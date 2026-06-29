@@ -144,36 +144,51 @@ OpenSquad 是一个多智能体框架，每个 Agent 作为独立进程运行，
 
 ## 插件系统（`plugins/`）
 
-共 21 个插件，分为 Tool（13）、Hook（3）、Platform（4）三类：
+共 **20** 个插件，分为 Tool（14）、Hook（3）、Platform（3）三类。`auto_register` 列含义按类型而异：Tool 插件为 `tools[0].auto_register`（是否随所有 Agent 自动注册），Platform 插件为 `service.auto_start`（平台适配器是否随 Launcher 自动启动），Hook 插件为 `—`（钩子随插件加载，无此概念）。
 
-| 插件 | 类型 | auto_register | 说明 |
-|------|------|---------------|------|
-| `websearch` | Tool | false | 通过外部服务进行 Web 搜索 |
-| `vision` | Tool | false | 通过 LLM Vision API 进行图像分析 |
-| `media` | Tool | false | 媒体文件处理 |
-| `whisper` | Tool | false | 通过 Whisper 服务进行语音转文字 |
-| `mcp_query` | Tool | false | MCP 服务器管理工具 |
-| `sequential_think` | Tool | false | 结构化思维工具 |
-| `git_core` | Tool | false | Git 版本控制操作 |
-| `long_memory` | Tool | false | 长期记忆管理（基于 agent_memory_tool） |
-| `agent_factory` | Tool | false | 动态创建 Agent |
-| `chat_account` | Tool | false | 聊天账号管理 |
-| `quick_note` | Tool | false | 快速笔记工具 |
-| `reminder` | Tool | false | 提醒工具 |
-| `telegram` | Platform | true | Telegram 机器人适配器 |
-| `feishu` | Platform | true | 飞书（Lark）机器人适配器 |
-| `qq` | Platform | true | QQ 机器人适配器 |
-| `vcs_remote` | Platform | true | 远程 VCS 操作（GitHub PR 等） |
-| `token_analytics` | Hook | true | Token 用量追踪（被动，无工具） |
-| `plugin_admin` | Hook | true | 插件管理与配置 |
-| `task_watch` | Hook | true | 任务监控 |
+### Tool 插件（14）
 
-插件加载：`plugin_manager.py` 扫描 `plugins/*/plugin.json`，实例化插件类，根据 `auto_register` 标志和 Agent 配置注册工具。`plugin.json` 由每次 Agent 启动/热重载时的 `@register(...)` 装饰器**自动生成**——请勿手动编辑。
+| 插件 | auto_register | 说明 |
+|------|---------------|------|
+| `websearch` | true | Web 搜索与网页抓取（通过外部 WebSearch 服务） |
+| `vision` | true | 图像识别（将图片路径写入 `img_path.txt` 供视觉模型处理） |
+| `media` | false | 媒体格式转换（基于 ffmpeg 的音频转码） |
+| `whisper` | false | 语音转文字（通过 Whisper 服务，支持中英文） |
+| `mcp_query` | true | MCP 服务器管理（list/add/remove/reconnect/reload） |
+| `sequential_think` | false | 结构化思维与摘要生成 |
+| `git_core` | true | 本地 Git 版本控制操作（带自动身份） |
+| `agent_factory` | false | 通过 Launcher API 动态创建/配置/启动 Agent |
+| `chat_account` | false | ChatPro 账号与群组管理 |
+| `email_assistant` | false | 通用 IMAP/SMTP 邮件（IMAP IDLE 收件 + SMTP SSL 发件） |
+| `plugin_admin` | false | 插件管理（列出/启停/读写配置/热重载） |
+| `quick_note` | false | 快速笔记（标签 + 搜索） |
+| `reminder` | true | 定时提醒（支持延时与绝对时间触发） |
+| `vcs_remote` | true | 远程 VCS 操作（通过 `gh` CLI 处理 GitHub Issues / PRs） |
+
+### Hook 插件（3）
+
+| 插件 | 说明 |
+|------|------|
+| `long_memory` | 长期记忆（语义召回 + 关键词提取 + 共现知识图谱） |
+| `token_analytics` | Token 用量采集（按模型/工具拆解，写入 SQLite） |
+| `task_watch` | 任务监控面板（Agent 任务生命周期、check-in、stall、工具活动） |
+
+### Platform 插件（3）
+
+| 插件 | auto_start | 说明 |
+|------|------------|------|
+| `telegram` | true | Telegram 平台适配器（入站消息 + 出站 send 工具） |
+| `feishu` | true | 飞书 / Lark 平台适配器（入站消息 + 出站 send 工具） |
+| `external_api` | true | 外部 API 适配器（HTTP/WebSocket 网关，桥接第三方系统） |
+
+`plugin.json` 中的 `enabled: true` 的插件列表保存在 `src/plugins/builtin_plugins.json`，共 6 个默认启用的系统级插件：`mcp_query`、`plugin_admin`、`reminder`、`task_watch`、`vision`、`websearch`——这些随 OpenSquad 一起发布，默认开启、不可卸载，单 Agent 粒度的开关在 UI 中隐藏。
+
+插件加载：`plugin_manager.py` 扫描 `plugins/*/plugin.json`，实例化插件类，根据 `auto_register` / `auto_start` 标志和 Agent 配置注册工具或启动服务。`plugin.json` 由每次 Agent 启动/热重载时的 `@register(...)` 装饰器**自动生成**——请勿手动编辑。
 
 ### 插件配置路由
 
 - **标准插件**（`tool`、`hook`、`service` 类型）：配置保存到 `data/plugins/{name}/config.json`，加载时与 schema 默认值合并。
-- **平台插件**（`platform` 类型 — feishu、telegram、qq）：配置桥接到 `system_config.json`。Launcher 的 GET/PUT 配置处理器检测 `plugin.json` 中的 `config.section`，并读写 `system_config.json` 中对应的节。例如：`feishu.bots` → `system_config.json["feishu"]["bots"]`。
+- **平台插件**（`platform` 类型 — feishu、telegram、external_api）：配置桥接到 `system_config.json`。Launcher 的 GET/PUT 配置处理器检测 `plugin.json` 中的 `config.section`，并读写 `system_config.json` 中对应的节。例如：`feishu.bots` → `system_config.json["feishu"]["bots"]`。
 - **分布式广播**：当任意节点收到配置保存请求时，自动广播到所有其他在线节点，无需额外插件代码。
 
 ---

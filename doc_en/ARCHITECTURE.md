@@ -141,46 +141,51 @@ The system prompt templates are `src/opensquad/base_fc.md` (Native Function Call
 
 ## Plugin System (`src/plugins/`)
 
-### Tool Plugins
+A total of **20** plugins, split into Tool (14), Hook (3), and Platform (3). The `auto_register` column meaning depends on type: for Tool plugins it's `tools[0].auto_register` (whether the tool is registered for every Agent automatically), for Platform plugins it's `service.auto_start` (whether the platform adapter auto-starts with the Launcher), and for Hook plugins it's `—` (hooks are always loaded with the plugin, no per-Agent toggle).
 
-| Plugin | Description |
-|--------|-------------|
-| `agent_factory` | Dynamically create, configure, and launch new Agents via the Launcher API |
-| `chat_account` | ChatPro account and group management |
-| `git_core` | Core Git tools for local repository management (disabled by default) |
-| `mcp_query` | MCP server management and querying tools |
-| `media` | Audio format conversion (ffmpeg-based) |
-| `plugin_admin` | Plugin administration: list, enable/disable, configure, hot-reload |
-| `quick_note` | Quick notes with tags and search |
-| `sequential_think` | Sequential thinking and structured reasoning |
-| `vcs_remote` | Remote VCS tools via GitHub CLI (gh) — Issues and PRs (disabled by default) |
-| `vision` | Image reading for vision model processing |
-| `websearch` | Web search and page fetching via WebSearch API |
-| `whisper` | Speech-to-text transcription via Whisper service |
+### Tool Plugins (14)
 
-### Hook Plugins
+| Plugin | auto_register | Description |
+|--------|---------------|-------------|
+| `websearch` | true | Web search and page fetching via the deployed WebSearch service |
+| `vision` | true | Image reading — writes image paths to `img_path.txt` for the vision model |
+| `media` | false | Audio format conversion (ffmpeg-based) |
+| `whisper` | false | Speech-to-text via Whisper service (Chinese + English) |
+| `mcp_query` | true | MCP server management (list / add / remove / reconnect / reload) |
+| `sequential_think` | false | Sequential thinking and structured reasoning with summary generation |
+| `git_core` | true | Local Git tools with auto-identity |
+| `agent_factory` | false | Dynamically create / configure / launch Agents via the Launcher API |
+| `chat_account` | false | ChatPro account and group management |
+| `email_assistant` | false | Generic IMAP/SMTP mail (IMAP IDLE receive + SMTP SSL send) |
+| `plugin_admin` | false | Plugin administration — list / enable / disable / read & write config / hot-reload |
+| `quick_note` | false | Quick notes with tags and search |
+| `reminder` | true | Scheduled notifications — delayed (sec/min/hr/day) and absolute-time triggers |
+| `vcs_remote` | true | Remote VCS tools via `gh` CLI — Issues and PRs |
+
+### Hook Plugins (3)
 
 | Plugin | Description |
 |--------|-------------|
 | `long_memory` | Long-term memory with semantic recall, keyword extraction, and co-occurrence knowledge graph |
-| `task_watch` | Task supervision dashboard — monitors agent task lifecycle, check-ins, stalls |
-| `token_analytics` | Token usage data collection with model/tool breakdown |
+| `token_analytics` | Token usage collection with model/tool breakdown, persisted to SQLite |
+| `task_watch` | Task supervision dashboard — Agent task lifecycle, check-ins, stalls, tool activity |
 
-### Platform Plugins
+### Platform Plugins (3)
 
-| Plugin | Description |
-|--------|-------------|
-| `external_api` | HTTP/WebSocket gateway for third-party system integrations |
-| `feishu` | Feishu/Lark platform integration (disabled by default) |
-| `qq` | QQ platform integration via NapCat/NTQQ (disabled by default) |
-| `telegram` | Telegram platform integration (disabled by default) |
+| Plugin | auto_start | Description |
+|--------|------------|-------------|
+| `telegram` | true | Telegram platform adapter — inbound message adapter + outbound send tool |
+| `feishu` | true | Feishu / Lark platform adapter — inbound message adapter + outbound send tool |
+| `external_api` | true | External API adapter — HTTP/WebSocket gateway for third-party system integration |
 
-Plugin loading: `plugin_manager.py` scans `src/plugins/*/plugin.json`, instantiates plugin classes, registers tools based on `auto_register` flag and agent config. `plugin.json` is **auto-generated** from the `@register(...)` decorator in `plugin.py` on every agent start/hot-reload — never hand-edit it.
+The system-level default-enabled plugins are listed in `src/plugins/builtin_plugins.json` (6 entries, all `enabled: true` by default, shipped with OpenSquad, non-uninstallable, per-Agent toggle hidden in the UI): `mcp_query`, `plugin_admin`, `reminder`, `task_watch`, `vision`, `websearch`.
+
+Plugin loading: `plugin_manager.py` scans `src/plugins/*/plugin.json`, instantiates plugin classes, registers tools or starts services based on the `auto_register` / `auto_start` flag and the agent config. `plugin.json` is **auto-generated** from the `@register(...)` decorator in `plugin.py` on every agent start/hot-reload — never hand-edit it.
 
 ### Plugin config routing
 
 - **Standard plugins** (`tool`, `hook`, `service`): config saved to `data/plugins/{name}/config.json`, merged with schema defaults at load time.
-- **Platform plugins** (`platform` type — feishu, telegram, qq): config is bridged to `system_config.json`. The Launcher's GET/PUT config handlers detect `config.section` in `plugin.json` and read/write the corresponding section in `system_config.json` instead. Example: `feishu.bots` → `system_config.json["feishu"]["bots"]`.
+- **Platform plugins** (`platform` type — feishu, telegram, external_api): config is bridged to `system_config.json`. The Launcher's GET/PUT config handlers detect `config.section` in `plugin.json` and read/write the corresponding section in `system_config.json` instead. Example: `feishu.bots` → `system_config.json["feishu"]["bots"]`.
 - **Distributed broadcast**: when a config save is received by any node, it is broadcast to all other online nodes automatically. No extra plugin code needed.
 
 ---
