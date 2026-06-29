@@ -2,12 +2,10 @@
 # See https://docs.github.com/en/code-security/dependabot
 
 version: 2
-# Dependabot is currently disabled (fresh-slate mode after delete-recreate).
-# To re-enable, set `enabled: true` on each update entry below.
 updates:
   - package-ecosystem: "pip"
     directory: "/"
-    enabled: false
+    enabled: true
     schedule:
       interval: "weekly"
       day: "monday"
@@ -18,7 +16,7 @@ updates:
 
   - package-ecosystem: "npm"
     directory: "/src/opensquad/gateway/nexuschat-pro"
-    enabled: false
+    enabled: true
     schedule:
       interval: "weekly"
       day: "monday"
@@ -29,9 +27,10 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
-    enabled: false
+    enabled: true
     schedule:
       interval: "monthly"
+    open-pull-requests-limit: 3
     labels:
       - "dependencies"
       - "ci"
