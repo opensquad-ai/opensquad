@@ -3,22 +3,22 @@
 # Owners are notified when a PR touches matching files.
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Default: all maintainers review everything
-*                           @opensquad-ai/maintainers
+# Default: sole maintainer reviews everything
+*                           @opensquad-ai
 
 # Core framework (src-layout — code lives under src/)
-src/opensquad/              @opensquad-ai/maintainers
+src/opensquad/              @opensquad-ai
 
 # Gateway & frontend
-src/opensquad/gateway/      @opensquad-ai/maintainers
+src/opensquad/gateway/      @opensquad-ai
 
 # Plugin system
-src/plugins/                @opensquad-ai/maintainers
+src/plugins/                @opensquad-ai
 
 # CI / build
-.github/                    @opensquad-ai/maintainers
-scripts/                    @opensquad-ai/maintainers
+.github/                    @opensquad-ai
+scripts/                    @opensquad-ai
 
 # Documentation
-docs/                       @opensquad-ai/maintainers
-*.md                        @opensquad-ai/maintainers
+docs/                       @opensquad-ai
+*.md                        @opensquad-ai
