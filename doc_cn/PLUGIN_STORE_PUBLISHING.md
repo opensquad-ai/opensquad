@@ -597,7 +597,7 @@ git push -u origin main
 
 ### 4.4 向注册表提交 Issue
 
-前往插件注册表仓库（如 `opensquad-plugins`），点击 **New Issue**，选择 **"Submit a Plugin"** 模板，填写以下信息：
+前往插件注册表仓库 [**github.com/opensquad-ai/opensquad-plugins**](https://github.com/opensquad-ai/opensquad-plugins)，点击 **New Issue**，选择 **"Submit a Plugin"** 模板，填写以下信息：
 
 ```
 插件名（plugin_id）: my_plugin

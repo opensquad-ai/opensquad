@@ -599,7 +599,7 @@ The plugin directory must contain a `plugin.json` in the following format:
 
 ### 4.4 Submit a Registration Issue
 
-Go to the plugin registry repository (e.g. `opensquad-plugins`), click **New Issue**, select the **"Submit a Plugin"** template, and fill in the following:
+Go to the plugin registry repository at [**github.com/opensquad-ai/opensquad-plugins**](https://github.com/opensquad-ai/opensquad-plugins), click **New Issue**, select the **"Submit a Plugin"** template, and fill in the following:
 
 ```
 plugin_id:    my_plugin
