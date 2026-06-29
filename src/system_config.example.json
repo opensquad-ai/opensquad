@@ -1,0 +1,86 @@
+﻿{
+  "hosts": {
+    "gateway": "0.0.0.0"
+  },
+  "ports": {
+    "gateway": 9555,
+    "launcher": 9600,
+    "plugin_registry": 9720,
+    "frontend": 5173,
+    "external_adapter": 9700
+  },
+  "gateway": {
+    "cors_origins": ["*"]
+  },
+  "security": {
+    "_comment": "Legacy CORS field. Prefer 'gateway.cors_origins' above. ['*'] works out of the box for dev/LAN/Electron; for production with credentials, list your trusted origins explicitly.",
+    "cors_allow_origins": ["*"]
+  },
+  "auth": {
+    "node_secret": "YOUR_NODE_SECRET_HERE",
+    "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",
+    "external_api_key": "YOUR_EXTERNAL_API_KEY_HERE"
+  },
+  "jwt": {
+    "secret_key": "YOUR_JWT_SECRET_KEY_CHANGE_ME_MIN_32_CHARS",
+    "algorithm": "HS256",
+    "access_token_expire_minutes": 1440
+  },
+  "node": {
+    "id": "my-node-01",
+    "label": "My Node (change me)",
+    "register_to_gateway": true
+  },
+  "services": {
+    "external_api": {
+      "enabled": true
+    },
+    "feishu": {
+      "enabled": false
+    },
+    "telegram": {
+      "enabled": false
+    }
+  },
+  "external_api": {
+    "log_level": "INFO",
+    "instances": [
+      {
+        "name": "default",
+        "host": "0.0.0.0",
+        "port": 9700,
+        "api_key": "",
+        "request_timeout": 120,
+        "async_result_ttl": 600,
+        "enabled": true
+      }
+    ]
+  },
+  "feishu": {
+    "log_level": "INFO",
+    "request_timeout": 60,
+    "bots": [
+      {
+        "name": "openmoss",
+        "app_id": "YOUR_FEISHU_APP_ID",
+        "app_secret": "YOUR_FEISHU_APP_SECRET",
+        "agent_id": "default-001",
+        "enabled": true
+      }
+    ]
+  },
+  "telegram": {
+    "log_level": "INFO",
+    "request_timeout": 60,
+    "connect_timeout": 30,
+    "proxy": "",
+    "bots": [
+      {
+        "name": "main",
+        "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+        "agent_id": "default-001",
+        "enabled": true
+      }
+    ]
+  }
+}

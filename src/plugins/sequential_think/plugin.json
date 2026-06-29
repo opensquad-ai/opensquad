@@ -1,0 +1,31 @@
+{
+  "name": "sequential_think",
+  "display_name": "Sequential Thinking",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Sequential thinking and reasoning tool. Provides structured thought processing, summary generation, and session management.",
+  "author": "OpenSquad",
+  "tags": [
+    "reasoning"
+  ],
+  "tools": [
+    {
+      "name": "sequential_think",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

@@ -1,0 +1,68 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ⚠️  DISABLED — workflow renamed to `.disabled` to prevent GitHub Actions
+# from loading it. To re-enable, rename back to `release-please.yml`.
+#
+# Why disabled (see BRANCHING.md + RELEASING.md for the full policy):
+#   • OpenSquad cuts releases via short-lived `release/0.X.Y` branches
+#     (PR → main → tag → absorb → delete). The release captain does the
+#     version bump and CHANGELOG update by hand on that branch.
+#   • release-please would open its own Release PR on every push to main,
+#     racing with the human-driven flow and producing a second version of
+#     `pyproject.toml` / `CHANGELOG.md` to reconcile. The auto-PR is
+#     also routed against `main`, not `dev`, which conflicts with our
+#     "dev is the integration line, main only ships releases" model.
+#   • Kept here (and the config in `.github/disabled/release-please-config.json`)
+#     as documentation of what release-please would do, in case we ever
+#     want to flip to an automated-only flow. Both files live under
+#     `.github/disabled/` so the dead state is obvious; to re-enable,
+#     move them back to `.github/` and `.github/workflows/` respectively
+#     and rename the workflow to `release-please.yml`.
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# release-please — opens a "Release PR" on every push to main.
+#
+# What it does:
+#   1. Scans commits since the last release (Conventional Commits)
+#   2. Bumps `pyproject.toml` to the next SemVer
+#   3. Rewrites CHANGELOG.md grouped by type
+#   4. Opens (or updates) a PR titled "chore(main): release X.Y.Z"
+#      Once that PR is merged, release-please pushes a `vX.Y.Z` tag,
+#      which in turn triggers the existing `.github/workflows/release.yml`
+#      (Docker build + PyPI publish + GitHub Release).
+#
+# Branch model: this project ships from `main` only (releases branch
+# off main, soak happens via `vX.Y.Z-beta.N` tags). For projects
+# using a separate `dev` branch, add `"branches": [{ "branch": "dev" }]`
+# and a second config under `.github/release-please-dev.json` if
+# you want a different version cadence.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: .github/release-please-config.json
+          # Default release-type is taken from config; explicit for clarity.
+          release-type: python
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log release-please outcome
+        if: steps.release.outputs.release_created == 'true'
+        run: |
+          echo "Release PR opened/updated for ${{ steps.release.outputs.tag_name }}"
+          echo "Tag: ${{ steps.release.outputs.tag_name }}"
+          echo "Major bump: ${{ steps.release.outputs.major }}"
+          echo "Minor bump: ${{ steps.release.outputs.minor }}"
+          echo "Patch bump: ${{ steps.release.outputs.patch }}"

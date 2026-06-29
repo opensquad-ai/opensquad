@@ -1,0 +1,9 @@
+{
+  "name": "collaboration_management",
+  "version": "1.0.0",
+  "description": "Complete guide to multi-agent collaboration card management, including starting collaborations, joining teams, and creating custom collaboration cards",
+  "author": "OpenSquad",
+  "tags": ["collaboration", "team", "collab-card", "multi-agent"],
+  "required_tools": ["collaboration", "im", "filesystem"],
+  "install": []
+}

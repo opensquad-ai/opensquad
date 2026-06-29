@@ -1,0 +1,35 @@
+{
+  "paths": {
+    "project_root": "/path/to/your/opensquad/gateway",
+    "backend": "/path/to/your/opensquad/gateway/backend",
+    "frontend": "/path/to/your/opensquad/gateway/nexuschat-pro"
+  },
+  "backend": {
+    "host": "0.0.0.0",
+    "port": 9555,
+    "reload": false,
+    "log_level": "info",
+    "database": {
+      "url": "sqlite+aiosqlite:///./chat.db",
+      "echo": false
+    },
+    "cors": {
+      "origins": ["*"],
+      "allow_credentials": true,
+      "allow_methods": ["*"],
+      "allow_headers": ["*"]
+    },
+    "jwt": {
+      "secret_key": "YOUR_JWT_SECRET_KEY_HERE",
+      "algorithm": "HS256",
+      "access_token_expire_minutes": 10080
+    }
+  },
+  "frontend": {
+    "host": "0.0.0.0",
+    "port": 5173,
+    "api_base_url": "http://localhost:9555",
+    "ws_base_url": "ws://localhost:9555",
+    "strict_port": true
+  }
+}

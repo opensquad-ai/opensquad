@@ -1,0 +1,89 @@
+{
+  "name": "websearch",
+  "display_name": "Web Search",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Web search and page fetching tools. Provides search, fetch, and fetch_html functions via a deployed WebSearch API service.",
+  "author": "OpenSquad",
+  "tags": [
+    "search"
+  ],
+  "tools": [
+    {
+      "name": "websearch",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "port": {
+        "type": "integer",
+        "default": 9001,
+        "description": "WebSearch service port"
+      },
+      "host": {
+        "type": "string",
+        "default": "0.0.0.0",
+        "description": "WebSearch service listen address"
+      },
+      "auto_start": {
+        "type": "boolean",
+        "default": true,
+        "description": "Auto-start the WebSearch service when the plugin loads"
+      }
+    }
+  },
+  "config_schema": {
+    "port": {
+      "type": "integer",
+      "default": 9001,
+      "description": "WebSearch service port"
+    },
+    "host": {
+      "type": "string",
+      "default": "0.0.0.0",
+      "description": "WebSearch service listen address"
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": true,
+      "description": "Auto-start the WebSearch service when the plugin loads"
+    }
+  },
+  "contributes": {},
+  "service": {
+    "entry": "service/main.py",
+    "default_port": 9001,
+    "port_key": "websearch",
+    "health_endpoint": "/health",
+    "auto_start": true,
+    "health_check_interval": 30,
+    "restart_policy": {
+      "max_retries": 5,
+      "backoff": [
+        3,
+        6,
+        12,
+        30,
+        60
+      ]
+    }
+  },
+  "dependencies": {
+    "pip": [
+      "requests",
+      "fastapi",
+      "uvicorn",
+      "httpx",
+      "beautifulsoup4",
+      "lxml",
+      "tiktoken"
+    ]
+  }
+}

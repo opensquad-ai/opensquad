@@ -1,0 +1,725 @@
+/**
+ * FileDiffBlock - renders a GitHub-style unified diff view for filesystem edit tool calls.
+ *
+ * Features:
+ *   - True unified diff (Myers/LCS algorithm): shows context lines + changed lines interleaved
+ *   - Syntax highlighting via highlight.js (language detected from file extension)
+ *   - Tool result note displayed in expanded header
+ *   - Collapsed sections between hunks (fold unchanged regions)
+ *
+ * Detects tool calls like:
+ *   - filesystem.replace_in_file / filesystem.edit_file
+ *   - mcp__filesystem__edit_file
+ *   - Any tool with old_str/new_str or oldString/newString args
+ *
+ * Shows:
+ *   - Collapsed header: "编辑 routes.py  +68  -10"
+ *   - Expanded: unified diff with syntax highlighted lines
+ */
+import React, { useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { ChevronDown, ChevronRight, CheckCircle, XCircle, Loader2, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
+import hljs from 'highlight.js/lib/core';
+
+// Register commonly used languages (keep bundle size reasonable)
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import css from 'highlight.js/lib/languages/css';
+import xml from 'highlight.js/lib/languages/xml';
+import json from 'highlight.js/lib/languages/json';
+import bash from 'highlight.js/lib/languages/bash';
+import yaml from 'highlight.js/lib/languages/yaml';
+import markdown from 'highlight.js/lib/languages/markdown';
+import rust from 'highlight.js/lib/languages/rust';
+import go from 'highlight.js/lib/languages/go';
+import java from 'highlight.js/lib/languages/java';
+import cpp from 'highlight.js/lib/languages/cpp';
+import csharp from 'highlight.js/lib/languages/csharp';
+import sql from 'highlight.js/lib/languages/sql';
+import ini from 'highlight.js/lib/languages/ini';
+import plaintext from 'highlight.js/lib/languages/plaintext';
+
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('rust', rust);
+hljs.registerLanguage('go', go);
+hljs.registerLanguage('java', java);
+hljs.registerLanguage('cpp', cpp);
+hljs.registerLanguage('csharp', csharp);
+hljs.registerLanguage('sql', sql);
+hljs.registerLanguage('ini', ini);
+hljs.registerLanguage('plaintext', plaintext);
+
+// ============================================================
+// Extension → language map
+// ============================================================
+
+const EXT_LANG: Record<string, string> = {
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python', pyw: 'python',
+  css: 'css', scss: 'css', less: 'css',
+  html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml',
+  json: 'json', jsonc: 'json',
+  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
+  yml: 'yaml', yaml: 'yaml',
+  md: 'markdown', mdx: 'markdown',
+  rs: 'rust',
+  go: 'go',
+  java: 'java',
+  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', c: 'cpp', h: 'cpp', hpp: 'cpp',
+  cs: 'csharp',
+  sql: 'sql',
+  ini: 'ini', cfg: 'ini', conf: 'ini', toml: 'ini',
+};
+
+function getLangForFile(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_LANG[ext] ?? 'plaintext';
+}
+
+/** Highlight a single line of code. Returns HTML string. */
+function highlightLine(code: string, lang: string): string {
+  if (!code) return '&nbsp;';
+  try {
+    const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
+    return result.value || escapeHtml(code);
+  } catch {
+    return escapeHtml(code);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// ============================================================
+// Types
+// ============================================================
+
+export type FileOpKind = 'read' | 'edit' | 'write' | 'other';
+
+export interface FileEditInfo {
+  kind: FileOpKind;
+  filePath: string;
+  fileName: string;
+  oldStr: string | null;
+  newStr: string;
+  addedLines: number;
+  removedLines: number;
+  lineRange?: string;
+}
+
+// ============================================================
+// Arg extraction
+// ============================================================
+
+function getArg(args: Record<string, any>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    if (args[k] !== undefined && args[k] !== null) return String(args[k]);
+  }
+  return undefined;
+}
+
+export function extractFileEditInfo(toolName: string, args: any): FileEditInfo | null {
+  if (!args || typeof args !== 'object') return null;
+
+  const nameLower = toolName.toLowerCase();
+
+  const filePath = getArg(args, 'path', 'file_path', 'filepath', 'filename', 'file');
+  if (!filePath) return null;
+
+  const fileName = filePath.split(/[/\\]/).pop() || filePath;
+
+  const isEditTool =
+    nameLower.includes('edit_file') ||
+    nameLower.includes('replace_in_file') ||
+    nameLower.includes('replace_file') ||
+    (nameLower.includes('edit') && (args.old_str !== undefined || args.oldString !== undefined || args.old_string !== undefined));
+
+  if (isEditTool || args.old_str !== undefined || args.old_string !== undefined || args.oldString !== undefined) {
+    const oldStr = getArg(args, 'old_str', 'old_string', 'oldString', 'oldStr') ?? '';
+    const newStr = getArg(args, 'new_str', 'new_string', 'newString', 'newStr') ?? '';
+
+    const oldLines = oldStr ? oldStr.split('\n') : [];
+    const newLines = newStr ? newStr.split('\n') : [];
+
+    return {
+      kind: 'edit',
+      filePath,
+      fileName,
+      oldStr,
+      newStr,
+      addedLines: newLines.length,
+      removedLines: oldLines.length,
+    };
+  }
+
+  const isReadTool =
+    nameLower.includes('read_file') ||
+    nameLower.includes('view_file') ||
+    nameLower.includes('open_file') ||
+    nameLower === 'read' ||
+    nameLower.endsWith('.read') ||
+    nameLower.endsWith('__read');
+
+  // Read: only if no edit/write args present
+  if (
+    isReadTool &&
+    args.content === undefined &&
+    args.old_str === undefined &&
+    args.oldString === undefined &&
+    args.old_string === undefined
+  ) {
+    const startLine = parseInt(args.start_line ?? args.startLine ?? 1, 10);
+    const endLine = parseInt(args.end_line ?? args.endLine ?? -1, 10);
+    const maxLines = parseInt(args.max_lines ?? args.maxLines ?? 200, 10);
+    let lineRange: string;
+    if (endLine > 0) {
+      lineRange = `L${startLine}-L${endLine}`;
+    } else if (maxLines > 0) {
+      lineRange = `L${startLine}-L${startLine + maxLines - 1}`;
+    } else {
+      lineRange = `L${startLine}..`;
+    }
+    return { kind: 'read', filePath, fileName, oldStr: null, newStr: '', addedLines: 0, removedLines: 0, lineRange };
+  }
+
+  const isWriteTool =
+    nameLower.includes('write_file') ||
+    (nameLower.includes('write') && args.content !== undefined);
+
+  if (isWriteTool && args.content !== undefined) {
+    const content = String(args.content);
+    const lines = content.split('\n');
+    return {
+      kind: 'write',
+      filePath,
+      fileName,
+      oldStr: null,
+      newStr: content,
+      addedLines: lines.length,
+      removedLines: 0,
+    };
+  }
+
+  return null;
+}
+
+// ============================================================
+// LCS-based diff algorithm (Myers-inspired)
+// ============================================================
+
+type LineKind = 'unchanged' | 'removed' | 'added';
+
+interface RawDiffLine {
+  kind: LineKind;
+  /** Line number in old file (1-based), or null for added lines */
+  oldNo: number | null;
+  /** Line number in new file (1-based), or null for removed lines */
+  newNo: number | null;
+  content: string;
+}
+
+/** Compute LCS length table */
+function lcsTable(a: string[], b: string[]): number[][] {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+  return dp;
+}
+
+/** Build diff from LCS table */
+function buildDiff(oldLines: string[], newLines: string[]): RawDiffLine[] {
+  // For very large inputs, fall back to simple before/after to avoid O(n*m) memory
+  if (oldLines.length * newLines.length > 200_000) {
+    const result: RawDiffLine[] = [];
+    oldLines.forEach((c, i) => result.push({ kind: 'removed', oldNo: i + 1, newNo: null, content: c }));
+    newLines.forEach((c, i) => result.push({ kind: 'added', oldNo: null, newNo: i + 1, content: c }));
+    return result;
+  }
+
+  const dp = lcsTable(oldLines, newLines);
+
+  // Iterative backtracking to avoid stack overflow on large diffs
+  let i = oldLines.length, j = newLines.length;
+  const ops: Array<{ kind: LineKind; oldNo: number | null; newNo: number | null; content: string }> = [];
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+      ops.push({ kind: 'unchanged', oldNo: i, newNo: j, content: oldLines[i - 1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ kind: 'added', oldNo: null, newNo: j, content: newLines[j - 1] });
+      j--;
+    } else {
+      ops.push({ kind: 'removed', oldNo: i, newNo: null, content: oldLines[i - 1] });
+      i--;
+    }
+  }
+
+  ops.reverse();
+  return ops;
+}
+
+// ============================================================
+// Unified diff hunk generation (with context)
+// ============================================================
+
+const CONTEXT_LINES = 3;
+
+interface DiffHunk {
+  lines: RawDiffLine[];
+}
+
+interface FoldedSection {
+  count: number;
+  startOld: number;
+  startNew: number;
+}
+
+type HunkEntry =
+  | { type: 'hunk'; hunk: DiffHunk }
+  | { type: 'fold'; fold: FoldedSection };
+
+/** Group raw diff lines into hunks separated by folded unchanged sections */
+function buildHunks(rawLines: RawDiffLine[]): HunkEntry[] {
+  if (rawLines.length === 0) return [];
+
+  // Find which lines are "changed" (for hunk boundary detection)
+  const changed = rawLines.map(l => l.kind !== 'unchanged');
+
+  // For each unchanged line, check if it's within CONTEXT_LINES of any changed line
+  const keep = rawLines.map((_, idx) => {
+    if (changed[idx]) return true;
+    for (let d = -CONTEXT_LINES; d <= CONTEXT_LINES; d++) {
+      const ni = idx + d;
+      if (ni >= 0 && ni < changed.length && changed[ni]) return true;
+    }
+    return false;
+  });
+
+  const entries: HunkEntry[] = [];
+  let i = 0;
+
+  while (i < rawLines.length) {
+    if (keep[i]) {
+      // Collect consecutive "kept" lines into a hunk
+      const hunkLines: RawDiffLine[] = [];
+      while (i < rawLines.length && keep[i]) {
+        hunkLines.push(rawLines[i]);
+        i++;
+      }
+      entries.push({ type: 'hunk', hunk: { lines: hunkLines } });
+    } else {
+      // Collect consecutive "folded" lines
+      const startOld = rawLines[i].oldNo ?? 0;
+      const startNew = rawLines[i].newNo ?? 0;
+      let count = 0;
+      while (i < rawLines.length && !keep[i]) {
+        count++;
+        i++;
+      }
+      entries.push({ type: 'fold', fold: { count, startOld, startNew } });
+    }
+  }
+
+  return entries;
+}
+
+// ============================================================
+// Highlighted line cache (per component render)
+// ============================================================
+
+// ============================================================
+// Sub-components
+// ============================================================
+
+interface DiffLineRowProps {
+  line: RawDiffLine;
+  lang: string;
+}
+
+const DiffLineRow: React.FC<DiffLineRowProps> = ({ line, lang }) => {
+  const isRemoved = line.kind === 'removed';
+  const isAdded = line.kind === 'added';
+  const isUnchanged = line.kind === 'unchanged';
+
+  const highlightedHtml = useMemo(() => highlightLine(line.content, lang), [line.content, lang]);
+
+  const rowBg = isRemoved
+    ? 'bg-red-500/10'
+    : isAdded
+    ? 'bg-green-500/10'
+    : '';
+
+  const lineNumStyle = isRemoved
+    ? 'text-red-400/50 bg-red-500/15 border-red-500/20'
+    : isAdded
+    ? 'text-green-400/50 bg-green-500/15 border-green-500/20'
+    : 'text-gray-600 bg-transparent border-gray-700/30';
+
+  const marker = isRemoved ? '-' : isAdded ? '+' : ' ';
+  const markerColor = isRemoved ? 'text-red-400 font-bold' : isAdded ? 'text-green-400 font-bold' : 'text-transparent';
+
+  const contentColor = isRemoved ? 'text-red-200' : isAdded ? 'text-green-200' : 'text-gray-300';
+
+  return (
+    <div className={`flex items-start font-mono text-[11px] leading-5 min-w-0 ${rowBg}`}>
+      {/* Old line number */}
+      <span className={`select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] border-r ${lineNumStyle}`}>
+        {line.oldNo ?? ''}
+      </span>
+      {/* New line number */}
+      <span className={`select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] border-r ${lineNumStyle}`}>
+        {line.newNo ?? ''}
+      </span>
+      {/* +/- marker */}
+      <span className={`w-5 shrink-0 text-center select-none leading-5 ${markerColor}`}>
+        {marker}
+      </span>
+      {/* Content with syntax highlighting */}
+      {isUnchanged ? (
+        <span
+          className={`flex-1 whitespace-pre pl-0.5 overflow-hidden ${contentColor}`}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
+      ) : (
+        <span
+          className={`flex-1 whitespace-pre pl-0.5 overflow-hidden ${contentColor}`}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+        />
+      )}
+    </div>
+  );
+};
+
+interface FoldRowProps {
+  fold: FoldedSection;
+  onExpand: () => void;
+}
+
+const FoldRow: React.FC<FoldRowProps> = ({ fold, onExpand }) => {
+  const { t } = useTranslation();
+  return (
+  <div
+    className="flex items-center gap-2 px-2 py-0.5 bg-blue-900/10 border-y border-blue-500/10 cursor-pointer hover:bg-blue-900/20 transition-colors select-none"
+    onClick={onExpand}
+    title={t('aiChat.expandFoldedLines')}
+  >
+    <ChevronsUpDown size={11} className="text-blue-400/60 flex-shrink-0" />
+    <span className="text-[10px] text-blue-400/60 font-mono">
+      ... {fold.count} {t('aiChat.unchangedLines')}
+    </span>
+  </div>
+  );
+};
+
+// ============================================================
+// Shared hljs theme (Material Palenight)
+// ============================================================
+
+const HLJS_STYLE = `
+  .hljs-keyword { color: #c792ea; }
+  .hljs-built_in { color: #82aaff; }
+  .hljs-type { color: #ffcb6b; }
+  .hljs-literal { color: #ff5874; }
+  .hljs-number { color: #f78c6c; }
+  .hljs-operator { color: #89ddff; }
+  .hljs-punctuation { color: #89ddff; }
+  .hljs-property { color: #80cbc4; }
+  .hljs-regexp { color: #f07178; }
+  .hljs-string { color: #c3e88d; }
+  .hljs-char { color: #c3e88d; }
+  .hljs-subst { color: #a6accd; }
+  .hljs-symbol { color: #82aaff; }
+  .hljs-variable { color: #f07178; }
+  .hljs-template-variable { color: #f07178; }
+  .hljs-link { color: #80cbc4; text-decoration: underline; }
+  .hljs-selector-id { color: #82aaff; }
+  .hljs-selector-class { color: #ffcb6b; }
+  .hljs-selector-attr { color: #c3e88d; }
+  .hljs-selector-pseudo { color: #c792ea; }
+  .hljs-attr { color: #ffcb6b; }
+  .hljs-attribute { color: #c3e88d; }
+  .hljs-name { color: #f07178; }
+  .hljs-tag { color: #f07178; }
+  .hljs-comment { color: #546e7a; font-style: italic; }
+  .hljs-meta { color: #546e7a; }
+  .hljs-meta .hljs-string { color: #c3e88d; }
+  .hljs-section { color: #82aaff; font-weight: bold; }
+  .hljs-title { color: #82aaff; font-weight: bold; }
+  .hljs-title.class_ { color: #ffcb6b; }
+  .hljs-title.function_ { color: #82aaff; }
+  .hljs-params { color: #a6accd; }
+  .hljs-formula { color: #c792ea; }
+  .hljs-deletion { color: #ef5350; background-color: rgba(239,83,80,0.1); }
+  .hljs-addition { color: #66bb6a; background-color: rgba(102,187,106,0.1); }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: bold; }
+`;
+
+// ============================================================
+// ReadContentPane — syntax-highlighted code viewer (for read_file results)
+// ============================================================
+
+const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content, lang }) => {
+  const lines = useMemo(() => content.split('\n'), [content]);
+  return (
+    <div className="overflow-x-auto max-h-[500px] overflow-y-auto bg-gray-950">
+      <style>{HLJS_STYLE}</style>
+      {lines.map((lineContent, i) => {
+        const html = highlightLine(lineContent, lang);
+        return (
+          <div
+            key={i}
+            className="flex items-start font-mono text-[11px] leading-5 min-w-0 hover:bg-white/[0.03]"
+          >
+            {/* Line number */}
+            <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-gray-600 border-r border-gray-700/30 bg-gray-900/30">
+              {i + 1}
+            </span>
+            {/* Alignment spacer (matches diff +/- column) */}
+            <span className="w-5 shrink-0" />
+            {/* Content */}
+            <span
+              className="flex-1 whitespace-pre pl-0.5 overflow-hidden text-gray-300"
+              dangerouslySetInnerHTML={{ __html: html }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+// ============================================================
+// Main component
+// ============================================================
+
+interface FileDiffBlockProps {
+  info: FileEditInfo;
+  status: 'running' | 'success' | 'error';
+  /** Short one-liner note from tool result (edit/write) */
+  note?: string;
+  /** Full result string for read_file — rendered as syntax-highlighted code */
+  resultContent?: string;
+}
+
+export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note, resultContent }) => {
+  const { t } = useTranslation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [expandedFolds, setExpandedFolds] = useState<Set<number>>(new Set());
+
+  const lang = useMemo(() => getLangForFile(info.fileName), [info.fileName]);
+
+  const statusIcon = status === 'success'
+    ? <CheckCircle size={12} className="text-emerald-500 flex-shrink-0" />
+    : status === 'error'
+    ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
+    : <Loader2 size={12} className="text-amber-500 animate-spin flex-shrink-0" />;
+
+  // Build raw diff lines — always call hooks unconditionally (Rules of Hooks)
+  const rawDiffLines = useMemo<RawDiffLine[]>(() => {
+    if (info.kind === 'write') {
+      return info.newStr.split('\n').map((content, i): RawDiffLine => ({
+        kind: 'added',
+        oldNo: null,
+        newNo: i + 1,
+        content,
+      }));
+    }
+    if (!info.oldStr) return [];
+    const oldLines = info.oldStr.split('\n');
+    const newLines = info.newStr.split('\n');
+    return buildDiff(oldLines, newLines);
+  }, [info]);
+
+  // Build hunk entries
+  const hunkEntries = useMemo(() => buildHunks(rawDiffLines), [rawDiffLines]);
+
+  // When fold is expanded, we inline all its lines
+  const expandFold = (foldIndex: number) => {
+    setExpandedFolds(prev => {
+      const next = new Set(prev);
+      next.add(foldIndex);
+      return next;
+    });
+  };
+
+  // Count actual added/removed from diff
+  const actualAdded = useMemo(() => rawDiffLines.filter(l => l.kind === 'added').length, [rawDiffLines]);
+  const actualRemoved = useMemo(() => rawDiffLines.filter(l => l.kind === 'removed').length, [rawDiffLines]);
+
+  const OpIcon = info.kind === 'write' ? FilePlus : FilePen;
+  const opLabel = info.kind === 'write' ? t('aiChat.writeFile') : t('aiChat.editFile');
+
+  // ── Read operation: simple viewer ──────────────────────────
+  if (info.kind === 'read') {
+    const canExpand = !!resultContent;
+    return (
+      <div className="rounded-md border border-sky-500/20 bg-sky-500/5 overflow-hidden">
+        <div
+          className={`flex items-center gap-1.5 px-2 py-1.5 transition-colors select-none ${canExpand ? 'cursor-pointer hover:bg-sky-500/10' : ''}`}
+          onClick={() => canExpand && setIsOpen(!isOpen)}
+        >
+          {statusIcon}
+          <FileText size={11} className="text-textMuted flex-shrink-0" />
+          <span className="text-[11px] text-textMuted font-mono">{t('aiChat.readFile')}</span>
+          <span className="text-[11px] text-textMuted font-mono truncate flex-1">
+            {info.fileName}
+          </span>
+          {info.lineRange && (
+            <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono font-semibold flex-shrink-0">
+              {info.lineRange}
+            </span>
+          )}
+          {canExpand && (
+            isOpen
+              ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
+              : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
+          )}
+        </div>
+        {isOpen && resultContent && (
+          <div className="border-t border-sky-500/10">
+            <div className="px-2 py-1 bg-black/20 border-b border-sky-500/10">
+              <span className="text-[10px] text-textMuted font-mono">{info.filePath}</span>
+              {info.lineRange && (
+                <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono ml-2">({info.lineRange})</span>
+              )}
+            </div>
+            <ReadContentPane content={resultContent} lang={lang} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Build hunk header label (e.g. @@ -10,4 +10,6 @@)
+  function hunkHeader(lines: RawDiffLine[]): string {
+    const oldStart = lines.find(l => l.oldNo !== null)?.oldNo ?? 1;
+    const newStart = lines.find(l => l.newNo !== null)?.newNo ?? 1;
+    const oldCount = lines.filter(l => l.kind !== 'added').length;
+    const newCount = lines.filter(l => l.kind !== 'removed').length;
+    return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`;
+  }
+
+  return (
+    <div className="rounded-md border border-amber-500/20 bg-amber-500/5 overflow-hidden">
+      {/* ── Header ── */}
+      <div
+        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-amber-500/10 transition-colors select-none"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        {statusIcon}
+        <OpIcon size={11} className="text-textMuted flex-shrink-0" />
+        <span className="text-[11px] text-textMuted font-mono">{opLabel}</span>
+        <span className="text-[11px] text-gray-700 dark:text-gray-200 font-mono font-semibold truncate flex-1">
+          {info.fileName}
+        </span>
+        {actualAdded > 0 && (
+          <span className="text-[11px] font-mono font-bold text-green-600 dark:text-green-400 flex-shrink-0">
+            +{actualAdded}
+          </span>
+        )}
+        {actualRemoved > 0 && (
+          <span className="text-[11px] font-mono font-bold text-red-500 dark:text-red-400 flex-shrink-0 ml-0.5">
+            -{actualRemoved}
+          </span>
+        )}
+        {isOpen
+          ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
+          : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
+        }
+      </div>
+
+      {/* ── Expanded diff ── */}
+      {isOpen && (
+        <div className="border-t border-amber-500/10">
+          {/* File path + note */}
+          <div className="px-2 py-1.5 bg-black/20 border-b border-amber-500/10 space-y-0.5">
+            <span className="block text-[10px] text-textMuted font-mono">{info.filePath}</span>
+            {note && (
+              <div className="flex items-start gap-1 pt-0.5">
+                <MessageSquare size={10} className="text-gray-500 flex-shrink-0 mt-0.5" />
+                <span className="text-[10px] text-gray-400 font-mono break-all">{note}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Diff content */}
+          <div className="overflow-x-auto max-h-[500px] overflow-y-auto bg-gray-950">
+            <style>{HLJS_STYLE}</style>
+
+            {hunkEntries.length === 0 ? (
+              <div className="p-3 text-[11px] text-gray-500 font-mono">No diff content</div>
+            ) : (
+              hunkEntries.map((entry, entryIdx) => {
+                if (entry.type === 'fold') {
+                  if (expandedFolds.has(entryIdx)) {
+                    let skipStart = 0;
+                    for (let ei = 0; ei < entryIdx; ei++) {
+                      const e = hunkEntries[ei];
+                      if (e.type === 'hunk') skipStart += e.hunk.lines.length;
+                      else skipStart += e.fold.count;
+                    }
+                    const foldLines = rawDiffLines.slice(skipStart, skipStart + entry.fold.count);
+                    return (
+                      <div key={entryIdx}>
+                        {foldLines.map((line, li) => (
+                          <DiffLineRow key={`fold-${entryIdx}-${li}`} line={line} lang={lang} />
+                        ))}
+                      </div>
+                    );
+                  }
+                  return (
+                    <FoldRow
+                      key={entryIdx}
+                      fold={entry.fold}
+                      onExpand={() => expandFold(entryIdx)}
+                    />
+                  );
+                }
+
+                // Hunk
+                const { lines } = entry.hunk;
+                return (
+                  <div key={entryIdx}>
+                    {/* Hunk header */}
+                    <div className="px-2 py-0.5 text-[10px] text-blue-400/60 font-mono bg-blue-900/10 border-b border-blue-500/10 select-none">
+                      {hunkHeader(lines)}
+                    </div>
+                    {lines.map((line, li) => (
+                      <DiffLineRow key={`${entryIdx}-${li}`} line={line} lang={lang} />
+                    ))}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

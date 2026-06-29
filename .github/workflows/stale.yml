@@ -1,0 +1,37 @@
+# Workflow: scheduled stale-issue bot.
+#
+# Runs every day at 06:00 UTC and applies the rules in
+# `.github/stale.yml`. Dry-run on the first Monday of each month
+# so a maintainer can audit the bot's pending actions via the
+# Actions log without actually mutating issues.
+name: Stale bot
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Log actions without applying them"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run actions/stale
+        uses: actions/stale@v9
+        with:
+          # Path is relative to the repo root.
+          config-file: .github/stale.yml
+          # First Monday of the month → audit pass. Override
+          # manually with the workflow_dispatch input when needed.
+          dry-run: ${{ github.event.inputs.dry-run == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

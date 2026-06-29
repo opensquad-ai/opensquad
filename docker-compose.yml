@@ -1,0 +1,29 @@
+
+services:
+  opensquad:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opensquad
+    restart: unless-stopped
+    ports:
+      - "9555:9555"   # Gateway Backend
+      - "9600:9600"   # Launcher
+      - "9720:9720"   # Plugin Registry
+    volumes:
+      # Persistent data (workspace, DB, logs, plugins)
+      - opensquad-data:/data
+      # Optional: mount your own config
+      # - ./src/system_config.json:/app/src/system_config.json:ro
+    environment:
+      - OPENSQUAD_WORKSPACE=/data/workspaces/default
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9555/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  opensquad-data:
+    driver: local

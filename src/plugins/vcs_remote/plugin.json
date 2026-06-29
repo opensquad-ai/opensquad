@@ -1,0 +1,48 @@
+{
+  "name": "vcs_remote",
+  "display_name": "VCS Remote",
+  "version": "1.2.0",
+  "type": "tool",
+  "enabled": false,
+  "node_scope": "all",
+  "description": "Remote VCS tools using GitHub CLI (gh). Handles Issues and PRs.",
+  "author": "OpenSquad",
+  "tags": [
+    "github",
+    "vcs",
+    "remote",
+    "issue",
+    "pr"
+  ],
+  "tools": [
+    {
+      "name": "vcs",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [
+    "on_after_tool"
+  ],
+  "config": {
+    "schema": {}
+  },
+  "service_toggle": true,
+  "config_schema": {},
+  "contributes": {
+    "views": [
+      {
+        "name": "audit",
+        "title": "VCS Audit",
+        "icon": "History",
+        "data_endpoint": "/api/ai-web/audit/logs"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  },
+  "category": "development"
+}

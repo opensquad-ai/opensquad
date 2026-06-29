@@ -1,0 +1,273 @@
+name: CI
+
+# Full pre-merge gate. Runs only on PRs targeting `main` (i.e. release/ hotfix
+# merges). Push events to main / dev, and PRs targeting dev, are covered by
+# the lightweight ci-fast.yml pipeline.
+#
+# This split keeps dev-iteration minutes cheap while ensuring every commit
+# that lands in main passes the heaviest checks (multi-OS deps install,
+# multi-Python pytest matrix with coverage gate, mypy, bandit, pip-audit,
+# CodeQL, doc-link check).
+#
+# See BRANCHING.md for the branch model.
+
+on:
+  pull_request:
+    branches: ["main"]
+
+# Cancel in-flight runs on the same ref to save minutes on rapid pushes.
+concurrency:
+  group: ci-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+    runtime-guard:
+      name: runtime tracking guard
+      runs-on: ubuntu-latest
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Check disallowed tracked runtime files
+          run: python scripts/check_runtime_tracking.py
+
+    lint:
+      name: ruff lint & format
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Install ruff
+          run: pip install ruff
+
+        - name: Run ruff check
+          run: ruff check src/ tests/
+
+        - name: Run ruff format check
+          run: ruff format --check src/ tests/
+
+    doc-links:
+      name: documentation link check
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Check Markdown links
+          run: python scripts/check_doc_links.py
+
+    deps-install:
+      name: dependency install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+      runs-on: ${{ matrix.os }}
+      needs: runtime-guard
+      strategy:
+        fail-fast: false
+        matrix:
+          os: [ubuntu-latest, windows-latest, macos-latest]
+          python-version: ["3.10", "3.12", "3.13"]
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Install uv
+          uses: astral-sh/setup-uv@v4
+
+        - name: Set up Python ${{ matrix.python-version }}
+          uses: actions/setup-python@v5
+          with:
+            python-version: ${{ matrix.python-version }}
+
+        - name: Sync dependencies with uv
+          run: uv sync --python ${{ matrix.python-version }}
+
+        - name: Verify opensquad imports
+          run: uv run python -c "import opensquad; print('OK')"
+
+    test:
+      name: pytest (Python ${{ matrix.python-version }})
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+      strategy:
+        fail-fast: false
+        matrix:
+          python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Install uv
+          uses: astral-sh/setup-uv@v4
+
+        - name: Set up Python ${{ matrix.python-version }}
+          uses: actions/setup-python@v5
+          with:
+            python-version: ${{ matrix.python-version }}
+
+        - name: Sync dependencies with uv
+          run: uv sync --python ${{ matrix.python-version }}
+
+        - name: Run tests
+          env:
+            PYTHONPATH: src
+          run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html
+
+        - name: Upload coverage report
+          if: matrix.python-version == '3.11'
+          uses: actions/upload-artifact@v4
+          with:
+            name: coverage-report
+            path: htmlcov/
+            retention-days: 7
+
+    frontend-smoke:
+      name: frontend build smoke
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Node.js 20
+          uses: actions/setup-node@v4
+          with:
+            node-version: "20"
+            cache: "npm"
+            cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package-lock.json
+
+        - name: Build frontend
+          working-directory: src/opensquad/gateway/nexuschat-pro
+          run: |
+            npm ci
+            npm run build
+
+        - name: TypeScript type check
+          working-directory: src/opensquad/gateway/nexuschat-pro
+          run: npx tsc --noEmit
+
+    mypy:
+      name: mypy type check
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Install uv
+          uses: astral-sh/setup-uv@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Sync dependencies with uv
+          run: uv sync --python 3.11
+
+        - name: Install mypy
+          run: pip install mypy
+
+        - name: Run mypy
+          run: uv run mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores
+
+    secrets-scan:
+      name: secrets scan (gitleaks)
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: Install gitleaks
+          run: |
+            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz | \
+              tar -xz gitleaks && chmod +x gitleaks && sudo mv gitleaks /usr/local/bin/
+
+        - name: Run gitleaks
+          run: gitleaks detect --source . --verbose --no-git
+
+    sast:
+      name: bandit SAST
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Install bandit
+          run: pip install bandit
+
+        - name: Run bandit
+          run: bandit -r src/ --skip B101 --quiet --severity-level high --confidence-level high --exit-non-zero-on-failure
+
+    sca:
+      name: pip-audit dependency scan
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Install uv
+          uses: astral-sh/setup-uv@v4
+
+        - name: Set up Python 3.11
+          uses: actions/setup-python@v5
+          with:
+            python-version: "3.11"
+
+        - name: Sync dependencies with uv
+          run: uv sync --python 3.11
+
+        - name: Install pip-audit
+          run: pip install pip-audit
+
+        - name: Run pip-audit
+          run: uv run pip-audit --strict --progress-spinner=off --desc on
+
+    codeql:
+      name: CodeQL analysis
+      runs-on: ubuntu-latest
+      needs: runtime-guard
+      permissions:
+        security-events: write
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Initialize CodeQL
+          uses: github/codeql-action/init@v3
+          with:
+            languages: python
+
+        - name: Autobuild
+          uses: github/codeql-action/autobuild@v3
+
+        - name: Perform CodeQL analysis
+          uses: github/codeql-action/analyze@v3
+          with:
+            category: "/language:python"

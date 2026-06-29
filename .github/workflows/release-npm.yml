@@ -1,0 +1,69 @@
+name: Release (npm)
+
+# Publishes the @opensquad-ai/opensquad npm package on every `v*` tag.
+# The package is a thin Node.js wrapper that installs the Python
+# `opensquad` CLI and proxies commands to it. See bin/opensquad.js.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # for future npm provenance; publish currently uses NPM_TOKEN (trusted publishing not yet configured on npmjs.com)
+
+jobs:
+  validate:
+    name: Validate version sync
+    runs-on: ubuntu-latest
+    outputs:
+      npm_version: ${{ steps.check.outputs.npm_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag vs package.json version
+        id: check
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          NPM_VERSION=$(node -p "require('./package.json').version")
+          echo "Tag version:     $TAG_VERSION"
+          echo "package.json:    $NPM_VERSION"
+          if [ "$TAG_VERSION" != "$NPM_VERSION" ]; then
+            echo "::error::Version mismatch! tag=$TAG_VERSION package.json=$NPM_VERSION"
+            exit 1
+          fi
+          echo "Version check passed: $NPM_VERSION"
+          echo "npm_version=$NPM_VERSION" >> $GITHUB_OUTPUT
+
+  publish:
+    name: Publish to npm
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm install --omit=dev --ignore-scripts
+
+      - name: Verify bin file
+        run: |
+          test -f bin/opensquad.js || (echo "::error::bin/opensquad.js missing" && exit 1)
+          node -e "require('./bin/opensquad.js')" || true   # syntax check only
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "Published @opensquad-ai/opensquad@${{ needs.validate.outputs.npm_version }}"
+          echo "Install with:  npm install -g @opensquad-ai/opensquad"
+          echo "Try with:      npx -p @opensquad-ai/opensquad opensquad --version"

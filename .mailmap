@@ -1,0 +1,14 @@
+# ── .mailmap ───────────────────────────────────────────────────────────────
+# Unify contributor identities and tag machine-generated commits.
+# Format: <Proper Name> <Proper Email> <Commit Name> <Commit Email>
+#
+# See `git shortlog -sn` and `git log --use-mailmap` for the unified view.
+# ──────────────────────────────────────────────────────────────────────────
+
+# IDE-assisted commits (auto-saved by editors) — collapse to a bot identity so
+# the contributors list reflects humans, not machines.
+OpenSquad Bot <bot@opensquad.ai> VS Code <vscode@users.noreply.github.com>
+OpenSquad Bot <bot@opensquad.ai> Zed <18559851031@163.com>
+
+# Project maintainer service account used for merges and bot-driven work.
+OpenSquad Bot <bot@opensquad.ai> opensquad-ai <opensquad@163.com>

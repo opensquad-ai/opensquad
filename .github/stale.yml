@@ -1,0 +1,48 @@
+# Stale issue & PR bot configuration.
+#
+# Goals:
+#   - Auto-mark idle issues/PRs so maintainers can spot them in triage
+#   - Close the truly abandoned ones after a warning period
+#   - Leave certain labels (security, breaking, pinned) untouched
+#
+# Tighten or loosen the day counts by editing `daysUntilStale` and
+# `daysUntilClose` below. The schedule that actually runs this lives
+# in `.github/workflows/stale.yml`.
+version: 2
+defaults:
+  daysUntilStale: 60
+  daysUntilClose: 14
+  markComment: false
+exemptLabels:
+  - pinned
+  - security
+  - security-advisory
+  - breaking-change
+  - rfc
+  - good first issue   # don't auto-close newcomer-friendly work
+  - help wanted
+issues:
+  staleLabel: stale
+  markComment: >
+    This issue has been idle for 60 days. It will be closed in 14 days
+    unless there is new activity. If the problem is still relevant,
+    please add a comment with a current repro / use case so it can be
+    re-prioritized. Thank you for your contribution! 🙏
+  closeComment: >
+    Closing as stale after 14 days of inactivity post the stale label.
+    Feel free to reopen if the issue resurfaces — the conversation
+    history is preserved.
+  additionalLabels:
+    - needs-triage
+pulls:
+  daysUntilStale: 45   # PRs get a shorter shelf life than issues
+  markComment: >
+    This PR has been idle for 45 days. It will be closed in 14 days
+    unless the author pushes a new commit or a maintainer requests
+    changes. If you intend to continue, please rebase onto the target
+    branch (`upstream/dev` or `upstream/main`) and push.
+  closeComment: >
+    Closing as stale after 14 days of inactivity. Reopen if you pick
+    the work back up.
+  additionalLabels:
+    - needs-triage

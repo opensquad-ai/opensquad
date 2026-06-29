@@ -1,0 +1,31 @@
+{
+  "name": "reminder",
+  "display_name": "Reminder",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Scheduled notification plugin: supports delayed (seconds/minutes/hours/days) and absolute time triggers; can push to agent or im group/DM",
+  "author": "OpenSquad",
+  "tags": [
+    "utility"
+  ],
+  "tools": [
+    {
+      "name": "reminder",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

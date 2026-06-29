@@ -1,0 +1,16 @@
+# FastAPI Web Server
+fastapi
+uvicorn[standard]
+
+# HTTP Client
+requests
+httpx
+
+# Web Scraping & Automation
+playwright
+playwright-stealth
+trafilatura
+beautifulsoup4
+
+# PDF Processing
+PyPDF2

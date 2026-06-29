@@ -1,0 +1,40 @@
+{
+  "name": "quick_note",
+  "display_name": "",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "quick note with tags and search",
+  "author": "coder001",
+  "tags": [
+    "utility"
+  ],
+  "tools": [
+    {
+      "name": "quick_note",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {
+    "views": [
+      {
+        "name": "dashboard",
+        "title": "Notes",
+        "icon": "StickyNote",
+        "data_endpoint": "/api/plugins/quick_note/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  }
+}

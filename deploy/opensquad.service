@@ -1,0 +1,59 @@
+[Unit]
+Description=OpenSquad - Local-first Multi-Agent Collaboration Framework
+Documentation=https://github.com/opensquad-ai/opensquad
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opensquad
+Group=opensquad
+
+# ── Adjust these paths to your installation ──────────────────────────
+# Installation directory (where pyproject.toml lives)
+WorkingDirectory=/opt/opensquad
+
+# Python interpreter — point to the correct venv or system python
+#   system python: /usr/bin/python3
+#   venv:          /opt/opensquad/.venv/bin/python
+ExecStart=/opt/opensquad/.venv/bin/python -m opensquad.cli.main start
+
+# Graceful stop — sends SIGTERM, which start_cmd.py handles on Linux
+# Then runs 'opensquad stop' as a safety net to clean up port owners
+ExecStop=/opt/opensquad/.venv/bin/python -m opensquad.cli.main stop
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# ── Environment ──────────────────────────────────────────────────────
+Environment=PYTHONPATH=/opt/opensquad/src
+Environment=OPENSQUAD_WORKSPACE=/var/lib/opensquad/workspace
+Environment=PYTHONUNBUFFERED=1
+
+# ── Restart policy ───────────────────────────────────────────────────
+# opensquad start has built-in auto-restart (3 attempts per service).
+# This handles the case where the entire launcher itself dies.
+Restart=on-failure
+RestartSec=15
+# Prevent systemd from restart-looping infinitely
+StartLimitBurst=5
+StartLimitInterval=120
+
+# ── Logging ──────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opensquad
+
+# ── Security hardening (optional) ────────────────────────────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+# ProtectSystem=strict  # uncomment after verifying all paths
+# ProtectHome=yes       # uncomment if workspace is outside /home
+# ReadWritePaths=/var/lib/opensquad  # uncomment with ProtectSystem=strict
+
+# ── Resource limits (optional, uncomment and adjust) ─────────────────
+# MemoryHigh=2G
+# MemoryMax=4G
+# CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

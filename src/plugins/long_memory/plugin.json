@@ -1,0 +1,122 @@
+{
+  "name": "long_memory",
+  "display_name": "Long Memory",
+  "version": "1.0.0",
+  "type": "hook",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Long-term memory management with semantic recall, keyword extraction, and co-occurrence knowledge graph. View and manage stored memory entries.",
+  "author": "",
+  "tags": [],
+  "tools": [],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "token_budget": {
+        "type": "integer",
+        "default": 3000,
+        "description": "Maximum token count for memory injected into the prompt per conversation turn. Higher values recall more information but consume more context window."
+      },
+      "window_size": {
+        "type": "integer",
+        "default": 5,
+        "description": "Number of turns a memory entry stays in the active window. Entries beyond this are unloaded to save context and reloaded when relevant questions arise."
+      },
+      "context_depth": {
+        "type": "integer",
+        "default": 4,
+        "description": "Number of historical messages to look back when performing automatic recall. Higher values improve keyword extraction accuracy but slightly increase latency."
+      },
+      "cache_ttl": {
+        "type": "integer",
+        "default": 8,
+        "description": "Number of turns before a query result cache entry expires. Cache hits avoid redundant queries and improve response speed. Set to 0 to disable caching."
+      },
+      "min_cooccurrence": {
+        "type": "integer",
+        "default": 5,
+        "description": "Knowledge graph pruning threshold: word pairs with co-occurrence count below this value are excluded from the graph. Higher values produce a sparser graph with lower memory usage."
+      },
+      "decay_rate": {
+        "type": "number",
+        "default": 0.005,
+        "description": "Co-occurrence matrix decay rate: the retention ratio per update is (1 - decay_rate). Higher values cause faster forgetting, suitable for rapidly evolving knowledge domains."
+      },
+      "decay_interval": {
+        "type": "integer",
+        "default": 500,
+        "description": "Number of documents processed between each matrix decay pass. Lower values cause more frequent forgetting, suitable for scenarios that emphasize recent information."
+      },
+      "time_decay_lambda": {
+        "type": "number",
+        "default": 0.1,
+        "description": "Time decay coefficient λ for memory entries; scoring formula: 1 / (1 + λ × days). Higher values prioritize more recent memories during recall."
+      },
+      "max_dim": {
+        "type": "integer",
+        "default": 100000,
+        "description": "Maximum dimension of the co-occurrence matrix (vocabulary size limit). Affects memory usage; changes require an Agent restart to take effect."
+      }
+    }
+  },
+  "config_schema": {
+    "token_budget": {
+      "type": "integer",
+      "default": 3000,
+      "description": "Maximum token count for memory injected into the prompt per conversation turn. Higher values recall more information but consume more context window."
+    },
+    "window_size": {
+      "type": "integer",
+      "default": 5,
+      "description": "Number of turns a memory entry stays in the active window. Entries beyond this are unloaded to save context and reloaded when relevant questions arise."
+    },
+    "context_depth": {
+      "type": "integer",
+      "default": 4,
+      "description": "Number of historical messages to look back when performing automatic recall. Higher values improve keyword extraction accuracy but slightly increase latency."
+    },
+    "cache_ttl": {
+      "type": "integer",
+      "default": 8,
+      "description": "Number of turns before a query result cache entry expires. Cache hits avoid redundant queries and improve response speed. Set to 0 to disable caching."
+    },
+    "min_cooccurrence": {
+      "type": "integer",
+      "default": 5,
+      "description": "Knowledge graph pruning threshold: word pairs with co-occurrence count below this value are excluded from the graph. Higher values produce a sparser graph with lower memory usage."
+    },
+    "decay_rate": {
+      "type": "number",
+      "default": 0.005,
+      "description": "Co-occurrence matrix decay rate: the retention ratio per update is (1 - decay_rate). Higher values cause faster forgetting, suitable for rapidly evolving knowledge domains."
+    },
+    "decay_interval": {
+      "type": "integer",
+      "default": 500,
+      "description": "Number of documents processed between each matrix decay pass. Lower values cause more frequent forgetting, suitable for scenarios that emphasize recent information."
+    },
+    "time_decay_lambda": {
+      "type": "number",
+      "default": 0.1,
+      "description": "Time decay coefficient λ for memory entries; scoring formula: 1 / (1 + λ × days). Higher values prioritize more recent memories during recall."
+    },
+    "max_dim": {
+      "type": "integer",
+      "default": 100000,
+      "description": "Maximum dimension of the co-occurrence matrix (vocabulary size limit). Affects memory usage; changes require an Agent restart to take effect."
+    }
+  },
+  "contributes": {
+    "views": [
+      {
+        "name": "panel",
+        "title": "Memory Management",
+        "icon": "BrainCircuit",
+        "data_endpoint": "/api/plugins/long_memory/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  }
+}

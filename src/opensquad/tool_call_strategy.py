@@ -1,0 +1,445 @@
+"""
+Tool Call Strategy Pattern
+
+This module implements different strategies for LLM tool calling:
+- XMLToolCallStrategy: Original XML-based format (for compatibility)
+- NativeToolCallStrategy: Native Function Calling API (OpenAI/Claude/Gemini)
+
+The strategy pattern allows seamless switching between formats based on model capabilities.
+"""
+
+import json
+import logging
+import functools
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+class ToolCallStrategy(ABC):
+    """Abstract base class for tool call strategies"""
+    
+    def __init__(self, tool_registry):
+        self.tool_registry = tool_registry
+    
+    @abstractmethod
+    def prepare_llm_call(self, system_prompt: str) -> Dict[str, Any]:
+        """
+        Prepare LLM call parameters
+        
+        Args:
+            system_prompt: Base system prompt template
+            
+        Returns:
+            Dictionary with:
+            - system_prompt: Final system prompt (str)
+            - tools: Tool definitions (List[Dict] or None)
+            - tool_choice: Tool choice mode (str, optional)
+        """
+        pass
+    
+    @abstractmethod
+    def parse_response(self, response: Any) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        """
+        Parse LLM response to extract tool calls
+        
+        Args:
+            response: LLM response (format depends on strategy)
+            
+        Returns:
+            List of (tool_name, args_dict) tuples if tool calls found, else None.
+            Returns list with one element for single tool call, or multiple
+            elements for parallel tool calls.
+        """
+        pass
+    
+    @abstractmethod
+    def get_strategy_name(self) -> str:
+        """Return strategy name for logging"""
+        pass
+
+
+class XMLToolCallStrategy(ToolCallStrategy):
+    """
+    XML-based tool call strategy (original implementation)
+    
+    This strategy generates tool descriptions as text and injects them into
+    the system prompt. LLM outputs tool calls in XML format like:
+    
+    <tool_call>
+      <func>tool_name</func>
+      <param1>value1</param1>
+    </tool_call>
+    """
+    
+    def prepare_llm_call(self, system_prompt: str) -> Dict[str, Any]:
+        """
+        Inject tool descriptions into system prompt
+        
+        Returns:
+            - system_prompt: Prompt with {{TOOL_DESCRIPTIONS}} replaced
+            - tools: None (XML mode doesn't use API-level tools)
+        """
+        # Generate text-based tool descriptions
+        tool_desc = self.tool_registry.generate_tool_descriptions()
+        
+        # Replace placeholder in system prompt
+        final_prompt = system_prompt.replace("{{TOOL_DESCRIPTIONS}}", tool_desc)
+        
+        return {
+            "system_prompt": final_prompt,
+            "tools": None,
+            "tool_choice": None
+        }
+    
+    def parse_response(self, response_text) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        """
+        Parse XML format tool call from text response.
+        Supports parallel tool calls — scans for multiple XML blocks.
+
+        Args:
+            response_text: Full text output from LLM (str).
+                During streaming, ChatCompletionChunk objects are passed here -- they are
+                silently ignored (return None). Actual XML parsing happens in runner.py
+                after the full response is assembled.
+
+        Returns:
+            List of (tool_name, args_dict) tuples, or None if no tool calls.
+        """
+        if not isinstance(response_text, str):
+            return None
+        from opensquad.parser import ResponseParser
+        results = ResponseParser.parse_tool_calls(response_text)
+        return results if results else None
+    
+    def get_strategy_name(self) -> str:
+        return "XML"
+
+
+class NativeToolCallStrategy(ToolCallStrategy):
+    """
+    Native Function Calling strategy (OpenAI/Claude/Gemini compatible)
+    
+    This strategy generates OpenAI Tools JSON Schema and passes it via
+    the API's `tools` parameter. The API returns structured tool calls.
+    """
+    
+    def __init__(self, tool_registry, tool_filter: str = "all"):
+        """
+        Initialize Native FC strategy
+        
+        Args:
+            tool_registry: ToolRegistry instance
+            tool_filter: tool filter strategy ("all" | "baseline" | "high" | List[str])
+                - "all": all tools (default)
+                - "baseline": high-frequency tools only (files, system, search, memory, MCP)
+                - "high": high + medium frequency tools
+                - List[str]: custom namespace list
+        """
+        super().__init__(tool_registry)
+        self._tool_calls_buffer = []  # Buffer for streaming mode
+        self._tool_filter = tool_filter  # tool filter strategy
+    
+    def prepare_llm_call(self, system_prompt: str) -> Dict[str, Any]:
+        """
+        Generate OpenAI Tools schema and return call parameters.
+
+        Returns:
+            - system_prompt: Prompt as-is (tool format instructions already in FC template)
+            - tools: List of tool definitions in OpenAI format
+            - tool_choice: "auto" (let model decide)
+        """
+        # Generate OpenAI Tools JSON Schema with filtering
+        tools = self.tool_registry.generate_openai_tools(tool_filter=self._tool_filter)
+
+        return {
+            "system_prompt": system_prompt,
+            "tools": tools,
+            "tool_choice": "auto"
+        }
+    
+    def parse_response(self, api_response) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        """
+        Parse native Function Calling response.
+        Supports parallel tool calls — returns list of all tool calls.
+        
+        Args:
+            api_response: API response chunk (streaming mode)
+            
+        Returns:
+            List of (tool_name, args_dict) tuples, or None if no tool calls.
+        """
+        # Handle streaming response chunks
+        if hasattr(api_response, 'choices') and api_response.choices:
+            delta = api_response.choices[0].delta
+            
+            # Check if this chunk contains tool_calls
+            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    # Buffer the tool call data
+                    if tc.index >= len(self._tool_calls_buffer):
+                        self._tool_calls_buffer.append({
+                            "id": getattr(tc, 'id', None),
+                            "type": getattr(tc, 'type', 'function'),
+                            "function": {
+                                "name": "",
+                                "arguments": ""
+                            }
+                        })
+                    
+                    # Accumulate function name
+                    if hasattr(tc, 'function') and tc.function:
+                        if hasattr(tc.function, 'name') and tc.function.name:
+                            self._tool_calls_buffer[tc.index]["function"]["name"] = tc.function.name
+                        
+                        # Accumulate arguments (streamed incrementally)
+                        if hasattr(tc.function, 'arguments') and tc.function.arguments:
+                            self._tool_calls_buffer[tc.index]["function"]["arguments"] += tc.function.arguments
+            
+            # Check if stream finished (finish_reason present)
+            finish_reason = getattr(api_response.choices[0], 'finish_reason', None)
+            if finish_reason == 'tool_calls' or finish_reason == 'stop':
+                # Stream finished, parse ALL buffered tool calls
+                if self._tool_calls_buffer:
+                    results = []
+                    for tc in self._tool_calls_buffer:
+                        tool_name = tc["function"]["name"]
+                        args_json = tc["function"]["arguments"]
+                        try:
+                            args_dict = json.loads(args_json)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse tool call arguments: {e}")
+                            logger.debug(f"Raw arguments: {args_json}")
+                            continue
+                        logger.info(f"Native FC parsed tool call: {tool_name}")
+                        results.append((tool_name, args_dict))
+                    self._tool_calls_buffer = []  # Clear buffer
+                    return results if results else None
+        else:
+            # Empty or missing choices -- some proxy APIs return chunks with
+            # choices=[] but still have a finish_reason at the chunk level.
+            # Check if stream is finished and parse buffered tool calls.
+            finish_reason = getattr(api_response, 'finish_reason', None)
+            if finish_reason == 'tool_calls' or finish_reason == 'stop':
+                if self._tool_calls_buffer:
+                    results = []
+                    for tc in self._tool_calls_buffer:
+                        tool_name = tc["function"]["name"]
+                        args_json = tc["function"]["arguments"]
+                        try:
+                            args_dict = json.loads(args_json)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse tool call arguments: {e}")
+                            logger.debug(f"Raw arguments: {args_json}")
+                            continue
+                        logger.info(f"Native FC parsed tool call (from empty-choices chunk): {tool_name}")
+                        results.append((tool_name, args_dict))
+                    self._tool_calls_buffer = []  # Clear buffer
+                    return results if results else None
+            # Also try to extract from choices[0] if it exists (even if list appears falsy)
+            if hasattr(api_response, 'choices') and api_response.choices is not None and len(api_response.choices) > 0:
+                finish_reason = getattr(api_response.choices[0], 'finish_reason', None)
+                if finish_reason == 'tool_calls' or finish_reason == 'stop':
+                    if self._tool_calls_buffer:
+                        results = []
+                        for tc in self._tool_calls_buffer:
+                            tool_name = tc["function"]["name"]
+                            args_json = tc["function"]["arguments"]
+                            try:
+                                args_dict = json.loads(args_json)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse tool call arguments: {e}")
+                                logger.debug(f"Raw arguments: {args_json}")
+                                continue
+                            logger.info(f"Native FC parsed tool call (from choices[0]): {tool_name}")
+                            results.append((tool_name, args_dict))
+                        self._tool_calls_buffer = []
+                        return results if results else None
+        
+        return None
+    
+    def _parse_buffered_tool_calls(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Parse the buffered tool calls (after streaming completes)"""
+        if not self._tool_calls_buffer:
+            return None
+        
+        # Take the first tool call (OpenSquad executes one tool at a time)
+        tc = self._tool_calls_buffer[0]
+        tool_name = tc["function"]["name"]
+        args_json = tc["function"]["arguments"]
+        
+        # Parse arguments JSON
+        try:
+            args_dict = json.loads(args_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse tool call arguments: {e}")
+            logger.debug(f"Raw arguments: {args_json}")
+            return None
+        
+        logger.info(f"Native FC parsed tool call: {tool_name}")
+        return tool_name, args_dict
+    
+    def get_strategy_name(self) -> str:
+        return "Native-FC"
+
+
+class ToolCallStrategySelector:
+    """
+    Strategy selector that chooses the appropriate tool call strategy
+    based on model capabilities and user configuration
+    """
+    
+    @staticmethod
+    def select(config: Dict, tool_registry) -> ToolCallStrategy:
+        """
+        Select tool call strategy based on configuration
+        
+        Args:
+            config: Agent configuration dict
+            tool_registry: ToolRegistry instance
+            
+        Returns:
+            Appropriate ToolCallStrategy instance
+            
+        Configuration:
+            Add to agent config.json:
+            {
+              "model": {
+                "tool_call_mode": "auto" | "native" | "xml",
+                "tool_filter": "all" | "baseline" | "high" | ["namespace1", "namespace2"]
+              }
+            }
+            
+        Modes:
+            - "auto": Auto-detect based on model capabilities (default)
+            - "native": Force native Function Calling (fallback to XML if unsupported)
+            - "xml": Force XML format (for compatibility)
+            
+        Tool Filters (Native FC only):
+            - "all": All tools (default, 124 tools)
+            - "baseline": High-frequency tools only (57 tools, ~46% reduction)
+            - "high": High + medium frequency tools (97 tools, ~22% reduction)
+            - List[str]: Custom namespace list
+        """
+        model_config = config.get("model", {})
+        mode = model_config.get("tool_call_mode", "auto")
+        tool_filter = model_config.get("tool_filter", "all")  # get filter config
+        # api_protocol: API 协议类型 (openai / openai_compat / claude / google)
+        provider = model_config.get("api_protocol", "")
+        model_name = model_config.get("model_name", "")
+        
+        # Check if model supports Function Calling
+        supports_fc = ToolCallStrategySelector._supports_function_calling(
+            provider, model_name
+        )
+        
+        # Strategy selection logic
+        if mode == "native":
+            if not supports_fc:
+                logger.warning(
+                    f"Model {model_name} may not support Function Calling. "
+                    f"Falling back to XML mode."
+                )
+                return XMLToolCallStrategy(tool_registry)
+            
+            # Check if we have implemented Native FC for this provider
+            is_implemented = ToolCallStrategySelector._is_native_fc_implemented(provider)
+            if not is_implemented:
+                logger.warning(
+                    f"Native FC not yet implemented for {provider} (provider). "
+                    f"The API will accept tools parameter but ignore it. "
+                    f"Tools will be unavailable. "
+                    f"Recommend using 'tool_call_mode: auto' or 'xml' instead."
+                )
+            
+            logger.info(f"Using Native Function Calling for {model_name} (filter: {tool_filter})")
+            return NativeToolCallStrategy(tool_registry, tool_filter=tool_filter)
+        
+        elif mode == "xml":
+            logger.info(f"Using XML format (forced by config) for {model_name}")
+            return XMLToolCallStrategy(tool_registry)
+        
+        elif mode == "auto":
+            # Auto mode: Use Native FC only if BOTH:
+            # 1. Model supports it (API-level)
+            # 2. We have implemented it (code-level)
+            is_implemented = ToolCallStrategySelector._is_native_fc_implemented(provider)
+            
+            if supports_fc and is_implemented:
+                logger.info(f"Auto-selected Native Function Calling for {model_name} (filter: {tool_filter})")
+                return NativeToolCallStrategy(tool_registry, tool_filter=tool_filter)
+            elif supports_fc and not is_implemented:
+                logger.info(
+                    f"Auto-selected XML format for {model_name}: "
+                    f"Native FC not yet implemented for {provider}"
+                )
+                return XMLToolCallStrategy(tool_registry)
+            else:
+                logger.info(f"Auto-selected XML format for {model_name}: model does not support Native FC")
+                return XMLToolCallStrategy(tool_registry)
+        
+        else:
+            logger.warning(f"Unknown tool_call_mode: {mode}. Falling back to XML.")
+            return XMLToolCallStrategy(tool_registry)
+    
+    @staticmethod
+    @functools.lru_cache(maxsize=8)
+    def _is_native_fc_implemented(provider: str) -> bool:
+        """
+        Check if our system has implemented Native FC for the given provider
+        
+        Returns:
+            True if Native FC is fully implemented, False otherwise
+            
+        Implementation status (v1.2):
+            - [x] OpenAI (ChatAPI): Fully implemented
+            - [x] Claude (ClaudeAPI): Fully implemented (v1.2)
+            - [x] Google (GoogleAPI): Fully implemented (v1.2)
+        """
+        # Normalize provider name
+        provider_map = {
+            "openai_compat": "openai",
+            "openai": "openai",
+            "claude": "claude",
+            "anthropic": "claude",
+            "google": "google",
+            "gemini": "google",
+        }
+        
+        normalized_provider = provider_map.get(provider.lower(), "openai")
+        
+        # OpenAI, Claude, Google are all implemented now
+        implemented_providers = {"openai", "claude", "google"}
+        return normalized_provider in implemented_providers
+    
+    @staticmethod
+    @functools.lru_cache(maxsize=64)
+    def _supports_function_calling(provider: str, model_name: str) -> bool:
+        """
+        Detect if model supports native Function Calling at API level
+        
+        Uses ModelCapabilityRegistry for comprehensive model support detection.
+        
+        Note: This only checks if the MODEL supports FC, not whether our 
+        implementation supports it. Use _is_native_fc_implemented() to check
+        if our system has implemented Native FC for a given provider.
+        """
+        from .model_capabilities import ModelCapabilityRegistry
+        
+        # Normalize provider name
+        provider_map = {
+            "openai_compat": "openai",
+            "openai": "openai",
+            "claude": "claude",
+            "anthropic": "claude",
+            "google": "google",
+            "gemini": "google",
+        }
+        
+        normalized_provider = provider_map.get(provider.lower(), "openai")
+        
+        # Use model capability registry to detect support
+        return ModelCapabilityRegistry.supports_function_calling(
+            model_name, normalized_provider
+        )

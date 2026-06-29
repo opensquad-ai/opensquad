@@ -1,0 +1,13 @@
+{
+  "name": "mcp_auto_deploy",
+  "display_name": "MCP Auto Deploy",
+  "description": "Teaches the agent how to self-configure and deploy MCP servers. Covers central config, per-agent sync, web UI visibility, and validation.",
+  "version": "1.0.0",
+  "author": "OpenSquad",
+  "tags": ["mcp", "auto-deploy", "config", "server-management"],
+  "is_private": false,
+  "install": [],
+  "requires": {
+    "tools": ["filesystem"]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "agent_management",
+  "version": "1.0.0",
+  "display_name": "Agent Management Complete Guide",
+  "description": "All-in-one OpenSquad Agent management Skill covering creation, configuration, deployment, architectural principles, and troubleshooting",
+  "author": "OpenSquad",
+  "created_at": "2026-03-01",
+  "required_tools": [
+    "chat_account",
+    "agent_factory"
+  ],
+  "optional_tools": [
+    "im",
+    "filesystem"
+  ],
+  "tags": [
+    "agent",
+    "management",
+    "chatpro",
+    "deployment",
+    "configuration",
+    "architecture"
+  ],
+  "replaces": [
+    "agent_creation",
+    "agent_config_management",
+    "agent_deployment",
+    "agent_architecture_im"
+  ]
+}

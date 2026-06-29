@@ -1,0 +1,10 @@
+{
+  "name": "self_config",
+  "display_name": "Self Configuration",
+  "description": "Allows the Agent to modify its own configuration file and reload plugins",
+  "version": "1.0.0",
+  "author": "OpenSquad",
+  "tags": ["config", "self-management"],
+  "is_private": false,
+  "install": []
+}

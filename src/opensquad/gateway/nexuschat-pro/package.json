@@ -1,0 +1,140 @@
+{
+  "name": "nexuschat-pro",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "icons:build": "python ../../../scripts/build_icons.py",
+    "electron:dev": "vite build && node scripts/compile-electron.mjs && electron dist-electron/main.cjs",
+    "electron:build": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder",
+    "electron:win": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder --win",
+    "electron:mac": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder --mac",
+    "electron:linux": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder --linux",
+    "electron:dev:fast": "node scripts/compile-electron.mjs && electron dist-electron/main.cjs",
+    "electron:dev:live": "node scripts/dev-electron-live.mjs"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "i18next": "^25.8.13",
+    "lucide-react": "^0.563.0",
+    "marked": "12.0.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-i18next": "^16.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.5.0",
+    "electron": "^40.8.0",
+    "electron-builder": "^26.8.1",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  },
+  "build": {
+    "appId": "com.opensquad.nexuschat-pro",
+    "productName": "NexusChat Pro",
+    "copyright": "Copyright © 2025-present OpenSquad",
+    "directories": {
+      "buildResources": "assets",
+      "output": "../../../build/release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**/*.cjs",
+      "!dist-electron/**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "../../../build/backend-win",
+        "to": "backend-win",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../../build/backend-mac",
+        "to": "backend-mac",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../../build/backend-linux",
+        "to": "backend-linux",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "Office"
+    }
+  }
+}

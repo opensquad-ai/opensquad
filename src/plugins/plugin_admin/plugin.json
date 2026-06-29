@@ -1,0 +1,33 @@
+{
+  "name": "plugin_admin",
+  "display_name": "Plugin Admin",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Plugin administration tools. Allows the Agent to list plugins, enable/disable them, read and write their configuration, and trigger a hot-reload — all without leaving the chat.",
+  "author": "lihua179",
+  "tags": [
+    "admin",
+    "plugins",
+    "management"
+  ],
+  "tools": [
+    {
+      "name": "plugin_admin",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

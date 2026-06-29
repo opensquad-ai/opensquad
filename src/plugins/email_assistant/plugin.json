@@ -1,0 +1,148 @@
+{
+  "name": "email_assistant",
+  "display_name": "Email Assistant",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": false,
+  "node_scope": "single",
+  "description": "General-purpose IMAP/SMTP email plugin. Receives mail via IMAP IDLE, sends via SMTP SSL. Use node_scope=single to avoid duplicate listeners.",
+  "author": "OpenSquad",
+  "tags": [
+    "email",
+    "communication"
+  ],
+  "tools": [
+    {
+      "name": "list_emails",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    },
+    {
+      "name": "read_email",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    },
+    {
+      "name": "search_emails",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    },
+    {
+      "name": "send_email",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "imap_host": {
+        "type": "string",
+        "default": "",
+        "description": "IMAP server hostname (e.g. imap.gmail.com)"
+      },
+      "imap_port": {
+        "type": "integer",
+        "default": 993,
+        "description": "IMAP server port (993 for SSL)"
+      },
+      "imap_ssl": {
+        "type": "boolean",
+        "default": true,
+        "description": "Use SSL for IMAP connection"
+      },
+      "imap_mailbox": {
+        "type": "string",
+        "default": "INBOX",
+        "description": "Mailbox to monitor (default: INBOX)"
+      },
+      "smtp_host": {
+        "type": "string",
+        "default": "",
+        "description": "SMTP server hostname (e.g. smtp.gmail.com)"
+      },
+      "smtp_port": {
+        "type": "integer",
+        "default": 465,
+        "description": "SMTP server port (465 for SSL)"
+      },
+      "username": {
+        "type": "string",
+        "default": "",
+        "description": "Email account username / address"
+      },
+      "password": {
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "description": "Email account password or app password"
+      }
+    }
+  },
+  "config_schema": {
+    "imap_host": {
+      "type": "string",
+      "default": "",
+      "description": "IMAP server hostname (e.g. imap.gmail.com)"
+    },
+    "imap_port": {
+      "type": "integer",
+      "default": 993,
+      "description": "IMAP server port (993 for SSL)"
+    },
+    "imap_ssl": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use SSL for IMAP connection"
+    },
+    "imap_mailbox": {
+      "type": "string",
+      "default": "INBOX",
+      "description": "Mailbox to monitor (default: INBOX)"
+    },
+    "smtp_host": {
+      "type": "string",
+      "default": "",
+      "description": "SMTP server hostname (e.g. smtp.gmail.com)"
+    },
+    "smtp_port": {
+      "type": "integer",
+      "default": 465,
+      "description": "SMTP server port (465 for SSL)"
+    },
+    "username": {
+      "type": "string",
+      "default": "",
+      "description": "Email account username / address"
+    },
+    "password": {
+      "type": "string",
+      "default": "",
+      "secret": true,
+      "description": "Email account password or app password"
+    }
+  },
+  "contributes": {
+    "views": [
+      {
+        "name": "inbox",
+        "title": "Email Inbox",
+        "icon": "Mail",
+        "data_endpoint": "/api/plugins/email_assistant/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": [
+      "imapclient"
+    ]
+  }
+}

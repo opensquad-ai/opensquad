@@ -1,0 +1,19 @@
+{
+  "id": "agent_factory",
+  "name": "Agent Factory",
+  "version": "1.1.0",
+  "author": "OpenSquad",
+  "description": "Dynamically spawns child agents from a parent agent's context. Useful for parallel task execution and hierarchical agent workflows.",
+  "tags": [
+    "multi-agent",
+    "factory",
+    "spawn"
+  ],
+  "type": "hook",
+  "created_at": "2025-11-10T09:00:00Z",
+  "likes": 190,
+  "icon_url": null,
+  "git_url": "https://github.com/opensquad-ai/plugin-agent-factory",
+  "homepage": "https://github.com/opensquad-ai/plugin-agent-factory",
+  "download_url": ""
+}

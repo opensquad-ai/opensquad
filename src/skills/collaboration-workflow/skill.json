@@ -1,0 +1,9 @@
+{
+  "name": "collaboration-workflow",
+  "display_name": "Collaboration Workflow",
+  "version": "1.0.0",
+  "description": "Complete guide to the OpenSquad multi-agent collaboration system. Covers the 4-phase lifecycle, board usage, tool calls, and message formats for PM, researcher, and analyst roles.",
+  "author": "OpenSquad",
+  "tags": ["collaboration", "workflow", "board", "team", "coordination"],
+  "category": "utility"
+}

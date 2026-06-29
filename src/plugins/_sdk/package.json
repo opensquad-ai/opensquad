@@ -1,0 +1,8 @@
+{
+  "name": "@opensquad/plugin-sdk",
+  "version": "1.0.0",
+  "description": "Shared type definitions for OpenSquad plugin UI adapters",
+  "main": "index.ts",
+  "types": "index.ts",
+  "private": true
+}

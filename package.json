@@ -1,0 +1,38 @@
+{
+  "name": "@opensquad-ai/opensquad",
+  "version": "0.4.0",
+  "description": "OpenSquad — Local-first Multi-Agent Collaboration Framework. npm bootstrap that installs the Python `opensquad` CLI and proxies commands to it.",
+  "bin": {
+    "opensquad": "bin/opensquad.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "scripts": {
+    "test": "node bin/opensquad.js --version"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opensquad-ai/opensquad.git"
+  },
+  "homepage": "https://github.com/opensquad-ai/opensquad",
+  "bugs": {
+    "url": "https://github.com/opensquad-ai/opensquad/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "opensquad",
+    "multi-agent",
+    "ai-agents",
+    "llm",
+    "mcp",
+    "framework"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

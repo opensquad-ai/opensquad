@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/opensquad-ai/opensquad/tree/main/docs
+    about: Read the project documentation before opening an issue.
+  - name: Security Vulnerability
+    url: https://github.com/opensquad-ai/opensquad/security/advisories/new
+    about: Please report security vulnerabilities privately via GitHub Security Advisories.

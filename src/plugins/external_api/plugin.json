@@ -1,0 +1,33 @@
+{
+  "name": "external_api",
+  "display_name": "External API",
+  "version": "1.0.0",
+  "type": "platform",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "External API adapter. Provides HTTP/WebSocket gateway for third-party system integrations.",
+  "author": "OpenSquad",
+  "tags": [
+    "platform"
+  ],
+  "tools": [],
+  "hooks": [],
+  "service_toggle": true,
+  "service": {
+    "entry": "adapter.py",
+    "auto_start": true
+  },
+  "config": {
+    "schema": {},
+    "section": "external_api"
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": [
+      "fastapi",
+      "uvicorn",
+      "websockets"
+    ]
+  }
+}

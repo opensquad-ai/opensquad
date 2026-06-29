@@ -1,0 +1,492 @@
+{
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "base_url": "https://api.deepseek.com/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "deepseek-chat",
+          "title": "DeepSeek Chat",
+          "token_max": 65536,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "deepseek-reasoner",
+          "title": "DeepSeek Reasoner",
+          "token_max": 65536,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "zhipuai",
+      "label": "智谱 GLM",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "glm-4-plus",
+          "title": "GLM-4 Plus",
+          "token_max": 128000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "glm-4-flash",
+          "title": "GLM-4 Flash",
+          "token_max": 128000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "glm-4v-plus",
+          "title": "GLM-4V Plus",
+          "token_max": 8192,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "glm-z1-flash",
+          "title": "GLM-Z1 Flash (Think)",
+          "token_max": 128000,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "moonshot",
+      "label": "月之暗面 Kimi",
+      "base_url": "https://api.moonshot.cn/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "moonshot-v1-8k",
+          "title": "Kimi 8K",
+          "token_max": 8192,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "auto"
+        },
+        {
+          "model_name": "moonshot-v1-32k",
+          "title": "Kimi 32K",
+          "token_max": 32768,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "auto"
+        },
+        {
+          "model_name": "moonshot-v1-128k",
+          "title": "Kimi 128K",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "auto"
+        },
+        {
+          "model_name": "kimi-latest",
+          "title": "Kimi Latest",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "auto"
+        }
+      ]
+    },
+    {
+      "id": "minimax",
+      "label": "MiniMax",
+      "base_url": "https://api.minimax.chat/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "MiniMax-Text-01",
+          "title": "MiniMax Text-01",
+          "token_max": 1000000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "abab6.5s-chat",
+          "title": "MiniMax ABAB6.5s",
+          "token_max": 245760,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "qwen",
+      "label": "阿里 Qwen (通义千问)",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "qwen-max",
+          "title": "Qwen Max",
+          "token_max": 32768,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "qwen-plus",
+          "title": "Qwen Plus",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "qwen-turbo",
+          "title": "Qwen Turbo",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "qwen-long",
+          "title": "Qwen Long",
+          "token_max": 10000000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "qwq-plus",
+          "title": "QwQ Plus (Think)",
+          "token_max": 131072,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "qwen-vl-max",
+          "title": "Qwen VL Max",
+          "token_max": 32768,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "provider": "openai",
+      "models": [
+        {
+          "model_name": "gpt-4o",
+          "title": "GPT-4o",
+          "token_max": 128000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "gpt-4o-mini",
+          "title": "GPT-4o Mini",
+          "token_max": 128000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "o1",
+          "title": "OpenAI o1",
+          "token_max": 200000,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "o1-mini",
+          "title": "OpenAI o1 Mini",
+          "token_max": 128000,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "o3-mini",
+          "title": "OpenAI o3 Mini",
+          "token_max": 200000,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "gpt-4-turbo",
+          "title": "GPT-4 Turbo",
+          "token_max": 128000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "google",
+      "label": "Google Gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "provider": "google",
+      "models": [
+        {
+          "model_name": "gemini-2.0-flash",
+          "title": "Gemini 2.0 Flash",
+          "token_max": 1048576,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "gemini-2.0-flash-thinking-exp",
+          "title": "Gemini 2.0 Flash Thinking",
+          "token_max": 1048576,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "gemini-1.5-pro",
+          "title": "Gemini 1.5 Pro",
+          "token_max": 2097152,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "gemini-1.5-flash",
+          "title": "Gemini 1.5 Flash",
+          "token_max": 1048576,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": true,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic Claude",
+      "base_url": "https://api.anthropic.com",
+      "provider": "anthropic",
+      "models": [
+        {
+          "model_name": "claude-opus-4-5",
+          "title": "Claude Opus 4.5",
+          "token_max": 200000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "claude-sonnet-4-5",
+          "title": "Claude Sonnet 4.5",
+          "token_max": 200000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "claude-3-7-sonnet-20250219",
+          "title": "Claude 3.7 Sonnet (Think)",
+          "token_max": 200000,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "claude-3-5-sonnet-20241022",
+          "title": "Claude 3.5 Sonnet",
+          "token_max": 200000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "claude-3-5-haiku-20241022",
+          "title": "Claude 3.5 Haiku",
+          "token_max": 200000,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "baidu",
+      "label": "百度 ERNIE",
+      "base_url": "https://qianfan.baidubce.com/v2",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "ernie-4.5-turbo-128k",
+          "title": "ERNIE 4.5 Turbo 128K",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "ernie-4.5-8k",
+          "title": "ERNIE 4.5 8K",
+          "token_max": 8192,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "stepfun",
+      "label": "阶跃星辰 Step",
+      "base_url": "https://api.stepfun.com/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "step-2-16k",
+          "title": "Step-2 16K",
+          "token_max": 16384,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "step-1v-32k",
+          "title": "Step-1V 32K",
+          "token_max": 32768,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": true,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    },
+    {
+      "id": "siliconflow",
+      "label": "硅基流动 SiliconFlow",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "provider": "openai_compat",
+      "models": [
+        {
+          "model_name": "deepseek-ai/DeepSeek-V3",
+          "title": "DeepSeek-V3 (SF)",
+          "token_max": 65536,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "deepseek-ai/DeepSeek-R1",
+          "title": "DeepSeek-R1 (SF)",
+          "token_max": 65536,
+          "temperature": 0,
+          "is_think": true,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        },
+        {
+          "model_name": "Qwen/Qwen2.5-72B-Instruct",
+          "title": "Qwen2.5-72B (SF)",
+          "token_max": 131072,
+          "temperature": 0.3,
+          "is_think": false,
+          "is_image": false,
+          "is_video": false,
+          "tool_call_mode": "native"
+        }
+      ]
+    }
+  ]
+}

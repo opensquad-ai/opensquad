@@ -1,0 +1,31 @@
+{
+  "name": "chat_account",
+  "display_name": "Chat Account Manager",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "ChatPro account and group management: register account, create group, join group, leave group, list groups",
+  "author": "OpenSquad",
+  "tags": [
+    "im"
+  ],
+  "tools": [
+    {
+      "name": "chat_account",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

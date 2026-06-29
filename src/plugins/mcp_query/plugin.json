@@ -1,0 +1,31 @@
+{
+  "name": "mcp_query",
+  "display_name": "MCP Server Management",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "MCP server management and querying tools. Allows agents to list, add, remove, reconnect, and reload MCP servers at runtime.",
+  "author": "OpenSquad",
+  "tags": [
+    "agent"
+  ],
+  "tools": [
+    {
+      "name": "mcp_query",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

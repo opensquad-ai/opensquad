@@ -1,0 +1,138 @@
+{
+  "name": "telegram",
+  "display_name": "Telegram",
+  "version": "1.0.0",
+  "type": "platform",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Telegram platform integration. Provides inbound message adapter and outbound send tools for Telegram chats.",
+  "author": "OpenSquad",
+  "tags": [
+    "im"
+  ],
+  "tools": [
+    {
+      "name": "telegram_send",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": true
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "service_enabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable Telegram service"
+      },
+      "proxy": {
+        "type": "string",
+        "default": "",
+        "description": "HTTP/SOCKS proxy for Telegram API (e.g. http://127.0.0.1:7890)"
+      },
+      "connect_timeout": {
+        "type": "integer",
+        "default": 30,
+        "description": "Connection timeout in seconds"
+      },
+      "request_timeout": {
+        "type": "integer",
+        "default": 60,
+        "description": "Request timeout in seconds"
+      },
+      "bots": {
+        "type": "bot_list",
+        "default": [],
+        "description": "Telegram bot list",
+        "item_schema": {
+          "name": {
+            "type": "string",
+            "default": "",
+            "description": "Bot name"
+          },
+          "bot_token": {
+            "type": "string",
+            "default": "",
+            "description": "Bot Token",
+            "secret": true
+          },
+          "agent_id": {
+            "type": "string",
+            "default": "",
+            "description": "Bound Agent ID"
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable this bot"
+          }
+        }
+      }
+    },
+    "section": "telegram"
+  },
+  "service_toggle": true,
+  "service": {
+    "entry": "adapter.py",
+    "auto_start": true
+  },
+  "config_schema": {
+    "service_enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable Telegram service"
+    },
+    "proxy": {
+      "type": "string",
+      "default": "",
+      "description": "HTTP/SOCKS proxy for Telegram API (e.g. http://127.0.0.1:7890)"
+    },
+    "connect_timeout": {
+      "type": "integer",
+      "default": 30,
+      "description": "Connection timeout in seconds"
+    },
+    "request_timeout": {
+      "type": "integer",
+      "default": 60,
+      "description": "Request timeout in seconds"
+    },
+    "bots": {
+      "type": "bot_list",
+      "default": [],
+      "description": "Telegram bot list",
+      "item_schema": {
+        "name": {
+          "type": "string",
+          "default": "",
+          "description": "Bot name"
+        },
+        "bot_token": {
+          "type": "string",
+          "default": "",
+          "description": "Bot Token",
+          "secret": true
+        },
+        "agent_id": {
+          "type": "string",
+          "default": "",
+          "description": "Bound Agent ID"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable this bot"
+        }
+      }
+    }
+  },
+  "contributes": {},
+  "dependencies": {
+    "pip": [
+      "requests",
+      "python-telegram-bot"
+    ]
+  }
+}

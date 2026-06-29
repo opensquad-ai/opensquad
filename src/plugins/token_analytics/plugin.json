@@ -1,0 +1,66 @@
+{
+  "name": "token_analytics",
+  "display_name": "Token Analytics",
+  "version": "1.0.0",
+  "type": "hook",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Collects and persists token usage data with model/tool breakdown for historical trend analysis",
+  "author": "OpenSquad",
+  "tags": [
+    "analytics"
+  ],
+  "tools": [],
+  "hooks": [
+    "on_after_tool"
+  ],
+  "config": {
+    "schema": {
+      "db_path": {
+        "type": "string",
+        "default": "data/plugins/token_analytics/analytics.db",
+        "description": "SQLite database file path (relative to project root)"
+      },
+      "buffer_size": {
+        "type": "integer",
+        "default": 10,
+        "description": "Number of records to buffer before flushing to disk"
+      },
+      "flush_interval_sec": {
+        "type": "integer",
+        "default": 30,
+        "description": "Maximum seconds between flushes"
+      }
+    }
+  },
+  "config_schema": {
+    "db_path": {
+      "type": "string",
+      "default": "data/plugins/token_analytics/analytics.db",
+      "description": "SQLite database file path (relative to project root)"
+    },
+    "buffer_size": {
+      "type": "integer",
+      "default": 10,
+      "description": "Number of records to buffer before flushing to disk"
+    },
+    "flush_interval_sec": {
+      "type": "integer",
+      "default": 30,
+      "description": "Maximum seconds between flushes"
+    }
+  },
+  "contributes": {
+    "views": [
+      {
+        "name": "token_dashboard",
+        "title": "Token Analytics",
+        "icon": "BarChart3",
+        "data_endpoint": "/api/plugins/token_analytics/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  }
+}

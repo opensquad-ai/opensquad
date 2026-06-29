@@ -1,0 +1,33 @@
+OpenSquad
+Copyright 2024-2026 OpenSquad Contributors
+
+---
+
+## License migration note
+
+This project was relicensed from Apache License 2.0 to MIT License on
+2026-06-26.
+
+- **v0.1.0** (tagged 2026-06-17): the commit that v0.1.0 points to
+  contained the Apache 2.0 LICENSE file. Anyone who obtained v0.1.0
+  source / binary / PyPI / Docker image before this migration has
+  v0.1.0 under Apache 2.0, and that license continues to govern that
+  specific version. The MIT License applies to commits made **after**
+  this NOTICE file was updated.
+
+- **All subsequent releases** (v0.2.0, v0.3.0, ...) are under MIT
+  License, see the `LICENSE` file at the root of the repository.
+
+For full Apache 2.0 text see: https://www.apache.org/licenses/LICENSE-2.0
+For full MIT text see: `LICENSE` in this repository.
+
+---
+
+## Historical attribution (Apache 2.0 era)
+
+This product includes software developed by the OpenSquad Contributors.
+Project home: https://github.com/opensquad-ai/opensquad
+
+When this project was distributed under Apache 2.0, this NOTICE file
+was required and tracked the attribution above. The attribution is
+preserved here for historical reference only.

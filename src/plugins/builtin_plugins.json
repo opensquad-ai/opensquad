@@ -1,0 +1,11 @@
+{
+  "_comment": "Built-in plugin registry. Only true system-level tools. These ship with OpenSquad, default enabled, cannot be uninstalled, and per-agent toggle is hidden.",
+  "plugins": {
+    "mcp_query":       { "default_enabled": true },
+    "plugin_admin":    { "default_enabled": true },
+    "reminder":        { "default_enabled": true },
+    "task_watch":      { "default_enabled": true },
+    "vision":          { "default_enabled": true },
+    "websearch":       { "default_enabled": true }
+  }
+}

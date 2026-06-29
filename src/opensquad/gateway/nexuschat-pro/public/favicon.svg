@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4338ca"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <filter id="node-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect width="100" height="100" rx="18" ry="18" fill="url(#bg-grad)"/>
+
+  <!-- Glass highlight -->
+  <ellipse cx="50" cy="18" rx="30" ry="15" fill="white" fill-opacity="0.08"/>
+
+  <!-- Edge lines -->
+  <line x1="30" y1="30" x2="70" y2="30" stroke="white" stroke-width="2" stroke-opacity="0.35" stroke-linecap="round"/>
+  <line x1="30" y1="30" x2="30" y2="70" stroke="white" stroke-width="2" stroke-opacity="0.35" stroke-linecap="round"/>
+  <line x1="70" y1="30" x2="70" y2="70" stroke="white" stroke-width="2" stroke-opacity="0.35" stroke-linecap="round"/>
+  <line x1="30" y1="70" x2="70" y2="70" stroke="white" stroke-width="2" stroke-opacity="0.35" stroke-linecap="round"/>
+
+  <!-- Diagonal lines -->
+  <line x1="30" y1="30" x2="70" y2="70" stroke="white" stroke-width="1.5" stroke-opacity="0.20" stroke-linecap="round"/>
+  <line x1="70" y1="30" x2="30" y2="70" stroke="white" stroke-width="1.5" stroke-opacity="0.20" stroke-linecap="round"/>
+
+  <!-- Nodes (2x2 grid) -->
+  <circle cx="30" cy="30" r="8" fill="white" filter="url(#node-glow)"/>
+  <circle cx="70" cy="30" r="8" fill="white" filter="url(#node-glow)"/>
+  <circle cx="30" cy="70" r="8" fill="white" filter="url(#node-glow)"/>
+  <circle cx="70" cy="70" r="8" fill="white" filter="url(#node-glow)"/>
+</svg>

@@ -1,0 +1,47 @@
+{
+  "name": "task_watch",
+  "display_name": "Task Watch",
+  "version": "1.0.0",
+  "type": "hook",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Task supervision dashboard — monitors agent task lifecycle, check-ins, stalls, and tool activity",
+  "author": "OpenSquad",
+  "tags": [
+    "monitoring",
+    "supervision"
+  ],
+  "tools": [],
+  "hooks": [
+    "on_after_tool"
+  ],
+  "config": {
+    "schema": {
+      "db_path": {
+        "type": "string",
+        "default": "data/plugins/task_watch/task_watch.db",
+        "description": "SQLite database file path (relative to project root)"
+      }
+    }
+  },
+  "config_schema": {
+    "db_path": {
+      "type": "string",
+      "default": "data/plugins/task_watch/task_watch.db",
+      "description": "SQLite database file path (relative to project root)"
+    }
+  },
+  "contributes": {
+    "views": [
+      {
+        "name": "task_dashboard",
+        "title": "Task Watch",
+        "icon": "ClipboardList",
+        "data_endpoint": "/api/plugins/task_watch/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  }
+}

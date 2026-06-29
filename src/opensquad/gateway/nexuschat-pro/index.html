@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>NexusChat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        /* 原始默认主题 (Original Light) */
+        --color-primary: #6366f1;
+        --color-bg: #f8fafc;
+        --color-panel: #ffffff;
+        --color-border: #e2e8f0;
+        --color-bubble-self: #eff6ff;
+        --color-bubble-other: #ffffff;
+        --color-text-main: #1e293b;
+        --color-text-muted: #64748b;
+      }
+
+      .theme-opencode {
+        /* OpenCode 默认参数 (基于 Indigo/Violet) */
+        --color-primary: #818cf8;
+        --color-bg: #0f172a;
+        --color-panel: #1e293b;
+        --color-border: #334155;
+        --color-bubble-self: #4f46e5;
+        --color-bubble-other: #1e293b;
+        --color-text-main: #f1f5f9;
+        --color-text-muted: #94a3b8;
+      }
+
+      .theme-tokyonight {
+        /* Tokyo Night 参数 */
+        --color-primary: #7aa2f7;
+        --color-bg: #1a1b26;
+        --color-panel: #16161e;
+        --color-border: #292e42;
+        --color-bubble-self: #3d59a1;
+        --color-bubble-other: #24283b;
+        --color-text-main: #c0caf5;
+        --color-text-muted: #565f89;
+      }
+
+      .theme-catppuccin {
+        /* Catppuccin Mocha 参数 */
+        --color-primary: #89b4fa;
+        --color-bg: #1e1e2e;
+        --color-panel: #181825;
+        --color-border: #313244;
+        --color-bubble-self: #89b4fa;
+        --color-bubble-other: #313244;
+        --color-text-main: #cdd6f4;
+        --color-text-muted: #7f849c;
+      }
+
+      .theme-nord {
+        /* Nord 配色 (Arctic, North-bluish Color Palette) */
+        --color-primary: #88c0d0;
+        --color-bg: #2e3440;
+        --color-panel: #3b4252;
+        --color-border: #434c5e;
+        --color-bubble-self: #5e81ac;
+        --color-bubble-other: #3b4252;
+        --color-text-main: #d8dee9;
+        --color-text-muted: #4c566a;
+      }
+
+      .theme-onedark {
+        /* Atom One Dark */
+        --color-primary: #61afef;
+        --color-bg: #282c34;
+        --color-panel: #21252b;
+        --color-border: #181a1f;
+        --color-bubble-self: #61afef;
+        --color-bubble-other: #2c313a;
+        --color-text-main: #abb2bf;
+        --color-text-muted: #5c6370;
+      }
+
+      .theme-warm {
+        /* 温馨暖色调 (Cream & Coral) */
+        --color-primary: #E07A5F;
+        --color-bg: #FFF8F0;
+        --color-panel: #FFFFFF;
+        --color-border: #E8D4C0;
+        --color-bubble-self: #FFE4D6;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-coffee {
+        /* 咖啡暖色调 (Coffee & Cream) */
+        --color-primary: #A67C52;
+        --color-bg: #F5F0E8;
+        --color-panel: #FAF7F2;
+        --color-border: #D7CCC8;
+        --color-bubble-self: #E8D5C4;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #4A3728;
+        --color-text-muted: #8B7355;
+      }
+
+      .theme-red {
+        /* 温馨红色系 (Rose & Cream) */
+        --color-primary: #E57373;
+        --color-bg: #FFF5F5;
+        --color-panel: #FFFFFF;
+        --color-border: #EF9A9A;
+        --color-bubble-self: #FFEBEE;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-orange {
+        /* 温馨橙色系 (Amber & Cream) */
+        --color-primary: #FF8A65;
+        --color-bg: #FFF8F0;
+        --color-panel: #FFFFFF;
+        --color-border: #FFAB91;
+        --color-bubble-self: #FFF3E0;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-pink {
+        /* 温馨粉色系 (Blush & Cream) */
+        --color-primary: #F48FB1;
+        --color-bg: #FDF2F4;
+        --color-panel: #FFFFFF;
+        --color-border: #F48FB1;
+        --color-bubble-self: #FCE4EC;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-yellow {
+        /* 温馨黄色系 (Sunshine & Cream) */
+        --color-primary: #FFD54F;
+        --color-bg: #FFFDE7;
+        --color-panel: #FFFFFF;
+        --color-border: #FFE082;
+        --color-bubble-self: #FFF8E1;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-green {
+        /* 温馨绿色系 (Sage & Cream) */
+        --color-primary: #81C784;
+        --color-bg: #F1F8E9;
+        --color-panel: #FFFFFF;
+        --color-border: #A5D6A7;
+        --color-bubble-self: #E8F5E9;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-cyan {
+        /* 温馨青色系 (Mint & Cream) */
+        --color-primary: #4DD0E1;
+        --color-bg: #E0F7FA;
+        --color-panel: #FFFFFF;
+        --color-border: #80DEEA;
+        --color-bubble-self: #E0F2F1;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-blue {
+        /* 温馨蓝色系 (Sky & Cream) */
+        --color-primary: #64B5F6;
+        --color-bg: #E3F2FD;
+        --color-panel: #FFFFFF;
+        --color-border: #90CAF9;
+        --color-bubble-self: #E8EAF6;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-purple {
+        /* 温馨紫色系 (Lavender & Cream) */
+        --color-primary: #BA68C8;
+        --color-bg: #F3E5F5;
+        --color-panel: #FFFFFF;
+        --color-border: #CE93D8;
+        --color-bubble-self: #F3E5F5;
+        --color-bubble-other: #FFFFFF;
+        --color-text-main: #5D4037;
+        --color-text-muted: #8D6E63;
+      }
+
+      .theme-coffee-dark {
+        /* 深咖啡色 (Dark Coffee) - 原 dusk */
+        --color-primary: #D4A574;
+        --color-bg: #3D3229;
+        --color-panel: #4A3F35;
+        --color-border: #5C4D40;
+        --color-bubble-self: #5C4D40;
+        --color-bubble-other: #4A3F35;
+        --color-text-main: #F5E6D3;
+        --color-text-muted: #A89080;
+      }
+
+      .theme-midnight {
+        /* 午夜黑色 (Midnight Black) - 纯暗色 */
+        --color-primary: #818cf8;
+        --color-bg: #0a0a0f;
+        --color-panel: #111118;
+        --color-border: #1e1e2a;
+        --color-bubble-self: #1a1a2e;
+        --color-bubble-other: #111118;
+        --color-text-main: #e2e8f0;
+        --color-text-muted: #6b7280;
+      }
+
+
+
+      .theme-catppuccin-macchiato {
+        /* Catppuccin Macchiato — Lighter variant of Catppuccin Mocha */
+        --color-primary: #8aadf4;
+        --color-bg: #24273a;
+        --color-panel: #1e2030;
+        --color-border: #363a4f;
+        --color-bubble-self: #363a4f;
+        --color-bubble-other: #1e2030;
+        --color-text-main: #cad3f5;
+        --color-text-muted: #6e738d;
+      }
+
+      .theme-matrix {
+        /* Matrix — Hacker green on black */
+        --color-primary: #00ff41;
+        --color-bg: #000000;
+        --color-panel: #0a0a0a;
+        --color-border: #1a3a1a;
+        --color-bubble-self: #0d1f0d;
+        --color-bubble-other: #0a0a0a;
+        --color-text-main: #00ff41;
+        --color-text-muted: #008020;
+      }
+
+      .theme-everforest {
+        /* Everforest Dark — Soft green, nature-inspired */
+        --color-primary: #a7c080;
+        --color-bg: #2b3339;
+        --color-panel: #333c43;
+        --color-border: #47535b;
+        --color-bubble-self: #3d4a50;
+        --color-bubble-other: #333c43;
+        --color-text-main: #d3c6aa;
+        --color-text-muted: #859289;
+      }
+
+      .theme-gruvbox {
+        /* Gruvbox Dark — Retro warm ochre & cream */
+        --color-primary: #fabd2f;
+        --color-bg: #282828;
+        --color-panel: #32302f;
+        --color-border: #504945;
+        --color-bubble-self: #3c3836;
+        --color-bubble-other: #32302f;
+        --color-text-main: #ebdbb2;
+        --color-text-muted: #928374;
+      }
+
+      .theme-kanagawa {
+        /* Kanagawa — Inspired by The Great Wave off Kanagawa */
+        --color-primary: #7fb4ca;
+        --color-bg: #1f1f28;
+        --color-panel: #2a2a37;
+        --color-border: #363646;
+        --color-bubble-self: #22323f;
+        --color-bubble-other: #2a2a37;
+        --color-text-main: #dcd7ba;
+        --color-text-muted: #72737a;
+      }
+
+      .theme-sakura {
+        /* Sakura — Delicate cherry blossom light */
+        --color-primary: #e8889d;
+        --color-bg: #fff8f9;
+        --color-panel: #ffffff;
+        --color-border: #f5d5da;
+        --color-bubble-self: #fce4ec;
+        --color-bubble-other: #ffffff;
+        --color-text-main: #5d3a4b;
+        --color-text-muted: #a88292;
+      }
+
+      .theme-dracula {
+        /* Dracula — Bold dark purple */
+        --color-primary: #bd93f9;
+        --color-bg: #282a36;
+        --color-panel: #353746;
+        --color-border: #44475a;
+        --color-bubble-self: #44475a;
+        --color-bubble-other: #353746;
+        --color-text-main: #f8f8f2;
+        --color-text-muted: #6272a4;
+      }
+
+      .theme-ayu {
+        /* Ayu Mirage — Warm purple-gray with cool blue accent */
+        --color-primary: #73d0ff;
+        --color-bg: #1f2430;
+        --color-panel: #252b38;
+        --color-border: #333b4a;
+        --color-bubble-self: #2d3640;
+        --color-bubble-other: #252b38;
+        --color-text-main: #e4e4e4;
+        --color-text-muted: #707a8c;
+      }
+
+      .theme-monokai {
+        /* Monokai — Vibrant high-contrast dark */
+        --color-primary: #a6e22e;
+        --color-bg: #272822;
+        --color-panel: #2d2e27;
+        --color-border: #3e3d32;
+        --color-bubble-self: #3e3d32;
+        --color-bubble-other: #2d2e27;
+        --color-text-main: #f8f8f2;
+        --color-text-muted: #75715e;
+      }
+
+      .dark {
+        /* 正宗 opencode (GitHub Dark Default) 参数 */
+        --color-primary: #58a6ff;
+        --color-bg: #0d1117;
+        --color-panel: #161b22;
+        --color-border: #30363d;
+        --color-bubble-self: #1f6feb;
+        --color-bubble-other: #21262d;
+        --color-text-main: #c9d1d9;
+        --color-text-muted: #8b949e;
+      }
+    <style>
+      /* Reset and Base */
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
+
+      /* Agent 呼吸灯动画 */
+      @keyframes breathe-idle {
+        0%, 100% { opacity: 0.4; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1); }
+      }
+      @keyframes breathe-working {
+        0%, 100% { opacity: 0.35; transform: scale(0.8); }
+        50% { opacity: 1; transform: scale(1.15); }
+      }
+      @keyframes breathe-sleeping {
+        0%, 100% { opacity: 0.15; transform: scale(0.9); }
+        50% { opacity: 0.55; transform: scale(1); }
+      }
+      .animate-breathe-idle {
+        animation: breathe-idle 3s ease-in-out infinite;
+      }
+      .animate-breathe-working {
+        animation: breathe-working 1.5s ease-in-out infinite;
+      }
+      .animate-breathe-sleeping {
+        animation: breathe-sleeping 4s ease-in-out infinite;
+      }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        width: 100%;
+        height: 100%;
+        height: 100dvh; /* Dynamic viewport height for mobile */
+      }
+
+      /* Mobile-specific fixes */
+      @supports (padding-top: env(safe-area-inset-top)) {
+        .safe-area-top {
+          padding-top: env(safe-area-inset-top);
+        }
+        .safe-area-bottom {
+          padding-bottom: env(safe-area-inset-bottom);
+        }
+        .safe-area-x {
+          padding-left: env(safe-area-inset-left);
+          padding-right: env(safe-area-inset-right);
+        }
+      }
+
+      /* Prevent pull-to-refresh on mobile */
+      body {
+        overscroll-behavior: none;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      /* Custom Scrollbar - hidden on mobile */
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+
+      /* Hide scrollbar on mobile */
+      @media (max-width: 768px) {
+        ::-webkit-scrollbar {
+          display: none;
+        }
+        * {
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+      }
+
+      /* Markdown Styles within Chat */
+      .prose p { margin-bottom: 0.5em; }
+      .prose p:last-child { margin-bottom: 0; }
+      .prose ul { list-style-type: disc; padding-left: 1.2em; margin-bottom: 0.5em; }
+      .prose ol { list-style-type: decimal; padding-left: 1.2em; margin-bottom: 0.5em; }
+      .prose strong { font-weight: 700; }
+      .prose em { font-style: italic; }
+      .prose pre {
+        overflow-x: auto;
+        max-width: 100%;
+        white-space: pre;
+        word-wrap: normal;
+        border-radius: 0.375rem;
+        padding: 0.5em 0.75em;
+        font-size: 0.8em;
+        background-color: rgba(0,0,0,0.05);
+      }
+      .prose code {
+        word-break: break-all;
+        font-size: 0.85em;
+      }
+      .prose pre code {
+        word-break: normal;
+        background-color: transparent;
+        padding: 0;
+      }
+      .dark .prose pre { background-color: var(--color-bg); border: 1px solid var(--color-border); }
+      .dark .prose code { color: var(--color-primary); }
+      .prose a { color: var(--color-primary); text-decoration: underline; cursor: pointer; }
+      .prose a:hover { opacity: 0.8; }
+      
+      /* Ensure markdown content doesn't overflow containers */
+      .ai-markdown { overflow-wrap: break-word; word-break: break-word; }
+      .ai-markdown pre { overflow-x: auto; max-width: 100%; }
+      .ai-markdown table { display: block; overflow-x: auto; max-width: 100%; }
+      .ai-markdown img { max-width: 100%; height: auto; }
+
+      .dark ::-webkit-scrollbar-thumb { background: #30363d; }
+      .dark ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+      /* Mobile input fixes */
+      input, textarea {
+        font-size: 16px; /* Prevent zoom on iOS */
+        -webkit-appearance: none;
+        border-radius: 0;
+      }
+
+      /* Touch action optimization */
+      .touch-manipulation {
+        touch-action: manipulation;
+      }
+
+      /* Prevent text selection on UI elements */
+      .no-select {
+        -webkit-user-select: none;
+        user-select: none;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "marked": "https://esm.sh/marked@12.0.0"
+  }
+}
+</script>
+</head>
+  <body class="bg-bgLight text-textMain min-h-screen w-full overflow-hidden">
+    <div id="root" class="h-full w-full overflow-hidden"></div>
+  <script type="module" src="/index.tsx"></script>
+  <!-- Mobile Auto Reload -->
+  <script>
+    (function() {
+      // 只在移动端启用自动刷新
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      if (!isMobile) return;
+
+      let lastModified = null;
+      const checkInterval = 2000; // 每2秒检查一次
+
+      setInterval(async () => {
+        try {
+          const response = await fetch('/index.tsx', { method: 'HEAD', cache: 'no-cache' });
+          const currentModified = response.headers.get('last-modified');
+
+          if (lastModified && currentModified !== lastModified) {
+            console.log('[AutoReload] File changed, reloading...');
+            window.location.reload();
+          }
+          lastModified = currentModified;
+        } catch (e) {
+          // 忽略错误
+        }
+      }, checkInterval);
+
+      console.log('[AutoReload] Mobile auto-reload enabled');
+    })();
+  </script>
+</body>
+</html>

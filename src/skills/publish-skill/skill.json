@@ -1,0 +1,7 @@
+{
+  "name": "publish-skill",
+  "display_name": "publish-skill",
+  "version": "1.0.0",
+  "description": "Complete guide for publishing a local skill to the public OpenSquad skill library, including lessons learned on BOM handling, path issues, and other gotchas.",
+  "author": "OpenSquad"
+}

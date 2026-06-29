@@ -1,0 +1,61 @@
+{
+  "agent_id": "qa-001",
+  "agent_name": "qa",
+  "agent_type": "analyst",
+  "default_wake_mode": "strict",
+  "description": "质量保证（QA）。负责代码审查、测试、验收把关。",
+  "description_zh": "质量保证（QA）。负责代码审查、测试、验收把关。",
+  "description_en": "Quality Assurance (QA). Responsible for code review, testing, and acceptance sign-off.",
+  "model": {
+    "api_protocol": "openai_compat",
+    "api_key": "",
+    "base_url": "https://api.deepseek.com/v1",
+    "model_name": "deepseek-v4-flash",
+    "token_max": 128000,
+    "temperature": 0.3,
+    "frequency_penalty": 0,
+    "presence_penalty": 0,
+    "top_k": 0,
+    "is_think": true,
+    "is_image": false,
+    "is_audio": false,
+    "is_video": false,
+    "tool_call_mode": "native",
+    "tool_filter": "all",
+    "_card": "deepseek-v4-flash"
+  },
+  "tools": [
+    "system",
+    "filesystem",
+    "im",
+    "collaboration",
+    "delegate_task",
+    "workspace",
+    "task_watch",
+    "websearch",
+    "vision",
+    "mcp_query"
+  ],
+  "group_chat": {
+    "enabled": true,
+    "email": "qa@ai",
+    "password": "aaaaaa",
+    "groups": []
+  },
+  "web_server": {
+    "enabled": true
+  },
+  "gateway": {
+    "enabled": true
+  },
+  "prompt": {
+    "role": "role.md"
+  },
+  "mcp": {
+    "enabled": true
+  },
+  "skills": {
+    "enabled": true,
+    "active": []
+  }
+}

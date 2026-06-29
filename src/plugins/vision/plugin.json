@@ -1,0 +1,31 @@
+{
+  "name": "vision",
+  "display_name": "Vision (Image Reader)",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Image reading tool. Writes image paths to img_path.txt for the vision model to process.",
+  "author": "OpenSquad",
+  "tags": [
+    "vision"
+  ],
+  "tools": [
+    {
+      "name": "vision",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

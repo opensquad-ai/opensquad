@@ -1,0 +1,286 @@
+# 构建 OpenSquad 桌面应用
+
+> OpenSquad 网关以桌面应用形式分发（代号 **NexusChat Pro**），基于
+> **Electron + Vite + PyInstaller** 打包。本文档是完整 how-to：
+> 从一行命令的开发模式，到多平台生产安装包，以及 CI 流水线是怎么串起来的。
+>
+> 想要**安装/运行已经构建好的应用**请看
+> [deployment_guide.md](deployment_guide.md)。本文讲的是**从源码构建应用**。
+
+---
+
+## TL;DR
+
+```bash
+# 开发模式（前端 + Electron，需要另一个终端跑 opensquad start）
+cd src/opensquad/gateway/nexuschat-pro
+npm install
+npm run electron:dev
+
+# 为当前平台构建安装包
+npm run electron:build
+# → build/release/   (Windows .exe、macOS .dmg、Linux .AppImage / .deb)
+
+# 构建指定平台
+npm run electron:win     # Windows .exe（NSIS + portable）
+npm run electron:mac     # macOS .dmg + .zip（x64 + arm64）
+npm run electron:linux   # Linux .AppImage + .deb
+```
+
+构建流水线分**两段**：一段 Python 后端（PyInstaller），一段 Electron 外壳。
+两段都要成功；Electron 阶段会按平台把对应的后端塞进对应的安装包。
+
+---
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  src/opensquad/gateway/nexuschat-pro/   (Electron + React UI)   │
+│  ────────────────────────────────────────────────────────────  │
+│   electron/         ← 主进程、preload、托盘菜单（.ts）         │
+│   src/              ← React UI（Vite + TypeScript）            │
+│   scripts/          ← compile-electron.mjs、dev-electron-live  │
+│   assets/           ← icon.png / .ico / .icns / tray.png       │
+│   package.json      ← npm scripts + electron-builder 配置      │
+└─────────────────────────────────────────────────────────────────┘
+                              │ 打包
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  opensquad/gateway/backend/   (Python 后端 → 二进制)           │
+│  ────────────────────────────────────────────────────────────  │
+│   opensquad_backend.spec   ← PyInstaller spec                  │
+│   app/、routes/、…         ← FastAPI 及其余                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │ pyinstaller
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  build/   （不进 git；由构建脚本创建）                          │
+│  ────────────────────────────────────────────────────────────  │
+│   backend-win/run/run.exe + 依赖                                │
+│   backend-mac/run/run   + 依赖                                  │
+│   backend-linux/run/run + 依赖                                  │
+│   release/  ← electron-builder 产物（安装包）                   │
+│     *.exe  *.dmg  *.AppImage  *.deb  *.zip                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Electron 应用把打包好的后端二进制作为子进程拉起来，在 `BrowserWindow` 里加载
+`http://127.0.0.1:<port>/`。端口从 `OPENSQUAD_PORT`（默认 `9510`，打包后端）
+或 `OPENSQUAD_FRONTEND_PORT` / `VITE_DEV_PORT`（默认 `5173`，dev 模式）取。
+具体解析规则见 `electron/main.ts`。
+
+---
+
+## 前置条件
+
+| 工具          | 版本                  | 用途 |
+|---------------|----------------------|------|
+| **Node.js**   | 20.x 或 22.x          | Vite + Electron + TypeScript |
+| **npm**       | Node 自带              | `npm ci`、scripts |
+| **Python**    | 3.10+（CI 用 3.11）    | `pip install -e .`、PyInstaller、build_icons.py |
+| **PyInstaller** | pip 最新版            | 后端 → 独立二进制 |
+| **Pillow + Playwright** | 最新版       | `build_icons.py`（把 SVG 主图标栅格化成各平台图标）|
+| **平台 SDK**  | 视情况                | macOS: Xcode CLT（生成 .icns / 公证）。Windows: 可选，仅签名时需要。 |
+
+`npm install` 阶段很重（Electron 约 200 MB）。首次跑可能要几分钟。
+
+---
+
+## 开发模式（三种变体）
+
+所有 dev 模式都要求**单独的后端**跑在 `9510`（或 `OPENSQUAD_PORT` 的值）。
+最常见的起法：
+
+```bash
+# 终端 1 — Python 后端（任选你喜欢的姿势）
+uv run opensquad start         # 或：python -m opensquad.cli start
+
+# 终端 2 — Electron 开发模式
+cd src/opensquad/gateway/nexuschat-pro
+npm install
+npm run electron:dev
+```
+
+### `npm run electron:dev` — 完整 build 后启动
+
+1. `vite build` — 把 React UI 打包到 `dist/`。
+2. `node scripts/compile-electron.mjs` — 把 `electron/*.ts` 编译到
+   `dist-electron/*.cjs`（TypeScript → CJS，再加一个小补丁让 Node 能
+   解析 `./foo` → `foo.cjs`）。
+3. `electron dist-electron/main.cjs` — 启动 Electron 窗口。
+
+Electron 窗口指向**打包后的** UI（不走 Vite dev server），跟外部跑着的后端
+通信。改前端代码需要重新 `vite build`（或重跑整个脚本）。想要测生产 build
+行为时用这个。
+
+### `npm run electron:dev:fast` — 跳过 Vite rebuild
+
+跟上面一样，但**跳过** `vite build`。当你只改 `electron/*.ts`（主进程 /
+preload / 托盘菜单）且不想等 Vite 时用这个。
+
+### `npm run electron:dev:live` — 走 Vite dev server + HMR
+
+`node scripts/dev-electron-live.mjs` 设置 `ELECTRON_DEV=1`，主进程会：
+
+- **跳过拉起打包后端**（假设你已经在另一端把后端跑起来了）。
+- **从 Vite dev server 加载 UI**（默认 `http://127.0.0.1:5173/`，
+  可用 `OPENSQUAD_FRONTEND_PORT` 覆盖），拿到 React HMR。
+
+做 UI/UX 迭代、想要即时反馈时用这个。后端还是要在另一端跑着。
+
+---
+
+## 生产构建（一行命令、单个平台）
+
+```bash
+cd src/opensquad/gateway/nexuschat-pro
+npm run electron:build
+# 或
+npm run electron:win       # 仅 Windows
+npm run electron:mac       # 仅 macOS
+npm run electron:linux     # 仅 Linux
+```
+
+每个命令依次执行：
+
+1. `npm run icons:build` — 跑 `python ../../../scripts/build_icons.py`，
+   把 `assets/logo-source.svg` 栅格化成 `icon.png` / `icon@2x.png` /
+   `icon.ico` / `icon.icns` / `tray.png`。需要 Pillow + Playwright + Chromium。
+2. `npm run build` — `vite build`，把 React UI 打到 `dist/`。
+3. `node scripts/compile-electron.mjs` — TypeScript → CJS（见上）。
+4. `electron-builder` — 把所有东西打成该平台的安装包。
+
+### 产物
+
+| 平台      | 命令           | 产物（在 `build/release/` 下）|
+|-----------|----------------|------------------------------|
+| Windows   | `electron:win`  | `*-setup.exe`（NSIS 安装器）、`*portable.exe`（免安装）|
+| macOS     | `electron:mac`  | `*.dmg` 和 `*.zip`，**同时**覆盖 x64 和 arm64 |
+| Linux     | `electron:linux`| `*.AppImage`、`*.deb` |
+| 三平台（仅当前 OS）| `electron:build` | 当前平台能产出的那些 |
+
+产物目录是**项目根**的 `build/release/`，**不是**前端目录内（见
+`package.json` → `build.directories.output = "../../../build/release"`）。
+
+### PyInstaller 后端这一步的前置条件
+
+`electron-builder` 阶段假设 `build/backend-<os>/run/` 已经塞好了该 OS 对应的
+Python 后端二进制。**前端 build 不会产生它**——你得另外跑一次 PyInstaller。
+
+两种塞法：
+
+#### 方式 A — 各 OS 的本地 build 脚本
+
+```bash
+# Windows
+scripts\build_backend.bat
+# macOS / Linux
+bash scripts/build_backend.sh
+```
+
+两个脚本都调用 PyInstaller 加 `opensquad/gateway/backend/opensquad_backend.spec`，
+输出到 `build/backend-{win|mac|linux}/run/`。
+
+#### 方式 B — 让 CI 跑（发版时推荐）
+
+`build-desktop.yml` 在 `push` 一个 `v*` tag 时会并行给三个 OS 跑 PyInstaller，
+再在匹配的 runner 上组装 Electron 安装包。见下面 [CI / 发版流水线](#ci--发版流水线)。
+
+---
+
+## CI / 发版流水线
+
+`.github/workflows/build-desktop.yml` 是出发布安装包的标准姿势。两种触发方式：
+
+- **push tag**：`git tag -a v0.X.Y && git push origin v0.X.Y` — 跑完整的多平台
+  build，并创建一个 GitHub Release 把安装包挂上去。
+- **手动**：`Actions → Build Desktop App → Run workflow` — 不发版只想验证
+  build 时用。
+
+三段：
+
+1. **`build-backend`**（3 路 matrix）— 装 Python 依赖、生成图标、
+   `npm ci && npm run build`（让 PyInstaller 能把前端打进去）、跑
+   PyInstaller 加 `opensquad_backend.spec`、上传 `backend-{win,mac,linux}`
+   artifact。
+2. **`build-electron`**（3 路 matrix，`needs: build-backend`）— 下载匹配
+   的后端 artifact、`npm ci`、跑 `npm run electron:{win,mac,linux}`、
+   上传 `build/release/*.{exe,dmg,AppImage,deb}` 为 `release-<os>` artifact
+   （保留 7 天）。
+3. **`create-release`**（仅 tag push）— 下载三个 `release-*` artifact，
+   挂到 GitHub Release 上并自动生成 release notes。
+
+全量一次冷启动约 **25–35 分钟**（3 个后端 build 并行 + 3 个 Electron build
+并行 + release）。
+
+### 验证一个桌面 build
+
+跑完之后：
+
+1. `https://github.com/opensquad-ai/opensquad/releases/tag/v0.X.Y` —
+   GitHub Release 页应该挂着各平台的安装包。
+2. workflow run 的 **artifacts 标签**也能下到（如果你是 `workflow_dispatch`
+   跑的、没创建 release）。
+3. 冒烟测试：下你平台的安装包、装、打开。app 应该能开网关 UI、
+   拉起打包好的后端（系统托盘能看到）、后端在
+   `127.0.0.1:9510/health` 应该能访问。
+
+---
+
+## 常见问题
+
+### `electron:dev` 第一次跑白屏
+
+- Vite build 成功了但打包后端没跑。在另一终端把它起来
+  （`uv run opensquad start`）。看 Electron DevTools 的 console—
+  如果看到 `ECONNREFUSED 127.0.0.1:9510`，就是这个原因。
+- 想要 HMR 就用 `electron:dev:live`；想要生产 build 行为就用 `electron:dev`。
+
+### `electron:build` 报缺图标
+
+- `npm run icons:build` 失败了（Pillow / Playwright 没装好、或 Chromium 下不下来）。
+  手动跑一下看错误：`python scripts/build_icons.py`。
+- 再跑 `electron:build` 就行——`icons:build` 是它的第一步。
+
+### 在本机给非原生平台跑 `electron:build`
+
+- **没法**在 macOS / Linux 上产出 Windows `.exe`（反之亦然），除非
+  装 Wine / Windows VM。`build-desktop.yml` 的 matrix 就是为了这个。
+  本地 build 只能挑跟你宿主 OS 一致的那个变体。
+
+### `electron-builder` 报 `extraResources` 错
+
+- `build/backend-<os>/run/` 不存在或为空。要么先跑对应的
+  `build_backend.{sh,bat}`，要么从跑完 `build-backend` 阶段的
+  `build-desktop.yml` run 里下 artifact。
+
+### AppImage 在 Linux 上跑不起来
+
+- 先 `chmod +x <file>.AppImage` 再跑。
+- 没有 FUSE 的环境要加 `--appimage-extract-and-run` 兜底。也可以用 `.deb`。
+
+### 代码签名（macOS / Windows）
+
+- 仓库里**没配**。macOS build 是没签的（首次开会有 Gatekeeper 警告，
+  右键 → 打开 绕过）。Windows 同理。签名是项目级决定，含义见
+  [RELEASING.md](../RELEASING.md)。
+
+### 产物在**项目根**的 `build/release/`，不在 `nexuschat-pro/`
+
+- 一开始挺迷惑——`package.json` →
+  `build.directories.output = "../../../build/release"`。三个 `..` 是
+  因为 `nexuschat-pro/` 离项目根正好三层。`build/` 在 `.gitignore` 里，
+  npm 脚本**不会**清理它；想从零来就手动 `rm -rf build/`。
+
+---
+
+## 本文没覆盖的内容
+
+- **后端安装 / 首次启动向导 / Web UI** →
+  [deployment_guide.md](deployment_guide.md) 和
+  [getting_started.md](getting_started.md)。
+- **分支模型和版本号策略** → [BRANCHING.md](../BRANCHING.md)。
+- **端到端发版流程（什么时候切 tag、跑了什么）** →
+  [RELEASING.md](../RELEASING.md)。
+- **插件开发** → [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md)。

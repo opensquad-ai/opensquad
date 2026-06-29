@@ -1,0 +1,51 @@
+{
+  "hosts": {
+    "gateway": "0.0.0.0"
+  },
+  "ports": {
+    "gateway": 9555,
+    "launcher": 9600,
+    "plugin_registry": 9720,
+    "frontend": 5173
+  },
+  "gateway": {
+    "cors_origins": ["http://localhost:5173", "http://127.0.0.1:5173"]
+  },
+  "security": {
+    "_comment": "Legacy CORS field. Prefer 'gateway.cors_origins' above. Avoid ['*'] in production — list your trusted origins explicitly.",
+    "cors_allow_origins": ["http://localhost:5173", "http://127.0.0.1:5173"]
+  },
+  "auth": {
+    "node_secret": "YOUR_NODE_SECRET_HERE"
+  },
+  "node": {
+    "id": "gateway-server-01",
+    "label": "Gateway Server (change me)",
+    "register_to_gateway": false,
+    "launcher_url": ""
+  },
+  "services": {
+    "gateway": {
+      "name": "Nexus Gateway (Backend)",
+      "type": "python_module",
+      "module": "opensquad.gateway.backend.run",
+      "enabled": true,
+      "start_delay": 2
+    },
+    "frontend": {
+      "name": "Nexus Frontend (UI)",
+      "type": "shell",
+      "cwd": "opensquad/gateway/nexuschat-pro",
+      "cmd": "npm run dev",
+      "enabled": false,
+      "start_delay": 2
+    },
+    "plugin_registry": {
+      "name": "Plugin Registry",
+      "type": "python_module",
+      "module": "opensquad.gateway.plugin_registry.main",
+      "enabled": true,
+      "start_delay": 1
+    }
+  }
+}

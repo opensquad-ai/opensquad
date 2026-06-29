@@ -1,0 +1,36 @@
+{
+  "name": "git_core",
+  "display_name": "Git Core",
+  "version": "1.1.0",
+  "type": "tool",
+  "enabled": false,
+  "node_scope": "all",
+  "description": "Core Git tools for local repository management with auto-identity.",
+  "author": "OpenSquad",
+  "tags": [
+    "git",
+    "vcs",
+    "code"
+  ],
+  "tools": [
+    {
+      "name": "git",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [
+    "on_before_tool"
+  ],
+  "config": {
+    "schema": {}
+  },
+  "service_toggle": true,
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

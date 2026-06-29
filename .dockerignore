@@ -1,0 +1,91 @@
+# Git
+.git
+.gitignore
+.*.sw?
+*.orig
+
+# Python
+__pycache__
+*.py[cod]
+*.pyo
+*.egg-info
+.eggs
+.venv
+venv
+env
+.pytest_cache
+.ruff_cache
+*.env
+.env.*
+
+# Node
+node_modules
+src/opensquad/gateway/nexuschat-pro/node_modules
+src/opensquad/gateway/nexuschat-pro/dist
+src/opensquad/gateway/nexuschat-pro/dist-electron
+.vite/
+
+# IDE / AI editor local state (may carry auth tokens / plans)
+.idea
+.vscode
+.claude/
+.claude2/
+.opencode/
+.codebuddy/
+.spec-workflow/
+.playwright-mcp/
+.playwright-cli/
+
+# Scratch / debug files (must not ship)
+_test_dbg*.py
+_test_install.py
+_test_mix.py
+check_env*.py
+check_line*.py
+check_syntax.py
+inspect_agent*.py
+find_typos*.py
+debug_watchdog.py
+test_agent_e2e.py
+
+# Docs not needed at runtime
+docs/
+doc_cn/
+doc_en/
+docs-site/
+docs-site-en/
+
+# CI / Tooling
+.github/
+.pre-commit-config.yaml
+.devcontainer/
+
+# Build artifacts
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime / secrets (never bake into image)
+src/system_config.json
+src/system_config.gateway.json
+ai_web_sessions.json
+src/opensquad/gateway/backend/ai_web_sessions.json
+src/opensquad/gateway/plugin_registry/plugins_db.json
+.opensquad/
+
+# Database / logs
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+data/logs/
+data/sessions/
+
+# Tests not needed in the runtime image
+tests/

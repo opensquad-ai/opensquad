@@ -1,0 +1,7 @@
+{
+  "name": "external-im-integration",
+  "display_name": "External IM Integration",
+  "version": "2.0.0",
+  "description": "Connect OpenSquad agents to external IM platforms (Feishu/Lark, QQ, Telegram). Covers plugin service setup, adapter processes, Gateway auth, and workspace path fixes. Uses Feishu as the reference example.",
+  "author": "OpenSquad"
+}

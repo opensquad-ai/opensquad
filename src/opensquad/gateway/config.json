@@ -1,0 +1,16 @@
+{
+    "frontend": {
+        "port": 9530,
+        "host": "0.0.0.0"
+    },
+    "backend": {
+        "host": "0.0.0.0",
+        "port": 9555,
+        "log_level": "info",
+        "reload": false,
+        "database": {
+            "url": "sqlite+aiosqlite:///./chat.db",
+            "echo": false
+        }
+    }
+}

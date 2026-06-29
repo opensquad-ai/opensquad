@@ -1,0 +1,19 @@
+{
+  "id": "websearch",
+  "name": "Web Search",
+  "version": "1.2.0",
+  "author": "OpenSquad",
+  "description": "Provides real-time web search capability using multiple search engine backends. Supports keyword queries, site-restricted searches, and news retrieval.",
+  "tags": [
+    "search",
+    "web",
+    "internet"
+  ],
+  "type": "tool",
+  "created_at": "2025-08-15T08:00:00Z",
+  "likes": 312,
+  "icon_url": null,
+  "git_url": "https://github.com/opensquad-ai/plugin-websearch",
+  "homepage": "https://github.com/opensquad-ai/plugin-websearch",
+  "download_url": ""
+}

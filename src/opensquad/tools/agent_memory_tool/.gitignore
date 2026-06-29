@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Test temp directories
+_test_save_dir/
+_test_episodic_save/
+
+# SQLite databases (runtime generated)
+*.db
+
+# Saved memory data (runtime generated)
+memory_data/
+*.npz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# pytest
+.pytest_cache/
+
+# Logs
+*.log
+
+# Temp / demo outputs
+demo_output.txt
+*.cache

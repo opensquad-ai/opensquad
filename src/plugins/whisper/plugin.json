@@ -1,0 +1,86 @@
+{
+  "name": "whisper_transcribe",
+  "display_name": "Whisper Transcription",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Speech-to-text transcription tool using Whisper service. Supports Chinese and English audio transcription.",
+  "author": "OpenSquad",
+  "tags": [
+    "audio"
+  ],
+  "tools": [
+    {
+      "name": "whisper_transcribe",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "port": {
+        "type": "integer",
+        "default": 5001,
+        "description": "Whisper service port"
+      },
+      "host": {
+        "type": "string",
+        "default": "0.0.0.0",
+        "description": "Whisper service listen address"
+      },
+      "auto_start": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically start the Whisper service when the plugin loads"
+      }
+    }
+  },
+  "config_schema": {
+    "port": {
+      "type": "integer",
+      "default": 5001,
+      "description": "Whisper service port"
+    },
+    "host": {
+      "type": "string",
+      "default": "0.0.0.0",
+      "description": "Whisper service listen address"
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically start the Whisper service when the plugin loads"
+    }
+  },
+  "contributes": {},
+  "service": {
+    "entry": "service/service.py",
+    "default_port": 5001,
+    "port_key": "whisper",
+    "health_endpoint": "/health",
+    "auto_start": true,
+    "health_check_interval": 30,
+    "restart_policy": {
+      "max_retries": 5,
+      "backoff": [
+        3,
+        6,
+        12,
+        30,
+        60
+      ]
+    }
+  },
+  "dependencies": {
+    "pip": [
+      "requests",
+      "whisper",
+      "flask",
+      "flask-cors"
+    ]
+  }
+}

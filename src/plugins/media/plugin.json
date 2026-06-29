@@ -1,0 +1,31 @@
+{
+  "name": "media",
+  "display_name": "Media Tools",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Audio format conversion tool. Converts audio files (e.g. webm to wav/mp3) using ffmpeg.",
+  "author": "OpenSquad",
+  "tags": [
+    "audio"
+  ],
+  "tools": [
+    {
+      "name": "media",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}
