@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "icons:build": "python ../../../scripts/build_icons.py",
+    "icons:build": "python ../../../../scripts/build_icons.py",
     "electron:dev": "vite build && node scripts/compile-electron.mjs && electron dist-electron/main.cjs",
     "electron:build": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder",
     "electron:win": "npm run icons:build && npm run build && node scripts/compile-electron.mjs && electron-builder --win",
