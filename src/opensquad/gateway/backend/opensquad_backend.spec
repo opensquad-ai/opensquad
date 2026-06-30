@@ -41,8 +41,34 @@ else:
     print(f"[spec] WARNING: Frontend dist not found at {FRONTEND_DIST}")
     print(f"[spec]   Run: cd nexuschat-pro && npm run build")
 
-# opensquad 包的数据文件（prompts、role_cards、plugin_registry 等）
-datas += collect_data_files("opensquad")
+# opensquad 包的数据文件（prompts、role_cards、plugin_registry 等）。
+# 必须过滤掉 node_modules / .map / .d.ts / 构建元数据：
+# - node_modules 里是 electron / electron-builder 等 build-time 工具，
+#   既有 200+ MB 的 electron.exe，也有 macOS 的 Electron.app 二进制，
+#   PyInstaller 的 COLLECT 阶段无法处理 macOS 的 Mach-O bundle，会直接
+#   报 SystemError: Failed to process binary。Windows/Linux 同样会中招。
+# - 已经在上面显式处理 nexuschat-pro/dist（前端构建产物），运行时不需要
+#   任何 node_modules 里的内容。
+_BUILD_ARTIFACT_PATTERNS = (
+    "node_modules",
+    os.sep + "node_modules",
+    ".tsbuildinfo",
+)
+_BUILD_METADATA_SUFFIXES = (".map", ".d.ts", ".d.ts.map")
+
+def _is_runtime_data(src):
+    norm = src.replace("\\", "/")
+    if any(p in norm for p in _BUILD_ARTIFACT_PATTERNS):
+        return False
+    base = os.path.basename(src)
+    if any(base.endswith(sfx) for sfx in _BUILD_METADATA_SUFFIXES):
+        return False
+    if base in ("package.json", "package-lock.json", "tsconfig.json", ".eslintrc"):
+        return False
+    return True
+
+datas += [pair for pair in collect_data_files("opensquad") if _is_runtime_data(pair[0])]
+print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build metadata excluded)")
 
 # alembic 迁移脚本
 alembic_dir = BACKEND_DIR / "alembic"
