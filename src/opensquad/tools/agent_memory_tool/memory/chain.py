@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Hidden chain inference module (PPR + shortest path)
 
@@ -15,9 +14,9 @@ Algorithm flow:
        (path intermediate nodes receive an additional bonus) -> output hidden words + chain structure
 """
 
-import numpy as np
-import networkx as nx
 from collections import defaultdict
+
+import networkx as nx
 
 
 def _build_networkx_graph(ppmi_matrix, idx_to_word, min_weight=0.1):
@@ -38,8 +37,8 @@ def _build_networkx_graph(ppmi_matrix, idx_to_word, min_weight=0.1):
     G = nx.Graph()
     coo = ppmi_matrix.tocoo()
 
-    for r, c, v in zip(coo.row, coo.col, coo.data):
-        if r >= c:          # undirected graph: add only one edge; skip diagonal and duplicates
+    for r, c, v in zip(coo.row, coo.col, coo.data, strict=False):
+        if r >= c:  # undirected graph: add only one edge; skip diagonal and duplicates
             continue
         if v < min_weight:
             continue
@@ -49,9 +48,7 @@ def _build_networkx_graph(ppmi_matrix, idx_to_word, min_weight=0.1):
         if word_r is None or word_c is None:
             continue
 
-        G.add_edge(word_r, word_c,
-                   weight=float(v),
-                   distance=1.0 / (float(v) + 1e-8))
+        G.add_edge(word_r, word_c, weight=float(v), distance=1.0 / (float(v) + 1e-8))
 
     return G
 
@@ -82,14 +79,10 @@ def _personalized_pagerank(G, anchor_words, alpha=0.85, top_k=50):
         personalization[node] = share if node in anchor_set else 0.0
 
     # Run PPR
-    ppr_scores = nx.pagerank(G, alpha=alpha,
-                             personalization=personalization,
-                             weight='weight',
-                             max_iter=100, tol=1e-6)
+    ppr_scores = nx.pagerank(G, alpha=alpha, personalization=personalization, weight="weight", max_iter=100, tol=1e-6)
 
     # Exclude anchor words; sort by score descending and take top-K
-    candidates = [(word, score) for word, score in ppr_scores.items()
-                  if word not in anchor_set]
+    candidates = [(word, score) for word, score in ppr_scores.items() if word not in anchor_set]
     candidates.sort(key=lambda x: x[1], reverse=True)
 
     return candidates[:top_k]
@@ -139,20 +132,22 @@ def _find_shortest_paths(G, anchor_words):
             tgt = anchors_in_graph[j]
 
             try:
-                path = nx.dijkstra_path(G, src, tgt, weight='distance')
+                path = nx.dijkstra_path(G, src, tgt, weight="distance")
                 # Compute total PPMI weight for the path
                 total_w = 0
                 for k in range(len(path) - 1):
                     edge_data = G.get_edge_data(path[k], path[k + 1])
-                    total_w += edge_data.get('weight', 0) if edge_data else 0
+                    total_w += edge_data.get("weight", 0) if edge_data else 0
 
-                paths.append({
-                    "from": src,
-                    "to": tgt,
-                    "path": path,
-                    "total_weight": round(total_w, 4),
-                    "hops": len(path) - 1,
-                })
+                paths.append(
+                    {
+                        "from": src,
+                        "to": tgt,
+                        "path": path,
+                        "total_weight": round(total_w, 4),
+                        "hops": len(path) - 1,
+                    }
+                )
 
                 # Count intermediate nodes (excluding start and end anchors)
                 anchor_set = set(anchor_words)
@@ -161,22 +156,30 @@ def _find_shortest_paths(G, anchor_words):
                         intermediate_counts[node] += 1
 
             except nx.NetworkXNoPath:
-                paths.append({
-                    "from": src,
-                    "to": tgt,
-                    "path": None,
-                    "total_weight": 0,
-                    "hops": -1,
-                })
+                paths.append(
+                    {
+                        "from": src,
+                        "to": tgt,
+                        "path": None,
+                        "total_weight": 0,
+                        "hops": -1,
+                    }
+                )
 
     return paths, dict(intermediate_counts)
 
 
-def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
-                          top_k_candidates=50, alpha=0.85,
-                          min_edge_weight=0.1, top_n=10,
-                          auto_reduce_weight=True,
-                          fallback_matrix=None):
+def discover_hidden_chain(
+    ppmi_matrix,
+    vocab_dict,
+    anchor_words,
+    top_k_candidates=50,
+    alpha=0.85,
+    min_edge_weight=0.1,
+    top_n=10,
+    auto_reduce_weight=True,
+    fallback_matrix=None,
+):
     """
     Hidden chain inference: given sparse anchor words, discover hidden intermediate
     association words and the chain structure.
@@ -221,8 +224,7 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
     idx_to_word = {v: k for k, v in vocab_dict.items()}
 
     # --- Step 1: Build full graph ---
-    G_full = _build_networkx_graph(ppmi_matrix, idx_to_word,
-                                   min_weight=min_edge_weight)
+    G_full = _build_networkx_graph(ppmi_matrix, idx_to_word, min_weight=min_edge_weight)
 
     # Check which anchor words are present in the graph
     anchors_found = [w for w in anchor_words if w in G_full.nodes()]
@@ -248,8 +250,7 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
         if not _all_connected:
             # Try lowering the threshold
             for try_weight in [min_edge_weight * 0.5, 0.05, 0.01, 0.001, 0.0]:
-                G_try = _build_networkx_graph(ppmi_matrix, idx_to_word,
-                                              min_weight=try_weight)
+                G_try = _build_networkx_graph(ppmi_matrix, idx_to_word, min_weight=try_weight)
                 if _check_anchors_connected(G_try, anchors_found):
                     G_full = G_try
                     _all_connected = True
@@ -257,23 +258,18 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
 
             # If PPMI graph at weight=0 is still disconnected, supplement with fallback_matrix
             if not _all_connected and fallback_matrix is not None:
-                G_fallback = _build_networkx_graph(fallback_matrix, idx_to_word,
-                                                   min_weight=0.5)
+                G_fallback = _build_networkx_graph(fallback_matrix, idx_to_word, min_weight=0.5)
                 # Add edges from fallback graph to G_full (only add, never overwrite)
                 for u, v, data in G_fallback.edges(data=True):
                     if not G_full.has_edge(u, v):
                         # Fallback edges carry reduced weight, marked as weak associations
-                        G_full.add_edge(u, v,
-                                        weight=data['weight'] * 0.1,
-                                        distance=data['distance'] * 10)
+                        G_full.add_edge(u, v, weight=data["weight"] * 0.1, distance=data["distance"] * 10)
                 # Re-check anchors_found (fallback may have added new nodes)
                 anchors_found = [w for w in anchor_words if w in G_full.nodes()]
                 anchors_missing = [w for w in anchor_words if w not in G_full.nodes()]
 
     # --- Step 2: Personalized PageRank ---
-    ppr_candidates = _personalized_pagerank(G_full, anchors_found,
-                                            alpha=alpha,
-                                            top_k=top_k_candidates)
+    ppr_candidates = _personalized_pagerank(G_full, anchors_found, alpha=alpha, top_k=top_k_candidates)
 
     if not ppr_candidates:
         return {
@@ -305,7 +301,7 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
     # - High-PPR nodes: even if not on any path, they have base score (ppr_score x 1)
     # - Path intermediate nodes: higher path_count gives larger bonus
     # - Nodes only discovered via path (not in PPR candidates): given a path_only_bonus
-    PATH_ONLY_BONUS = 0.001   # base score for nodes discovered only through paths
+    PATH_ONLY_BONUS = 0.001  # base score for nodes discovered only through paths
 
     # Collect all words that need scoring: PPR candidates + path intermediate nodes
     all_scored_words = set(ppr_score_map.keys()) | set(intermediate_counts.keys())
@@ -321,12 +317,14 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
             # Node discovered only through paths
             combined = PATH_ONLY_BONUS * path_count
 
-        hidden_words.append({
-            "word": word,
-            "ppr_score": round(ppr_score, 6),
-            "path_count": path_count,
-            "combined_score": round(combined, 6),
-        })
+        hidden_words.append(
+            {
+                "word": word,
+                "ppr_score": round(ppr_score, 6),
+                "path_count": path_count,
+                "combined_score": round(combined, 6),
+            }
+        )
 
     # Sort by combined score
     hidden_words.sort(key=lambda x: x["combined_score"], reverse=True)
@@ -345,10 +343,17 @@ def discover_hidden_chain(ppmi_matrix, vocab_dict, anchor_words,
     }
 
 
-def discover_hidden_chain_with_evidence(ppmi_matrix, vocab_dict, anchor_words,
-                                        memory_store=None, top_k_candidates=50,
-                                        alpha=0.85, min_edge_weight=0.1,
-                                        top_n=10, fallback_matrix=None):
+def discover_hidden_chain_with_evidence(
+    ppmi_matrix,
+    vocab_dict,
+    anchor_words,
+    memory_store=None,
+    top_k_candidates=50,
+    alpha=0.85,
+    min_edge_weight=0.1,
+    top_n=10,
+    fallback_matrix=None,
+):
     """
     Hidden chain inference + text evidence association.
 
@@ -369,10 +374,14 @@ def discover_hidden_chain_with_evidence(ppmi_matrix, vocab_dict, anchor_words,
             ]
     """
     result = discover_hidden_chain(
-        ppmi_matrix, vocab_dict, anchor_words,
+        ppmi_matrix,
+        vocab_dict,
+        anchor_words,
         top_k_candidates=top_k_candidates,
-        alpha=alpha, min_edge_weight=min_edge_weight,
-        top_n=top_n, fallback_matrix=fallback_matrix
+        alpha=alpha,
+        min_edge_weight=min_edge_weight,
+        top_n=top_n,
+        fallback_matrix=fallback_matrix,
     )
 
     # If no MemoryStore or no hidden words found, return directly
@@ -391,19 +400,21 @@ def discover_hidden_chain_with_evidence(ppmi_matrix, vocab_dict, anchor_words,
         # Merge; take the best hit
         best_eid = None
         if exact_hits:
-            best_eid = list(exact_hits.keys())[0]
+            best_eid = next(iter(exact_hits.keys()))
         elif fuzzy_hits:
-            best_eid = list(fuzzy_hits.keys())[0]
+            best_eid = next(iter(fuzzy_hits.keys()))
 
         if best_eid:
             entry = memory_store.get(best_eid)
             if entry:
-                evidence.append({
-                    "word": word,
-                    "entry_id": best_eid,
-                    "topic": entry.get("topic"),
-                    "summary": entry.get("summary"),
-                })
+                evidence.append(
+                    {
+                        "word": word,
+                        "entry_id": best_eid,
+                        "topic": entry.get("topic"),
+                        "summary": entry.get("summary"),
+                    }
+                )
 
     result["evidence"] = evidence
     return result

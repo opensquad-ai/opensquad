@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
-
 class TaskManager:
     """Manages and persists the task planning state for an agent."""
+
     def __init__(self):
         self.raw_plan = ""
 

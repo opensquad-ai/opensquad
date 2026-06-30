@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Model Preset Service
 
@@ -20,18 +19,19 @@ import json
 import logging
 import os
 import time
-from typing import Dict, List, Optional
 
 import httpx
 
 # SSL verification: use certifi CA bundle on Windows where system store may be unavailable
 try:
     import certifi
+
     _SSL_VERIFY = certifi.where()
 except ImportError:
     _SSL_VERIFY = True
 
 logger = logging.getLogger(__name__)
+
 
 # ── Vendor metadata (base_url is provided here; neither data source includes this info) ────────────────────────
 # Order determines the sort order of the frontend dropdown menu
@@ -40,7 +40,8 @@ def _gf(domain: str) -> str:
     """Build Google Favicon service URL"""
     return f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
 
-VENDOR_META: Dict[str, dict] = {
+
+VENDOR_META: dict[str, dict] = {
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
@@ -153,22 +154,22 @@ VENDOR_META: Dict[str, dict] = {
 
 # models.dev provider ID → our vendor_id mapping
 # Prioritize China-region endpoints (-cn suffix) for direct access by domestic users
-_MODELS_DEV_PROVIDER_MAP: Dict[str, str] = {
-    "deepseek":       "deepseek",
-    "openai":         "openai",
-    "anthropic":      "anthropic",
-    "google":         "google",
-    "alibaba-cn":     "qwen",        # domestic endpoint: dashscope.aliyuncs.com
-    "zhipuai":        "zhipuai",
-    "moonshotai-cn":  "moonshot",    # domestic endpoint: api.moonshot.cn
-    "minimax-cn":     "minimax",     # domestic endpoint: api.minimaxi.com
-    "mistral":        "mistral",
-    "cohere":         "cohere",
-    "groq":           "groq",
-    "perplexity":     "perplexity",
-    "togetherai":     "together_ai",
-    "stepfun":        "stepfun",
-    "siliconflow-cn": "siliconflow", # domestic endpoint: api.siliconflow.cn
+_MODELS_DEV_PROVIDER_MAP: dict[str, str] = {
+    "deepseek": "deepseek",
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "google": "google",
+    "alibaba-cn": "qwen",  # domestic endpoint: dashscope.aliyuncs.com
+    "zhipuai": "zhipuai",
+    "moonshotai-cn": "moonshot",  # domestic endpoint: api.moonshot.cn
+    "minimax-cn": "minimax",  # domestic endpoint: api.minimaxi.com
+    "mistral": "mistral",
+    "cohere": "cohere",
+    "groq": "groq",
+    "perplexity": "perplexity",
+    "togetherai": "together_ai",
+    "stepfun": "stepfun",
+    "siliconflow-cn": "siliconflow",  # domestic endpoint: api.siliconflow.cn
     # baidu not on models.dev, kept as static fallback
 }
 
@@ -179,19 +180,31 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 _CACHE_FILE = os.path.join(os.path.dirname(__file__), "preset_cache.json")
 
 # ── Module-level state ────────────────────────────────────────────────────────────────
-_cached_presets: Dict = {"providers": []}  # Loaded from disk on startup, updated after refresh
-_models_dev_data: Dict = {}
-_openrouter_data: List = []
+_cached_presets: dict = {"providers": []}  # Loaded from disk on startup, updated after refresh
+_models_dev_data: dict = {}
+_openrouter_data: list = []
 _last_models_dev_ts: float = 0.0
 _last_openrouter_ts: float = 0.0
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
 
-_THINK_KEYWORDS = frozenset([
-    "reasoner", "thinking", "think", "r1", "r2",
-    "o1", "o3", "o4", "qwq", "z1", "deepthink", "turbo-s",
-])
+_THINK_KEYWORDS = frozenset(
+    [
+        "reasoner",
+        "thinking",
+        "think",
+        "r1",
+        "r2",
+        "o1",
+        "o3",
+        "o4",
+        "qwq",
+        "z1",
+        "deepthink",
+        "turbo-s",
+    ]
+)
 
 
 def _detect_is_think(model_name: str) -> bool:
@@ -208,7 +221,8 @@ def _build_title(model_name: str) -> str:
 # ── models.dev → vendor_data ──────────────────────────────────────────────────
 # Return structure: {vendor_id: {"meta": {label, base_url, api_protocol}, "models": [...]}}
 
-def _build_from_models_dev(models_dev_data: dict) -> Dict[str, dict]:
+
+def _build_from_models_dev(models_dev_data: dict) -> dict[str, dict]:
     """
     Parse models.dev JSON, process all vendors, return
       {vendor_id: {"meta": {...}, "models": [...]}}
@@ -218,8 +232,8 @@ def _build_from_models_dev(models_dev_data: dict) -> Dict[str, dict]:
     - VENDOR_META vendor_id → override metadata with its label/base_url/api_protocol
     - All other vendors → vendor_id = provider_id, metadata derived from models.dev fields
     """
-    result: Dict[str, dict] = {}
-    seen_models: Dict[str, set] = {}  # vendor_id → set of model_id (deduplicated)
+    result: dict[str, dict] = {}
+    seen_models: dict[str, set] = {}  # vendor_id → set of model_id (deduplicated)
 
     for provider_id, provider_data in models_dev_data.items():
         if not isinstance(provider_data, dict):
@@ -257,6 +271,7 @@ def _build_from_models_dev(models_dev_data: dict) -> Dict[str, dict]:
             doc_url = provider_data.get("doc") or base_url
             try:
                 from urllib.parse import urlparse
+
                 doc_domain = urlparse(doc_url).hostname or ""
                 # Strip www. prefix, get main domain
                 if doc_domain.startswith("www."):
@@ -292,33 +307,36 @@ def _build_from_models_dev(models_dev_data: dict) -> Dict[str, dict]:
             temp = 0 if (is_think or temperature_disabled) else 0.3
             title = entry.get("name") or _build_title(model_id)
 
-            result[vendor_id]["models"].append({
-                "model_name": model_id,
-                "title": title,
-                "token_max": token_max,
-                "temperature": temp,
-                "is_think": is_think,
-                "is_image": is_image,
-                "is_video": is_video,
-                "tool_call_mode": tool_call_mode,
-            })
+            result[vendor_id]["models"].append(
+                {
+                    "model_name": model_id,
+                    "title": title,
+                    "token_max": token_max,
+                    "temperature": temp,
+                    "is_think": is_think,
+                    "is_image": is_image,
+                    "is_video": is_video,
+                    "tool_call_mode": tool_call_mode,
+                }
+            )
 
     return result
 
 
 # ── OpenRouter merge ───────────────────────────────────────────────────────────
 
+
 def _merge_openrouter(
-    vendor_data: Dict[str, dict],
-    or_models: List[dict],
-) -> Dict[str, dict]:
+    vendor_data: dict[str, dict],
+    or_models: list[dict],
+) -> dict[str, dict]:
     """
     OpenRouter data is used only to build the openrouter vendor; does not affect other vendors.
     """
     if not or_models:
         return vendor_data
 
-    or_vendor_list: List[dict] = []
+    or_vendor_list: list[dict] = []
     for or_model in or_models:
         or_id = or_model.get("id", "")
         if not or_id:
@@ -330,24 +348,29 @@ def _merge_openrouter(
         is_video = "video" in input_part
         is_think = _detect_is_think(or_id)
         or_name = or_model.get("name") or _build_title(or_id.split("/")[-1])
-        or_vendor_list.append({
-            "model_name": or_id,
-            "title": or_name,
-            "token_max": context_length,
-            "temperature": 0 if is_think else 0.3,
-            "is_think": is_think,
-            "is_image": is_image,
-            "is_video": is_video,
-            "tool_call_mode": "native",
-        })
+        or_vendor_list.append(
+            {
+                "model_name": or_id,
+                "title": or_name,
+                "token_max": context_length,
+                "temperature": 0 if is_think else 0.3,
+                "is_think": is_think,
+                "is_image": is_image,
+                "is_video": is_video,
+                "tool_call_mode": "native",
+            }
+        )
 
     if or_vendor_list:
         or_vendor_list.sort(key=lambda m: (m["is_think"], m["model_name"]))
-        or_meta = VENDOR_META.get("openrouter", {
-            "label": "OpenRouter",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_protocol": "openai_compat",
-        })
+        or_meta = VENDOR_META.get(
+            "openrouter",
+            {
+                "label": "OpenRouter",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_protocol": "openai_compat",
+            },
+        )
         vendor_data["openrouter"] = {
             "meta": {
                 "label": or_meta["label"],
@@ -361,7 +384,7 @@ def _merge_openrouter(
     return vendor_data
 
 
-def _assemble_presets(vendor_data: Dict[str, dict]) -> Dict:
+def _assemble_presets(vendor_data: dict[str, dict]) -> dict:
     """
     Assemble into the { providers: [...] } format expected by the frontend.
     Sort order: known vendors in VENDOR_META order (prioritized display), remainder appended alphabetically.
@@ -385,74 +408,77 @@ def _assemble_presets(vendor_data: Dict[str, dict]) -> Dict:
         vm = VENDOR_META[vendor_id]
         if vendor_id in vendor_data and vendor_data[vendor_id]["models"]:
             d = vendor_data[vendor_id]
-            providers.append({
-                "id": vendor_id,
-                "label": d["meta"]["label"],
-                "provider": d["meta"]["label"],
-                "base_url": d["meta"]["base_url"],
-                "api_protocol": d["meta"]["api_protocol"],
-                "icon_url": d["meta"].get("icon_url", vm.get("icon_url", "")),
-                "models": sorted(d["models"], key=lambda m: (m["is_think"], m["model_name"])),
-            })
+            providers.append(
+                {
+                    "id": vendor_id,
+                    "label": d["meta"]["label"],
+                    "provider": d["meta"]["label"],
+                    "base_url": d["meta"]["base_url"],
+                    "api_protocol": d["meta"]["api_protocol"],
+                    "icon_url": d["meta"].get("icon_url", vm.get("icon_url", "")),
+                    "models": sorted(d["models"], key=lambda m: (m["is_think"], m["model_name"])),
+                }
+            )
         else:
             # No live model data (e.g. Ollama); still shown as empty entry for user to fill in model name
-            providers.append({
-                "id": vendor_id,
-                "label": vm["label"],
-                "provider": vm["label"],
-                "base_url": vm["base_url"],
-                "api_protocol": vm["api_protocol"],
-                "icon_url": vm.get("icon_url", ""),
-                "models": [],
-            })
+            providers.append(
+                {
+                    "id": vendor_id,
+                    "label": vm["label"],
+                    "provider": vm["label"],
+                    "base_url": vm["base_url"],
+                    "api_protocol": vm["api_protocol"],
+                    "icon_url": vm.get("icon_url", ""),
+                    "models": [],
+                }
+            )
         seen.add(vendor_id)
 
     # 2. Remaining vendors from models.dev appended alphabetically
     for vendor_id in sorted(vendor_data.keys()):
         if vendor_id not in seen and vendor_data[vendor_id]["models"]:
             d = vendor_data[vendor_id]
-            providers.append({
-                "id": vendor_id,
-                "label": d["meta"]["label"],
-                "provider": d["meta"]["label"],
-                "base_url": d["meta"]["base_url"],
-                "api_protocol": d["meta"]["api_protocol"],
-                "icon_url": d["meta"].get("icon_url", ""),
-                "models": sorted(d["models"], key=lambda m: (m["is_think"], m["model_name"])),
-            })
+            providers.append(
+                {
+                    "id": vendor_id,
+                    "label": d["meta"]["label"],
+                    "provider": d["meta"]["label"],
+                    "base_url": d["meta"]["base_url"],
+                    "api_protocol": d["meta"]["api_protocol"],
+                    "icon_url": d["meta"].get("icon_url", ""),
+                    "models": sorted(d["models"], key=lambda m: (m["is_think"], m["model_name"])),
+                }
+            )
 
     return {"providers": providers}
 
 
 # ── Persistent cache (disk read/write) ───────────────────────────────────────
 
-def _save_cache_to_disk(presets: Dict) -> None:
+
+def _save_cache_to_disk(presets: dict) -> None:
     """Write current preset data to preset_cache.json for use on next startup"""
     try:
         with open(_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(presets, f, ensure_ascii=False, indent=2)
         n_p = len(presets.get("providers", []))
         n_m = sum(len(p["models"]) for p in presets.get("providers", []))
-        logger.info(
-            f"[ModelPresets] Cache saved to disk: {n_p} providers, {n_m} models → {_CACHE_FILE}"
-        )
+        logger.info(f"[ModelPresets] Cache saved to disk: {n_p} providers, {n_m} models → {_CACHE_FILE}")
     except Exception as exc:
         logger.warning(f"[ModelPresets] Failed to save cache to disk: {exc}")
 
 
-def _load_cache_from_disk() -> Optional[Dict]:
+def _load_cache_from_disk() -> dict | None:
     """Read previously persisted preset data from preset_cache.json; return None if missing or parse fails"""
     if not os.path.exists(_CACHE_FILE):
         return None
     try:
-        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+        with open(_CACHE_FILE, encoding="utf-8") as f:
             data = json.load(f)
         if data.get("providers"):
             n_p = len(data["providers"])
             n_m = sum(len(p["models"]) for p in data["providers"])
-            logger.info(
-                f"[ModelPresets] Loaded cache from disk: {n_p} providers, {n_m} models"
-            )
+            logger.info(f"[ModelPresets] Loaded cache from disk: {n_p} providers, {n_m} models")
             return data
     except Exception as exc:
         logger.warning(f"[ModelPresets] Failed to load cache from disk: {exc}")
@@ -461,14 +487,15 @@ def _load_cache_from_disk() -> Optional[Dict]:
 
 # ── Network requests ──────────────────────────────────────────────────────────
 
-async def _fetch_models_dev() -> Dict:
+
+async def _fetch_models_dev() -> dict:
     async with httpx.AsyncClient(timeout=30.0, verify=_SSL_VERIFY) as client:
         resp = await client.get(MODELS_DEV_URL)
         resp.raise_for_status()
         return resp.json()
 
 
-async def _fetch_openrouter() -> List:
+async def _fetch_openrouter() -> list:
     async with httpx.AsyncClient(timeout=15.0, verify=_SSL_VERIFY) as client:
         resp = await client.get(OPENROUTER_URL)
         resp.raise_for_status()
@@ -476,6 +503,7 @@ async def _fetch_openrouter() -> List:
 
 
 # ── Public interface ──────────────────────────────────────────────────────────
+
 
 async def initialize() -> None:
     """
@@ -503,21 +531,21 @@ async def initialize() -> None:
         logger.info("[ModelPresets] No disk cache found; providers empty until manual refresh")
 
 
-def get_presets() -> Dict:
+def get_presets() -> dict:
     """Return the current cached presets (for synchronous route calls). Never None."""
     return {
         **_cached_presets,
         "meta": {
             "models_dev_fetched_at": _last_models_dev_ts,
             "openrouter_fetched_at": _last_openrouter_ts,
-            "source": "live" if _last_models_dev_ts else (
-                "disk_cache" if os.path.exists(_CACHE_FILE) else "static_fallback"
-            ),
+            "source": "live"
+            if _last_models_dev_ts
+            else ("disk_cache" if os.path.exists(_CACHE_FILE) else "static_fallback"),
         },
     }
 
 
-async def manual_refresh() -> Dict:
+async def manual_refresh() -> dict:
     """
     Manually trigger a full refresh (models.dev + OpenRouter).
     On success, overwrites disk file preset_cache.json and updates in-memory cache.
@@ -561,10 +589,7 @@ async def manual_refresh() -> Dict:
         logger.info("[ModelPresets] Manual refresh complete, disk file updated")
     else:
         # All fetches failed (offline / network error) — keep existing cache, do not overwrite disk file
-        logger.warning(
-            "[ModelPresets] All fetches failed or returned no models; "
-            "keeping existing cache intact"
-        )
+        logger.warning("[ModelPresets] All fetches failed or returned no models; keeping existing cache intact")
 
     n_providers = len(_cached_presets["providers"])
     n_models = sum(len(p["models"]) for p in _cached_presets["providers"])

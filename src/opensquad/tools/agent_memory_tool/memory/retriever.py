@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 """
 Multi-level memory retriever
 
@@ -27,12 +27,12 @@ Time weight: inverse decay 1/(1+lambda*days)
 """
 
 import time
+
 import numpy as np
 import tiktoken
 
-from .storage import MemoryStore, extract_keywords_jieba, extract_keywords_weighted
 from .chain import discover_hidden_chain
-
+from .storage import MemoryStore, extract_keywords_jieba, extract_keywords_weighted
 
 # ========================
 # tiktoken encoder (lazy init)
@@ -43,7 +43,7 @@ _encoder = None
 def _get_encoder():
     global _encoder
     if _encoder is None:
-        _encoder = tiktoken.get_encoding("cl100k_base")   # GPT-4 / GPT-3.5 universal
+        _encoder = tiktoken.get_encoding("cl100k_base")  # GPT-4 / GPT-3.5 universal
     return _encoder
 
 
@@ -105,21 +105,23 @@ class MemoryRetriever:
     # Main entry point
     # ========================
 
-    def retrieve(self,
-                 user_input=None,
-                 keywords=None,
-                 depth="standard",
-                 token_budget=1000,
-                 time_range=None,
-                 time_recent=None,
-                 time_decay=0.1,
-                 source_filter=None,
-                 top_n_expand=10,
-                 top_n_entries=10,
-                 chain_fuzzy=False,
-                 long_threshold=80,
-                 core_ratio=0.2,
-                 important_ratio=0.4):
+    def retrieve(
+        self,
+        user_input=None,
+        keywords=None,
+        depth="standard",
+        token_budget=1000,
+        time_range=None,
+        time_recent=None,
+        time_decay=0.1,
+        source_filter=None,
+        top_n_expand=10,
+        top_n_entries=10,
+        chain_fuzzy=False,
+        long_threshold=80,
+        core_ratio=0.2,
+        important_ratio=0.4,
+    ):
         """
         Multi-level memory retrieval.
 
@@ -166,14 +168,12 @@ class MemoryRetriever:
         ai_keywords = list(keywords) if keywords else []
 
         # Determine whether long-text mode
-        is_long = (user_input and isinstance(user_input, str)
-                   and len(user_input) > long_threshold)
+        is_long = user_input and isinstance(user_input, str) and len(user_input) > long_threshold
 
         if is_long:
             # ---- Long-text mode: TF-IDF extraction + tiering ----
             stats["long_text_mode"] = True
-            weighted_kws = extract_keywords_weighted(
-                user_input, top_k=25, long_threshold=long_threshold)
+            weighted_kws = extract_keywords_weighted(user_input, top_k=25, long_threshold=long_threshold)
 
             # Remove keywords already given by AI (avoid duplicates)
             ai_set = set(ai_keywords)
@@ -185,17 +185,17 @@ class MemoryRetriever:
 
             # Split into three tiers (weighted_kws already sorted by weight descending)
             core_words = [w for w, _ in weighted_kws[:core_count]]
-            important_words = [w for w, _ in weighted_kws[core_count:core_count + important_count]]
-            supplement_words = [w for w, _ in weighted_kws[core_count + important_count:]]
+            important_words = [w for w, _ in weighted_kws[core_count : core_count + important_count]]
+            supplement_words = [w for w, _ in weighted_kws[core_count + important_count :]]
 
             # Merge AI keywords into core words (they are key terms already judged by AI)
             core_keywords = ai_keywords + core_words
 
             # Keyword sets used by each Tier
-            tier0_keywords = core_keywords + important_words    # exact: core + important
-            tier1_keywords = core_keywords                      # fuzzy: core only
-            tier2_keywords = core_keywords                      # expand: core only
-            tier3_keywords = core_keywords                      # chain: core only
+            tier0_keywords = core_keywords + important_words  # exact: core + important
+            tier1_keywords = core_keywords  # fuzzy: core only
+            tier2_keywords = core_keywords  # expand: core only
+            tier3_keywords = core_keywords  # chain: core only
 
             stats["core_keywords"] = core_keywords
             stats["important_keywords"] = important_words
@@ -237,32 +237,34 @@ class MemoryRetriever:
             all_ids = list(self.store.entries.keys())
             # Apply source filter first if set
             if source_filter:
-                all_ids = [eid for eid in all_ids
-                           if self.store.entries[eid].get("source") == source_filter]
-            candidate_pool = set(self.store.filter_by_time(
-                all_ids, time_range=time_range, time_recent=time_recent))
+                all_ids = [eid for eid in all_ids if self.store.entries[eid].get("source") == source_filter]
+            candidate_pool = set(self.store.filter_by_time(all_ids, time_range=time_range, time_recent=time_recent))
             stats["time_filtered"] = len(all_ids) - len(candidate_pool)
         else:
-            candidate_pool = None   # None means no restriction
+            candidate_pool = None  # None means no restriction
 
         # === Step 2: Tier 0 exact matching ===
         exact_hits = self.store.search_exact(tier0_keywords)
         if candidate_pool is not None:
-            exact_hits = {eid: n for eid, n in exact_hits.items()
-                          if eid in candidate_pool}
+            exact_hits = {eid: n for eid, n in exact_hits.items() if eid in candidate_pool}
         if source_filter and candidate_pool is None:
-            exact_hits = {eid: n for eid, n in exact_hits.items()
-                          if self.store.entries.get(eid, {}).get("source") == source_filter}
+            exact_hits = {
+                eid: n
+                for eid, n in exact_hits.items()
+                if self.store.entries.get(eid, {}).get("source") == source_filter
+            }
         stats["exact_hits"] = len(exact_hits)
 
         # === Step 3: Tier 1 fuzzy matching ===
         fuzzy_hits = self.store.search_fuzzy(tier1_keywords)
         if candidate_pool is not None:
-            fuzzy_hits = {eid: s for eid, s in fuzzy_hits.items()
-                          if eid in candidate_pool}
+            fuzzy_hits = {eid: s for eid, s in fuzzy_hits.items() if eid in candidate_pool}
         if source_filter and candidate_pool is None:
-            fuzzy_hits = {eid: s for eid, s in fuzzy_hits.items()
-                          if self.store.entries.get(eid, {}).get("source") == source_filter}
+            fuzzy_hits = {
+                eid: s
+                for eid, s in fuzzy_hits.items()
+                if self.store.entries.get(eid, {}).get("source") == source_filter
+            }
         stats["fuzzy_hits"] = len(fuzzy_hits)
 
         # === Step 4: Tier 2 association expansion (standard / deep) ===
@@ -290,9 +292,14 @@ class MemoryRetriever:
         if depth == "deep" and self.ppmi_matrix is not None and self.vocab_dict is not None:
             if len(tier3_keywords) >= 2:
                 chain_result = discover_hidden_chain(
-                    self.ppmi_matrix, self.vocab_dict, tier3_keywords,
-                    top_k_candidates=50, alpha=0.85, min_edge_weight=0.1, top_n=10,
-                    fallback_matrix=self.cooccurrence_matrix
+                    self.ppmi_matrix,
+                    self.vocab_dict,
+                    tier3_keywords,
+                    top_k_candidates=50,
+                    alpha=0.85,
+                    min_edge_weight=0.1,
+                    top_n=10,
+                    fallback_matrix=self.cooccurrence_matrix,
                 )
                 # Also query memory for hidden words on the chain
                 if chain_result and chain_result.get("hidden_words"):
@@ -343,8 +350,8 @@ class MemoryRetriever:
             # Time dimension (inverse decay, importance-aware)
             entry_importance = entry.get("importance", 3)
             tw = MemoryStore.compute_time_weight(
-                entry["timestamp"], decay_lambda=time_decay, now=now,
-                importance=entry_importance)
+                entry["timestamp"], decay_lambda=time_decay, now=now, importance=entry_importance
+            )
 
             # Importance factor: importance=3 -> 1.0 (neutral), 5 -> 1.67, 1 -> 0.33
             importance_factor = entry_importance / 3.0
@@ -353,22 +360,23 @@ class MemoryRetriever:
 
             age_hours = (now - entry["timestamp"]) / 3600.0
 
-            scored_entries.append({
-                "entry_id": eid,
-                "entry": entry,
-                "relevance_score": round(relevance, 4),
-                "time_weight": round(tw, 4),
-                "final_score": round(final_score, 4),
-                "age_hours": round(age_hours, 2),
-            })
+            scored_entries.append(
+                {
+                    "entry_id": eid,
+                    "entry": entry,
+                    "relevance_score": round(relevance, 4),
+                    "time_weight": round(tw, 4),
+                    "final_score": round(final_score, 4),
+                    "age_hours": round(age_hours, 2),
+                }
+            )
 
         # Sort by combined score descending
         scored_entries.sort(key=lambda x: x["final_score"], reverse=True)
         scored_entries = scored_entries[:top_n_entries]
 
         # === Step 7: Layered loading (within token budget) ===
-        prompt_text, loaded_info = self._layered_load(scored_entries, token_budget,
-                                                      expanded_keywords, chain_result)
+        prompt_text, loaded_info = self._layered_load(scored_entries, token_budget, expanded_keywords, chain_result)
 
         stats["time_ms"] = round((time.time() - t_start) * 1000, 2)
 
@@ -376,19 +384,21 @@ class MemoryRetriever:
         matched_output = []
         for se in scored_entries:
             entry = se["entry"]
-            matched_output.append({
-                "id": se["entry_id"],
-                "entry_id": se["entry_id"],
-                "topic": entry.get("topic"),
-                "keywords": entry.get("keywords"),
-                "relevance_score": se["relevance_score"],
-                "time_weight": se["time_weight"],
-                "importance": entry.get("importance", 3),
-                "final_score": se["final_score"],
-                "timestamp": entry.get("timestamp"),
-                "age_hours": se["age_hours"],
-                "loaded_layers": loaded_info.get(se["entry_id"], []),
-            })
+            matched_output.append(
+                {
+                    "id": se["entry_id"],
+                    "entry_id": se["entry_id"],
+                    "topic": entry.get("topic"),
+                    "keywords": entry.get("keywords"),
+                    "relevance_score": se["relevance_score"],
+                    "time_weight": se["time_weight"],
+                    "importance": entry.get("importance", 3),
+                    "final_score": se["final_score"],
+                    "timestamp": entry.get("timestamp"),
+                    "age_hours": se["age_hours"],
+                    "loaded_layers": loaded_info.get(se["entry_id"], []),
+                }
+            )
 
         return {
             "prompt_text": prompt_text,
@@ -440,8 +450,7 @@ class MemoryRetriever:
     # Layered loading
     # ========================
 
-    def _layered_load(self, scored_entries, token_budget, expanded_keywords=None,
-                      chain_result=None):
+    def _layered_load(self, scored_entries, token_budget, expanded_keywords=None, chain_result=None):
         """
         Layered loading of memory entries within the token budget.
 
@@ -454,7 +463,7 @@ class MemoryRetriever:
         """
         parts = []
         used_tokens = 0
-        loaded_info = {}    # entry_id -> [layer_names]
+        loaded_info = {}  # entry_id -> [layer_names]
 
         # Header marker
         header = "[Memory Context]\n"
@@ -469,15 +478,16 @@ class MemoryRetriever:
             loaded_info[eid] = []
             remaining = token_budget - used_tokens
 
-            if remaining <= 20:     # Too little space remaining, stop
+            if remaining <= 20:  # Too little space remaining, stop
                 break
 
             entry_parts = []
-            entry_prefix = f"\n--- Memory #{i+1} "
+            entry_prefix = f"\n--- Memory #{i + 1} "
             if entry.get("source"):
                 entry_prefix += f"[source:{entry['source']}] "
             # Absolute time
             import time as _time
+
             ts = entry.get("timestamp")
             if ts:
                 abs_time = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(ts))
@@ -486,11 +496,11 @@ class MemoryRetriever:
             # Relative time
             age_h = se["age_hours"]
             if age_h < 1:
-                entry_prefix += f"[{age_h*60:.0f}min ago]"
+                entry_prefix += f"[{age_h * 60:.0f}min ago]"
             elif age_h < 24:
                 entry_prefix += f"[{age_h:.1f}h ago]"
             else:
-                entry_prefix += f"[{age_h/24:.1f}d ago]"
+                entry_prefix += f"[{age_h / 24:.1f}d ago]"
             entry_prefix += " ---\n"
 
             prefix_tokens = count_tokens(entry_prefix)
@@ -532,8 +542,7 @@ class MemoryRetriever:
                     loaded_info[eid].append("summary")
                 elif remaining > 30:
                     # Not enough budget for full summary, truncate
-                    truncated = self._truncate_to_tokens(
-                        f"Summary: {entry['summary']}", remaining - 5)
+                    truncated = self._truncate_to_tokens(f"Summary: {entry['summary']}", remaining - 5)
                     if truncated:
                         text = truncated + "...\n"
                         t = count_tokens(text)
@@ -552,8 +561,7 @@ class MemoryRetriever:
                     remaining -= t
                     loaded_info[eid].append("body")
                 elif remaining > 80:
-                    truncated = self._truncate_to_tokens(
-                        f"Detail: {entry['body']}", remaining - 5)
+                    truncated = self._truncate_to_tokens(f"Detail: {entry['body']}", remaining - 5)
                     if truncated:
                         text = truncated + "...\n"
                         t = count_tokens(text)

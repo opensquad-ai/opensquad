@@ -349,9 +349,29 @@ export const groupAPI = {
 
 // ========== 消息相关 ==========
 
-export interface MessageResponse extends Message {
+/** Wire-format message from the REST API (snake_case). */
+export interface MessageResponse {
+  id: string;
   group_id: string;
   sender_id: string;
+  content: string;
+  timestamp: string;
+  type: string;
+  attachments?: Array<{
+    id: string;
+    name: string;
+    size: string;
+    url: string;
+    type: string;
+    duration?: number;
+  }>;
+  reply_to_id?: string;
+  is_pinned?: boolean;
+  is_edited?: boolean;
+  is_deleted?: boolean;
+  can_undo?: boolean;
+  deleted_at?: string;
+  mentions?: string[];
 }
 
 export const messageAPI = {

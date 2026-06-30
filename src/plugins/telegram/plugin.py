@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 Telegram Platform Plugin (New-style Decorator API)
 
 Provides Telegram outbound send tools.
 Inbound adapter (adapter.py) remains as an independent process.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.telegram")
 
@@ -83,18 +83,20 @@ class TelegramPlugin(Plugin):
     def on_load(self) -> None:
         logger.info("[TelegramPlugin] Telegram plugin loaded (new-style).")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         """Return the telegram_send tool module."""
         tools = []
         try:
             module = importlib.import_module("plugins.telegram.send_tools")
-            tools.append({
-                "name": "telegram_send",
-                "module": module,
-                "level": "extended",
-                "auto_register": True,
-                "requires_agent_id": True,
-            })
+            tools.append(
+                {
+                    "name": "telegram_send",
+                    "module": module,
+                    "level": "extended",
+                    "auto_register": True,
+                    "requires_agent_id": True,
+                }
+            )
         except ImportError as e:
             logger.error(f"[TelegramPlugin] Cannot import send_tools module: {e}")
         return tools

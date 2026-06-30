@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for _get_current_version() — the function the web UI's
 ``/version`` endpoint uses to display "vX.Y.Z 稳定版" in the footer.
 
@@ -14,15 +13,14 @@ which reads the version field from the installed package's metadata
 — generated from ``pyproject.toml`` at ``pip install`` time and
 therefore immune to hand-edit drift.
 """
+
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from unittest.mock import patch
 
 import pytest
-
 
 # The routes files use ``from app.api import get_current_user_dep`` and
 # similar absolute imports that require the gateway backend root on
@@ -30,7 +28,11 @@ import pytest
 _BACKEND_DIR = os.path.normpath(
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        os.pardir, "src", "opensquad", "gateway", "backend",
+        os.pardir,
+        "src",
+        "opensquad",
+        "gateway",
+        "backend",
     )
 )
 if _BACKEND_DIR not in sys.path:
@@ -49,7 +51,8 @@ if _BACKEND_DIR not in sys.path:
 def _extract_function(source_path: str, function_name: str) -> str:
     """Read ``source_path`` and return just the source of ``function_name``."""
     import ast
-    with open(source_path, "r", encoding="utf-8") as fh:
+
+    with open(source_path, encoding="utf-8") as fh:
         tree = ast.parse(fh.read(), filename=source_path)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == function_name:
@@ -60,9 +63,11 @@ def _extract_function(source_path: str, function_name: str) -> str:
 def _make_loader(filename: str):
     """Return a function that produces a fresh module with the helper
     in its own namespace, so each test gets a clean importlib.metadata view."""
-    import importlib
     routes_dir = os.path.join(
-        _BACKEND_DIR, "app", "ai_web", "routes",
+        _BACKEND_DIR,
+        "app",
+        "ai_web",
+        "routes",
     )
     src = os.path.normpath(
         os.path.join(routes_dir, filename)
@@ -77,6 +82,7 @@ def _make_loader(filename: str):
         # Bind a clean copy of the function so the closure / module attrs
         # don't leak between tests.
         return ns["_get_current_version"]
+
     return _load
 
 
@@ -103,10 +109,7 @@ def test_routes_prefers_importlib_metadata(routes_fn):
     """When importlib.metadata returns a real version, it wins over __version__."""
     with patch("importlib.metadata.version", return_value="9.9.9.post7"):
         result = routes_fn()
-    assert result == "9.9.9.post7", (
-        f"_get_current_version must return the importlib.metadata value, "
-        f"got {result!r}"
-    )
+    assert result == "9.9.9.post7", f"_get_current_version must return the importlib.metadata value, got {result!r}"
 
 
 def test_main_prefers_importlib_metadata(main_fn):
@@ -121,6 +124,7 @@ def test_main_prefers_importlib_metadata(main_fn):
 
 def test_routes_falls_back_to_module_version(routes_fn):
     """If importlib.metadata raises, the module-level __version__ is used."""
+
     def _boom(_name):
         raise RuntimeError("simulated: package not installed")
 
@@ -129,8 +133,7 @@ def test_routes_falls_back_to_module_version(routes_fn):
         # resolve to whatever __init__.py declares right now.
         result = routes_fn()
     assert result and result != "unknown", (
-        f"fallback to opensquad.__version__ should yield a real version, "
-        f"got {result!r}"
+        f"fallback to opensquad.__version__ should yield a real version, got {result!r}"
     )
 
 
@@ -161,9 +164,8 @@ def test_main_returns_unknown_when_both_sources_fail(main_fn):
     def _boom(_name):
         raise RuntimeError("no metadata")
 
-    with patch("importlib.metadata.version", side_effect=_boom):
-        with patch.dict(sys.modules, {"opensquad": None}):
-            result = main_fn()
+    with patch("importlib.metadata.version", side_effect=_boom), patch.dict(sys.modules, {"opensquad": None}):
+        result = main_fn()
     assert result == "unknown"
 
 
@@ -193,6 +195,7 @@ def test_returns_non_empty_pep440_string(routes_fn):
     # packaging.version is the canonical parser; if it accepts the string,
     # the value is at least well-formed PEP 440.
     from packaging.version import Version
+
     Version(result)  # raises if malformed
 
 
@@ -212,26 +215,22 @@ def test_returns_non_empty_pep440_string(routes_fn):
 
 def test_vite_config_reads_pyproject_before_init_py():
     """Regression: loadAppVersion() must consult pyproject.toml first."""
-    vite_path = os.path.normpath(
-        os.path.join(
-            _BACKEND_DIR, "..", "..", "..", "nexuschat-pro", "vite.config.ts"
-        )
-    )
+    os.path.normpath(os.path.join(_BACKEND_DIR, "..", "..", "..", "nexuschat-pro", "vite.config.ts"))
     # Resolve the actual repo path (the join above is approximate).
     candidate = [
-        p for p in [
+        p
+        for p in [
             os.path.join(_BACKEND_DIR, "..", "..", "..", "nexuschat-pro", "vite.config.ts"),
             os.path.normpath(
                 os.path.join(
-                    os.path.dirname(__file__),
-                    "..", "src", "opensquad", "gateway", "nexuschat-pro", "vite.config.ts"
+                    os.path.dirname(__file__), "..", "src", "opensquad", "gateway", "nexuschat-pro", "vite.config.ts"
                 )
             ),
         ]
         if os.path.exists(p)
     ]
     assert candidate, "could not locate vite.config.ts"
-    text = open(candidate[0], "r", encoding="utf-8").read()
+    text = open(candidate[0], encoding="utf-8").read()
 
     # 1. pyproject.toml must appear in loadAppVersion.
     assert "pyproject" in text, (

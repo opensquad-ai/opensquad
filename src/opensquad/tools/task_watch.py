@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 task_watch — Active Task Supervision Tools ("打卡制度")
 
@@ -18,9 +17,10 @@ Enhanced features:
   - Configurable reminder interval: Customize check-in frequency
   - Smart reminders: Asks agent to report progress or complete task
 """
+
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Any
 
 from opensquad.task_supervisor import task_supervisor
 
@@ -33,7 +33,7 @@ def start(
     max_stalls: int = 5,
     reminder_interval: int = 300,
     enable_reminder: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Start active task supervision with optional smart reminders.
 
@@ -68,9 +68,10 @@ def start(
             f"- Check interval: {check_interval}s\n"
             f"- Max stalls: {max_stalls}\n"
             f"- Smart reminder: {'enabled' if enable_reminder else 'disabled'}"
-            + (f" (every {reminder_interval}s)" if enable_reminder else "") + "\n\n"
-            f"Use task_watch.update(progress) to report progress.\n"
-            f"Use task_watch.complete(summary) when finished."
+            + (f" (every {reminder_interval}s)" if enable_reminder else "")
+            + "\n\n"
+            "Use task_watch.update(progress) to report progress.\n"
+            "Use task_watch.complete(summary) when finished."
         ),
     }
 
@@ -83,10 +84,7 @@ def _start_smart_reminder(task_id: str, description: str, interval: int):
         loop = None
 
     if loop and loop.is_running():
-        asyncio.run_coroutine_threadsafe(
-            _smart_reminder_loop(task_id, description, interval),
-            loop
-        )
+        asyncio.run_coroutine_threadsafe(_smart_reminder_loop(task_id, description, interval), loop)
         logger.info(f"[TaskWatch] Smart reminder started for {task_id} (interval={interval}s)")
     else:
         logger.warning("[TaskWatch] No running event loop, smart reminder not started")
@@ -110,12 +108,12 @@ async def _smart_reminder_loop(task_id: str, description: str, interval: int):
 
         # Check if task still active
         if not task_supervisor.is_active:
-            logger.info(f"[TaskWatch] Smart reminder ending: task no longer active")
+            logger.info("[TaskWatch] Smart reminder ending: task no longer active")
             break
 
         current_task = task_supervisor.current_task
         if not current_task or current_task.task_id != task_id:
-            logger.info(f"[TaskWatch] Smart reminder ending: task changed")
+            logger.info("[TaskWatch] Smart reminder ending: task changed")
             break
 
         # Check agent state
@@ -131,11 +129,12 @@ async def _smart_reminder_loop(task_id: str, description: str, interval: int):
         if current_progress_count > last_progress_count:
             # Progress was made, reset timer
             last_progress_count = current_progress_count
-            logger.debug(f"[TaskWatch] Progress detected, resetting reminder timer")
+            logger.debug("[TaskWatch] Progress detected, resetting reminder timer")
             continue
 
         # Check time since last activity
         import time
+
         elapsed_since_activity = time.time() - current_task.last_activity_time
 
         # Only remind if inactive for the full interval
@@ -144,10 +143,9 @@ async def _smart_reminder_loop(task_id: str, description: str, interval: int):
 
         # Send reminder!
         elapsed_total = time.time() - current_task.created_at
-        stall_count = current_task.stall_count
 
         message = (
-            f"[TASK_WATCH:REMINDER] Task: \"{description[:100]}\"\n"
+            f'[TASK_WATCH:REMINDER] Task: "{description[:100]}"\n'
             f"Status: Agent has been idle for {elapsed_since_activity:.0f}s\n"
             f"Task elapsed: {elapsed_total:.0f}s\n"
             f"Progress updates: {current_progress_count}\n\n"
@@ -165,13 +163,14 @@ def _inject_reminder(message: str):
     """Push a reminder message into the agent's input_hub."""
     try:
         from opensquad.input_hub import input_hub
+
         input_hub.push(message, source="task_watch")
         logger.info(f"[TaskWatch] Injected reminder ({len(message)} chars)")
     except Exception as e:
         logger.error(f"[TaskWatch] Failed to inject reminder: {e}", exc_info=True)
 
 
-def update(progress: str) -> Dict[str, Any]:
+def update(progress: str) -> dict[str, Any]:
     """
     Report progress on the current supervised task.
     Resets the inactivity timer and logs the progress update.
@@ -195,7 +194,7 @@ def update(progress: str) -> Dict[str, Any]:
     }
 
 
-def complete(summary: str = "") -> Dict[str, Any]:
+def complete(summary: str = "") -> dict[str, Any]:
     """
     Mark the current supervised task as completed and stop supervision.
     Call this when the task objective has been achieved.
@@ -218,7 +217,7 @@ def complete(summary: str = "") -> Dict[str, Any]:
     }
 
 
-def status() -> Dict[str, Any]:
+def status() -> dict[str, Any]:
     """
     Get the current task supervision status.
     Returns information about the active supervised task, if any.

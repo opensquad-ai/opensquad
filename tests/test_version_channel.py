@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for :mod:`opensquad.utils.version_channel`.
 
 The release-channel detection drives the ``/version`` endpoint's
@@ -6,14 +5,12 @@ behaviour: it must NOT tell a ``dev`` user to upgrade to an older
 ``stable`` release. These tests pin the classification so a future
 refactor can't silently regress it.
 """
-import pytest
 
 from opensquad.utils.version_channel import (
     CHECKABLE_CHANNELS,
     detect_channel,
     should_check_for_updates,
 )
-
 
 # ── detect_channel ───────────────────────────────────────────────────────
 
@@ -113,7 +110,7 @@ class TestShouldCheckForUpdates:
     def test_checkable_channels_constant(self):
         # The constant is used by the /version route. Only "stable" is
         # checkable; everything else is opt-out by default.
-        assert CHECKABLE_CHANNELS == frozenset({"stable"})
+        assert frozenset({"stable"}) == CHECKABLE_CHANNELS
 
 
 # ── The dev-branch bug we are fixing ─────────────────────────────────────

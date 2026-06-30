@@ -1,14 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 Compression module -- summary payload building + external summarizer LLM call.
 
 Extracted from runner.py to reduce its size.
 """
+
 from __future__ import annotations
 
+import contextlib
 import json
-import logging
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from opensquad.system_config import syscfg
 from opensquad.tool import logger
@@ -32,10 +33,7 @@ def build_summary_payload(
         lines.append("[Previous Context Summary]\n(none)")
 
     lines.append("\n[Conversation Messages to Compress]")
-    if keep_last is not None and len(messages) > keep_last:
-        msgs_to_compress = messages[:-keep_last]
-    else:
-        msgs_to_compress = messages
+    msgs_to_compress = messages[:-keep_last] if keep_last is not None and len(messages) > keep_last else messages
 
     for msg in msgs_to_compress:
         role = msg.get("role", "")
@@ -51,10 +49,7 @@ def build_summary_payload(
     for evt in events:
         etype = evt.get("type", "")
         data = evt.get("data", evt.get("content", ""))
-        if isinstance(data, dict):
-            text = json.dumps(data, ensure_ascii=False)
-        else:
-            text = str(data or "")
+        text = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data or "")
         text = text.strip()
         if not text:
             continue
@@ -69,27 +64,17 @@ def build_summary_payload(
         "Key Parameters, Unresolved Issues."
     )
     lines.append(
-        "Current Task MUST describe what the agent is working on "
-        "RIGHT NOW -- the most recent user request in detail."
+        "Current Task MUST describe what the agent is working on RIGHT NOW -- the most recent user request in detail."
     )
+    lines.append("Original Goal is the very first user request in this session, in one sentence.")
     lines.append(
-        "Original Goal is the very first user request in this session, in one sentence."
+        "Current State is the most important section -- include open files, current directory, last tool executed."
     )
+    lines.append("Preserve all file paths, IDs, ports, version numbers, config values, and error messages verbatim.")
     lines.append(
-        "Current State is the most important section -- include open files, "
-        "current directory, last tool executed."
+        "You MUST consider full workflow context: thought, plan, tool_call, tool_result, and info/status events."
     )
-    lines.append(
-        "Preserve all file paths, IDs, ports, version numbers, config values, "
-        "and error messages verbatim."
-    )
-    lines.append(
-        "You MUST consider full workflow context: thought, plan, tool_call, "
-        "tool_result, and info/status events."
-    )
-    lines.append(
-        "Completed must include Done/In progress/Todo sub-bullets with specific file paths."
-    )
+    lines.append("Completed must include Done/In progress/Todo sub-bullets with specific file paths.")
     if keep_last is not None:
         lines.append(
             f"Keep only the last {keep_last} messages in live chat history; "
@@ -159,16 +144,13 @@ async def run_external_summarizer(
             if not delta:
                 continue
             parts.append(delta)
-            try:
+            with contextlib.suppress(Exception):
                 await on_chunk(delta)
-            except Exception:
-                pass
 
         result = "".join(parts).strip()
         if not result:
             logger.warning(
-                "[Compression] External summarizer returned empty result "
-                "(model=%s, payload_len=%d)",
+                "[Compression] External summarizer returned empty result (model=%s, payload_len=%d)",
                 model,
                 len(summary_payload),
             )

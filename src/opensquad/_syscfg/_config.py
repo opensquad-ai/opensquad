@@ -1,22 +1,22 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg/_config.py -- Config file loading, caching, and raw access.
 
 Extracted from system_config.py.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from . import _workspace as _ws
 
 logger = logging.getLogger(__name__)
 
 # In-memory cache (module-level mutable state)
-_cache: Optional[dict] = None
+_cache: dict | None = None
 _cache_mtime: float = 0.0
 _cache_path_at_load: str = ""
 
@@ -44,20 +44,14 @@ def _load() -> dict:
     except Exception:
         pass
 
-    if (
-        _cache is not None
-        and _cache_path_at_load == cfg_path
-        and current_mtime == _cache_mtime
-    ):
+    if _cache is not None and _cache_path_at_load == cfg_path and current_mtime == _cache_mtime:
         return _cache
 
     if not os.path.exists(cfg_path):
-        last_ws_file = os.path.join(
-            os.path.expanduser("~"), ".opensquad", "last_workspace.json"
-        )
+        last_ws_file = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
         if os.path.exists(last_ws_file):
             try:
-                with open(last_ws_file, "r", encoding="utf-8") as f:
+                with open(last_ws_file, encoding="utf-8") as f:
                     ws_data = json.load(f)
                 alt_path = ws_data.get("config_path", "")
                 if not (alt_path and os.path.exists(alt_path)):
@@ -96,7 +90,7 @@ def _load() -> dict:
     for candidate_path in config_paths:
         if os.path.exists(candidate_path):
             try:
-                with open(candidate_path, "r", encoding="utf-8-sig") as f:
+                with open(candidate_path, encoding="utf-8-sig") as f:
                     _cache = json.load(f)
                 _cache_path_at_load = cfg_path
                 _cache_mtime = current_mtime
@@ -263,6 +257,7 @@ def ensure_node_id() -> str:
         return current_id
 
     import uuid as _uuid
+
     new_id = str(_uuid.uuid4())
     cfg.setdefault("node", {})["id"] = new_id
     try:
@@ -315,7 +310,7 @@ def _auto_generate_secrets(target_path: str) -> bool:
     Returns ``True`` if any field was replaced, ``False`` otherwise.
     """
     try:
-        with open(target_path, "r", encoding="utf-8-sig") as f:
+        with open(target_path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
         logger.warning("[syscfg] _auto_generate_secrets: cannot read %s: %s", target_path, e)
@@ -327,6 +322,7 @@ def _auto_generate_secrets(target_path: str) -> bool:
     for key in target_keys:
         if _is_placeholder_secret(auth.get(key, "")):
             import secrets as _secrets
+
             new_val = _secrets.token_urlsafe(32)
             auth[key] = new_val
             replaced.append(key)
@@ -354,6 +350,7 @@ def ensure_external_api_key() -> str:
         return current_key
 
     import secrets as _secrets
+
     new_key = _secrets.token_urlsafe(32)
     cfg.setdefault("auth", {})["external_api_key"] = new_key
     try:
@@ -385,6 +382,7 @@ def ensure_gateway_token() -> str:
         return current
 
     import secrets as _secrets
+
     new_token = _secrets.token_urlsafe(32)
     cfg.setdefault("auth", {})["gateway_token"] = new_token
     try:
@@ -413,6 +411,7 @@ def ensure_node_secret() -> str:
         return current
 
     import secrets as _secrets
+
     new_secret = _secrets.token_urlsafe(32)
     cfg.setdefault("auth", {})["node_secret"] = new_secret
     try:
@@ -426,6 +425,7 @@ def ensure_node_secret() -> str:
 
 
 # Cross-cutting workspace functions (moved here to avoid circular import with system_config)
+
 
 def ensure_workspace_structure() -> None:
     """Ensure the workspace directory structure exists."""
@@ -450,9 +450,8 @@ def ensure_workspace_structure() -> None:
 def init_workspace(workspace_path: str, copy_config: bool = True) -> None:
     """Initialize a new workspace."""
     import datetime
-    import shutil
 
-    set_workspace(workspace_path)
+    _ws.set_workspace(workspace_path)
     ensure_workspace_structure()
 
     workspace_meta = {
@@ -468,6 +467,7 @@ def init_workspace(workspace_path: str, copy_config: bool = True) -> None:
 
     if copy_config:
         import shutil as _shutil
+
         for suffix in ["system_config.template.json", "system_config.json", "system_config.example.json"]:
             src = os.path.join(_ws._DEFAULT_ROOT, suffix)
             if os.path.exists(src):

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AgentConfig Schema — Pydantic validation for config.json (Config Validation).
 
 Validates agent configuration at boot time, catching misconfigurations
@@ -11,21 +10,25 @@ Usage:
     except ConfigValidationError as e:
         print(f"Config error: {e}")
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, ValidationError, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
 
 class ModelConfigSchema(BaseModel):
     """Schema for the ``model`` section of config.json."""
+
     schema_version: str = Field(default="1.0", pattern=r"^\d+\.\d+$")
     # api_protocol: API 协议类型 (openai / openai_compat / claude / anthropic / google / gemini)
-    api_protocol: str = Field(default="openai_compat", pattern=r"^(openai|openai_compat|claude|anthropic|google|gemini)$")
+    api_protocol: str = Field(
+        default="openai_compat", pattern=r"^(openai|openai_compat|claude|anthropic|google|gemini)$"
+    )
     # provider: 模型供应商名称（厂商），仅用于 UI 展示/分组
     provider: str = Field(default="")
     model_name: str = Field(default="", min_length=1)
@@ -61,59 +64,65 @@ class ModelConfigSchema(BaseModel):
 
 class PromptConfigSchema(BaseModel):
     """Schema for the ``prompt`` section of config.json."""
-    base: Optional[str] = Field(default=None)
+
+    base: str | None = Field(default=None)
     role: str = Field(default="role.md")
 
 
 class CollaborationConfigSchema(BaseModel):
     """Schema for the ``collaboration`` section of config.json."""
+
     enabled: bool = Field(default=False)
-    team_id: Optional[str] = Field(default=None)
+    team_id: str | None = Field(default=None)
 
 
 class GatewayConfigSchema(BaseModel):
     """Schema for the ``gateway`` section of config.json."""
+
     enabled: bool = Field(default=True)
     url: str = Field(default="")
 
 
 class WebServerConfigSchema(BaseModel):
     """Schema for the ``web_server`` section of config.json."""
+
     enabled: bool = Field(default=False)
     port: int = Field(default=0, ge=0, le=65535)
 
 
 class GroupChatConfigSchema(BaseModel):
     """Schema for the ``group_chat`` section of config.json."""
+
     enabled: bool = Field(default=True)
     email: str = Field(default="ai@ai")
     password: str = Field(default="aaaaaa")
-    groups: List[str] = Field(default_factory=list)
-    base_url: Optional[str] = Field(default=None)
+    groups: list[str] = Field(default_factory=list)
+    base_url: str | None = Field(default=None)
 
 
 class AgentConfigSchema(BaseModel):
     """Top-level schema for config.json."""
+
     model_config = ConfigDict(extra="allow")
     schema_version: str = Field(default="1.0", pattern=r"^\d+\.\d+$")
     agent_id: str = Field(default="", min_length=1)
     agent_name: str = Field(default="", min_length=1)
     agent_type: str = Field(default="assistant")
-    capabilities: List[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
     model: ModelConfigSchema = Field(default_factory=ModelConfigSchema)
     prompt: PromptConfigSchema = Field(default_factory=PromptConfigSchema)
-    tools: List[str] = Field(default_factory=list)
-    plugins: List[str] = Field(default_factory=list)
-    tool_levels: Dict[str, Any] = Field(default_factory=dict)
+    tools: list[str] = Field(default_factory=list)
+    plugins: list[str] = Field(default_factory=list)
+    tool_levels: dict[str, Any] = Field(default_factory=dict)
     collaboration: CollaborationConfigSchema = Field(default_factory=CollaborationConfigSchema)
     gateway: GatewayConfigSchema = Field(default_factory=GatewayConfigSchema)
     web_server: WebServerConfigSchema = Field(default_factory=WebServerConfigSchema)
     group_chat: GroupChatConfigSchema = Field(default_factory=GroupChatConfigSchema)
-    mcp_servers: Dict[str, Any] = Field(default_factory=dict)
-    system_tools: Dict[str, Any] = Field(default_factory=dict)
-    state_machine: Optional[Dict[str, Any]] = Field(default=None)
-    load_his: Optional[str] = Field(default=None)
-    prompt_preload: Optional[Dict[str, Any]] = Field(default=None)
+    mcp_servers: dict[str, Any] = Field(default_factory=dict)
+    system_tools: dict[str, Any] = Field(default_factory=dict)
+    state_machine: dict[str, Any] | None = Field(default=None)
+    load_his: str | None = Field(default=None)
+    prompt_preload: dict[str, Any] | None = Field(default=None)
 
     @field_validator("agent_id")
     @classmethod
@@ -132,13 +141,14 @@ class AgentConfigSchema(BaseModel):
 
 class ConfigValidationError(Exception):
     """Raised when config.json fails validation."""
+
     pass
 
 
 _CONFIG_SCHEMA_VERSION = "1.0"
 
 
-def validate_agent_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+def validate_agent_config(raw: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a raw config.json dict.
 
     Args:
@@ -155,10 +165,7 @@ def validate_agent_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if version == "0.9":
         raw = _migrate_v0_9_to_v1_0(raw)
     elif version != _CONFIG_SCHEMA_VERSION:
-        raise ConfigValidationError(
-            f"Unsupported config schema_version: {version}. "
-            f"Expected: {_CONFIG_SCHEMA_VERSION}"
-        )
+        raise ConfigValidationError(f"Unsupported config schema_version: {version}. Expected: {_CONFIG_SCHEMA_VERSION}")
 
     try:
         validated = AgentConfigSchema(**raw)
@@ -175,7 +182,7 @@ def validate_agent_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ConfigValidationError(f"Unexpected config validation error: {e}") from e
 
 
-def _migrate_v0_9_to_v1_0(raw: Dict[str, Any]) -> Dict[str, Any]:
+def _migrate_v0_9_to_v1_0(raw: dict[str, Any]) -> dict[str, Any]:
     """Migrate schema_version 0.9 config to 1.0.
 
     - Adds schema_version field

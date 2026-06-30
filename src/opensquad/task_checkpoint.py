@@ -1,16 +1,17 @@
-# -*- coding: utf-8 -*-
 """
 Task Checkpoint — Task state persistence utilities.
 
 All writes use atomic rename (write-to-tmp then rename) to prevent
 partial/corrupt reads.
 """
+
+import contextlib
 import json
 import os
-import time
 import tempfile
+import time
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Any
 
 
 def _checkpoint_path(agent_dir: str) -> str:
@@ -20,6 +21,7 @@ def _checkpoint_path(agent_dir: str) -> str:
 # ---------------------------------------------------------------------------
 # Atomic write helper
 # ---------------------------------------------------------------------------
+
 
 def _atomic_write_json(path: str, data: dict):
     """Write JSON atomically: write to temp file then rename."""
@@ -33,16 +35,15 @@ def _atomic_write_json(path: str, data: dict):
         os.replace(tmp_path, path)
     except Exception:
         # Best-effort cleanup
-        try:
+        with contextlib.suppress(Exception):
             os.unlink(tmp_path)
-        except Exception:
-            pass
         raise
 
 
 # ---------------------------------------------------------------------------
 # Task Checkpoint
 # ---------------------------------------------------------------------------
+
 
 def write_checkpoint(
     agent_dir: str,
@@ -53,7 +54,7 @@ def write_checkpoint(
     plan: str = "",
     progress_summary: str = "",
     last_turn_id: int = 0,
-    last_tool_call: Optional[Dict[str, Any]] = None,
+    last_tool_call: dict[str, Any] | None = None,
     next_input: str = "",
     context_snapshot: str = "",
     session_id: str = "",
@@ -101,14 +102,14 @@ def write_checkpoint(
         pass  # Checkpoint is best-effort; never crash the agent
 
 
-def read_checkpoint(agent_dir: str) -> Optional[Dict[str, Any]]:
+def read_checkpoint(agent_dir: str) -> dict[str, Any] | None:
     """
     Read the task checkpoint. Returns None if file doesn't exist or is corrupt.
     Used on agent startup for auto-resume.
     """
     path = _checkpoint_path(agent_dir)
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -125,53 +126,52 @@ def clear_checkpoint(agent_dir: str):
         existing["ts"] = time.time()
         existing["iso"] = datetime.now().isoformat()
         existing["cleared_reason"] = "task_completed_or_idle"
-        try:
+        with contextlib.suppress(Exception):
             _atomic_write_json(_checkpoint_path(agent_dir), existing)
-        except Exception:
-            pass
     elif not existing:
         # No checkpoint file — write an empty inactive one
-        try:
-            _atomic_write_json(_checkpoint_path(agent_dir), {
-                "active": False,
-                "ts": time.time(),
-                "iso": datetime.now().isoformat(),
-            })
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            _atomic_write_json(
+                _checkpoint_path(agent_dir),
+                {
+                    "active": False,
+                    "ts": time.time(),
+                    "iso": datetime.now().isoformat(),
+                },
+            )
 
 
-def build_recovery_prompt(checkpoint: Dict[str, Any]) -> str:
+def build_recovery_prompt(checkpoint: dict[str, Any]) -> str:
     """
     Build a recovery prompt from a checkpoint for auto-resume.
     This prompt is injected into input_hub on startup when a crashed task is detected.
-    
+
     Returns a formatted string that tells the AI to resume its previous task.
     """
     parts = ["[RECOVERY_MODE] Agent restarted after an unexpected shutdown while a task was in progress."]
     parts.append("Please resume the task from where you left off. Verify the environment state before continuing.")
     parts.append("")
-    
+
     if checkpoint.get("original_request"):
-        parts.append(f"## Original User Request")
+        parts.append("## Original User Request")
         parts.append(checkpoint["original_request"])
         parts.append("")
-    
+
     if checkpoint.get("plan"):
-        parts.append(f"## Last Known Plan")
+        parts.append("## Last Known Plan")
         parts.append(checkpoint["plan"])
         parts.append("")
-    
+
     if checkpoint.get("progress_summary"):
-        parts.append(f"## Progress Before Crash")
+        parts.append("## Progress Before Crash")
         parts.append(checkpoint["progress_summary"])
         parts.append("")
-    
+
     last_tool = checkpoint.get("last_tool_call")
     if last_tool:
         status = last_tool.get("status", "unknown")
         name = last_tool.get("name", "unknown")
-        parts.append(f"## Last Tool Call")
+        parts.append("## Last Tool Call")
         parts.append(f"- Tool: {name}")
         parts.append(f"- Status: {status}")
         if last_tool.get("args"):
@@ -179,16 +179,16 @@ def build_recovery_prompt(checkpoint: Dict[str, Any]) -> str:
         if last_tool.get("result_preview"):
             parts.append(f"- Result preview: {last_tool['result_preview'][:500]}")
         parts.append("")
-        
+
         if status == "running":
             parts.append("WARNING: The last tool call was still running when the agent crashed.")
             parts.append("Its effects may be partial. Verify the result before proceeding.")
             parts.append("")
-    
+
     parts.append("## Instructions")
     parts.append("1. First verify the current state (check files, running processes, etc.)")
     parts.append("2. Determine what was already completed vs. what needs to be redone")
     parts.append("3. Continue the task to completion")
     parts.append("4. Do NOT start over from scratch unless the environment state is inconsistent")
-    
+
     return "\n".join(parts)

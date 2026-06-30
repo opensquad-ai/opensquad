@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Output handler module -- stream parsing setup, event emission, and token stats.
 
@@ -7,14 +6,13 @@ Extracted from runner.py to reduce its size.  Handles:
 - Token stat computation and broadcast (_broadcast_token_stats)
 - Streamed text accumulation (to_user_stream / to_user_final lifecycle)
 """
+
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import re
-from datetime import datetime
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from opensquad.tool import logger
 
@@ -54,7 +52,6 @@ class OutputHandler:
 
         def emit_with_sid(etype: str, data: Any) -> None:
             """Inject session_id into event data before emitting."""
-            bus_emit = emit  # alias for clarity
             from opensquad.events import bus
 
             # emit is already runner._emit which wraps bus.emit_async with sid injection.
@@ -161,9 +158,9 @@ class OutputHandler:
                     if fn.get("parameters"):
                         stats["tool"] += _count_str(json.dumps(fn["parameters"], ensure_ascii=False))
 
-            _THOUGHT_RE = re.compile(r'<(thought|think)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
-            _TOOL_CALL_RE = re.compile(r'<tool_call[^>]*>(.*?)</tool_call>', re.DOTALL | re.IGNORECASE)
-            _TOOL_RESULT_RE = re.compile(r'<tool_result[^>]*>(.*?)</tool_result>', re.DOTALL | re.IGNORECASE)
+            _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+            _TOOL_CALL_RE = re.compile(r"<tool_call[^>]*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
+            _TOOL_RESULT_RE = re.compile(r"<tool_result[^>]*>(.*?)</tool_result>", re.DOTALL | re.IGNORECASE)
 
             def _count_content_list(items: list, target: str) -> None:
                 has_tool_result = any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items)
@@ -181,10 +178,10 @@ class OutputHandler:
                             thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
                             if thought_sum:
                                 stats["thought"] += thought_sum
-                                text = _THOUGHT_RE.sub('', text).strip()
+                                text = _THOUGHT_RE.sub("", text).strip()
                             stats["response"] += _count_str(text)
                     elif t == "tool_result":
-                        for c in (item.get("content") or []):
+                        for c in item.get("content") or []:
                             if isinstance(c, dict) and c.get("type") == "text":
                                 stats["tool"] += _count_str(c["text"])
                     elif t == "tool_use":
@@ -224,19 +221,19 @@ class OutputHandler:
                         if "<tool_result>" in content or "<tool_result " in content:
                             tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
                             stats["tool"] += tool_sum
-                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub('', content).strip())
-                        elif re.match(r'^\[\d{2}:\d{2}:\d{2}\] Tool \'', content):
+                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub("", content).strip())
+                        elif re.match(r"^\[\d{2}:\d{2}:\d{2}\] Tool \'", content):
                             stats["tool"] += _count_str(content)
                         else:
                             stats["user"] += _count_str(content)
                     elif role == "assistant":
                         thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
                         stats["thought"] += thought_sum
-                        text_no_thought = _THOUGHT_RE.sub('', content).strip()
+                        text_no_thought = _THOUGHT_RE.sub("", content).strip()
 
                         tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
                         stats["tool"] += tool_sum
-                        text_response = _TOOL_CALL_RE.sub('', text_no_thought).strip()
+                        text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
 
                         stats["response"] += _count_str(text_response)
 
@@ -253,9 +250,7 @@ class OutputHandler:
             cumul_output = hist_out + getattr(chat_api, "total_output_tokens", 0)
             cumul_total = cumul_input + cumul_output
             cumul_requests = hist_req + getattr(chat_api, "total_requests", 0)
-            cumul_cache = hist_cache + getattr(
-                chat_api, "total_cache_read_tokens", 0
-            )
+            cumul_cache = hist_cache + getattr(chat_api, "total_cache_read_tokens", 0)
 
             token_data = {
                 "used": total,
@@ -275,9 +270,7 @@ class OutputHandler:
                     "input_tokens": getattr(chat_api, "total_input_tokens", 0),
                     "output_tokens": getattr(chat_api, "total_output_tokens", 0),
                     "requests": getattr(chat_api, "total_requests", 0),
-                    "cache_read_tokens": getattr(
-                        chat_api, "total_cache_read_tokens", 0
-                    ),
+                    "cache_read_tokens": getattr(chat_api, "total_cache_read_tokens", 0),
                 },
                 "breakdown": stats,
             }

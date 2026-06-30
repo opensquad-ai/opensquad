@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import asyncio
 from types import SimpleNamespace
 
@@ -96,11 +95,13 @@ class DummyRunner:
 
     def _extract_tag(self, response, tag):
         import re
+
         m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", response, re.DOTALL | re.IGNORECASE)
         return m.group(1).strip() if m else None
 
     def _remove_tags(self, text, tags):
         import re
+
         result = text
         for tag in tags:
             result = re.sub(rf"<{tag}\\b[^>]*>.*?</{tag}>", "", result, flags=re.DOTALL | re.IGNORECASE)
@@ -110,6 +111,7 @@ class DummyRunner:
 
     def _remove_all_tags(self, text):
         import re
+
         return re.sub(r"<[^>]+>", "", text).strip()
 
 

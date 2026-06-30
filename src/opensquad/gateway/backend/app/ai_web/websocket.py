@@ -2,18 +2,20 @@
 WebSocket handler
 Handles Agent registration and user conversations
 """
-import json
-import asyncio
-import hmac
-import uuid
-import time
-from datetime import datetime, timezone
-from typing import Dict, Optional
-from fastapi import WebSocket, WebSocketDisconnect, HTTPException, Query, Depends
-from fastapi.security import HTTPBearer
-import logging
 
-from .registry import registry, AgentInfo
+import asyncio
+import contextlib
+import hmac
+import json
+import logging
+import time
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.security import HTTPBearer
+
+from .registry import AgentInfo, registry
 from .sessions import gateway_session_cache
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ def _check_node_secret(received: str) -> bool:
     - If configured, use ``hmac.compare_digest`` to prevent timing side-channels.
     """
     from opensquad.system_config import syscfg
+
     expected = syscfg.node_secret()
     if not expected:
         logging.warning(
@@ -45,34 +48,28 @@ def _check_node_secret(received: str) -> bool:
 
 class AgentWebSocketHandler:
     """Handle Agent's WebSocket connection (registration and messages)"""
-    
+
     async def handle_agent_register(self, websocket: WebSocket):
         """Handle Agent registration connection"""
         await websocket.accept()
         agent_id = None
-        
+
         try:
             # Wait for registration message
             data = await websocket.receive_json()
-            
+
             if data.get("action") != "register":
-                await websocket.send_json({
-                    "status": "error",
-                    "message": "First message must be register"
-                })
+                await websocket.send_json({"status": "error", "message": "First message must be register"})
                 await websocket.close()
                 return
 
-                    # Validate node_secret
+                # Validate node_secret
             if not _check_node_secret(data.get("node_secret", "")):
                 logger.warning(f"Agent registration rejected: invalid node_secret (agent_id={data.get('agent_id')})")
-                await websocket.send_json({
-                    "status": "error",
-                    "message": "Unauthorized: invalid node_secret"
-                })
+                await websocket.send_json({"status": "error", "message": "Unauthorized: invalid node_secret"})
                 await websocket.close()
                 return
-            
+
             # Create AgentInfo
             agent_info = AgentInfo(
                 agent_id=data["agent_id"],
@@ -87,18 +84,16 @@ class AgentWebSocketHandler:
                 node_id=data.get("node_id", ""),
                 node_label=data.get("node_label", ""),
             )
-            
+
             agent_id = agent_info.agent_id
-            
+
             # Register
             old_ws = registry.register(agent_info, websocket)
             if old_ws is not None:
                 # Close the stale connection from a previous registration to
                 # prevent zombie sockets and double-delivery.
-                try:
+                with contextlib.suppress(Exception):
                     asyncio.create_task(old_ws.close(code=4000, reason="replaced by new registration"))
-                except Exception:
-                    pass
             # Auto-create a default session (using a fixed system user ID), ensuring the Agent can immediately respond to group chat messages
             # Even if the user hasn't connected via the Web interface yet, the Agent can work normally
             default_user_id = "system"
@@ -106,11 +101,13 @@ class AgentWebSocketHandler:
             logger.info(f"Auto-created default session for agent {agent_id}")
 
             # Send confirmation
-            await websocket.send_json({
-                "status": "registered",
-                "message": f"Agent {agent_id} registered successfully",
-                "assigned_route": f"/ai-web/chat/{agent_id}"
-            })
+            await websocket.send_json(
+                {
+                    "status": "registered",
+                    "message": f"Agent {agent_id} registered successfully",
+                    "assigned_route": f"/ai-web/chat/{agent_id}",
+                }
+            )
 
             logger.info(f"Agent {agent_id} registered successfully")
 
@@ -125,11 +122,9 @@ class AgentWebSocketHandler:
             logger.error(f"Agent register error: {e}")
             if agent_id:
                 registry.unregister(agent_id)
-            try:
+            with contextlib.suppress(Exception):
                 await websocket.close()
-            except Exception:
-                pass
-    
+
     async def _agent_message_loop(self, agent_id: str, websocket: WebSocket):
         """Agent message loop"""
         try:
@@ -137,13 +132,13 @@ class AgentWebSocketHandler:
                 message = await websocket.receive_json()
                 action = message.get("action")
                 msg_type = message.get("type")
-                
+
                 if action == "heartbeat":
                     # Heartbeat response
                     stats = message.get("stats", {})
                     registry.update_heartbeat(agent_id, stats)
                     await websocket.send_json({"action": "pong"})
-                    
+
                 elif action == "status":
                     # Status update
                     status = message.get("status", "online")
@@ -151,8 +146,32 @@ class AgentWebSocketHandler:
                         registry.set_busy(agent_id, True)
                     else:
                         registry.set_busy(agent_id, False)
-                
-                elif msg_type in ["message", "response", "thought", "stream", "tool_call", "tool_result", "state", "wake", "sleep", "info", "status", "turn_start", "turn_elapsed", "token_stats", "current_session", "history_sync", "session_list", "file_push", "plan", "prompt_update", "output_media", "summary_stream", "compression_progress"]:
+
+                elif msg_type in [
+                    "message",
+                    "response",
+                    "thought",
+                    "stream",
+                    "tool_call",
+                    "tool_result",
+                    "state",
+                    "wake",
+                    "sleep",
+                    "info",
+                    "status",
+                    "turn_start",
+                    "turn_elapsed",
+                    "token_stats",
+                    "current_session",
+                    "history_sync",
+                    "session_list",
+                    "file_push",
+                    "plan",
+                    "prompt_update",
+                    "output_media",
+                    "summary_stream",
+                    "compression_progress",
+                ]:
                     # Agent's response message, forward to user
                     user_id = message.get("user_id")
                     if msg_type == "info":
@@ -204,17 +223,16 @@ class AgentWebSocketHandler:
                     if msg_type == "current_session":
                         try:
                             from .agent_sessions import invalidate_reader
+
                             invalidate_reader(agent_id)
                         except Exception:
                             pass
                         # Also invalidate Gateway in-memory cache so stale
                         # user messages from previous session aren't served
                         # on reconnect.
-                        try:
+                        with contextlib.suppress(Exception):
                             gateway_session_cache.invalidate(user_id, agent_id)
-                        except Exception:
-                            pass
-                    
+
                     # Persist final assistant replies in Gateway WS history so refresh
                     # still works when the disk-session HTTP API is slow or unavailable.
                     # Streaming chunks (stream/thought/tool_*) are NOT saved here.
@@ -233,37 +251,28 @@ class AgentWebSocketHandler:
                         if user_id in ("adapter-user",) or user_id.startswith("feishu_"):
                             await user_handler.broadcast_to_agent(agent_id, message)
                         else:
-                            await user_handler.forward_to_user(
-                                user_id,
-                                agent_id,
-                                message
-                            )
+                            await user_handler.forward_to_user(user_id, agent_id, message)
                     else:
                         await user_handler.broadcast_to_agent(agent_id, message)
-                        
+
                 elif action == "chat_response":
                     user_id = message.get("user_id")
                     if user_id:
                         if user_id in ("adapter-user",) or user_id.startswith("feishu_"):
-                            await user_handler.broadcast_to_agent(agent_id, {
-                                "type": "message",
-                                "role": "assistant",
-                                "content": message.get("content", "")
-                            })
+                            await user_handler.broadcast_to_agent(
+                                agent_id,
+                                {"type": "message", "role": "assistant", "content": message.get("content", "")},
+                            )
                         else:
                             await user_handler.forward_to_user(
                                 user_id,
                                 agent_id,
-                                {
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "content": message.get("content", "")
-                                }
+                                {"type": "message", "role": "assistant", "content": message.get("content", "")},
                             )
-                    
+
                 else:
                     logger.warning(f"Unknown message from agent {agent_id}: {message}")
-                    
+
         except WebSocketDisconnect:
             logger.info(f"Agent {agent_id} disconnected")
             registry.unregister(agent_id)
@@ -282,18 +291,18 @@ class UserWebSocketHandler:
 
     def __init__(self):
         # Store user connections: "user_id:agent_id" -> list[WebSocket]
-        self.user_connections: Dict[str, List[WebSocket]] = {}
+        self.user_connections: dict[str, list[WebSocket]] = {}
         self._kv_lock = asyncio.Lock()
-    
+
     async def handle_user_chat(
-        self, 
-        websocket: WebSocket, 
+        self,
+        websocket: WebSocket,
         agent_id: str,
-        user_id: str  # parsed from token
+        user_id: str,  # parsed from token
     ):
         """Handle conversation between user and Agent"""
         await websocket.accept()
-        
+
         # Wait briefly for agent startup. If still offline, fail fast with 1013
         # so frontend can retry quickly instead of hanging for a long handshake wait.
         agent = registry.get_agent(agent_id)
@@ -315,10 +324,7 @@ class UserWebSocketHandler:
         if not agent or agent.status == "offline":
             status_msg = f"Agent {agent_id} is offline" if agent else f"Agent {agent_id} not found"
             try:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": status_msg
-                })
+                await websocket.send_json({"type": "error", "message": status_msg})
                 # Explicit 1013 (Try Again Later) helps frontend treat this as startup delay,
                 # avoiding confusing normal-close(1000) reconnect churn.
                 await websocket.close(code=1013, reason="agent_not_ready")
@@ -326,17 +332,19 @@ class UserWebSocketHandler:
                 # Client may have already disconnected (code 1005/1006), just ignore
                 pass
             return
-        
+
         # Get or create session
         session = await gateway_session_cache.async_get_or_create_session(user_id, agent_id)
-        
+
         # Register connection (supports multiple devices per user:agent pair)
         conn_key = f"{user_id}:{agent_id}"
         async with self._kv_lock:
             if conn_key not in self.user_connections:
                 self.user_connections[conn_key] = []
             self.user_connections[conn_key].append(websocket)
-        logger.info(f"[WS] User {user_id} registered for agent {agent_id}, total connections for this pair: {len(self.user_connections[conn_key])}")
+        logger.info(
+            f"[WS] User {user_id} registered for agent {agent_id}, total connections for this pair: {len(self.user_connections[conn_key])}"
+        )
 
         # [Fix P2-A regression] Wrap all post-registration operations in the same try/finally
         # Originally only _user_message_loop was in try; send_json(connected) and history sending were outside the guard:
@@ -355,15 +363,17 @@ class UserWebSocketHandler:
             #   1. Startup delay waiting for agent disk read (may fail on remote deploys)
             #   2. Fragile agent_id→path mapping in agent_sessions.py
             #   3. Session ID mismatch between connected event and current_session event
-            await websocket.send_json({
-                "type": "connected",
-                "agent_id": agent_id,
-                "agent_name": agent.agent_name,
-                "agent_status": agent.status,
-                "session_id": session["session_key"],
-                "gateway_session_key": session["session_key"],
-                "history_count": len(history)
-            })
+            await websocket.send_json(
+                {
+                    "type": "connected",
+                    "agent_id": agent_id,
+                    "agent_name": agent.agent_name,
+                    "agent_status": agent.status,
+                    "session_id": session["session_key"],
+                    "gateway_session_key": session["session_key"],
+                    "history_count": len(history),
+                }
+            )
             if history:
                 for msg in history:
                     payload = dict(msg)
@@ -376,12 +386,16 @@ class UserWebSocketHandler:
                             payload["attachments"] = extra.get("attachments", [])
                         if payload_msg_type == "file_push":
                             payload["files"] = extra.get("files", payload.get("files", []))
-                            payload["message"] = extra.get("message", payload.get("message", payload.get("content", "")))
-                    await websocket.send_json({
-                        "type": "history",
-                        "msg_type": payload_msg_type,
-                        **payload,
-                    })
+                            payload["message"] = extra.get(
+                                "message", payload.get("message", payload.get("content", ""))
+                            )
+                    await websocket.send_json(
+                        {
+                            "type": "history",
+                            "msg_type": payload_msg_type,
+                            **payload,
+                        }
+                    )
 
             logger.info(f"User {user_id} connected to agent {agent_id}")
 
@@ -394,11 +408,16 @@ class UserWebSocketHandler:
             if now - last > 2.0:
                 _last_token_req[agent_id] = now
                 user_handler._last_token_req_time = _last_token_req
-                asyncio.create_task(registry.send_to_agent(agent_id, {
-                    "type": "command",
-                    "user_id": user_id,
-                    "command": "request_token_stats",
-                }))
+                asyncio.create_task(
+                    registry.send_to_agent(
+                        agent_id,
+                        {
+                            "type": "command",
+                            "user_id": user_id,
+                            "command": "request_token_stats",
+                        },
+                    )
+                )
 
             # Enter message loop
             await self._user_message_loop(user_id, agent_id, websocket)
@@ -413,28 +432,22 @@ class UserWebSocketHandler:
                         conns.remove(websocket)
                     if not conns:
                         del self.user_connections[conn_key]
-            logger.info(f"User {user_id} disconnected from agent {agent_id}, remaining connections for this pair: {len(conns) if conns else 0}")
-    
-    async def _user_message_loop(
-        self, 
-        user_id: str, 
-        agent_id: str, 
-        user_ws: WebSocket
-    ):
+            logger.info(
+                f"User {user_id} disconnected from agent {agent_id}, remaining connections for this pair: {len(conns) if conns else 0}"
+            )
+
+    async def _user_message_loop(self, user_id: str, agent_id: str, user_ws: WebSocket):
         """User message loop"""
         try:
             while True:
                 # Receive user message
                 message = await user_ws.receive_json()
                 msg_type = message.get("type")
-                
+
                 if msg_type == "command":
                     command = message.get("command", "")
                     data = message.get("data", {})
-                    logger.info(
-                        f"[AI-WS][command-in] user={user_id} agent={agent_id} "
-                        f"command={command!r}"
-                    )
+                    logger.info(f"[AI-WS][command-in] user={user_id} agent={agent_id} command={command!r}")
                     if not command:
                         continue
 
@@ -451,19 +464,24 @@ class UserWebSocketHandler:
                         )
 
                     # Forward command to agent — never saved to session history
-                    sent = await registry.send_to_agent(agent_id, {
-                        "type": "command",
-                        "user_id": user_id,
-                        "command": command,
-                        "data": data if isinstance(data, dict) else {},
-                    })
+                    sent = await registry.send_to_agent(
+                        agent_id,
+                        {
+                            "type": "command",
+                            "user_id": user_id,
+                            "command": command,
+                            "data": data if isinstance(data, dict) else {},
+                        },
+                    )
                     if not sent:
-                        await user_ws.send_json({
-                            "type": "error",
-                            "message": f"Agent {agent_id} is not connected; command {command!r} not delivered",
-                        })
+                        await user_ws.send_json(
+                            {
+                                "type": "error",
+                                "message": f"Agent {agent_id} is not connected; command {command!r} not delivered",
+                            }
+                        )
                     continue
-                
+
                 if msg_type == "chat":
                     content = message.get("content", "").strip()
                     images = message.get("images", [])
@@ -473,19 +491,18 @@ class UserWebSocketHandler:
                         f"content_head={(content or '')[:120]!r} images={len(images) if isinstance(images, list) else -1} "
                         f"attachments={len(attachments) if isinstance(attachments, list) else -1}"
                     )
-                    has_media = (isinstance(images, list) and len(images) > 0) or (isinstance(attachments, list) and len(attachments) > 0)
+                    has_media = (isinstance(images, list) and len(images) > 0) or (
+                        isinstance(attachments, list) and len(attachments) > 0
+                    )
                     if not content and not has_media:
                         continue
-                    
+
                     # Check if Agent is online
                     agent = registry.get_agent(agent_id)
                     if not agent or agent.status == "offline":
-                        await user_ws.send_json({
-                            "type": "error",
-                            "message": "Agent is offline"
-                        })
+                        await user_ws.send_json({"type": "error", "message": "Agent is offline"})
                         continue
-                    
+
                     # Save user message (preserve structured media metadata for history replay)
                     images = message.get("images", [])
                     attachments = message.get("attachments", [])
@@ -501,7 +518,7 @@ class UserWebSocketHandler:
                             "attachments": attachments if isinstance(attachments, list) else [],
                         },
                     )
-                    
+
                     # Forward to Agent
                     history = await gateway_session_cache.async_get_history(user_id, agent_id, limit=10)
                     message_to_agent = {
@@ -525,7 +542,7 @@ class UserWebSocketHandler:
                         message_to_agent["attachments"] = attachments
                     logger.info(f"Sending to agent {agent_id}: {message_to_agent}")
                     success = await registry.send_to_agent(agent_id, message_to_agent)
-                    
+
                     if success:
                         logger.info(f"Successfully forwarded message from {user_id} to agent {agent_id}")
                         # Increment today's chat count
@@ -540,38 +557,36 @@ class UserWebSocketHandler:
                             "content": content,
                             "images": images if isinstance(images, list) else [],
                             "attachments": attachments if isinstance(attachments, list) else [],
-                            "message_id": f"user_{int(time.time()*1000)}_{user_id[:8]}",
+                            "message_id": f"user_{int(time.time() * 1000)}_{user_id[:8]}",
                             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                         }
                         conns = self.user_connections.get(f"{user_id}:{agent_id}", [])
+
                         async def _bcast(ws):
                             if ws is not user_ws:  # Don't echo back to sender
-                                try:
+                                with contextlib.suppress(Exception):
                                     await ws.send_json(broadcast_msg)
-                                except Exception:
-                                    pass
+
                         if len(conns) > 1:
                             await asyncio.gather(*[_bcast(ws) for ws in conns])
                     else:
                         logger.error(f"Failed to forward message to agent {agent_id} - agent connection not found")
-                        await user_ws.send_json({
-                            "type": "error",
-                            "message": "Agent connection not available"
-                        })
-                    
+                        await user_ws.send_json({"type": "error", "message": "Agent connection not available"})
+
                 elif msg_type == "ping":
                     await user_ws.send_json({"type": "pong"})
-                    
+
                 else:
                     logger.warning(f"Unknown message type from user: {msg_type}")
-                    
+
         except WebSocketDisconnect:
             pass
         except Exception as e:
             logger.error(f"User message loop error: {e}", exc_info=True)
             import traceback
+
             logger.error(traceback.format_exc())
-    
+
     async def forward_to_user(self, user_id: str, agent_id: str, message: dict):
         """Forward Agent message to ALL connected devices for this user:agent pair.
         Uses asyncio.gather for parallel sending so all devices receive simultaneously."""
@@ -582,7 +597,9 @@ class UserWebSocketHandler:
         conns = list(self.user_connections.get(conn_key, []))
 
         if not conns:
-            logger.warning(f"[forward_to_user] No connection found for key='{conn_key}', available keys: {list(self.user_connections.keys())}")
+            logger.warning(
+                f"[forward_to_user] No connection found for key='{conn_key}', available keys: {list(self.user_connections.keys())}"
+            )
             return False
 
         async def _send(ws: WebSocket) -> bool:
@@ -648,7 +665,7 @@ class UserWebSocketHandler:
         # Separate delivered from dead in a single pass
         delivered: set[str] = set()
         dead: dict[str, list[WebSocket]] = {}
-        for (uid, ws), result in zip(sends, results):
+        for (uid, ws), result in zip(sends, results, strict=False):
             if isinstance(result, tuple) and result[1]:
                 delivered.add(uid)
             else:
@@ -678,6 +695,7 @@ user_handler = UserWebSocketHandler()
 # and receives admin_response — no inbound port needed on home.
 # ============================================================
 
+
 class LauncherWebSocketHandler:
     """
     Bidirectional RPC over the WS connection that Launcher establishes.
@@ -687,8 +705,8 @@ class LauncherWebSocketHandler:
     """
 
     def __init__(self):
-        self._connections: Dict[str, WebSocket] = {}   # node_id -> ws
-        self._pending: Dict[str, asyncio.Future] = {}  # req_id  -> future
+        self._connections: dict[str, WebSocket] = {}  # node_id -> ws
+        self._pending: dict[str, asyncio.Future] = {}  # req_id  -> future
 
     def has_connections(self) -> bool:
         return bool(self._connections)
@@ -696,14 +714,14 @@ class LauncherWebSocketHandler:
     def connected_nodes(self) -> list:
         return list(self._connections.keys())
 
-    def get_any_node_id(self) -> Optional[str]:
+    def get_any_node_id(self) -> str | None:
         """Return the first connected node_id, or None."""
         return next(iter(self._connections), None)
 
     async def handle_launcher_connect(self, websocket: WebSocket):
         """Accept a Launcher WS connection and dispatch messages."""
         await websocket.accept()
-        node_id: Optional[str] = None
+        node_id: str | None = None
         try:
             async for raw in websocket.iter_text():
                 try:
@@ -715,7 +733,7 @@ class LauncherWebSocketHandler:
 
                 if msg_type == "launcher_register":
                     node_id = msg.get("node_id", "")
-            # Validate node_secret
+                    # Validate node_secret
                     if not _check_node_secret(msg.get("node_secret", "")):
                         logger.warning(f"Launcher registration rejected: invalid node_secret (node_id={node_id!r})")
                         await websocket.close(code=4003, reason="Unauthorized: invalid node_secret")
@@ -723,10 +741,14 @@ class LauncherWebSocketHandler:
                     if node_id:
                         self._connections[node_id] = websocket
                         logger.info(f"Launcher '{node_id}' WS tunnel connected")
-                        await websocket.send_text(json.dumps({
-                            "type": "launcher_ack",
-                            "node_id": node_id,
-                        }))
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "launcher_ack",
+                                    "node_id": node_id,
+                                }
+                            )
+                        )
 
                 elif msg_type == "keepalive":
                     # Launcher periodic heartbeat — nothing to do
@@ -773,13 +795,17 @@ class LauncherWebSocketHandler:
         self._pending[req_id] = fut
 
         try:
-            await ws.send_text(json.dumps({
-                "type": "admin_request",
-                "req_id": req_id,
-                "method": method,
-                "path": path,
-                "body": body,
-            }))
+            await ws.send_text(
+                json.dumps(
+                    {
+                        "type": "admin_request",
+                        "req_id": req_id,
+                        "method": method,
+                        "path": path,
+                        "body": body,
+                    }
+                )
+            )
             result = await asyncio.wait_for(fut, timeout=timeout)
             status = result.get("status", 200)
             resp_body = result.get("body", {})

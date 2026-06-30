@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 email_assistant — query.py
 
@@ -6,22 +5,23 @@ Called by the Launcher for:
   GET  /api/plugins/email_assistant/data   -> query_data(project_root, params)
   POST /api/plugins/email_assistant/action -> handle_action(project_root, action, data)
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _db_path(project_root: str) -> str:
     return os.path.join(project_root, "data", "plugins", "email_assistant", "emails.db")
 
 
-def _open_db(project_root: str) -> Optional[sqlite3.Connection]:
+def _open_db(project_root: str) -> sqlite3.Connection | None:
     path = _db_path(project_root)
     if not os.path.isfile(path):
         return None
@@ -37,6 +37,7 @@ def _open_db(project_root: str) -> Optional[sqlite3.Connection]:
 # query_data — GET /api/plugins/email_assistant/data
 # ---------------------------------------------------------------------------
 
+
 def query_data(project_root: str, params: dict) -> dict:
     """
     params:
@@ -47,7 +48,7 @@ def query_data(project_root: str, params: dict) -> dict:
         q       : str  (for action=search)
     """
     action = params.get("action", "list")
-    conn   = _open_db(project_root)
+    conn = _open_db(project_root)
 
     if conn is None:
         if action == "list":
@@ -58,8 +59,8 @@ def query_data(project_root: str, params: dict) -> dict:
         if action == "read":
             email_id = int(params.get("id", 0))
             row = conn.execute(
-                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at"
-                " FROM emails WHERE id=?", (email_id,)
+                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at FROM emails WHERE id=?",
+                (email_id,),
             ).fetchone()
             if not row:
                 return {"error": f"Email id={email_id} not found"}
@@ -68,22 +69,22 @@ def query_data(project_root: str, params: dict) -> dict:
         if action == "search":
             q = params.get("q", "")
             limit = int(params.get("limit", 20))
-            like  = f"%{q}%"
+            like = f"%{q}%"
             rows = conn.execute(
                 "SELECT id,msg_id,subject,sender,date_str,received_at FROM emails"
                 " WHERE subject LIKE ? OR sender LIKE ? OR body LIKE ?"
                 " ORDER BY received_at DESC LIMIT ?",
-                (like, like, like, limit)
+                (like, like, like, limit),
             ).fetchall()
             return {"emails": [dict(r) for r in rows], "query": q, "count": len(rows)}
 
         # default: list
-        limit  = int(params.get("limit", 50))
+        limit = int(params.get("limit", 50))
         offset = int(params.get("offset", 0))
         rows = conn.execute(
             "SELECT id,msg_id,subject,sender,date_str,received_at"
             " FROM emails ORDER BY received_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
+            (limit, offset),
         ).fetchall()
         total = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
         return {
@@ -100,6 +101,7 @@ def query_data(project_root: str, params: dict) -> dict:
 # handle_action — POST /api/plugins/email_assistant/action
 # ---------------------------------------------------------------------------
 
+
 def handle_action(project_root: str, action: str, data: dict) -> dict:
     """
     Supported actions:
@@ -114,8 +116,8 @@ def handle_action(project_root: str, action: str, data: dict) -> dict:
         try:
             email_id = int(data.get("id", 0))
             row = conn.execute(
-                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at"
-                " FROM emails WHERE id=?", (email_id,)
+                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at FROM emails WHERE id=?",
+                (email_id,),
             ).fetchone()
             if not row:
                 return {"error": f"Email id={email_id} not found"}
@@ -128,42 +130,43 @@ def handle_action(project_root: str, action: str, data: dict) -> dict:
         if conn is None:
             return {"emails": [], "count": 0}
         try:
-            q     = data.get("query", "")
+            q = data.get("query", "")
             limit = int(data.get("limit", 20))
-            like  = f"%{q}%"
-            rows  = conn.execute(
+            like = f"%{q}%"
+            rows = conn.execute(
                 "SELECT id,msg_id,subject,sender,date_str,received_at FROM emails"
                 " WHERE subject LIKE ? OR sender LIKE ? OR body LIKE ?"
                 " ORDER BY received_at DESC LIMIT ?",
-                (like, like, like, limit)
+                (like, like, like, limit),
             ).fetchall()
             return {"emails": [dict(r) for r in rows], "query": q, "count": len(rows)}
         finally:
             conn.close()
 
     if action == "send_email":
-        to      = data.get("to", "")
+        to = data.get("to", "")
         subject = data.get("subject", "")
-        body    = data.get("body", "")
+        body = data.get("body", "")
 
         if not to:
             return {"error": "Missing 'to' field"}
 
         # Read credentials from config.json
         cfg_path = os.path.join(project_root, "data", "plugins", "email_assistant", "config.json")
-        cfg: Dict[str, Any] = {}
+        cfg: dict[str, Any] = {}
         if os.path.isfile(cfg_path):
             try:
                 import json
-                with open(cfg_path, "r", encoding="utf-8") as f:
+
+                with open(cfg_path, encoding="utf-8") as f:
                     cfg = json.load(f)
             except Exception:
                 pass
 
         smtp_host = cfg.get("smtp_host", "")
         smtp_port = int(cfg.get("smtp_port", 465))
-        username  = cfg.get("username", "")
-        password  = cfg.get("password", "")
+        username = cfg.get("username", "")
+        password = cfg.get("password", "")
 
         if not smtp_host:
             return {"error": "SMTP host not configured"}
@@ -175,8 +178,8 @@ def handle_action(project_root: str, action: str, data: dict) -> dict:
 
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
-        msg["From"]    = username
-        msg["To"]      = to
+        msg["From"] = username
+        msg["To"] = to
 
         try:
             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:

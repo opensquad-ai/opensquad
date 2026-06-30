@@ -1,39 +1,38 @@
-# -*- coding: utf-8 -*-
 """
 Web/AI Chat communication tools for agent to interact with web interface users.
 Uploads files to Gateway via HTTP, then Gateway pushes to frontend via WebSocket.
 """
 
-import os
 import json
-from typing import List, Dict, Any, Union
 import logging
+import os
+from typing import Any
 
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger(__name__)
 
 
-def _list_runtime_agent_ids() -> List[str]:
+def _list_runtime_agent_ids() -> list[str]:
     """List agent_ids under runtime_dir/agents for diagnostics and fallback."""
-    ids: List[str] = []
-    runtime_dir = os.environ.get('OPENSQUAD_RUNTIME_DIR', '') or syscfg.get_workspace()
+    ids: list[str] = []
+    runtime_dir = os.environ.get("OPENSQUAD_RUNTIME_DIR", "") or syscfg.get_workspace()
 
     if not runtime_dir:
         return ids
 
-    agents_dir = os.path.join(runtime_dir, 'agents')
+    agents_dir = os.path.join(runtime_dir, "agents")
     if not os.path.isdir(agents_dir):
         return ids
 
     for name in os.listdir(agents_dir):
-        config_path = os.path.join(agents_dir, name, 'config.json')
+        config_path = os.path.join(agents_dir, name, "config.json")
         if not os.path.exists(config_path):
             continue
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-                aid = cfg.get('agent_id', '')
+                aid = cfg.get("agent_id", "")
                 if aid:
                     ids.append(aid)
         except Exception:
@@ -45,35 +44,35 @@ def _list_runtime_agent_ids() -> List[str]:
 def _get_agent_id() -> str:
     """Get agent ID from config or environment."""
     # Method 1: Environment variable
-    agent_id = os.environ.get('OPENSQUAD_AGENT_ID', '')
+    agent_id = os.environ.get("OPENSQUAD_AGENT_ID", "")
     if agent_id:
         return agent_id
 
     # Method 2: Agent directory from environment
-    agent_dir = os.environ.get('OPENSQUAD_AGENT_DIR', '')
-    if agent_dir and os.path.exists(os.path.join(agent_dir, 'config.json')):
-        with open(os.path.join(agent_dir, 'config.json'), 'r', encoding='utf-8') as f:
+    agent_dir = os.environ.get("OPENSQUAD_AGENT_DIR", "")
+    if agent_dir and os.path.exists(os.path.join(agent_dir, "config.json")):
+        with open(os.path.join(agent_dir, "config.json"), encoding="utf-8") as f:
             cfg = json.load(f)
-            return cfg.get('agent_id', 'unknown')
+            return cfg.get("agent_id", "unknown")
 
     # Method 3: Detect from current working directory
-    cwd = os.getcwd().replace('\\', '/')
-    if 'agents/' in cwd:
-        parts = cwd.split('agents/')
+    cwd = os.getcwd().replace("\\", "/")
+    if "agents/" in cwd:
+        parts = cwd.split("agents/")
         if len(parts) > 1:
-            agent_name = parts[1].split('/')[0]
-            potential_dir = os.path.join(parts[0], 'agents', agent_name)
-            config_path = os.path.join(potential_dir, 'config.json')
+            agent_name = parts[1].split("/")[0]
+            potential_dir = os.path.join(parts[0], "agents", agent_name)
+            config_path = os.path.join(potential_dir, "config.json")
             if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
+                with open(config_path, encoding="utf-8") as f:
                     cfg = json.load(f)
-                    return cfg.get('agent_id', 'unknown')
+                    return cfg.get("agent_id", "unknown")
 
     # Method 4: Check if we're in an agent directory directly
-    if os.path.exists('config.json'):
-        with open('config.json', 'r', encoding='utf-8') as f:
+    if os.path.exists("config.json"):
+        with open("config.json", encoding="utf-8") as f:
             cfg = json.load(f)
-            return cfg.get('agent_id', 'unknown')
+            return cfg.get("agent_id", "unknown")
 
     # Method 5: Runtime scan fallback
     # IMPORTANT: if multiple agent IDs exist, do NOT guess the first one.
@@ -83,21 +82,21 @@ def _get_agent_id() -> str:
     if len(agent_ids) == 1:
         return agent_ids[0]
 
-    return 'unknown'
+    return "unknown"
 
 
 def _get_gateway_url() -> str:
     """Get Gateway HTTP URL from system config."""
     try:
-        config_path = os.environ.get('OPENSQUAD_SYSTEM_CONFIG', '') or syscfg.workspace_config_path()
-        
+        config_path = os.environ.get("OPENSQUAD_SYSTEM_CONFIG", "") or syscfg.workspace_config_path()
+
         if config_path and os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-                hosts = cfg.get('hosts', {})
-                ports = cfg.get('ports', {})
-                host = hosts.get('gateway', '127.0.0.1')
-                port = ports.get('gateway', 9555)
+                hosts = cfg.get("hosts", {})
+                ports = cfg.get("ports", {})
+                host = hosts.get("gateway", "127.0.0.1")
+                port = ports.get("gateway", 9555)
                 return f"http://{host}:{port}"
     except Exception as e:
         logger.debug(f"[web] Could not load system config: {e}")
@@ -105,24 +104,20 @@ def _get_gateway_url() -> str:
     return "http://127.0.0.1:9555"
 
 
-def send_file(
-    file_paths: Union[str, List[str]],
-    message: str = "",
-    agent_id: str = ""
-) -> Dict[str, Any]:
+def send_file(file_paths: str | list[str], message: str = "", agent_id: str = "") -> dict[str, Any]:
     """
     Upload one or more files to the AI Web chat panel.
     Files are uploaded to Gateway, which then displays them in the chat.
     Supports images (displayed inline), videos, audio, and any other file type.
-    
+
     Args:
         file_paths: List of absolute file paths or single path string. E.g., ["C:/data/chart.png"] or "C:/data/chart.png"
         message: Optional accompanying text message
         agent_id: Optional explicit target agent_id. Strongly recommended in multi-agent runtime.
-    
+
     Returns:
         Dict with status and message
-    
+
     Example:
         web.send_file(file_paths=["C:/workspace/chart.png"], message="分析结果")
         web.send_file(file_paths="C:/workspace/chart.png")
@@ -131,15 +126,12 @@ def send_file(
     if isinstance(file_paths, str):
         try:
             parsed = json.loads(file_paths)
-            if isinstance(parsed, list):
-                file_paths = parsed
-            else:
-                file_paths = [file_paths]
+            file_paths = parsed if isinstance(parsed, list) else [file_paths]
         except json.JSONDecodeError:
             file_paths = [file_paths]
     elif not isinstance(file_paths, list):
         file_paths = [str(file_paths)]
-    
+
     if not file_paths:
         return {"status": "error", "message": "No file paths provided."}
 
@@ -165,10 +157,10 @@ def send_file(
             "normalized_paths": normalized_paths,
         }
 
-    resolved_agent_id = (agent_id or '').strip() or _get_agent_id()
+    resolved_agent_id = (agent_id or "").strip() or _get_agent_id()
     gateway_url = _get_gateway_url()
 
-    if resolved_agent_id in ('', 'unknown'):
+    if resolved_agent_id in ("", "unknown"):
         agent_ids = _list_runtime_agent_ids()
         return {
             "status": "error",
@@ -176,9 +168,10 @@ def send_file(
             "hint": "Pass explicit agent_id in send_file_to_web(..., agent_id=...) or set OPENSQUAD_AGENT_ID.",
             "available_agent_ids": agent_ids,
         }
-    
+
     # Upload files via HTTP to Gateway
     from contextlib import ExitStack
+
     with ExitStack() as stack:
         try:
             import requests
@@ -192,13 +185,13 @@ def send_file(
                 ext = os.path.splitext(filename)[1].lower()
 
                 # Detect content type
-                if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                if ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]:
                     content_type = f"image/{ext[1:]}"
-                elif ext in ['.svg']:
+                elif ext in [".svg"]:
                     content_type = "image/svg+xml"
-                elif ext in ['.mp4', '.webm', '.mov', '.avi', '.mkv']:
+                elif ext in [".mp4", ".webm", ".mov", ".avi", ".mkv"]:
                     content_type = f"video/{ext[1:]}"
-                elif ext in ['.mp3', '.wav', '.ogg', '.m4a', '.webm']:
+                elif ext in [".mp3", ".wav", ".ogg", ".m4a", ".webm"]:
                     content_type = f"audio/{ext[1:]}"
                 else:
                     content_type = "application/octet-stream"
@@ -261,30 +254,27 @@ def send_file(
         # ExitStack.__exit__ closes all opened file handles even on exception paths
 
 
-def send_message(
-    content: str,
-    agent_id: str = ""
-) -> Dict[str, Any]:
+def send_message(content: str, agent_id: str = "") -> dict[str, Any]:
     """
     Send a text message to the AI Web chat panel.
-    
+
     Args:
         content: Message text to send
         agent_id: Optional explicit target agent_id. Strongly recommended in multi-agent runtime.
-    
+
     Returns:
         Dict with status and message
-    
+
     Example:
         web.send_message(content="分析完成！")
     """
     try:
         import requests
-        
-        resolved_agent_id = (agent_id or '').strip() or _get_agent_id()
+
+        resolved_agent_id = (agent_id or "").strip() or _get_agent_id()
         gateway_url = _get_gateway_url()
 
-        if resolved_agent_id in ('', 'unknown'):
+        if resolved_agent_id in ("", "unknown"):
             agent_ids = _list_runtime_agent_ids()
             return {
                 "status": "error",
@@ -329,7 +319,7 @@ def send_message(
             "agent_id": resolved_agent_id,
             "gateway_response": result,
         }
-        
+
     except requests.exceptions.ConnectionError:
         return {
             "status": "error",

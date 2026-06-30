@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Time-decay manager
 - Applies exponential decay to the global co-occurrence matrix at regular intervals
@@ -64,5 +63,6 @@ class DecayManager:
             "last_decay_doc": self.last_decay_doc,
             "total_decay_steps": self.total_decay_steps,
             "effective_retention": (1 - self.decay_rate) ** self.total_decay_steps
-                if self.total_decay_steps > 0 else 1.0
+            if self.total_decay_steps > 0
+            else 1.0,
         }

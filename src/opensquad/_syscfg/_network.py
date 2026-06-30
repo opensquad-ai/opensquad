@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg/_network.py -- Network config (ports, hosts, URLs, auth).
 
 Extracted from system_config.py.
 """
+
 from __future__ import annotations
 
 import os

@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 Multi-hop inference search module
 - find_top_inference_paths: single-word 2-hop inference (backward compatible)
 - find_group_inference_paths: multi-word joint 2-hop inference (backward compatible)
 - beam_search_inference: N-hop adaptive Beam Search inference (new)
 """
+
 import numpy as np
-from heapq import nlargest
 
 
 def _merge_substring_targets(results, top_n):
@@ -29,13 +28,13 @@ def _merge_substring_targets(results, top_n):
         return results
 
     # Sort by target word length descending, then by confidence descending
-    results.sort(key=lambda x: (len(x['target']), x['confidence']), reverse=True)
+    results.sort(key=lambda x: (len(x["target"]), x["confidence"]), reverse=True)
 
-    merged = []       # kept results
-    merged_words = [] # corresponding target words
+    merged = []  # kept results
+    merged_words = []  # corresponding target words
 
     for item in results:
-        word = item['target']
+        word = item["target"]
         # Check if this word is a substring of an already-kept longer word
         merged_into = None
         for i, kept_word in enumerate(merged_words):
@@ -45,21 +44,21 @@ def _merge_substring_targets(results, top_n):
 
         if merged_into is not None:
             # Merge score into the longer word
-            merged[merged_into]['confidence'] += item['confidence']
-            merged[merged_into]['confidence'] = round(merged[merged_into]['confidence'], 6)
+            merged[merged_into]["confidence"] += item["confidence"]
+            merged[merged_into]["confidence"] = round(merged[merged_into]["confidence"], 6)
             # Merge path explanations
-            merged[merged_into]['why'].extend(item.get('why', []))
+            merged[merged_into]["why"].extend(item.get("why", []))
             # Re-sort and keep only top 3
-            sort_key = 'score'
-            merged[merged_into]['why'] = sorted(
-                merged[merged_into]['why'], key=lambda x: x.get(sort_key, 0), reverse=True
+            sort_key = "score"
+            merged[merged_into]["why"] = sorted(
+                merged[merged_into]["why"], key=lambda x: x.get(sort_key, 0), reverse=True
             )[:3]
         else:
             merged.append(item)
             merged_words.append(word)
 
     # Re-sort by merged confidence
-    merged.sort(key=lambda x: x['confidence'], reverse=True)
+    merged.sort(key=lambda x: x["confidence"], reverse=True)
     return merged[:top_n]
 
 
@@ -93,18 +92,20 @@ def find_top_inference_paths(prob_matrix, vocab_dict, start_word, top_n=5):
         possible_c_indices = np.where(row_b > 0)[0]
 
         for idx_c in possible_c_indices:
-            if idx_c == idx_a or idx_c == idx_b:
+            if idx_c in (idx_a, idx_b):
                 continue
             p_bc = row_b[idx_c]
             total_prob = p_ab * p_bc
 
-            paths.append({
-                "path": f"{start_word} -> {idx_to_word[idx_b]} -> {idx_to_word[idx_c]}",
-                "prob": total_prob,
-                "target": idx_to_word[idx_c]
-            })
+            paths.append(
+                {
+                    "path": f"{start_word} -> {idx_to_word[idx_b]} -> {idx_to_word[idx_c]}",
+                    "prob": total_prob,
+                    "target": idx_to_word[idx_c],
+                }
+            )
 
-    sorted_paths = sorted(paths, key=lambda x: x['prob'], reverse=True)
+    sorted_paths = sorted(paths, key=lambda x: x["prob"], reverse=True)
     return sorted_paths[:top_n]
 
 
@@ -161,30 +162,33 @@ def find_group_inference_paths(prob_matrix, vocab_dict, input_words, top_n=5):
                     results[idx_target] = {"total_score": 0, "explanations": []}
 
                 results[idx_target]["total_score"] += path_score
-                results[idx_target]["explanations"].append({
-                    "from": start_word,
-                    "bridge": mid_word,
-                    "score": round(path_score, 6)
-                })
+                results[idx_target]["explanations"].append(
+                    {"from": start_word, "bridge": mid_word, "score": round(path_score, 6)}
+                )
 
     final_output = []
     for idx_target, data in results.items():
         sorted_expl = sorted(data["explanations"], key=lambda x: x["score"], reverse=True)
-        final_output.append({
-            "target": idx_to_word[idx_target],
-            "confidence": round(data["total_score"], 6),
-            "why": sorted_expl[:3]
-        })
+        final_output.append(
+            {"target": idx_to_word[idx_target], "confidence": round(data["total_score"], 6), "why": sorted_expl[:3]}
+        )
 
     final_output = sorted(final_output, key=lambda x: x["confidence"], reverse=True)
-    return _merge_substring_targets(final_output[:top_n * 2], top_n)
+    return _merge_substring_targets(final_output[: top_n * 2], top_n)
 
 
-def beam_search_inference(prob_matrix, vocab_dict, input_words,
-                          max_depth=3, beam_width=20,
-                          min_prob_threshold=0.01, top_n=10,
-                          hop_decay=0.5, diversity_penalty=0.6,
-                          hub_penalty_percentile=95):
+def beam_search_inference(
+    prob_matrix,
+    vocab_dict,
+    input_words,
+    max_depth=3,
+    beam_width=20,
+    min_prob_threshold=0.01,
+    top_n=10,
+    hop_decay=0.5,
+    diversity_penalty=0.6,
+    hub_penalty_percentile=95,
+):
     """
     N-hop adaptive Beam Search inference (v3.1 - multi-source reachability + hub penalty).
 
@@ -236,7 +240,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
 
     # --- Pre-computation 2: node degree & hub node identification ---
     # Compute out-degree (non-zero connection count) for each node
-    node_degrees = np.diff(prob_matrix.indptr) if hasattr(prob_matrix, 'indptr') else None
+    node_degrees = np.diff(prob_matrix.indptr) if hasattr(prob_matrix, "indptr") else None
     hub_threshold = None
     hub_nodes = set()
     if node_degrees is not None and len(node_degrees) > 0:
@@ -259,7 +263,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
         for depth in range(max_depth):
             next_paths = []
             # Decay factor for this layer
-            layer_decay = hop_decay ** depth
+            layer_decay = hop_decay**depth
 
             for cum_prob, path_words, current_idx, first_bridge in active_paths:
                 # Get all successors of the current node
@@ -289,7 +293,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
                     # Record the first-hop bridge word
                     new_bridge = first_bridge if first_bridge is not None else next_word
 
-                    new_path = path_words + [next_word]
+                    new_path = [*path_words, next_word]
                     next_paths.append((new_cum_prob, new_path, idx_next, new_bridge))
 
                     # Score only at the final depth layer
@@ -299,19 +303,21 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
                                 "total_score": 0,
                                 "paths": [],
                                 "bridges": set(),
-                                "source_words": set()
+                                "source_words": set(),
                             }
 
                         target_scores[idx_next]["total_score"] += new_cum_prob
                         target_scores[idx_next]["bridges"].add(new_bridge)
                         target_scores[idx_next]["source_words"].add(start_word)
-                        target_scores[idx_next]["paths"].append({
-                            "from": start_word,
-                            "chain": " -> ".join(new_path),
-                            "depth": depth + 1,
-                            "score": round(new_cum_prob, 6),
-                            "bridge": new_bridge
-                        })
+                        target_scores[idx_next]["paths"].append(
+                            {
+                                "from": start_word,
+                                "chain": " -> ".join(new_path),
+                                "depth": depth + 1,
+                                "score": round(new_cum_prob, 6),
+                                "bridge": new_bridge,
+                            }
+                        )
 
             if not next_paths:
                 break
@@ -356,7 +362,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
         # === Coverage weighting ===
         # Full coverage (coverage=1.0) gets maximum score;
         # partial direct-neighbor coverage is down-weighted proportionally
-        coverage_weight = coverage ** 0.5  # square root prevents too-heavy partial-coverage penalty
+        coverage_weight = coverage**0.5  # square root prevents too-heavy partial-coverage penalty
         score *= coverage_weight
 
         # === Multi-source path reward ===
@@ -364,7 +370,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
         if n_sources >= n_inputs and n_inputs >= 2:
             score *= 1.5  # all-source reachable: +50%
         elif n_sources > 1:
-            score *= (1.0 + 0.2 * (n_sources - 1))  # partial multi-source: +20% per source
+            score *= 1.0 + 0.2 * (n_sources - 1)  # partial multi-source: +20% per source
 
         # === Bridge diversity penalty ===
         n_bridges = len(data["bridges"])
@@ -374,11 +380,7 @@ def beam_search_inference(prob_matrix, vocab_dict, input_words,
         sorted_paths = sorted(data["paths"], key=lambda x: x["score"], reverse=True)
         clean_paths = [{k: v for k, v in p.items() if k != "bridge"} for p in sorted_paths[:3]]
 
-        final_output.append({
-            "target": target_word,
-            "confidence": round(score, 6),
-            "why": clean_paths
-        })
+        final_output.append({"target": target_word, "confidence": round(score, 6), "why": clean_paths})
 
     final_output.sort(key=lambda x: x["confidence"], reverse=True)
-    return _merge_substring_targets(final_output[:top_n * 2], top_n)
+    return _merge_substring_targets(final_output[: top_n * 2], top_n)

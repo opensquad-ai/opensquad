@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for ModelConfig dataclass (P2-1).
 
 Validates:
@@ -8,6 +7,7 @@ Validates:
 4. to_dict() serializes correctly
 5. ChatAPI/ClaudeAPI/GoogleAPI accept ModelConfig
 """
+
 import pytest
 
 from opensquad.model_config import ModelConfig
@@ -141,6 +141,7 @@ class TestModelConfigWithChatAPI:
     )
     def test_chat_api_with_config(self):
         from opensquad.chat_api import ChatAPI
+
         cfg = ModelConfig(api_key="sk-test", model="gpt-4", prompt="hello")
         api = ChatAPI(config=cfg)
         assert api.api_key == "sk-test"
@@ -154,6 +155,7 @@ class TestModelConfigWithChatAPI:
     def test_chat_api_backward_compat(self):
         """Legacy kwargs should still work."""
         from opensquad.chat_api import ChatAPI
+
         api = ChatAPI(api_key="sk-test", model="gpt-4", prompt="hello")
         assert api.api_key == "sk-test"
         assert api.model == "gpt-4"
@@ -169,6 +171,7 @@ class TestModelConfigWithClaudeAPI:
     )
     def test_claude_api_with_config(self):
         from opensquad.claude_api import ClaudeAPI
+
         cfg = ModelConfig(api_key="sk-test", model="claude-3", prompt="hello")
         api = ClaudeAPI(config=cfg)
         assert api.api_key == "sk-test"
@@ -181,6 +184,7 @@ class TestModelConfigWithGoogleAPI:
 
     def test_google_api_with_config(self):
         from opensquad.google_api import GoogleAPI
+
         cfg = ModelConfig(api_key="sk-test", model="gemini-pro", prompt="hello")
         api = GoogleAPI(config=cfg)
         assert api.api_key == "sk-test"

@@ -1,22 +1,30 @@
-# -*- coding: utf-8 -*-
 """Market Routes (Plugins / Skills / Roles / Collabs / PR Review).
 Extracted from routes.py."""
+
 from __future__ import annotations
 
-import os, json, re, time, shutil, hashlib, base64, logging, traceback, zipfile, io
-from typing import Optional, Any, List
-from fastapi import BackgroundTasks, APIRouter, Depends, HTTPException, Query, Body, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+import ast
+import asyncio
+import base64
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import time
+import zipfile
+from datetime import datetime, timezone
+
 import httpx
-from opensquad.system_config import syscfg
-from datetime import timezone, datetime
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
 from app.api import get_current_user_dep
 from app.models import User
-from ..registry import registry
-from ..websocket import launcher_handler
-from .. import model_preset_service
-from ..routes._common import normalize_session_message, normalize_session_payload
+from opensquad.system_config import syscfg
+
 from ..routes._admin import _proxy_get
 
 logger = logging.getLogger(__name__)
@@ -31,15 +39,15 @@ market_router = APIRouter()  # prefix comes from main router include
 
 # GitHub registry URLs
 PLUGIN_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-plugins/main/index.json"
-SKILL_REGISTRY_URL  = "https://raw.githubusercontent.com/opensquad-ai/opensquad-skills/main/index.json"
-ROLE_REGISTRY_URL   = "https://raw.githubusercontent.com/opensquad-ai/opensquad-roles/main/index.json"
+SKILL_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-skills/main/index.json"
+ROLE_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-roles/main/index.json"
 COLLAB_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-collabs/main/index.json"
 
 # Local install/storage directories — 使用 builtin root（项目安装目录），与 launcher 读取目录保持一致
 _BUILTIN_ROOT = syscfg.get_builtin_root()
-PLUGINS_DIR      = os.path.join(_BUILTIN_ROOT, "plugins")
-_SKILLS_DIR      = os.path.join(_BUILTIN_ROOT, "skills")
-_ROLE_CARDS_DIR  = os.path.join(_BUILTIN_ROOT, "role_cards")
+PLUGINS_DIR = os.path.join(_BUILTIN_ROOT, "plugins")
+_SKILLS_DIR = os.path.join(_BUILTIN_ROOT, "skills")
+_ROLE_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "role_cards")
 _COLLAB_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "collab_cards")
 _MODEL_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "model_cards")
 
@@ -51,7 +59,7 @@ _LIKED_ITEMS_PATH = os.path.join(_REPO_ROOT, "data", "liked_items.json")
 def _read_local_liked() -> dict:
     """Read local liked_items.json; return empty dict on failure."""
     try:
-        with open(_LIKED_ITEMS_PATH, "r", encoding="utf-8") as f:
+        with open(_LIKED_ITEMS_PATH, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -97,8 +105,8 @@ async def market_serve_icon(
 # GitHub Contents API — likes.json for each repo (internal key is always "plugins")
 _LIKES_REPOS = {
     "plugins": "opensquad-ai/opensquad-plugins",
-    "skills":  "opensquad-ai/opensquad-skills",
-    "roles":   "opensquad-ai/opensquad-roles",
+    "skills": "opensquad-ai/opensquad-skills",
+    "roles": "opensquad-ai/opensquad-roles",
     "collabs": "opensquad-ai/opensquad-collabs",
 }
 
@@ -276,7 +284,8 @@ async def market_list_plugins(
         if search:
             q = search.lower()
             all_plugins = [
-                p for p in all_plugins
+                p
+                for p in all_plugins
                 if q in p.get("name", "").lower()
                 or q in p.get("description", "").lower()
                 or q in p.get("id", "").lower()
@@ -291,7 +300,7 @@ async def market_list_plugins(
             all_plugins = [p for p in all_plugins if p.get("category") == plugin_category]
 
         # 3. Sort
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             all_plugins.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -313,11 +322,12 @@ async def market_list_plugins(
             "page": page,
             "size": size,
             "pages": (total + size - 1) // size,
-            "plugins": paged_plugins
+            "plugins": paged_plugins,
         }
     except Exception as e:
         logger.error(f"Failed to fetch registry from GitHub: {e}")
         raise HTTPException(status_code=503, detail=f"Plugin registry unavailable: {e}")
+
 
 @market_router.get("/market/installed")
 async def market_list_installed(
@@ -338,15 +348,13 @@ async def market_list_installed(
                 continue
             plugin_id = p.get("id") or p.get("name")
             if plugin_id:
-                result[plugin_id] = {
-                    "version": p.get("version", "0.0.0"),
-                    "enabled": p.get("enabled", True)
-                }
+                result[plugin_id] = {"version": p.get("version", "0.0.0"), "enabled": p.get("enabled", True)}
         return {"installed": result}
     except Exception as e:
         logger.error(f"Failed to get installed plugins: {e}")
         # Return empty map on error to prevent frontend crash
         return {"installed": {}}
+
 
 @market_router.get("/market/plugins/{plugin_id}")
 async def market_get_plugin(
@@ -382,28 +390,32 @@ async def market_like_plugin(
 
 from app.ai_web.builder import builder
 
+
 @market_router.get("/market/build/env")
 async def market_check_build_env():
     """Check if Node/NPM are ready for local builds."""
     return await builder.check_env()
+
 
 @market_router.post("/market/plugins/{plugin_id}/build")
 async def market_trigger_plugin_build(plugin_id: str):
     """Trigger a local build for a plugin's UI."""
     return builder.start_build(plugin_id)
 
+
 @market_router.get("/market/plugins/{plugin_id}/build/log")
 async def market_get_plugin_build_log(plugin_id: str):
     """Return the current build log for a plugin."""
     log_path = builder.get_log_path(plugin_id)
     status = builder.active_builds.get(plugin_id, "idle")
-    
+
     content = ""
     if os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
+        with open(log_path, encoding="utf-8") as f:
             content = f.read()
-            
+
     return {"status": status, "log": content}
+
 
 @market_router.post("/market/plugins/{plugin_id}/install")
 async def market_install_plugin(
@@ -456,11 +468,11 @@ async def market_install_plugin(
     existing_manifest = os.path.join(plugin_dest, "plugin.json")
     existing_plugin_py_path = os.path.join(plugin_dest, "plugin.py")
     # Preserve the real plugin.py content if it already exists on disk.
-    existing_plugin_py: Optional[bytes] = None
+    existing_plugin_py: bytes | None = None
     existing_category = None
     if os.path.isfile(existing_manifest):
         try:
-            with open(existing_manifest, "r", encoding="utf-8") as f:
+            with open(existing_manifest, encoding="utf-8") as f:
                 existing_data = json.load(f)
             existing_enabled = existing_data.get("enabled", True)
             existing_version = existing_data.get("version")
@@ -523,7 +535,7 @@ async def market_install_plugin(
     # 5b. Restore preserved 'enabled' state and 'category' into the extracted plugin.json
     if os.path.isfile(existing_manifest):
         try:
-            with open(existing_manifest, "r", encoding="utf-8") as f:
+            with open(existing_manifest, encoding="utf-8") as f:
                 new_manifest_data = json.load(f)
             new_manifest_data["enabled"] = existing_enabled
             # Restore category only if the new zip doesn't carry one
@@ -554,7 +566,9 @@ async def market_install_plugin(
             pass
 
     action = "updated" if existing_version and existing_version != registry_version else "installed"
-    logger.info(f"Plugin '{plugin_id}' {action} (v{existing_version} -> v{registry_version}), {file_count} files, {zip_size_kb:.1f} KB")
+    logger.info(
+        f"Plugin '{plugin_id}' {action} (v{existing_version} -> v{registry_version}), {file_count} files, {zip_size_kb:.1f} KB"
+    )
 
     return {
         "ok": True,
@@ -568,7 +582,6 @@ async def market_install_plugin(
     }
 
 
-
 @market_router.post("/market/plugins/upload")
 async def market_upload_plugin(
     body: dict = Body(...),
@@ -576,8 +589,7 @@ async def market_upload_plugin(
 ):
     """Plugin submission stub (registry is a static GitHub file; use PR workflow)."""
     raise HTTPException(
-        status_code=501,
-        detail="Direct upload not supported. Submit a Pull Request to the GitHub registry instead."
+        status_code=501, detail="Direct upload not supported. Submit a Pull Request to the GitHub registry instead."
     )
 
 
@@ -591,7 +603,7 @@ async def market_uninstall_plugin(
     Triggers hot-reload after removal.
     """
     # Sanitize plugin_id: must be a simple directory name (no path traversal)
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', plugin_id):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", plugin_id):
         raise HTTPException(status_code=400, detail="Invalid plugin id")
 
     plugin_dest = os.path.join(PLUGINS_DIR, plugin_id)
@@ -603,9 +615,11 @@ async def market_uninstall_plugin(
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' is not installed")
 
     try:
+
         def _remove_readonly(func, path, exc_info):
             """Windows: files inside .git directory are often read-only; chmod then retry"""
             import stat
+
             os.chmod(path, stat.S_IWRITE)
             func(path)
 
@@ -627,20 +641,24 @@ async def market_uninstall_plugin(
 
 class GitInstallRequest(BaseModel):
     """Git plugin install request"""
+
     git_url: str
-    plugin_id: Optional[str] = None
+    plugin_id: str | None = None
     mode: str = "smart"  # "smart" | "build"
+
 
 # ---- Background Git install job state storage ----
 # key: job_id, value: {"status": "pending|running|done|failed", "plugin_id", "started_at", ...}
 _git_install_jobs: dict = {}
 
-def _resolve_plugin_id(git_url: str, plugin_id: Optional[str]) -> str:
+
+def _resolve_plugin_id(git_url: str, plugin_id: str | None) -> str:
     """Infer plugin_id from git_url, or use the provided value directly"""
     if plugin_id:
         return plugin_id
     # e.g., https://github.com/user/opensquad-plugin-websearch -> websearch
-    return git_url.split('/')[-1].replace('.git', '').replace('opensquad-plugin-', '')
+    return git_url.split("/")[-1].replace(".git", "").replace("opensquad-plugin-", "")
+
 
 async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str = "smart") -> None:
     """Execute git clone/pull in a thread pool, build if needed based on mode, update job status.
@@ -660,10 +678,7 @@ async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str =
         else:
             cmd = ["git", "clone", git_url, target_dir]
             cwd = None
-        result = _subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace"
-        )
+        result = _subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         return result.returncode, result.stdout, result.stderr
 
     try:
@@ -690,47 +705,57 @@ async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str =
 
         if not os.path.exists(ui_dir):
             # Pure Python plugin, no build needed, complete immediately
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": False,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": False,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (no UI dir)")
             return
 
         # Has UI directory: decide whether to build based on mode
         if mode == "smart" and os.path.exists(dist_index):
             # smart mode and pre-built file exists, complete immediately
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": True,
-                "dist_found": True,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": True,
+                    "dist_found": True,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (smart mode, dist found)")
             return
 
         # Phase 3: Build required (build mode, or smart mode but no pre-built file)
-        _git_install_jobs[job_id].update({
-            "status": "building",
-            "build_log_path": builder.get_log_path(p_id),
-        })
+        _git_install_jobs[job_id].update(
+            {
+                "status": "building",
+                "build_log_path": builder.get_log_path(p_id),
+            }
+        )
         logger.info(f"Git job {job_id} starting build for {p_id} (mode={mode})")
         await builder.run_build_task(p_id)
 
         build_result = builder.active_builds.get(p_id, "error")
         if build_result == "success":
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": True,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": True,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (build success)")
         else:
-            _git_install_jobs[job_id].update({
-                "status": "failed",
-                "error": f"Build failed: {build_result}",
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "failed",
+                    "error": f"Build failed: {build_result}",
+                }
+            )
             logger.error(f"Git job {job_id} build failed for {p_id}: {build_result}")
 
     except Exception as e:
@@ -752,10 +777,11 @@ async def market_install_plugin_from_git(
 
     p_id = _resolve_plugin_id(body.git_url, body.plugin_id)
 
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', p_id):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", p_id):
         raise HTTPException(status_code=400, detail="Invalid plugin id")
 
     import uuid
+
     job_id = uuid.uuid4().hex[:12]
     _git_install_jobs[job_id] = {
         "job_id": job_id,
@@ -795,6 +821,7 @@ async def get_git_install_job(
 # Market Routes — Skills
 # ============================================================
 
+
 @market_router.get("/market/skills")
 async def market_list_skills(
     page: int = Query(1, ge=1),
@@ -822,12 +849,18 @@ async def market_list_skills(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -835,7 +868,7 @@ async def market_list_skills(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -896,7 +929,7 @@ async def market_install_skill(
             prefix = members[0] if len(members) > 0 and members[0].endswith("/") else ""
             os.makedirs(dest, exist_ok=True)
             for member in members:
-                rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+                rel = member[len(prefix) :] if prefix and member.startswith(prefix) else member
                 if not rel:
                     continue
                 target = os.path.join(dest, rel)
@@ -910,7 +943,9 @@ async def market_install_skill(
                         installed_files.append(rel)
                         total_size += len(data)
         total_size_kb = total_size / 1024
-        logger.info(f"[Install] Skill '{item_id}': {zip_size_kb:.1f} KB zip → {len(installed_files)} files ({total_size_kb:.1f} KB) → {dest}")
+        logger.info(
+            f"[Install] Skill '{item_id}': {zip_size_kb:.1f} KB zip → {len(installed_files)} files ({total_size_kb:.1f} KB) → {dest}"
+        )
         return {
             "ok": True,
             "message": f"Skill '{item_id}' installed: {len(installed_files)} files ({total_size_kb:.1f} KB)",
@@ -927,6 +962,7 @@ async def market_install_skill(
 # ============================================================
 # Market Routes — Roles
 # ============================================================
+
 
 @market_router.get("/market/roles")
 async def market_list_roles(
@@ -955,12 +991,18 @@ async def market_list_roles(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -968,7 +1010,7 @@ async def market_list_roles(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -1050,7 +1092,9 @@ async def market_install_role(
                     logger.warning(f"Role icon download failed for '{item_id}': {icon_err}")
 
         total_size_kb = total_size / 1024
-        logger.info(f"[Install] Role '{item_id}': {len(installed_files)} md files ({total_size_kb:.1f} KB) → {_ROLE_CARDS_DIR}")
+        logger.info(
+            f"[Install] Role '{item_id}': {len(installed_files)} md files ({total_size_kb:.1f} KB) → {_ROLE_CARDS_DIR}"
+        )
         return {
             "ok": True,
             "message": f"Role '{item_id}' installed: {len(installed_files)} file(s) ({total_size_kb:.1f} KB)",
@@ -1070,6 +1114,7 @@ async def market_install_role(
 # ============================================================
 # Market Routes — Collabs
 # ============================================================
+
 
 @market_router.get("/market/collabs")
 async def market_list_collabs(
@@ -1098,12 +1143,18 @@ async def market_list_collabs(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -1111,7 +1162,7 @@ async def market_list_collabs(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -1207,13 +1258,13 @@ REVIEW_TOKEN = os.environ.get("OPENSQUAD_REVIEW_TOKEN", "")
 
 # Dangerous builtins / modules that should not appear in plugin code
 _SECURITY_PATTERNS = [
-    r'\bsubprocess\b',
-    r'\beval\s*\(',
-    r'\bexec\s*\(',
-    r'\b__import__\s*\(',
-    r'\bos\.system\s*\(',
-    r'\bos\.popen\s*\(',
-    r'\bshutil\.rmtree\s*\(',
+    r"\bsubprocess\b",
+    r"\beval\s*\(",
+    r"\bexec\s*\(",
+    r"\b__import__\s*\(",
+    r"\bos\.system\s*\(",
+    r"\bos\.popen\s*\(",
+    r"\bshutil\.rmtree\s*\(",
     r'\bopen\s*\(.*["\']w["\']',
 ]
 
@@ -1221,12 +1272,12 @@ _SECURITY_PATTERNS = [
 class PRReviewRequest(BaseModel):
     admin_key: str
     pr_number: int
-    repo: str               # "owner/repo"
+    repo: str  # "owner/repo"
     plugin_id: str
-    plugin_py: str          # file content (plain text)
-    plugin_json: str        # file content (plain text)
-    readme: Optional[str] = None
-    github_token: Optional[str] = None   # for posting PR comment
+    plugin_py: str  # file content (plain text)
+    plugin_json: str  # file content (plain text)
+    readme: str | None = None
+    github_token: str | None = None  # for posting PR comment
 
 
 def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
@@ -1260,14 +1311,17 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
 
     # Check @register decorator present
     has_register = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         and any(
             (isinstance(d, ast.Name) and d.id == "register")
             or (isinstance(d, ast.Attribute) and d.attr == "register")
-            or (isinstance(d, ast.Call) and (
-                (isinstance(d.func, ast.Name) and d.func.id == "register")
-                or (isinstance(d.func, ast.Attribute) and d.func.attr == "register")
-            ))
+            or (
+                isinstance(d, ast.Call)
+                and (
+                    (isinstance(d.func, ast.Name) and d.func.id == "register")
+                    or (isinstance(d.func, ast.Attribute) and d.func.attr == "register")
+                )
+            )
             for d in node.decorator_list
         )
         for node in ast.walk(tree)
@@ -1279,8 +1333,7 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
     has_plugin_class = any(
         isinstance(node, ast.ClassDef)
         and any(
-            (isinstance(b, ast.Name) and b.id == "Plugin")
-            or (isinstance(b, ast.Attribute) and b.attr == "Plugin")
+            (isinstance(b, ast.Name) and b.id == "Plugin") or (isinstance(b, ast.Attribute) and b.attr == "Plugin")
             for b in node.bases
         )
         for node in ast.walk(tree)
@@ -1296,14 +1349,14 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
     return issues
 
 
-async def _ai_review_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str, readme: Optional[str]) -> str:
+async def _ai_review_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str, readme: str | None) -> str:
     """
     Call DeepSeek via OpenAI-compatible API to review the plugin.
     Returns the AI review text.
     """
     card_path = os.path.join(_MODEL_CARDS_DIR, "deepseek_chat.json")
     try:
-        with open(card_path, "r", encoding="utf-8") as f:
+        with open(card_path, encoding="utf-8") as f:
             card = json.load(f)
     except Exception as e:
         return f"[AI review skipped: unable to load model config — {e}]"
@@ -1343,6 +1396,7 @@ Finally provide an overall verdict: **PASS** (recommend merge), **WARN** (recomm
 
     try:
         import openai
+
         client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         response = await client.chat.completions.create(
             model=model_name,
@@ -1392,9 +1446,7 @@ async def market_review_pr(body: PRReviewRequest):
     ai_review = await _ai_review_plugin(body.plugin_id, body.plugin_py, body.plugin_json, body.readme)
 
     # 4. Determine verdict
-    if issues:
-        verdict = "fail"
-    elif "FAIL" in ai_review.upper():
+    if issues or "FAIL" in ai_review.upper():
         verdict = "fail"
     elif "WARN" in ai_review.upper():
         verdict = "warn"
@@ -1404,7 +1456,11 @@ async def market_review_pr(body: PRReviewRequest):
     # 5. Post GitHub PR comment
     if body.github_token:
         verdict_emoji = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "")
-        verdict_label = {"pass": "PASS — Recommend merge", "warn": "WARN — Recommend merge after fixes", "fail": "FAIL — Recommend reject"}.get(verdict, verdict)
+        verdict_label = {
+            "pass": "PASS — Recommend merge",
+            "warn": "WARN — Recommend merge after fixes",
+            "fail": "FAIL — Recommend reject",
+        }.get(verdict, verdict)
         issues_md = "\n".join(f"- {i}" for i in issues) if issues else "No static check issues"
         comment_body = (
             f"## OpenSquad Plugin Auto Review Report {verdict_emoji}\n\n"

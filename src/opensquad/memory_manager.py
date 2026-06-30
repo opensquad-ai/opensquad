@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 opensquad/memory_manager.py - Long-term memory lifecycle manager
 
@@ -18,10 +17,11 @@ Data flow:
             |- write_memory()       # Synchronous write to SQLite
             +- _background_rebuild()# Background thread rebuilds matrix
 """
+
+import hashlib
 import logging
 import threading
-import hashlib
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class MemoryManager:
             cache_ttl: int       - cache expiry in turns (default 8)
     """
 
-    def __init__(self, agent_memory, agent_name: str, config: dict = None):
+    def __init__(self, agent_memory, agent_name: str, config: dict | None = None):
         self._am = agent_memory
         self._agent_name = agent_name
 
@@ -53,12 +53,12 @@ class MemoryManager:
         # State
         self._turn_counter = 0
         # Active memories: [(prompt_text, cache_key, loaded_at_turn, matched_count)]
-        self._active_memories: List[tuple] = []
+        self._active_memories: list[tuple] = []
         # Query cache: cache_key -> {"result": dict, "turn": int}
-        self._query_cache: Dict[str, dict] = {}
+        self._query_cache: dict[str, dict] = {}
         # Injection log: cache_key -> req_len_at_last_injection (persists across evictions)
         # Used to detect whether a memory chunk is already in chat_api.req, avoiding re-injection
-        self._injection_log: Dict[str, int] = {}
+        self._injection_log: dict[str, int] = {}
         # Background rebuild lock (prevent concurrent rebuilds)
         self._rebuild_lock = threading.Lock()
         self._rebuilding = False
@@ -112,9 +112,7 @@ class MemoryManager:
                 prompt_text = entry.get("prompt_text", "")
                 matched_count = len(entry.get("matched_entries", []))
                 if prompt_text.strip() and matched_count > 0:
-                    self._active_memories.append((
-                        prompt_text, cache_key, self._turn_counter, matched_count
-                    ))
+                    self._active_memories.append((prompt_text, cache_key, self._turn_counter, matched_count))
             logger.debug(f"[MemoryManager] Cache hit for {keywords[:3]}...")
             return self.render_active_memories(current_req_length=req_length)
 
@@ -139,9 +137,7 @@ class MemoryManager:
 
             # Add to active window
             if prompt_text.strip() and matched_count > 0:
-                self._active_memories.append((
-                    prompt_text, cache_key, self._turn_counter, matched_count
-                ))
+                self._active_memories.append((prompt_text, cache_key, self._turn_counter, matched_count))
                 logger.info(f"[MemoryManager] Recalled {matched_count} memories, keywords={keywords[:5]}")
             else:
                 logger.debug(f"[MemoryManager] No relevant memories for {keywords[:3]}")
@@ -181,8 +177,10 @@ class MemoryManager:
             last_inj = self._injection_log.get(cache_key, -1)  # -1 = never injected
             if last_inj >= 0 and current_req_length > last_inj:
                 # Last injected message is still in req, skip (avoid re-injection)
-                logger.debug(f"[MemoryManager] Skip re-injection for {cache_key[:8]}... "
-                             f"(req_len={current_req_length} > last_inj={last_inj})")
+                logger.debug(
+                    f"[MemoryManager] Skip re-injection for {cache_key[:8]}... "
+                    f"(req_len={current_req_length} > last_inj={last_inj})"
+                )
                 continue
             # Need to inject: record current req length
             self._injection_log[cache_key] = current_req_length
@@ -198,10 +196,17 @@ class MemoryManager:
 
         return "\n".join(result)
 
-    def write_memory(self, topic: str = None, summary: str = None,
-                     keywords: list = None, body: str = None,
-                     entry_type: str = "knowledge", category: str = None,
-                     importance: int = 3, supersedes: str = None) -> Dict[str, Any]:
+    def write_memory(
+        self,
+        topic: str | None = None,
+        summary: str | None = None,
+        keywords: list | None = None,
+        body: str | None = None,
+        entry_type: str = "knowledge",
+        category: str | None = None,
+        importance: int = 3,
+        supersedes: str | None = None,
+    ) -> dict[str, Any]:
         """
         Write a memory entry + rebuild matrix in background thread.
 
@@ -232,14 +237,19 @@ class MemoryManager:
             return {
                 "status": "success",
                 "entry_id": entry_id,
-                "message": f"Written to long-term memory [{entry_type}] topic='{topic}', importance={importance}"
+                "message": f"Written to long-term memory [{entry_type}] topic='{topic}', importance={importance}",
             }
         except Exception as e:
             return {"status": "error", "message": f"Write failed: {e}"}
 
-    def log_memory(self, content: str, detail: str = None,
-                   category: str = None, tags: list = None,
-                   importance: int = 2) -> Dict[str, Any]:
+    def log_memory(
+        self,
+        content: str,
+        detail: str | None = None,
+        category: str | None = None,
+        tags: list | None = None,
+        importance: int = 2,
+    ) -> dict[str, Any]:
         """
         Record a log memory entry + rebuild matrix in background.
         """
@@ -261,13 +271,18 @@ class MemoryManager:
             return {
                 "status": "success",
                 "entry_id": entry_id,
-                "message": f"Log recorded [{category or 'uncategorized'}] {content[:30]}..."
+                "message": f"Log recorded [{category or 'uncategorized'}] {content[:30]}...",
             }
         except Exception as e:
             return {"status": "error", "message": f"Log recording failed: {e}"}
 
-    def query_deep(self, query_text: str = None, keywords: list = None,
-                   depth: str = "standard", token_budget: int = None) -> Dict[str, Any]:
+    def query_deep(
+        self,
+        query_text: str | None = None,
+        keywords: list | None = None,
+        depth: str = "standard",
+        token_budget: int | None = None,
+    ) -> dict[str, Any]:
         """
         Active deep query (Layer 2) - called by agent tool.
         Not managed by sliding window; returns results directly.
@@ -305,7 +320,7 @@ class MemoryManager:
         except Exception as e:
             return {"status": "error", "message": f"Query failed: {e}"}
 
-    def find_chain(self, anchor_words: list) -> Dict[str, Any]:
+    def find_chain(self, anchor_words: list) -> dict[str, Any]:
         """Chain reasoning - discover hidden associations."""
         if not self._am:
             return {"status": "error", "message": "Long-term memory system not initialized"}
@@ -316,12 +331,12 @@ class MemoryManager:
                 return {
                     "status": "success",
                     "chain": chain,
-                    "message": f"Found association chain for {' <-> '.join(anchor_words)}"
+                    "message": f"Found association chain for {' <-> '.join(anchor_words)}",
                 }
             return {
                 "status": "success",
                 "chain": None,
-                "message": f"No association chain found between {' <-> '.join(anchor_words)}"
+                "message": f"No association chain found between {' <-> '.join(anchor_words)}",
             }
         except Exception as e:
             return {"status": "error", "message": f"Chain reasoning failed: {e}"}
@@ -359,7 +374,7 @@ class MemoryManager:
 
         # Most recent N messages
         if messages:
-            recent = messages[-self._context_depth:]
+            recent = messages[-self._context_depth :]
             for msg in recent:
                 content = msg.get("content", "")
                 if isinstance(content, str) and content.strip():
@@ -394,10 +409,7 @@ class MemoryManager:
 
     def _evict_expired_cache(self):
         """Evict expired query cache entries and their corresponding injection log entries."""
-        expired_keys = [
-            k for k, v in self._query_cache.items()
-            if self._turn_counter - v["turn"] > self._cache_ttl
-        ]
+        expired_keys = [k for k, v in self._query_cache.items() if self._turn_counter - v["turn"] > self._cache_ttl]
         for k in expired_keys:
             del self._query_cache[k]
             self._injection_log.pop(k, None)

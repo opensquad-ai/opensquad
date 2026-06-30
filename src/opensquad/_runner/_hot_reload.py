@@ -1,14 +1,13 @@
-# -*- coding: utf-8 -*-
 """
 Hot-reload module -- handles config.json and plugin hot-reload logic.
 
 Extracted from runner.py. Contains ``do_plugin_reload`` which can be called
 by a tool mid-workflow without waiting for the agent to be idle.
 """
+
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Any
 
@@ -63,16 +62,14 @@ class HotReloadManager:
 
         if config_path and os.path.isfile(config_path):
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, encoding="utf-8") as f:
                     new_cfg = json.load(f)
                 new_tool_names = new_cfg.get("tools", self.runner._agent_tool_names)
                 self.runner._agent_tool_names = new_tool_names
                 self.runner._agent_tool_levels = new_cfg.get("tool_levels", {})
                 self.runner._config_mtime = os.path.getmtime(config_path)
             except Exception as e:
-                logger.warning(
-                    "[HotReload] Failed to read config.json: %s", e
-                )
+                logger.warning("[HotReload] Failed to read config.json: %s", e)
 
         # Re-register built-in core tools (im, collaboration, etc.)
         if new_cfg and self.runner._agent_dir:
@@ -86,9 +83,7 @@ class HotReloadManager:
                     self.runner.tool_registry,
                     self.runner._agent_dir,
                 )
-                logger.info(
-                    "[HotReload] Built-in tools re-registered"
-                )
+                logger.info("[HotReload] Built-in tools re-registered")
             except Exception as _e:
                 logger.warning(
                     "[HotReload] Built-in tool re-registration failed: %s",
@@ -139,7 +134,7 @@ class HotReloadManager:
 
         self.runner._config_mtime = mtime
         try:
-            with open(config_path, "r", encoding="utf-8") as _f:
+            with open(config_path, encoding="utf-8") as _f:
                 new_cfg = json.load(_f)
         except Exception:
             return False, False, {}
@@ -148,10 +143,7 @@ class HotReloadManager:
         new_levels = new_cfg.get("tool_levels", {})
         new_model = new_cfg.get("model", {})
 
-        tools_changed = (
-            new_tools != self.runner._agent_tool_names
-            or new_levels != self.runner._agent_tool_levels
-        )
+        tools_changed = new_tools != self.runner._agent_tool_names or new_levels != self.runner._agent_tool_levels
         model_changed = new_model != self.runner._model_config
 
         if tools_changed:

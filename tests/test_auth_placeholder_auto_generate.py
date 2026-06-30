@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Regression tests for the auth-placeholder auto-generation path (issue #41).
 
 A deployment tester reported that Feishu / Telegram / external_api chat
@@ -21,16 +20,13 @@ The fix is two-sided:
 
 These tests pin the contract for both layers.
 """
+
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import uuid
-from unittest.mock import patch
 
 import pytest
-
 
 # ── _is_placeholder_secret ───────────────────────────────────────────────
 
@@ -75,14 +71,19 @@ def test_auto_generate_secrets_replaces_all_three_placeholders(tmp_path):
     from opensquad._syscfg._config import _auto_generate_secrets
 
     target = tmp_path / "system_config.json"
-    target.write_text(json.dumps({
-        "auth": {
-            "node_secret": "YOUR_NODE_SECRET_HERE",
-            "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",
-            "external_api_key": "YOUR_EXTERNAL_API_KEY_HERE",
-        },
-        "services": {"feishu": {"enabled": True}},
-    }), encoding="utf-8")
+    target.write_text(
+        json.dumps(
+            {
+                "auth": {
+                    "node_secret": "YOUR_NODE_SECRET_HERE",
+                    "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",
+                    "external_api_key": "YOUR_EXTERNAL_API_KEY_HERE",
+                },
+                "services": {"feishu": {"enabled": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     replaced = _auto_generate_secrets(str(target))
     assert replaced is True
@@ -123,13 +124,18 @@ def test_auto_generate_secrets_partial_placeholders(tmp_path):
     from opensquad._syscfg._config import _auto_generate_secrets
 
     target = tmp_path / "system_config.json"
-    target.write_text(json.dumps({
-        "auth": {
-            "node_secret": "real_node_keep",
-            "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",  # placeholder
-            "external_api_key": "real_ext_keep",
-        },
-    }), encoding="utf-8")
+    target.write_text(
+        json.dumps(
+            {
+                "auth": {
+                    "node_secret": "real_node_keep",
+                    "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",  # placeholder
+                    "external_api_key": "real_ext_keep",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     replaced = _auto_generate_secrets(str(target))
     assert replaced is True
@@ -176,20 +182,24 @@ def test_auto_generate_secrets_handles_corrupted_file(tmp_path, caplog):
 @pytest.fixture
 def isolated_workspace(tmp_path, monkeypatch):
     """Redirect syscfg to a fresh temp workspace for one test."""
-    from opensquad import _syscfg
-    from opensquad._syscfg import _workspace as _ws
     from opensquad._syscfg import _config
+    from opensquad._syscfg import _workspace as _ws
 
     ws = tmp_path / "ws"
     ws.mkdir()
     cfg_path = ws / "system_config.json"
-    cfg_path.write_text(json.dumps({
-        "auth": {
-            "node_secret": "YOUR_NODE_SECRET_HERE",
-            "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",
-            "external_api_key": "YOUR_EXTERNAL_API_KEY_HERE",
-        },
-    }), encoding="utf-8")
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "auth": {
+                    "node_secret": "YOUR_NODE_SECRET_HERE",
+                    "gateway_token": "YOUR_GATEWAY_TOKEN_HERE",
+                    "external_api_key": "YOUR_EXTERNAL_API_KEY_HERE",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(_ws, "_WORKSPACE_ROOT", str(ws), raising=False)
     monkeypatch.setattr(_ws, "_CONFIG_PATH", str(cfg_path), raising=False)

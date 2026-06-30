@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """opensquad logs — Tail and filter service logs."""
+
 import os
 import sys
 
@@ -12,33 +12,33 @@ def run_logs(args):
 
     if not os.path.isdir(log_dir):
         print(f"[logs] No log directory found: {log_dir}")
-        print(f"[logs] Start services first with: opensquad start")
+        print("[logs] Start services first with: opensquad start")
         sys.exit(1)
 
     # Build service -> log file mapping
     log_map = {
-        "gateway":    os.path.join(log_dir, "gateway", "websocket.log"),
-        "api":        os.path.join(log_dir, "gateway", "api.log"),
-        "auth":       os.path.join(log_dir, "gateway", "auth.log"),
-        "database":   os.path.join(log_dir, "gateway", "database.log"),
-        "backend":    os.path.join(log_dir, "gateway", "backend.log"),
-        "startup":    os.path.join(log_dir, "gateway", "backend_startup.log"),
-        "watchdog":   os.path.join(log_dir, "watchdog.log"),
-        "agent":      os.path.join(ws, "data", "logs", "agent_run.log"),
+        "gateway": os.path.join(log_dir, "gateway", "websocket.log"),
+        "api": os.path.join(log_dir, "gateway", "api.log"),
+        "auth": os.path.join(log_dir, "gateway", "auth.log"),
+        "database": os.path.join(log_dir, "gateway", "database.log"),
+        "backend": os.path.join(log_dir, "gateway", "backend.log"),
+        "startup": os.path.join(log_dir, "gateway", "backend_startup.log"),
+        "watchdog": os.path.join(log_dir, "watchdog.log"),
+        "agent": os.path.join(ws, "data", "logs", "agent_run.log"),
     }
 
     # List mode
     if getattr(args, "list_services", False):
         print("[logs] Available log sources:")
         for name, path in sorted(log_map.items()):
-            exists = " \u2705" if os.path.isfile(path) else " \u274C"
+            exists = " \u2705" if os.path.isfile(path) else " \u274c"
             size = ""
             if os.path.isfile(path):
                 sz = os.path.getsize(path)
-                if sz > 1024*1024:
-                    size = f" ({sz//(1024*1024)}MB)"
+                if sz > 1024 * 1024:
+                    size = f" ({sz // (1024 * 1024)}MB)"
                 elif sz > 1024:
-                    size = f" ({sz//1024}KB)"
+                    size = f" ({sz // 1024}KB)"
             print(f"  {name:<15} {path}{exists}{size}")
         return
 
@@ -46,7 +46,7 @@ def run_logs(args):
     service = getattr(args, "service", "gateway")
     if service not in log_map:
         print(f"[logs] Unknown service: {service}", file=sys.stderr)
-        print(f"[logs] Use --list to see available services")
+        print("[logs] Use --list to see available services")
         sys.exit(1)
 
     log_file = log_map[service]
@@ -56,7 +56,7 @@ def run_logs(args):
 
     # Read and filter
     try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except Exception as e:
         print(f"[logs] Error reading {log_file}: {e}", file=sys.stderr)

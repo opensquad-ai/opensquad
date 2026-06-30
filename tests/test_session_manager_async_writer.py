@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for SessionManager async batch writer (P0-1 optimization).
 
 Validates:
@@ -7,10 +6,12 @@ Validates:
 3. tool_call / tool_result still flush synchronously
 4. Graceful shutdown drains pending writes
 """
+
 import asyncio
 import json
 import os
 import tempfile
+
 import pytest
 
 from opensquad.session_manager import SessionManager
@@ -54,7 +55,7 @@ async def test_add_message_returns_immediately(temp_session_manager):
 
     # Verify disk persistence
     assert os.path.exists(sm.current_session_file)
-    with open(sm.current_session_file, "r", encoding="utf-8") as f:
+    with open(sm.current_session_file, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["messages"]) == 1
     assert data["messages"][0]["content"] == "hello world"
@@ -80,7 +81,7 @@ async def test_add_event_non_critical_is_async(temp_session_manager):
 
     # After flush, mutations are applied and persisted
     assert len(sm.session_data["events"]) == 5
-    with open(sm.current_session_file, "r", encoding="utf-8") as f:
+    with open(sm.current_session_file, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["events"]) == 5
 
@@ -96,7 +97,7 @@ async def test_tool_call_flushes_sync(temp_session_manager):
     sm.add_event("tool_call", {"tool": "filesystem", "args": {"path": "/tmp"}})
 
     # Should be on disk immediately, no need to wait for flush interval
-    with open(sm.current_session_file, "r", encoding="utf-8") as f:
+    with open(sm.current_session_file, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["events"]) == 1
     assert data["events"][0]["type"] == "tool_call"
@@ -117,7 +118,7 @@ async def test_graceful_shutdown_drains_queue(temp_session_manager):
     # Stop immediately — should drain all pending writes
     await sm.stop_async_writer()
 
-    with open(sm.current_session_file, "r", encoding="utf-8") as f:
+    with open(sm.current_session_file, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["messages"]) == 50
 
@@ -131,7 +132,7 @@ async def test_fallback_when_writer_not_started(temp_session_manager):
     sm.add_message("user", "sync fallback test")
 
     # Should be on disk immediately (sync fallback)
-    with open(sm.current_session_file, "r", encoding="utf-8") as f:
+    with open(sm.current_session_file, encoding="utf-8") as f:
         data = json.load(f)
     assert len(data["messages"]) == 1
     assert data["messages"][0]["content"] == "sync fallback test"

@@ -1,24 +1,25 @@
-# -*- coding: utf-8 -*-
 """Unit tests for runner.py pure utility functions.
 
 Tests cover: _build_context_prefix, _filter_native_tokens, _remove_all_tags,
 _extract_text_before_tool, _is_repeated_content, _truncate_result_text.
 """
-import pytest
 
 
 def _make_runner():
     """Create a minimal AgentRunner instance for testing instance methods."""
     from opensquad.runner import AgentRunner
+
     runner = object.__new__(AgentRunner)
     # _remove_all_tags calls self._filter_native_tokens which is a @staticmethod
     # but the instance still needs a _get_session_manager for _is_repeated_content
     import types
+
     runner._get_session_manager = types.MethodType(lambda self: None, runner)
     return runner
 
 
 # ── _build_context_prefix ────────────────────────────────────────────────
+
 
 class TestBuildContextPrefix:
     """Test _build_context_prefix — assembling dynamic context blocks."""
@@ -26,6 +27,7 @@ class TestBuildContextPrefix:
     @staticmethod
     def _target(dynamic_parts: dict) -> str:
         from opensquad.runner import _build_context_prefix
+
         return _build_context_prefix(dynamic_parts)
 
     def test_empty_parts(self):
@@ -56,12 +58,14 @@ class TestBuildContextPrefix:
 
 # ── _filter_native_tokens ───────────────────────────────────────────────
 
+
 class TestFilterNativeTokens:
     """Test _filter_native_tokens — strip leaked model-internal tokens."""
 
     @staticmethod
     def _target(text: str) -> str:
         from opensquad.runner import AgentRunner
+
         return AgentRunner._filter_native_tokens(text)
 
     def test_plain_text_passthrough(self):
@@ -85,6 +89,7 @@ class TestFilterNativeTokens:
 
 
 # ── _remove_all_tags ────────────────────────────────────────────────────
+
 
 class TestRemoveAllTags:
     """Test _remove_all_tags — strip tool-related XML tags."""
@@ -118,6 +123,7 @@ class TestRemoveAllTags:
 
 # ── _extract_text_before_tool ────────────────────────────────────────────
 
+
 class TestExtractTextBeforeTool:
     """Test _extract_text_before_tool — get text before first <tool_call>."""
 
@@ -131,13 +137,13 @@ class TestExtractTextBeforeTool:
         assert result is None
 
     def test_text_before_tool(self):
-        result = self._target("Please look up<tool_call name=\"read\">")
+        result = self._target('Please look up<tool_call name="read">')
         # "Please look up" is 14 chars > 3, so it should be returned
         assert result == "Please look up"
 
     def test_too_short_text_before(self):
         # "Hi" is only 2 chars, less than the threshold of 3
-        result = self._target("Hi<tool_call name=\"read\">")
+        result = self._target('Hi<tool_call name="read">')
         assert result is None
 
     def test_empty_input(self):
@@ -147,12 +153,14 @@ class TestExtractTextBeforeTool:
 
 # ── _truncate_result_text ───────────────────────────────────────────────
 
+
 class TestTruncateResultText:
     """Test _truncate_result_text — truncate long tool results."""
 
     @staticmethod
     def _target(text: str, max_len: int) -> str:
         from opensquad.runner import AgentRunner
+
         return AgentRunner._truncate_result_text(text, max_len)
 
     def test_short_text_no_truncation(self):
@@ -178,6 +186,7 @@ class TestTruncateResultText:
 
 
 # ── _is_repeated_content ────────────────────────────────────────────────
+
 
 class TestIsRepeatedContent:
     """Test _is_repeated_content — detect model output stuttering."""

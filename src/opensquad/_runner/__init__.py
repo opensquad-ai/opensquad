@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 _opensquad_runner — Runner refactoring sub-package.
 
@@ -14,18 +13,18 @@ Structure:
 """
 
 from ._compression import build_summary_payload, run_external_summarizer
-from ._state_machine import StateMachine
-from ._output_handler import OutputHandler
-from ._input_handler import InputHandler
-from ._tool_executor import ToolExecutor
 from ._hot_reload import HotReloadManager
+from ._input_handler import InputHandler
+from ._output_handler import OutputHandler
+from ._state_machine import StateMachine
+from ._tool_executor import ToolExecutor
 
 __all__ = [
+    "HotReloadManager",
+    "InputHandler",
+    "OutputHandler",
+    "StateMachine",
+    "ToolExecutor",
     "build_summary_payload",
     "run_external_summarizer",
-    "StateMachine",
-    "OutputHandler",
-    "InputHandler",
-    "ToolExecutor",
-    "HotReloadManager",
 ]

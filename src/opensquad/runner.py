@@ -1,55 +1,54 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import asyncio
-import re
 import json
-import sys
 import os
-import sys as _sys
 import os as _os
-import threading
+import re
+import sys
 import time
-from openai import OpenAI
-from opensquad.system_config import syscfg
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple, Union, Callable, Awaitable
-from .tool import logger
+from typing import Any
+
+from opensquad.system_config import syscfg
+
+from . import session_manager as _session_module
+from . import state_manager as _state_module
 from .chat_api import ChatAPI
 from .claude_api import ClaudeAPI
-from .parser import ResponseParser
-from .registry import ToolRegistry
-from .task import TaskManager
+from .context_builder import ContextBuilder
 from .events import bus
 from .input_hub import input_hub
-from .utils import extract_and_remove_first_tag
-from .message_queue import message_queue
 from .log_setup import get_tool_call_debug_logger
-from . import state_manager as _state_module
+from .message_queue import message_queue
+from .parser import ResponseParser
+from .registry import ToolRegistry
 from .sleep_controller import sleep_controller
-from . import task_checkpoint
+from .task import TaskManager
 from .task_logger import task_logger
 from .task_supervisor import task_supervisor
-from . import session_manager as _session_module
-from .context_base import inject_standard
-from .skill_loader import build_skills_prompt, get_loaded_skills
+from .tool import logger
 from .tool_call_strategy import ToolCallStrategySelector
-from .context_builder import ContextBuilder, build_context_prefix
+from .utils import extract_and_remove_first_tag
+
 
 # Dynamic accessor: always gets the latest instance after reinit
 def _get_session_manager():
     """Return injected session_manager if current runner has one, else global singleton."""
     try:
-        runner = getattr(_active_runner, '_injected_session_manager', None)
+        runner = getattr(_active_runner, "_injected_session_manager", None)
         if runner is not None:
             return runner
     except Exception:
         pass
     return _session_module.session_manager
 
+
 def _get_state_manager():
     """Return injected state_manager if current runner has one, else global singleton."""
     try:
-        runner = getattr(_active_runner, '_injected_state_manager', None)
+        runner = getattr(_active_runner, "_injected_state_manager", None)
         if runner is not None:
             return runner
     except Exception:
@@ -59,11 +58,11 @@ def _get_state_manager():
 
 def _build_summary_payload(
     previous_summary: str,
-    messages: List[Dict[str, Any]],
-    events: List[Dict[str, Any]],
-    keep_last: int = None,
+    messages: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    keep_last: int | None = None,
 ) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     if previous_summary and previous_summary.strip():
         lines.append("[Previous Context Summary]")
         lines.append(previous_summary.strip())
@@ -71,10 +70,7 @@ def _build_summary_payload(
         lines.append("[Previous Context Summary]\n(none)")
 
     lines.append("\n[Conversation Messages to Compress]")
-    if keep_last is not None and len(messages) > keep_last:
-        msgs_to_compress = messages[:-keep_last]
-    else:
-        msgs_to_compress = messages
+    msgs_to_compress = messages[:-keep_last] if keep_last is not None and len(messages) > keep_last else messages
     for msg in msgs_to_compress:
         role = msg.get("role", "")
         content = msg.get("content", "")
@@ -89,10 +85,7 @@ def _build_summary_payload(
     for evt in events:
         etype = evt.get("type", "")
         data = evt.get("data", evt.get("content", ""))
-        if isinstance(data, dict):
-            text = json.dumps(data, ensure_ascii=False)
-        else:
-            text = str(data or "")
+        text = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data or "")
         text = text.strip()
         if not text:
             continue
@@ -101,17 +94,29 @@ def _build_summary_payload(
         lines.append(f"- {etype}: {text}")
 
     lines.append("\n[Compression Rules]")
-    lines.append("Use the exact summary template with these sections: Current Task, Original Goal, Completed, Current State, Key Parameters, Unresolved Issues.")
-    lines.append("Current Task MUST describe what the agent is working on RIGHT NOW — the most recent user request in detail.")
+    lines.append(
+        "Use the exact summary template with these sections: Current Task, Original Goal, Completed, Current State, Key Parameters, Unresolved Issues."
+    )
+    lines.append(
+        "Current Task MUST describe what the agent is working on RIGHT NOW — the most recent user request in detail."
+    )
     lines.append("Original Goal is the very first user request in this session, in one sentence.")
-    lines.append("Current State is the most important section — include open files, current directory, last tool executed.")
+    lines.append(
+        "Current State is the most important section — include open files, current directory, last tool executed."
+    )
     lines.append("Preserve all file paths, IDs, ports, version numbers, config values, and error messages verbatim.")
-    lines.append("You MUST consider full workflow context: thought, plan, tool_call, tool_result, and info/status events.")
+    lines.append(
+        "You MUST consider full workflow context: thought, plan, tool_call, tool_result, and info/status events."
+    )
     lines.append("Completed must include Done/In progress/Todo sub-bullets with specific file paths.")
     if keep_last is not None:
-        lines.append(f"Keep only the last {keep_last} messages in live chat history; everything above must be summarized into CONTEXT_SUMMARY.")
+        lines.append(
+            f"Keep only the last {keep_last} messages in live chat history; everything above must be summarized into CONTEXT_SUMMARY."
+        )
     else:
-        lines.append("Compress ALL messages and events into CONTEXT_SUMMARY. Keep only the newest 10% of content as live context.")
+        lines.append(
+            "Compress ALL messages and events into CONTEXT_SUMMARY. Keep only the newest 10% of content as live context."
+        )
     return "\n".join(lines)
 
 
@@ -120,7 +125,7 @@ async def _run_external_summarizer(
     base_url: str,
     api_key: str,
     model: str,
-    on_chunk: Optional[Callable[[str], Awaitable[None]]] = None,
+    on_chunk: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     # Delegated summarizer uses the same runtime model endpoint as current agent,
     # unless model override is explicitly provided.
@@ -134,8 +139,11 @@ async def _run_external_summarizer(
     try:
         # Use async OpenAI client to avoid blocking the event loop
         from openai import AsyncOpenAI
+
         client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=60)
-        logger.info("[Runner] Calling external summarizer LLM (async): model=%s, payload_len=%d", model, len(summary_payload))
+        logger.info(
+            "[Runner] Calling external summarizer LLM (async): model=%s, payload_len=%d", model, len(summary_payload)
+        )
         if on_chunk is None:
             response = await client.chat.completions.create(
                 model=model,
@@ -158,7 +166,7 @@ async def _run_external_summarizer(
             ],
         )
 
-        parts: List[str] = []
+        parts: list[str] = []
         async for chunk in stream:
             try:
                 delta = chunk.choices[0].delta.content or ""
@@ -175,7 +183,11 @@ async def _run_external_summarizer(
 
         result = "".join(parts).strip()
         if not result:
-            logger.warning("[Runner] External summarizer returned empty result, model=%s, payload_len=%d", model, len(summary_payload))
+            logger.warning(
+                "[Runner] External summarizer returned empty result, model=%s, payload_len=%d",
+                model,
+                len(summary_payload),
+            )
         return result
     except Exception as e:
         logger.error(f"[Runner] External summarizer failed: {e}")
@@ -183,7 +195,7 @@ async def _run_external_summarizer(
 
 
 # Module-level runner reference for tool hot-reload (each agent is an independent process, singleton-safe)
-_active_runner: Optional['AgentRunner'] = None
+_active_runner: AgentRunner | None = None
 
 
 def do_plugin_reload() -> dict:
@@ -205,7 +217,8 @@ def do_plugin_reload() -> dict:
     if config_path and _os.path.isfile(config_path):
         try:
             import json as _json
-            with open(config_path, "r", encoding="utf-8") as f:
+
+            with open(config_path, encoding="utf-8") as f:
                 new_cfg = _json.load(f)
             new_tool_names = new_cfg.get("tools", _active_runner._agent_tool_names)
             _active_runner._agent_tool_names = new_tool_names
@@ -218,6 +231,7 @@ def do_plugin_reload() -> dict:
     if new_cfg and _active_runner._agent_dir:
         try:
             from opensquad.agents_boot import register_builtin_tools_sync as _reg_builtin
+
             _reg_builtin(new_cfg, _active_runner.tool_registry, _active_runner._agent_dir)
             logger.info("[Runner] do_plugin_reload: built-in tools re-registered")
         except Exception as _bt_e:
@@ -236,14 +250,17 @@ def do_plugin_reload() -> dict:
         agent_tool_names=new_tool_names,
         agent_tool_levels=_active_runner._agent_tool_levels,
     )
-    logger.info(f"[Runner] Immediate plugin reload: loaded={reload_result.get('loaded')}, "
-                f"unloaded={reload_result.get('unloaded')}")
+    logger.info(
+        f"[Runner] Immediate plugin reload: loaded={reload_result.get('loaded')}, "
+        f"unloaded={reload_result.get('unloaded')}"
+    )
     return {
         "success": True,
         "loaded": reload_result.get("loaded", []),
         "unloaded": reload_result.get("unloaded", []),
         "active_tools": new_tool_names,
     }
+
 
 class AgentRunner:
     """
@@ -252,15 +269,30 @@ class AgentRunner:
     - Auto-saves conversation history
     - Auto-loads on startup
     """
-    def __init__(self, chat_api: Union[ChatAPI, ClaudeAPI], tool_registry: ToolRegistry, hooks: Dict = None, vision_config: Dict = None, memory_manager=None, plugin_manager=None, agent_id: str = "", agent_tool_names: List[str] = None, config_path: str = "", session_manager=None, state_manager=None, agent_context=None):
+
+    def __init__(
+        self,
+        chat_api: ChatAPI | ClaudeAPI,
+        tool_registry: ToolRegistry,
+        hooks: dict | None = None,
+        vision_config: dict | None = None,
+        memory_manager=None,
+        plugin_manager=None,
+        agent_id: str = "",
+        agent_tool_names: list[str] | None = None,
+        config_path: str = "",
+        session_manager=None,
+        state_manager=None,
+        agent_context=None,
+    ):
         global _active_runner
         _active_runner = self
         # Use injected session/state manager if provided
         if agent_context is not None:
-                if session_manager is None and hasattr(agent_context, 'session_manager'):
-                    session_manager = agent_context.session_manager
-                if state_manager is None and hasattr(agent_context, 'state_manager'):
-                    state_manager = agent_context.state_manager
+            if session_manager is None and hasattr(agent_context, "session_manager"):
+                session_manager = agent_context.session_manager
+            if state_manager is None and hasattr(agent_context, "state_manager"):
+                state_manager = agent_context.state_manager
         self._injected_session_manager = session_manager
         self._injected_state_manager = state_manager
         self.chat_api = chat_api
@@ -276,19 +308,28 @@ class AgentRunner:
         if self._plugin_manager:
             _pm = self._plugin_manager
             _aid = self._agent_id
+
             async def _on_state_change_hook(old_state: str, new_state: str):
-                asyncio.create_task(_pm.run_hook("on_state_change", {
-                    "old_state": old_state,
-                    "new_state": new_state,
-                    "agent_id": _aid,
-                }))
+                asyncio.create_task(
+                    _pm.run_hook(
+                        "on_state_change",
+                        {
+                            "old_state": old_state,
+                            "new_state": new_state,
+                            "agent_id": _aid,
+                        },
+                    )
+                )
+
             _get_state_manager().add_listener(_on_state_change_hook)
         self._agent_tool_names = agent_tool_names or []  # Tool names from agent config (for plugin hot-reload)
-        self._agent_tool_levels: Dict[str, str] = {}      # Per-tool level overrides from agent config
+        self._agent_tool_levels: dict[str, str] = {}  # Per-tool level overrides from agent config
         self._config_path = config_path  # Path to config.json (for hot-reload watching)
-        self._agent_dir = _os.path.dirname(_os.path.abspath(config_path)) if config_path else ""  # Agent's own directory
-        self._config_mtime: float = 0.0   # Last known config.json mtime
-        self._plugin_dir_mtime: float = 0.0   # Last known plugin dir mtime (for hot-reload caching)
+        self._agent_dir = (
+            _os.path.dirname(_os.path.abspath(config_path)) if config_path else ""
+        )  # Agent's own directory
+        self._config_mtime: float = 0.0  # Last known config.json mtime
+        self._plugin_dir_mtime: float = 0.0  # Last known plugin dir mtime (for hot-reload caching)
         self._last_config_check: float = 0.0  # Last time config was checked (for throttling syscalls)
         if config_path and _os.path.isfile(config_path):
             self._config_mtime = _os.path.getmtime(config_path)
@@ -300,14 +341,16 @@ class AgentRunner:
         self.delegation_depth = 0  # Current delegation depth (used by SubAgentRunner); always 0 for parent agents
         self._current_images = []  # Image path list for the current turn
         self._current_attachments = []  # Attachment list for the current turn (includes audio/video/file)
-        self._tool_result_images = []       # Base64 image list returned by MCP tools (e.g. Playwright screenshots)
+        self._tool_result_images = []  # Base64 image list returned by MCP tools (e.g. Playwright screenshots)
         self._tool_result_image_paths = []  # Local image paths returned by vision plugin
-        self._turn_sid = _get_session_manager().get_current_session_id()  # Session ID for the current turn (closure-safe)
+        self._turn_sid = (
+            _get_session_manager().get_current_session_id()
+        )  # Session ID for the current turn (closure-safe)
         self._current_turn = 0  # Current turn index (1-based), reset on each handle call
         self._current_round = 0  # Message round (1-based), monotonically increasing, does not reset across messages; used to precisely attribute events to messages
-        self._turn_started_ms: float = 0.0    # Current turn start time (ms), reset on each LLM call
+        self._turn_started_ms: float = 0.0  # Current turn start time (ms), reset on each LLM call
         self._workflow_started_ms: float = 0.0  # Entire workflow start time (ms), set once when user sends a message
-        
+
         # Task supervision state
         self._in_task = False
         self._awaiting_user_reply = False
@@ -317,17 +360,17 @@ class AgentRunner:
 
         # Streaming metadata (tracks tag that produced the streamed user text)
         self._streamed_user_tag = None
-        
+
         # Vision config: {"is_img_mode": bool}
         # is_img_mode=true: main model supports images natively (controlled by config.json model.is_image), passed directly
         # is_img_mode=false: skip image input
         self._vision_config = vision_config or {}
         self._is_img_mode = self._vision_config.get("is_img_mode", False)
-        
+
         # Agent lifecycle hooks
         # hooks = {"before_input": callable(agent_context) -> dict}
         self._hooks = hooks or {}
-        
+
         # Dynamic context prefix (updated each round in _setup_prompt, prepended to user message)
         self._dynamic_context_prefix = ""
 
@@ -336,7 +379,7 @@ class AgentRunner:
         _tool_strategy_config = {}
         if config_path and _os.path.isfile(config_path):
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, encoding="utf-8") as f:
                     _tool_strategy_config = json.load(f)
             except Exception as e:
                 logger.warning(f"[Runner] Failed to load config from {config_path}: {e}")
@@ -358,11 +401,11 @@ class AgentRunner:
         # Store current tools and tool_choice (updated by _setup_prompt)
         self._current_tools = None
         self._current_tool_choice = "auto"
-        
+
         # Inject sid_provider into ChatAPI so it can include the correct session_id when emitting events
         self.chat_api._sid_provider = lambda: self._turn_sid
         self.chat_api._user_id_provider = lambda: self._current_user_id
-        
+
         # Historical cumulative token stats (across sessions/restarts), not written to chat_api
         # chat_api.total_* only records the current session (reset to 0 on new session)
         self._hist_input_tokens: int = 0
@@ -370,23 +413,23 @@ class AgentRunner:
         self._hist_requests: int = 0
         self._hist_cache_read_tokens: int = 0
         self._hist_cache_creation_tokens: int = 0
-        
+
         # Load history session into chat_api
         self._load_history()
 
         # Restore last process's cumulative stats from disk on startup, preventing stats from resetting after restart
         self._restore_cumulative_stats()
-        
+
         # Write token_stats.json once on startup (based on already-loaded history session)
         # This allows the Launcher management panel to immediately display the progress bar without waiting for the first conversation
         self._broadcast_token_stats_sync()
 
         # ── Startup readiness: buffer pre-ready messages ──
         self._agent_ready = False
-        self._pending_buffer: List[Dict] = []
+        self._pending_buffer: list[dict] = []
         # Subscribe to agent_ready from boot (fires before run() starts)
-        bus.subscribe('agent_ready', lambda _: self._replay_pending())
-        
+        bus.subscribe("agent_ready", lambda _: self._replay_pending())
+
     async def _emit(self, etype, data):
         """Event push with session_id (uses the sid captured at turn start to avoid routing errors on session switch)"""
         sid = self._turn_sid
@@ -415,23 +458,22 @@ class AgentRunner:
             loaded_roles: list[str] = []
             skipped_info: list[str] = []
             for msg in history[-30:]:  # Last 30 messages
-                role = msg.get('role', '')
-                content = msg.get('content', '')
-                has_tool_calls = isinstance(msg.get('tool_calls'), list) and msg['tool_calls']
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                has_tool_calls = isinstance(msg.get("tool_calls"), list) and msg["tool_calls"]
 
                 # Keep any message that carries LLM-visible state.
                 # - user/assistant/system/tool roles are always relevant
                 # - assistant messages with tool_calls are kept even if content is empty/None
                 # - content can be string, list (Claude multimodal), or None (tool-only assistant)
                 keep = False
-                if role in ('user', 'assistant', 'system', 'tool'):
-                    if role == 'assistant' and has_tool_calls:
-                        keep = True
-                    elif isinstance(content, (str, list)):
-                        keep = True
-                    elif content is None and role in ('assistant', 'tool'):
-                        keep = True
-                    elif role == 'user' and (isinstance(content, str) or content is None):
+                if role in ("user", "assistant", "system", "tool"):
+                    if (
+                        (role == "assistant" and has_tool_calls)
+                        or isinstance(content, str | list)
+                        or (content is None and role in ("assistant", "tool"))
+                        or (role == "user" and (isinstance(content, str) or content is None))
+                    ):
                         keep = True
 
                 if keep:
@@ -442,17 +484,21 @@ class AgentRunner:
 
             logger.warning(
                 "[Runner] _load_history: history=%d, loaded=%d (roles=%s), skipped=%s",
-                len(history), len(self.chat_api.req) - (1 if system_msg else 0),
-                loaded_roles, skipped_info,
+                len(history),
+                len(self.chat_api.req) - (1 if system_msg else 0),
+                loaded_roles,
+                skipped_info,
             )
 
             # FIX B: Restore _prev_reasoning_content from last assistant message for DeepSeek V4
             # After session load, _prev_reasoning_content is always "". Without this fix,
             # _validate_and_fix_reasoning_content() skips all injection logic and the API returns 400.
-            _last_asst = next((m for m in reversed(self.chat_api.req) if m.get('role') == 'assistant'), None)
-            if _last_asst and _last_asst.get('reasoning_content'):
-                self.chat_api._prev_reasoning_content = _last_asst['reasoning_content']
-                logger.info(f"[Runner] Restored _prev_reasoning_content ({len(_last_asst['reasoning_content'])} chars) from session history")
+            _last_asst = next((m for m in reversed(self.chat_api.req) if m.get("role") == "assistant"), None)
+            if _last_asst and _last_asst.get("reasoning_content"):
+                self.chat_api._prev_reasoning_content = _last_asst["reasoning_content"]
+                logger.info(
+                    f"[Runner] Restored _prev_reasoning_content ({len(_last_asst['reasoning_content'])} chars) from session history"
+                )
             else:
                 self.chat_api._prev_reasoning_content = ""
 
@@ -464,7 +510,7 @@ class AgentRunner:
             logger.info(f"[Runner] Loaded {len(history)} messages from history")
         else:
             logger.info("[Runner] Session history is empty")
-    
+
     def _validate_message_sequence(self):
         """Fix message sequence for DeepSeek/OpenAI compatibility.
 
@@ -476,23 +522,24 @@ class AgentRunner:
         tool_call_id linkage, which is invalid for streaming resume scenarios.
         """
         import uuid
+
         req = self.chat_api.req
         fixed = 0
 
         i = 0
         while i < len(req):
             msg = req[i]
-            if msg.get('role') == 'tool':
+            if msg.get("role") == "tool":
                 # Check if previous message is assistant with tool_calls
                 if i == 0:
                     # No previous message - remove orphan tool message
-                    logger.warning(f"[Runner] Removing orphan role=tool at index 0")
+                    logger.warning("[Runner] Removing orphan role=tool at index 0")
                     req.pop(i)
                     fixed += 1
                     continue
 
                 prev = req[i - 1]
-                if prev.get('role') != 'assistant' or not prev.get('tool_calls'):
+                if prev.get("role") != "assistant" or not prev.get("tool_calls"):
                     # Previous message doesn't have tool_calls - inject synthetic assistant
                     synth_id = f"synth_{uuid.uuid4().hex[:8]}"
                     logger.info(f"[Runner] Injecting synthetic assistant before role=tool (index={i})")
@@ -501,29 +548,35 @@ class AgentRunner:
                     # to scan backward to find the last assistant that had reasoning_content.
                     synth_reasoning = ""
                     for _lookback in reversed(req[:i]):
-                        if _lookback.get('role') == 'assistant' and _lookback.get('reasoning_content'):
-                            synth_reasoning = _lookback['reasoning_content']
+                        if _lookback.get("role") == "assistant" and _lookback.get("reasoning_content"):
+                            synth_reasoning = _lookback["reasoning_content"]
                             break
                     synth_msg = {
                         "role": "assistant",
                         "content": None,
-                        "tool_calls": [{
-                            "id": synth_id,
-                            "type": "function",
-                            "function": {
-                                "name": "restored_session",
-                                "arguments": "{}",
-                            },
-                        }],
+                        "tool_calls": [
+                            {
+                                "id": synth_id,
+                                "type": "function",
+                                "function": {
+                                    "name": "restored_session",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
                     }
                     if synth_reasoning:
-                        synth_msg['reasoning_content'] = synth_reasoning
-                        logger.info(f"[Runner] Copied reasoning_content ({len(synth_reasoning)} chars) to synthetic assistant")
+                        synth_msg["reasoning_content"] = synth_reasoning
+                        logger.info(
+                            f"[Runner] Copied reasoning_content ({len(synth_reasoning)} chars) to synthetic assistant"
+                        )
                     req.insert(i, synth_msg)
                     # Update tool_call_id on the actual tool message (now at i+2 after insert)
                     if i + 2 < len(req):
-                        if not req[i + 2].get('tool_call_id') or req[i + 2].get('tool_call_id', '').startswith('pipeline_events_'):
-                            req[i + 2]['tool_call_id'] = synth_id
+                        if not req[i + 2].get("tool_call_id") or req[i + 2].get("tool_call_id", "").startswith(
+                            "pipeline_events_"
+                        ):
+                            req[i + 2]["tool_call_id"] = synth_id
                     fixed += 1
                     i += 1  # Skip to after the inserted message
                     continue
@@ -532,23 +585,23 @@ class AgentRunner:
 
         if fixed > 0:
             logger.info(f"[Runner] Fixed {fixed} message sequence issues for API compatibility")
-    
-    async def run(self, initial_query: str = None, **kwargs):
+
+    async def run(self, initial_query: str | None = None, **kwargs):
         """Start and run the agent - continuous conversation mode"""
         logger.info(f"[Runner] ===== run() STARTED, initial_query={'yes' if initial_query else 'None'} =====")
 
         # Mark agent ready and replay any buffered pre-boot messages
         self._agent_ready = True
-        bus.emit('agent_ready', {"agent_id": self._agent_id})
+        bus.emit("agent_ready", {"agent_id": self._agent_id})
         self._replay_pending()
-        
+
         while True:
             # Check wake-up
             if sleep_controller._wake_reason:
                 wake_prompt = self._generate_wake_prompt()
                 initial_query = wake_prompt
                 logger.info(f"[Runner] Processing wake up: {sleep_controller._wake_reason}")
-            
+
             # Get input
             _pending_group_messages = []  # group messages drained from message_queue this iteration
             if not initial_query:
@@ -567,27 +620,32 @@ class AgentRunner:
                 # During sleep, group messages will wake it up via message_router -> sleep_controller.wake_up()
                 elif message_queue.size == 0:
                     from opensquad.message_router import message_router as _message_router
+
                     if _message_router.awaiting_reply:
                         sleep_seconds = _message_router._await_reply_seconds
-                        logger.info(f"[Runner] Post-send idle detected (awaiting reply), auto-sleeping {sleep_seconds}s to await reply")
-                        await self._emit('status', 'sleeping')
-                        await self._emit('info', f"Group message sent, waiting for reply ({sleep_seconds}s timeout)...")
+                        logger.info(
+                            f"[Runner] Post-send idle detected (awaiting reply), auto-sleeping {sleep_seconds}s to await reply"
+                        )
+                        await self._emit("status", "sleeping")
+                        await self._emit("info", f"Group message sent, waiting for reply ({sleep_seconds}s timeout)...")
                         await _get_state_manager().set_state("sleeping")
                         _message_router.clear_await_reply()  # Clear after entering sleep to avoid re-triggering on wake
                         wake_info = await sleep_controller.sleep(sleep_seconds)
                         await _get_state_manager().set_state("idle")
-                        await self._emit('status', 'idle')
+                        await self._emit("status", "idle")
                         # After waking: generate wake prompt for AI to process
                         wake_prompt = self._generate_wake_prompt()
                         initial_query = wake_prompt
                         self._current_input_source = "wake"
-                        logger.info(f"[Runner] Auto-sleep ended: {wake_info.get('wake_type')}, reason: {wake_info.get('wake_reason')}")
+                        logger.info(
+                            f"[Runner] Auto-sleep ended: {wake_info.get('wake_type')}, reason: {wake_info.get('wake_reason')}"
+                        )
                         continue
-                
+
                 current_state = await _get_state_manager().get_state()
                 logger.debug(f"[Runner] ===== IDLE: waiting for input (state={current_state}) =====")
-                await self._emit('status', f"State: {current_state}, waiting...")
-                
+                await self._emit("status", f"State: {current_state}, waiting...")
+
                 # Hot-reload check: poll input_hub with 5s timeout,
                 # check plugin reload signal between polls
                 user_input_data = None
@@ -600,8 +658,10 @@ class AgentRunner:
                             agent_tool_names=self._agent_tool_names,
                         )
                         if reload_result["loaded"] or reload_result["unloaded"]:
-                            logger.info(f"[Runner] Plugin hot-reload: loaded={reload_result['loaded']}, "
-                                        f"unloaded={reload_result['unloaded']}")
+                            logger.info(
+                                f"[Runner] Plugin hot-reload: loaded={reload_result['loaded']}, "
+                                f"unloaded={reload_result['unloaded']}"
+                            )
 
                     # Check config.json hot-reload (tools list may have changed)
                     if self._config_path and time.time() - self._last_config_check >= 5.0:
@@ -611,7 +671,8 @@ class AgentRunner:
                             if mtime > self._config_mtime:
                                 self._config_mtime = mtime
                                 import json as _json
-                                with open(self._config_path, "r", encoding="utf-8") as _f:
+
+                                with open(self._config_path, encoding="utf-8") as _f:
                                     _new_cfg = _json.load(_f)
                                 new_tools = _new_cfg.get("tools", [])
                                 new_levels = _new_cfg.get("tool_levels", {})
@@ -636,7 +697,10 @@ class AgentRunner:
                                     # tool_levels overrides in config.json take effect immediately.
                                     if (tools_changed or levels_changed) and self._agent_dir:
                                         try:
-                                            from opensquad.agents_boot import register_builtin_tools_sync as _reg_builtin
+                                            from opensquad.agents_boot import (
+                                                register_builtin_tools_sync as _reg_builtin,
+                                            )
+
                                             _reg_builtin(
                                                 _new_cfg,
                                                 self.tool_registry,
@@ -644,7 +708,9 @@ class AgentRunner:
                                             )
                                             logger.info("[Runner] Config hot-reload: built-in tools re-registered")
                                         except Exception as _bt_e:
-                                            logger.warning(f"[Runner] Config hot-reload: built-in tool re-registration failed: {_bt_e}")
+                                            logger.warning(
+                                                f"[Runner] Config hot-reload: built-in tool re-registration failed: {_bt_e}"
+                                            )
                                     if self._plugin_manager:
                                         # Load any newly enabled plugins
                                         self._plugin_manager.reload_plugins(
@@ -660,35 +726,31 @@ class AgentRunner:
                                             agent_tool_names=self._agent_tool_names,
                                             agent_tool_levels=self._agent_tool_levels,
                                         )
-                                        logger.info(
-                                            "[Runner] Config hot-reload complete: "
-                                            "plugin tools re-registered"
-                                        )
+                                        logger.info("[Runner] Config hot-reload complete: plugin tools re-registered")
                                 # Check model config hot-reload
                                 new_model = _new_cfg.get("model", {})
                                 if new_model != self._model_config:
-                                    logger.info(
-                                        "[Runner] config.json model changed, hot-reloading..."
-                                    )
+                                    logger.info("[Runner] config.json model changed, hot-reloading...")
                                     try:
                                         from opensquad.model_switch import apply_model_reload
+
                                         await apply_model_reload(self, new_model)
                                     except Exception as _me:
-                                        logger.warning(
-                                            f"[Runner] Model hot-reload failed: {_me}"
-                                        )
+                                        logger.warning(f"[Runner] Model hot-reload failed: {_me}")
                         except Exception as _e:
                             logger.warning(f"[Runner] config.json hot-reload check failed: {_e}")
 
                     try:
-                        logger.debug(f"[Runner] Polling input_hub (5s timeout)...")
+                        logger.debug("[Runner] Polling input_hub (5s timeout)...")
                         # Log urgent queue state before polling (debug level to avoid spam)
                         _urgent_q = input_hub._get_urgent_queue()
-                        logger.debug(f"[Runner] Pre-poll state: urgent_queue_size={_urgent_q.qsize()}, normal_queue_size={input_hub._get_queue().qsize()}")
-                        user_input_data = await asyncio.wait_for(
-                            input_hub.get_user_response(), timeout=5.0
+                        logger.debug(
+                            f"[Runner] Pre-poll state: urgent_queue_size={_urgent_q.qsize()}, normal_queue_size={input_hub._get_queue().qsize()}"
                         )
-                        logger.info(f"[Runner] ===== GOT INPUT from input_hub: source={user_input_data.get('source')}, content={str(user_input_data.get('content',''))[:80]} =====")
+                        user_input_data = await asyncio.wait_for(input_hub.get_user_response(), timeout=5.0)
+                        logger.info(
+                            f"[Runner] ===== GOT INPUT from input_hub: source={user_input_data.get('source')}, content={str(user_input_data.get('content', ''))[:80]} ====="
+                        )
                     except asyncio.TimeoutError:
                         # Bug 4 fix: after a cooldown period in idle state, there may be backlogged messages
                         # in the queue but no trigger. Check on every poll timeout:
@@ -696,16 +758,21 @@ class AgentRunner:
                         # drain directly to avoid __PROCESS_QUEUE__ through input_hub (caused duplicate responses).
                         if message_queue.size > 0:
                             from opensquad.message_router import message_router
+
                             if not message_router.in_cooldown:
                                 _drained = message_queue.get_all()
-                                logger.info(f"[Runner] Idle drain: {len(_drained)} queued msg(s) found, merging with pending input")
+                                logger.info(
+                                    f"[Runner] Idle drain: {len(_drained)} queued msg(s) found, merging with pending input"
+                                )
                                 _pending_group_messages = _drained
                                 # Build a synthetic group-message-only input so the turn loop processes it
                                 user_input_data = {"source": "group:idle_drain", "content": ""}
                         # Check urgent queue after timeout (items may have arrived during the wait)
                         _uq_after = input_hub._get_urgent_queue()
                         if _uq_after.qsize() > 0:
-                            logger.info(f"[Runner] Post-timeout: urgent queue has {_uq_after.qsize()} items, will retry on next poll")
+                            logger.info(
+                                f"[Runner] Post-timeout: urgent queue has {_uq_after.qsize()} items, will retry on next poll"
+                            )
                         continue  # loop back to check reload signal
                     except asyncio.CancelledError:
                         # Safety net: if a leaked anyio CancelledError still
@@ -714,7 +781,7 @@ class AgentRunner:
                         # anyio_patches.py prevents the infinite re-cancel loop
                         # at source.
                         current_task = asyncio.current_task()
-                        if current_task and hasattr(current_task, 'uncancel'):
+                        if current_task and hasattr(current_task, "uncancel"):
                             while current_task.uncancel() > 0:
                                 pass
                         logger.warning(
@@ -736,15 +803,20 @@ class AgentRunner:
                 self._current_user_id = user_input_data.get("user_id", "")
                 # Update shared runtime context for tools
                 from opensquad import _runtime_ctx
-                _runtime_ctx.update({
-                    "channel": self._current_channel,
-                    "sender_name": self._current_sender_name,
-                    "chat_name": self._current_chat_name,
-                    "source_chat_id": self._current_source_chat_id,
-                    "input_source": self._current_input_source,
-                    "attachments": self._current_attachments,
-                })
-                logger.info(f"[Runner] Got input: source={source}, content_len={len(initial_query)}, raw_repr={repr(initial_query[:80])}")
+
+                _runtime_ctx.update(
+                    {
+                        "channel": self._current_channel,
+                        "sender_name": self._current_sender_name,
+                        "chat_name": self._current_chat_name,
+                        "source_chat_id": self._current_source_chat_id,
+                        "input_source": self._current_input_source,
+                        "attachments": self._current_attachments,
+                    }
+                )
+                logger.info(
+                    f"[Runner] Got input: source={source}, content_len={len(initial_query)}, raw_repr={initial_query[:80]!r}"
+                )
 
                 # --- Merge pending group messages (drained from message_queue earlier) ---
                 if _pending_group_messages:
@@ -752,7 +824,9 @@ class AgentRunner:
                     all_images = []
                     for msg in _pending_group_messages:
                         if msg.type == "group":
-                            msg_parts.append(f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}")
+                            msg_parts.append(
+                                f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}"
+                            )
                         elif msg.type == "dm":
                             msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
                         if msg.images:
@@ -763,7 +837,11 @@ class AgentRunner:
                     if initial_query:
                         initial_query += f"\n\n[Simultaneously received group messages]\n{formatted}"
                     else:
-                        initial_query = "[Messages]\n" + formatted + "[Messages received, please decide how to reply based on the source]"
+                        initial_query = (
+                            "[Messages]\n"
+                            + formatted
+                            + "[Messages received, please decide how to reply based on the source]"
+                        )
                         source = "chatpro"
                         self._current_input_source = source
                         self._current_channel = "chatpro_group"
@@ -783,7 +861,9 @@ class AgentRunner:
                 if isinstance(initial_query, str) and initial_query.startswith("__PROCESS_QUEUE__"):
                     pending = message_queue.get_all()
                     _extra_web = input_hub.get_all_pending()
-                    logger.info(f"[Runner] __PROCESS_QUEUE__ (early intercept), pending={len(pending)}, extra_web={len(_extra_web)}")
+                    logger.info(
+                        f"[Runner] __PROCESS_QUEUE__ (early intercept), pending={len(pending)}, extra_web={len(_extra_web)}"
+                    )
                     if not pending and not _extra_web:
                         initial_query = None
                         continue
@@ -803,20 +883,28 @@ class AgentRunner:
                             _extra_parts = [_wd.get("content", "") for _wd in _extra_web[1:] if _wd.get("content")]
                             if _extra_parts:
                                 initial_query += "\n" + "\n".join(_extra_parts)
-                        logger.info(f"[Runner] __PROCESS_QUEUE__ (early) with only web messages, processing as regular input")
+                        logger.info(
+                            "[Runner] __PROCESS_QUEUE__ (early) with only web messages, processing as regular input"
+                        )
                     else:
                         msg_parts = []
                         all_images = []
                         for msg in pending:
                             if msg.type == "group":
-                                msg_parts.append(f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}")
+                                msg_parts.append(
+                                    f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}"
+                                )
                             elif msg.type == "dm":
                                 msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
                             if msg.images:
                                 all_images.extend(msg.images)
                         if all_images:
                             self._current_images = all_images
-                        initial_query = "[Messages]\n" + "\n".join(msg_parts) + "[Messages received, please decide how to reply based on the source]"
+                        initial_query = (
+                            "[Messages]\n"
+                            + "\n".join(msg_parts)
+                            + "[Messages received, please decide how to reply based on the source]"
+                        )
                         source = "chatpro"
                         self._current_input_source = source
                         self._current_channel = "chatpro_group"
@@ -854,32 +942,38 @@ class AgentRunner:
                     self._reset_session_stats()  # Archive current session stats, reset chat_api counters
                     _drain_before = input_hub.get_all_pending()
                     if _drain_before:
-                        self._pending_buffer.extend([
-                            {"content": _d['content'], "source": _d.get('source', 'web'),
-                             "images": _d.get('images'), "attachments": _d.get('attachments'),
-                             "channel": _d.get('channel', '')}
-                            for _d in _drain_before
-                        ])
+                        self._pending_buffer.extend(
+                            [
+                                {
+                                    "content": _d["content"],
+                                    "source": _d.get("source", "web"),
+                                    "images": _d.get("images"),
+                                    "attachments": _d.get("attachments"),
+                                    "channel": _d.get("channel", ""),
+                                }
+                                for _d in _drain_before
+                            ]
+                        )
                         logger.info(f"[Runner] Buffered {len(_drain_before)} msg(s) during session switch")
                     _get_session_manager().start_new_session()
                     self._turn_sid = _get_session_manager().get_current_session_id()
-                    self._load_history() # Reload (now empty)
-                    await self._emit('turn_start', 0) # Trigger frontend cleanup
+                    self._load_history()  # Reload (now empty)
+                    await self._emit("turn_start", 0)  # Trigger frontend cleanup
 
                     # Update session list for frontend
-                    await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
 
                     # Send new current session info
-                    await bus.emit_async('current_session', {
-                        'id': _get_session_manager().get_current_session_id(),
-                        'title': 'Current Session'
-                    })
+                    await bus.emit_async(
+                        "current_session",
+                        {"id": _get_session_manager().get_current_session_id(), "title": "Current Session"},
+                    )
 
                     await self._broadcast_token_stats()  # Immediately broadcast new session (session=0) stats
-                    await self._emit('info', "New session started")
+                    await self._emit("info", "New session started")
                     # Re-send turn_elapsed to close any workflow timer block that may exist in the frontend
                     _now_ms = int(datetime.now().timestamp() * 1000)
-                    await self._emit('turn_elapsed', {"started_ms": _now_ms, "ended_ms": _now_ms})
+                    await self._emit("turn_elapsed", {"started_ms": _now_ms, "ended_ms": _now_ms})
                     initial_query = None
                     continue
 
@@ -889,16 +983,21 @@ class AgentRunner:
                     if _get_session_manager().load_history_session(sid):
                         self._turn_sid = sid
                         self._load_history()
-                        await self._emit('turn_start', 0)
-                        history_data = {'messages': _get_session_manager().get_messages(), 'events': _get_session_manager().get_events(), 'session_id': sid, 'is_working_session': True}
-                        await bus.emit_async('history_sync', history_data)
-                        await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
+                        await self._emit("turn_start", 0)
+                        history_data = {
+                            "messages": _get_session_manager().get_messages(),
+                            "events": _get_session_manager().get_events(),
+                            "session_id": sid,
+                            "is_working_session": True,
+                        }
+                        await bus.emit_async("history_sync", history_data)
+                        await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                         # Refresh session list immediately
-                        await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                        await self._emit('info', f"Session loaded: {sid}")
+                        await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                        await self._emit("info", f"Session loaded: {sid}")
                         # Re-send turn_elapsed to close any workflow timer block that may exist in the frontend
                         _now_ms = int(datetime.now().timestamp() * 1000)
-                        await self._emit('turn_elapsed', {"started_ms": _now_ms, "ended_ms": _now_ms})
+                        await self._emit("turn_elapsed", {"started_ms": _now_ms, "ended_ms": _now_ms})
                     initial_query = None
                     continue
 
@@ -907,7 +1006,7 @@ class AgentRunner:
                     logger.info("[Runner] Command: Manual context compression ENTER")
                     _start_ms = int(datetime.now().timestamp() * 1000)
                     _trace_id = f"cmp_{_start_ms}_{self._current_round}"
-                    await self._emit('turn_start', {'turn': 0, 'started_ms': _start_ms})
+                    await self._emit("turn_start", {"turn": 0, "started_ms": _start_ms})
                     prev_summary = getattr(self.chat_api, "_latest_summary", "")
 
                     # Token-based compression: gather ALL messages and events for summarization
@@ -921,15 +1020,18 @@ class AgentRunner:
                     )
 
                     summary_stream_id = f"compress_{_trace_id}"
-                    summary_text_chunks: List[str] = []
+                    summary_text_chunks: list[str] = []
 
                     async def _on_summary_chunk(delta: str):
                         summary_text_chunks.append(delta)
-                        await self._emit('summary_stream', {
-                            'id': summary_stream_id,
-                            'delta': delta,
-                            'trace_id': _trace_id,
-                        })
+                        await self._emit(
+                            "summary_stream",
+                            {
+                                "id": summary_stream_id,
+                                "delta": delta,
+                                "trace_id": _trace_id,
+                            },
+                        )
 
                     # Call external summarizer LLM (separate from current agent) with streaming output
                     summary_text = await _run_external_summarizer(
@@ -941,51 +1043,52 @@ class AgentRunner:
                     )
                     if not summary_text and summary_text_chunks:
                         summary_text = "".join(summary_text_chunks).strip()
-                    await self._emit('summary_stream', {
-                        'id': summary_stream_id,
-                        'done': True,
-                        'trace_id': _trace_id,
-                    })
+                    await self._emit(
+                        "summary_stream",
+                        {
+                            "id": summary_stream_id,
+                            "done": True,
+                            "trace_id": _trace_id,
+                        },
+                    )
 
                     result = _get_session_manager().compress_current_session(
-                        keep_ratio=0.1,
-                        previous_summary=prev_summary,
-                        external_summary=summary_text
+                        keep_ratio=0.1, previous_summary=prev_summary, external_summary=summary_text
                     )
-                    if result.get('compressed'):
-                        self.chat_api._latest_summary = result.get('summary_content', '')
+                    if result.get("compressed"):
+                        self.chat_api._latest_summary = result.get("summary_content", "")
                     if summary_text:
                         _summary_evt = {
-                            'event': 'context_summary_generated',
-                            'text': 'Context summary generated',
-                            'summary': summary_text,
-                            'trace_id': _trace_id,
+                            "event": "context_summary_generated",
+                            "text": "Context summary generated",
+                            "summary": summary_text,
+                            "trace_id": _trace_id,
                         }
                         # Persist so refresh/history replay can still show the generated summary
-                        _get_session_manager().add_event('info', _summary_evt, turn_id=0, round_id=self._current_round)
+                        _get_session_manager().add_event("info", _summary_evt, turn_id=0, round_id=self._current_round)
                         # Persist an explicit summary message as durable fallback for UI recovery
                         # when realtime WS events are dropped during reconnect.
                         _get_session_manager().add_message("system", summary_text, msg_type="context_summary")
-                        await self._emit('info', _summary_evt)
+                        await self._emit("info", _summary_evt)
                     self._load_history()
                     self.chat_api.req = self.chat_api._prepare_messages()
                     sid = _get_session_manager().get_current_session_id()
                     history_data = {
-                        'messages': _get_session_manager().get_messages(),
-                        'events': _get_session_manager().get_events(),
-                        'session_id': sid,
-                        'is_working_session': True
+                        "messages": _get_session_manager().get_messages(),
+                        "events": _get_session_manager().get_events(),
+                        "session_id": sid,
+                        "is_working_session": True,
                     }
-                    await bus.emit_async('history_sync', history_data)
-                    await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
-                    await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                    await bus.emit_async("history_sync", history_data)
+                    await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
                     # Force prompt refresh so CONTEXT_SUMMARY replacement takes effect immediately.
                     # Also force one prompt_update snapshot after compression even if textual diff
                     # is not detected by equality checks.
                     self._has_prompt_snapshot = False
                     await self._setup_prompt()
                     _end_ms = int(datetime.now().timestamp() * 1000)
-                    await self._emit('turn_elapsed', {"started_ms": _start_ms, "ended_ms": _end_ms})
+                    await self._emit("turn_elapsed", {"started_ms": _start_ms, "ended_ms": _end_ms})
                     # Broadcast updated token stats after compression so frontend
                     # reflects the reduced context size immediately.
                     await self._broadcast_token_stats()
@@ -995,20 +1098,25 @@ class AgentRunner:
                 # --- Plugin Hook: on_message_received ---
                 if self._plugin_manager:
                     _hook_before = repr(initial_query)
-                    logger.info(f"[Runner] Before on_message_received hook: {repr(initial_query[:80])}")
-                    _hook_ctx = await self._plugin_manager.run_hook("on_message_received", {
-                        "message": initial_query,
-                        "channel": self._current_channel,
-                        "sender_name": getattr(self, '_current_sender_name', ''),
-                        "chat_name": getattr(self, '_current_chat_name', ''),
-                        "source_chat_id": self._current_source_chat_id,
-                        "input_source": self._current_input_source,
-                    })
+                    logger.info(f"[Runner] Before on_message_received hook: {initial_query[:80]!r}")
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_message_received",
+                        {
+                            "message": initial_query,
+                            "channel": self._current_channel,
+                            "sender_name": getattr(self, "_current_sender_name", ""),
+                            "chat_name": getattr(self, "_current_chat_name", ""),
+                            "source_chat_id": self._current_source_chat_id,
+                            "input_source": self._current_input_source,
+                        },
+                    )
                     initial_query = _hook_ctx.get("message", initial_query)
                     _hook_after = repr(initial_query)
-                    logger.info(f"[Runner] After on_message_received hook: {repr(initial_query[:80])}")
+                    logger.info(f"[Runner] After on_message_received hook: {initial_query[:80]!r}")
                     if _hook_before != _hook_after:
-                        logger.info(f"[Runner] WARNING: on_message_received CHANGED message from {repr(initial_query[:80])} to {repr(initial_query[:80])}")
+                        logger.info(
+                            f"[Runner] WARNING: on_message_received CHANGED message from {initial_query[:80]!r} to {initial_query[:80]!r}"
+                        )
                     if _hook_ctx.get("__stop__"):
                         logger.info("[Runner] on_message_received: chain stopped by plugin, skipping message")
                         initial_query = None
@@ -1018,7 +1126,9 @@ class AgentRunner:
                 if user_input_data.get("has_messages") and user_input_data.get("message_context"):
                     msg_ctx = user_input_data["message_context"]
                     initial_query += f"\n\n[Simultaneously received group messages - for reference only, do not auto-call im.send_message to reply]\n{msg_ctx}"
-                    logger.info(f"[Runner] Appended {user_input_data.get('message_count', 0)} pending messages to user input")
+                    logger.info(
+                        f"[Runner] Appended {user_input_data.get('message_count', 0)} pending messages to user input"
+                    )
 
                 # Handle switch-and-reply command
                 if initial_query.startswith("__SWITCH_AND_REPLY__:"):
@@ -1032,9 +1142,9 @@ class AgentRunner:
                             if _get_session_manager().load_history_session(sid):
                                 self._turn_sid = sid
                                 self._load_history()
-                                await self._emit('turn_start', 0)
-                                await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
-                                await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                                await self._emit("turn_start", 0)
+                                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                                await bus.emit_async("session_list", _get_session_manager().get_session_list())
                                 initial_query = reply_content
                             else:
                                 # Switch failed (target session does not exist), stay on current session and process message
@@ -1054,7 +1164,7 @@ class AgentRunner:
 
                 if source == "wake" or initial_query.startswith("[Wake-"):
                     logger.info(f"[Runner] Woken up by: {initial_query}")
-            
+
             # --- Re-check system commands from urgent interrupt path ---
             # When a system command arrives via urgent queue during task execution,
             # the urgent handler sets initial_query (truthy), causing the
@@ -1071,29 +1181,28 @@ class AgentRunner:
                 input_hub.push_urgent(initial_query, source="system")
                 initial_query = None
                 continue
-            
+
             # For group message sources, do not store as user message in history or display
             if self._current_input_source == "chatpro":
                 # Group messages are only passed to AI as context, not displayed in the chat box
                 self._last_user_input = initial_query
                 self._turn_sid = _get_session_manager().get_current_session_id()
-                # Do not call _get_session_manager().add_message("user", ...) 
+                # Do not call _get_session_manager().add_message("user", ...)
                 # Do not call self._emit('user_msg', ...)
             else:
                 # Normal user message
                 _get_session_manager().add_message("user", initial_query)
                 self._last_user_input = initial_query
                 self._turn_sid = _get_session_manager().get_current_session_id()
-                await self._emit('user_msg', initial_query)
-            
+                await self._emit("user_msg", initial_query)
+
             # Initialize task
             initial_query, task_id = self._prepare_task(initial_query)
-            
+
             # Add source label for AI (does not affect storage or frontend display)
-            ai_query = initial_query
-            channel = getattr(self, '_current_channel', '') or ''
-            sender_name = getattr(self, '_current_sender_name', '') or ''
-            chat_name = getattr(self, '_current_chat_name', '') or ''
+            channel = getattr(self, "_current_channel", "") or ""
+            sender_name = getattr(self, "_current_sender_name", "") or ""
+            chat_name = getattr(self, "_current_chat_name", "") or ""
             if self._current_input_source in ("web", "gateway"):
                 # Map channel to human-readable label
                 _channel_labels = {
@@ -1108,19 +1217,19 @@ class AgentRunner:
                     "external": "External Integration",
                     "external-ws": "External WebSocket",
                 }
-                label = _channel_labels.get(channel, "Web UI" if not channel else channel)
+                label = _channel_labels.get(channel, channel if channel else "Web UI")
                 # Build context parts
                 ctx_parts = [f"Source: {label}"]
                 if chat_name:
                     ctx_parts.append(f"Group: {chat_name}")
                 if sender_name:
                     ctx_parts.append(f"Sender: {sender_name}")
-                source_chat_id = getattr(self, '_current_source_chat_id', '') or ''
+                source_chat_id = getattr(self, "_current_source_chat_id", "") or ""
                 if source_chat_id:
                     ctx_parts.append(f"chat_id: {source_chat_id}")
-                ai_query = f"[{', '.join(ctx_parts)}] {initial_query}"
+                f"[{', '.join(ctx_parts)}] {initial_query}"
             elif self._current_input_source == "cli":
-                ai_query = f"[Source: CLI Terminal] {initial_query}"
+                pass
             # chatpro group messages already prefixed in __PROCESS_QUEUE__ path
 
             # Broadcast token stats (after user input)
@@ -1128,12 +1237,12 @@ class AgentRunner:
             # so we no longer manually append here to avoid two consecutive user messages per round.
             await self._broadcast_token_stats()
 
-            await self._emit('status', f"Session continuous, State: {await _get_state_manager().get_state()}")
-            
+            await self._emit("status", f"Session continuous, State: {await _get_state_manager().get_state()}")
+
             # Task plan is managed by LLM via <plan> tags, not auto-injected
             # LLM decides when to use <plan> based on task complexity
             await self._setup_prompt()
-            
+
             current_input = f"User input: {initial_query}"
             if self._dynamic_context_prefix:
                 current_input = self._dynamic_context_prefix + current_input
@@ -1159,33 +1268,32 @@ class AgentRunner:
                         att_lines.append(str(att))
                 if att_lines:
                     current_input += "\n\n[Attachments]\n" + "\n".join(att_lines)
-            max_turns = kwargs.get('max_turns', 200)
+            max_turns = kwargs.get("max_turns", 200)
             task_finished = False
             # round_id monotonically increasing: incremented once per new user message, never resets across the session
             # Used by the frontend to attribute all events from this response to the corresponding assistant message
             self._current_round += 1
-            logger.debug(f"[Runner] ===== ENTERING TURN LOOP (max_turns={max_turns}, input_source={self._current_input_source}, round={self._current_round}) =====")
+            logger.debug(
+                f"[Runner] ===== ENTERING TURN LOOP (max_turns={max_turns}, input_source={self._current_input_source}, round={self._current_round}) ====="
+            )
             # Record the workflow start time (before all turns, set only once)
             self._workflow_started_ms = datetime.now().timestamp() * 1000
             # Persist a workflow start marker so refresh can reconstruct in-progress blocks
             _get_session_manager().add_event(
-                'info',
-                {"text": "Workflow started"},
-                turn_id=0,
-                round_id=self._current_round
+                "info", {"text": "Workflow started"}, turn_id=0, round_id=self._current_round
             )
-            
+
             for turn in range(max_turns):
                 logger.debug(f"[Runner] --- Turn {turn + 1}/{max_turns} ---")
                 self._current_turn = turn + 1
                 self._turn_started_ms = datetime.now().timestamp() * 1000
-                await self._emit('turn_start', {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)})
+                await self._emit("turn_start", {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)})
 
                 # Per-turn repetition rewind counter — only allow ONE rewind per turn.
                 # Prevents infinite "detect → rewind → repeat → detect" loops when the
                 # model keeps producing the same repetitive output.
                 self._repetition_rewind_count = 0
-                
+
                 # ========== Safety interrupt checkpoint 1: Before turn starts ==========
                 urgent_commands = input_hub.check_urgent_commands()
                 if urgent_commands:
@@ -1196,7 +1304,7 @@ class AgentRunner:
                             input_hub.clear_stop_request()
                             task_finished = True
                             initial_query = None
-                            await self._emit('status', "Task stopped by user")
+                            await self._emit("status", "Task stopped by user")
                             break
                         elif content == "__NEW_SESSION__":
                             # Urgent session switch: start new session
@@ -1205,14 +1313,14 @@ class AgentRunner:
                             _get_session_manager().start_new_session()
                             self._turn_sid = _get_session_manager().get_current_session_id()
                             self._load_history()
-                            await self._emit('turn_start', 0)
-                            await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                            await bus.emit_async('current_session', {
-                                'id': _get_session_manager().get_current_session_id(),
-                                'title': 'Current Session'
-                            })
+                            await self._emit("turn_start", 0)
+                            await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                            await bus.emit_async(
+                                "current_session",
+                                {"id": _get_session_manager().get_current_session_id(), "title": "Current Session"},
+                            )
                             await self._broadcast_token_stats()  # Immediately broadcast new session (session=0) stats
-                            await self._emit('info', "New session started")
+                            await self._emit("info", "New session started")
                             task_finished = True
                             initial_query = None
                             break
@@ -1229,12 +1337,17 @@ class AgentRunner:
                             if _get_session_manager().load_history_session(sid):
                                 self._turn_sid = sid
                                 self._load_history()
-                                await self._emit('turn_start', 0)
-                                history_data = {'messages': _get_session_manager().get_messages(), 'events': _get_session_manager().get_events(), 'session_id': sid, 'is_working_session': True}
-                                await bus.emit_async('history_sync', history_data)
-                                await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
-                                await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                                await self._emit('info', f"Session loaded: {sid}")
+                                await self._emit("turn_start", 0)
+                                history_data = {
+                                    "messages": _get_session_manager().get_messages(),
+                                    "events": _get_session_manager().get_events(),
+                                    "session_id": sid,
+                                    "is_working_session": True,
+                                }
+                                await bus.emit_async("history_sync", history_data)
+                                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                                await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                                await self._emit("info", f"Session loaded: {sid}")
                             task_finished = True
                             initial_query = None
                             break
@@ -1251,7 +1364,9 @@ class AgentRunner:
                                 cmd_attachments = cmd.get("attachments", [])
                                 if cmd_attachments:
                                     self._current_attachments = cmd_attachments
-                                    logger.info(f"[Runner] Urgent SWITCH_AND_REPLY with {len(cmd_attachments)} attachments")
+                                    logger.info(
+                                        f"[Runner] Urgent SWITCH_AND_REPLY with {len(cmd_attachments)} attachments"
+                                    )
                                 current_sid = _get_session_manager().get_current_session_id()
                                 if sid != current_sid:
                                     # Different session: need to switch context
@@ -1259,12 +1374,9 @@ class AgentRunner:
                                     if _get_session_manager().load_history_session(sid):
                                         self._turn_sid = sid
                                         self._load_history()
-                                        await self._emit('turn_start', 0)
-                                        await bus.emit_async('current_session', {
-                                            'id': sid,
-                                            'title': 'Current Session'
-                                        })
-                                        await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                                        await self._emit("turn_start", 0)
+                                        await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                                        await bus.emit_async("session_list", _get_session_manager().get_session_list())
                                 else:
                                     # Same session: skip reload
                                     logger.info(f"[Runner] Urgent same session {sid}, skip context switch")
@@ -1274,13 +1386,14 @@ class AgentRunner:
                                 break
                     if task_finished:
                         break
-                
+
                 # Check for supplementary input (web/gateway messages during working state)
                 # These must be pushed into event_pipeline so they flow through
                 # add_pipeline_events (role=tool) to the LLM on the next tool result.
                 supplements = input_hub.get_all_pending()
                 if supplements:
                     from opensquad.event_pipeline import event_pipeline
+
                     for item in supplements:
                         content = item["content"]
                         logger.info(f"[Runner] Mid-work supplement from input_hub: {content[:80]}")
@@ -1288,9 +1401,13 @@ class AgentRunner:
                         event_pipeline.push_nowait(
                             source=item.get("source", "web"),
                             content=content,
-                            metadata={"sender_name": item.get("sender_name", ""), "channel": item.get("channel", ""), "source": "input_hub"},
+                            metadata={
+                                "sender_name": item.get("sender_name", ""),
+                                "channel": item.get("channel", ""),
+                                "source": "input_hub",
+                            },
                         )
-                
+
                 # Check message pipeline
                 # CRITICAL: External messages (group/DM) flow through event_pipeline → role=tool.
                 # Do NOT append them to current_input — that would cause add_user_message() to
@@ -1302,33 +1419,34 @@ class AgentRunner:
                     for msg in pending:
                         if msg.images:
                             queue_images.extend(msg.images)
-                    
+
                     # Collect images only (text flows via event_pipeline/role=tool)
                     if queue_images:
                         self._current_images.extend(queue_images)
                         logger.info(f"[Runner] Collected {len(queue_images)} images from mid-turn queue")
-                
+
                 # ========== Safety interrupt checkpoint 2: Before sending request ==========
                 if input_hub.is_stop_requested():
                     logger.info("[Runner] Stop requested before API call")
                     input_hub.clear_stop_request()
                     task_finished = True
                     initial_query = None
-                    await self._emit('status', "Task stopped")
+                    await self._emit("status", "Task stopped")
                     break
-                
+
                 # Execute AI conversation
                 self._setup_event_dispatch()
-                await self._emit('status', 'working') # Notify frontend of working state before starting
+                await self._emit("status", "working")  # Notify frontend of working state before starting
 
                 # Check for image paths written by vision plugin (img_path.txt)
                 _img_path_file = os.path.join(self._agent_dir, "img_path.txt") if self._agent_dir else "img_path.txt"
                 if os.path.exists(_img_path_file):
                     try:
-                        with open(_img_path_file, "r", encoding="utf-8") as f:
+                        with open(_img_path_file, encoding="utf-8") as f:
                             content = f.read().strip()
                             if content:
                                 import ast
+
                                 try:
                                     paths = ast.literal_eval(content)
                                     if isinstance(paths, list):
@@ -1337,11 +1455,13 @@ class AgentRunner:
                                         new_paths = [p for p in paths if os.path.exists(p) and p not in already]
                                         if new_paths:
                                             self._current_images.extend(new_paths)
-                                            logger.info(f"[Runner] Loaded {len(new_paths)} new images from img_path.txt")
+                                            logger.info(
+                                                f"[Runner] Loaded {len(new_paths)} new images from img_path.txt"
+                                            )
                                     elif isinstance(paths, str):
                                         if os.path.exists(paths):
                                             self._current_images.append(paths)
-                                            logger.info(f"[Runner] Loaded 1 image from img_path.txt")
+                                            logger.info("[Runner] Loaded 1 image from img_path.txt")
                                 except Exception as e:
                                     logger.error(f"[Runner] Failed to parse img_path.txt: {e}")
                         # Clear after reading
@@ -1350,8 +1470,10 @@ class AgentRunner:
                     except Exception as e:
                         logger.error(f"[Runner] Failed to read img_path.txt: {e}")
 
-                logger.debug(f"[Runner] ===== CALLING LLM (source: {self._current_input_source}, content_len={len(current_input)}) =====")
-                
+                logger.debug(
+                    f"[Runner] ===== CALLING LLM (source: {self._current_input_source}, content_len={len(current_input)}) ====="
+                )
+
                 # === DEDUPLICATION FIX ===
                 # External messages (web, group, DM) flow through event_pipeline → role=tool.
                 # On the FIRST turn of a session, the user message is added via
@@ -1360,15 +1482,18 @@ class AgentRunner:
                 # once as role=tool).
                 # On SUBSEQUENT turns, skip_add_user=True so external events only appear
                 # as role=tool via add_pipeline_events.
-                _is_first_turn = (turn == 0)
+                _is_first_turn = turn == 0
                 if _is_first_turn:
                     from opensquad.event_pipeline import event_pipeline
+
                     drained = event_pipeline.drain_formatted_sync()
                     if drained:
-                        logger.info(f"[Runner] Pre-chat event_pipeline drain: {len(drained)} chars (prevents role=user + role=tool duplication)")
+                        logger.info(
+                            f"[Runner] Pre-chat event_pipeline drain: {len(drained)} chars (prevents role=user + role=tool duplication)"
+                        )
                 # Image handling: is_img_mode=true (i.e. config.json model.is_image=true) passes directly to main model, false skips
                 _native_images = None  # Images passed directly to chat_api in native mode (file paths)
-                _b64_images = None     # Base64 images returned by MCP tools
+                _b64_images = None  # Base64 images returned by MCP tools
                 _audio_paths: list = []
                 _video_paths: list = []
                 if self._current_attachments:
@@ -1390,80 +1515,101 @@ class AgentRunner:
                 if self._current_images:
                     _images = self._current_images
                     self._current_images = []  # Process only once
-                    logger.info(f"[Runner] Processing {len(_images)} image(s), is_img_mode={self._is_img_mode}, paths={_images}")
-                    
+                    logger.info(
+                        f"[Runner] Processing {len(_images)} image(s), is_img_mode={self._is_img_mode}, paths={_images}"
+                    )
+
                     # Verify files exist
                     import os as _os
+
                     for _ip in _images:
                         if not _os.path.exists(_ip):
                             logger.error(f"[Runner] Image file NOT FOUND: {_ip}")
-                            await self._emit('info', f"Warning: image not found: {_os.path.basename(_ip)}")
-                    
+                            await self._emit("info", f"Warning: image not found: {_os.path.basename(_ip)}")
+
                     if self._is_img_mode:
                         # Main model supports images natively, pass directly
                         _native_images = _images
-                        logger.info(f"[Runner] [VISION] Native mode: _native_images={_native_images}, is_img_mode={self._is_img_mode}")
-                        await self._emit('info', f"Sending {len(_images)} image(s) to model")
+                        logger.info(
+                            f"[Runner] [VISION] Native mode: _native_images={_native_images}, is_img_mode={self._is_img_mode}"
+                        )
+                        await self._emit("info", f"Sending {len(_images)} image(s) to model")
                     else:
                         # Main model does not support native image input (is_image=false)
-                        logger.warning(f"[Runner] [VISION] Model doesn't support native vision (is_image=False), skipping {len(_images)} image(s)")
-                        await self._emit('info', f"Current model does not support image input; skipped {len(_images)} image(s). To enable image recognition, set model.is_image to true in config.json.")
+                        logger.warning(
+                            f"[Runner] [VISION] Model doesn't support native vision (is_image=False), skipping {len(_images)} image(s)"
+                        )
+                        await self._emit(
+                            "info",
+                            f"Current model does not support image input; skipped {len(_images)} image(s). To enable image recognition, set model.is_image to true in config.json.",
+                        )
 
                 if _audio_paths or _video_paths:
                     if _audio_paths:
                         current_input += "\n\n[Audio attachment paths]\n" + "\n".join(_audio_paths)
-                        await self._emit('info', f"Received {len(_audio_paths)} audio file(s)")
+                        await self._emit("info", f"Received {len(_audio_paths)} audio file(s)")
                     if _video_paths:
                         current_input += "\n\n[Video attachment paths]\n" + "\n".join(_video_paths)
-                        await self._emit('info', f"Received {len(_video_paths)} video file(s)")
+                        await self._emit("info", f"Received {len(_video_paths)} video file(s)")
 
                 if _audio_paths:
-                    current_input += "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                    current_input += (
+                        "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                    )
                 if _video_paths:
                     current_input += "\n[Tip] To process video, use system.run_session_job to call ffmpeg to extract audio/keyframes first."
-                
+
                 # Base64 screenshots returned by MCP tools (e.g. Playwright browser_take_screenshot)
-                if hasattr(self, '_tool_result_images') and self._tool_result_images:
+                if hasattr(self, "_tool_result_images") and self._tool_result_images:
                     if self._is_img_mode:
                         _b64_images = self._tool_result_images
                         # await self._emit('info', f"MCP tool returned {len(_b64_images)} screenshot(s), passing directly to model")  # Disabled: removed per user request
                         logger.info(f"[Runner] MCP tool images: {len(_b64_images)} image(s) to chat_api")
                     else:
                         # Models that don't support native images (is_image=False): ignore
-                        logger.warning("[Runner] MCP tool returned images but model doesn't support native vision (is_image=False), skipping")
+                        logger.warning(
+                            "[Runner] MCP tool returned images but model doesn't support native vision (is_image=False), skipping"
+                        )
                     self._tool_result_images = []
-                
+
                 # --- Plugin Hook: on_before_llm ---
                 if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook("on_before_llm", {
-                        "messages": self.chat_api.req if hasattr(self.chat_api, 'req') else [],
-                        "model": getattr(self.chat_api, 'model', ''),
-                        "agent_id": self._agent_id,
-                    })
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_before_llm",
+                        {
+                            "messages": self.chat_api.req if hasattr(self.chat_api, "req") else [],
+                            "model": getattr(self.chat_api, "model", ""),
+                            "agent_id": self._agent_id,
+                        },
+                    )
                     if _hook_ctx.get("__stop__"):
                         logger.info("[Runner] on_before_llm: chain stopped by plugin, skipping LLM call")
                         task_finished = True
                         initial_query = None
                         break
- 
-                _llm_timeout = getattr(self.chat_api, 'timeout', 30.0)
-                _asyncio_timeout = _llm_timeout + 15.0  # asyncio-layer timeout slightly higher than API layer to ensure API timeout triggers first
+
+                _llm_timeout = getattr(self.chat_api, "timeout", 30.0)
+                _asyncio_timeout = (
+                    _llm_timeout + 15.0
+                )  # asyncio-layer timeout slightly higher than API layer to ensure API timeout triggers first
 
                 try:
-                    logger.info(f"[Runner] [VISION] >>> Calling chat() with image_path={_native_images}, turn={turn}, is_first_turn={_is_first_turn}")
+                    logger.info(
+                        f"[Runner] [VISION] >>> Calling chat() with image_path={_native_images}, turn={turn}, is_first_turn={_is_first_turn}"
+                    )
                     ai_response = await asyncio.wait_for(
                         self.chat_api.chat(
                             current_input,
                             image_path=_native_images,
                             image_b64_list=_b64_images,
-                            audio_path=_audio_paths if getattr(self.chat_api, 'is_audio_model', False) else None,
-                            video_path=_video_paths if getattr(self.chat_api, 'is_video_model', False) else None,
+                            audio_path=_audio_paths if getattr(self.chat_api, "is_audio_model", False) else None,
+                            video_path=_video_paths if getattr(self.chat_api, "is_video_model", False) else None,
                             tools=self._current_tools,
                             tool_choice=self._current_tool_choice,
                             tool_call_strategy=self.tool_call_strategy,
-                            skip_add_user=not _is_first_turn
+                            skip_add_user=not _is_first_turn,
                         ),
-                        timeout=_asyncio_timeout
+                        timeout=_asyncio_timeout,
                     )
                     # After chat_api.chat() adds the user message (first turn) and any
                     # pipeline tool events, broadcast updated stats so the frontend sees
@@ -1471,10 +1617,13 @@ class AgentRunner:
                     await self._broadcast_token_stats()
                 except asyncio.TimeoutError:
                     logger.error(f"[Runner] LLM API call timed out after {_asyncio_timeout}s, aborting turn")
-                    await self._emit('status', "LLM API response timed out, please try again later")
-                    await self._emit('error', {
-                        "message": f"LLM API call timed out after {_asyncio_timeout}s. Please check your network or try again later.",
-                    })
+                    await self._emit("status", "LLM API response timed out, please try again later")
+                    await self._emit(
+                        "error",
+                        {
+                            "message": f"LLM API call timed out after {_asyncio_timeout}s. Please check your network or try again later.",
+                        },
+                    )
                     task_finished = True
                     initial_query = None
                     break
@@ -1494,10 +1643,7 @@ class AgentRunner:
                             "Check your API provider account settings."
                         )
                     elif "429" in err_msg or "rate limit" in err_msg.lower():
-                        friendly = (
-                            "LLM API rate limit exceeded (HTTP 429). "
-                            "Please wait a moment and try again."
-                        )
+                        friendly = "LLM API rate limit exceeded (HTTP 429). Please wait a moment and try again."
                     elif "Connection" in err_msg or "connect" in err_msg.lower() or "refused" in err_msg.lower():
                         friendly = (
                             f"Unable to connect to LLM API: {err_msg[:200]}. "
@@ -1506,40 +1652,48 @@ class AgentRunner:
                     else:
                         friendly = f"LLM API call failed: {err_msg[:300]}"
                     logger.error(f"[Runner] LLM API call failed: {err_msg[:500]}")
-                    await self._emit('status', "LLM API call failed")
-                    await self._emit('error', {
-                        "message": friendly,
-                    })
+                    await self._emit("status", "LLM API call failed")
+                    await self._emit(
+                        "error",
+                        {
+                            "message": friendly,
+                        },
+                    )
                     task_finished = True
                     initial_query = None
                     break
-                
+
                 # LLM call completed (success or error)
-                
+
                 # --- Auto-compression post-processing ---
-                if getattr(self.chat_api, '_auto_compressed', False):
-                    _summary = getattr(self.chat_api, '_latest_summary', '')
+                if getattr(self.chat_api, "_auto_compressed", False):
+                    _summary = getattr(self.chat_api, "_latest_summary", "")
                     if _summary:
                         _summary_evt = {
-                            'event': 'context_summary_generated',
-                            'text': 'Context auto-compacted',
-                            'summary': _summary,
+                            "event": "context_summary_generated",
+                            "text": "Context auto-compacted",
+                            "summary": _summary,
                         }
-                        _get_session_manager().add_event('info', _summary_evt, turn_id=self._current_turn, round_id=self._current_round)
+                        _get_session_manager().add_event(
+                            "info", _summary_evt, turn_id=self._current_turn, round_id=self._current_round
+                        )
                         _get_session_manager().add_message("system", _summary, msg_type="context_summary")
                         # Persist summary to session_data so _load_history() can restore it
                         _get_session_manager().session_data["latest_summary"] = _summary
-                        await self._emit('info', _summary_evt)
+                        await self._emit("info", _summary_evt)
                         # FIX 2: Also emit summary_stream so the frontend can display the summary in the workflow panel.
                         # Auto-compression has no per-chunk streaming, so emit the full summary in one delta with done=true.
                         _ss_id = f"auto_compress_{_get_session_manager().get_current_session_id()}"
-                        await self._emit('summary_stream', {
-                            'id': _ss_id,
-                            'delta': _summary,
-                            'text': _summary,
-                            'done': True,
-                            'trace_id': 'auto',
-                        })
+                        await self._emit(
+                            "summary_stream",
+                            {
+                                "id": _ss_id,
+                                "delta": _summary,
+                                "text": _summary,
+                                "done": True,
+                                "trace_id": "auto",
+                            },
+                        )
 
                     # Force prompt refresh so CONTEXT_SUMMARY replacement takes effect immediately
                     self._has_prompt_snapshot = False
@@ -1548,17 +1702,19 @@ class AgentRunner:
                     # History sync
                     sid = _get_session_manager().get_current_session_id()
                     history_data = {
-                        'messages': _get_session_manager().get_messages(),
-                        'events': _get_session_manager().get_events(),
-                        'session_id': sid,
-                        'is_working_session': True
+                        "messages": _get_session_manager().get_messages(),
+                        "events": _get_session_manager().get_events(),
+                        "session_id": sid,
+                        "is_working_session": True,
                     }
-                    await bus.emit_async('history_sync', history_data)
-                    await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
-                    await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                    await bus.emit_async("history_sync", history_data)
+                    await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
 
                     _end_ms = int(datetime.now().timestamp() * 1000)
-                    await self._emit('turn_elapsed', {"started_ms": int(self._workflow_started_ms), "ended_ms": _end_ms})
+                    await self._emit(
+                        "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _end_ms}
+                    )
 
                     # Broadcast updated token stats after compression so frontend
                     # reflects the reduced context size immediately.
@@ -1576,7 +1732,9 @@ class AgentRunner:
                     stream_error = ai_response.get("stream_error", False)
                     logger.info(f"[Runner] Received dict response with tool_data: {tool_data_from_api is not None}")
                     if tool_data_from_api:
-                        logger.info(f"[Runner] Tool data extracted: {len(tool_data_from_api)} tool(s): {[t[0] for t in tool_data_from_api]}")
+                        logger.info(
+                            f"[Runner] Tool data extracted: {len(tool_data_from_api)} tool(s): {[t[0] for t in tool_data_from_api]}"
+                        )
                 else:
                     # Fallback for old format (plain string)
                     response_text = ai_response
@@ -1584,18 +1742,25 @@ class AgentRunner:
                     output_media = []
                     finish_reason = None
                     stream_error = False
-                    logger.warning(f"[Runner] Received non-dict response (type={type(ai_response).__name__}), using fallback")
-                
-                logger.debug(f"[Runner] ===== LLM RESPONDED, response_len={len(response_text) if response_text else 0} =====")
+                    logger.warning(
+                        f"[Runner] Received non-dict response (type={type(ai_response).__name__}), using fallback"
+                    )
+
+                logger.debug(
+                    f"[Runner] ===== LLM RESPONDED, response_len={len(response_text) if response_text else 0} ====="
+                )
 
                 # --- Plugin Hook: on_after_llm ---
                 if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook("on_after_llm", {
-                        "response": response_text,
-                        "agent_id": self._agent_id,
-                    })
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_after_llm",
+                        {
+                            "response": response_text,
+                            "agent_id": self._agent_id,
+                        },
+                    )
                     response_text = _hook_ctx.get("response", response_text)
-                
+
                 # ========== Safety interrupt checkpoint 3: After API response ==========
                 if input_hub.is_stop_requested():
                     logger.info("[Runner] Stop requested after API response")
@@ -1603,15 +1768,15 @@ class AgentRunner:
                     # Save partially streamed content to session to ensure it's not lost on refresh.
                     # _streamed_user_text is accumulated by stream_parser in real time for to_user content;
                     # it is the most reliable source of user-visible text.
-                    _partial = "".join(getattr(self, '_streamed_user_text', []))
+                    _partial = "".join(getattr(self, "_streamed_user_text", []))
                     if _partial.strip():
                         _get_session_manager().add_message("assistant", _partial.strip())
                         logger.info(f"[Runner] Saved partial response on stop ({len(_partial)} chars)")
                     task_finished = True
                     initial_query = None
-                    await self._emit('status', "Task stopped")
+                    await self._emit("status", "Task stopped")
                     break
-                
+
                 # Parse response (state changes, tool calls, history saving, etc. are all handled here)
                 stop, next_input, went_to_sleep = await self._handle_turn_result(
                     response_text,
@@ -1620,38 +1785,40 @@ class AgentRunner:
                     finish_reason=finish_reason,
                     stream_error=stream_error,
                 )
-                logger.info(f"[Runner] _handle_turn_result => stop={stop}, next_input_len={len(next_input) if next_input else 0}, went_to_sleep={went_to_sleep}")
-                
+                logger.info(
+                    f"[Runner] _handle_turn_result => stop={stop}, next_input_len={len(next_input) if next_input else 0}, went_to_sleep={went_to_sleep}"
+                )
+
                 if went_to_sleep:
                     # KEY CHANGE: LLM has called system.wait or finished replying.
                     # In the 'never stop' architecture, the LLM stays in the inner loop
                     # waiting for new events (web messages, group chat, DM, timer, etc.).
                     # Don't exit the loop - instead, wait for pipeline events.
                     _get_session_manager().add_event(
-                        'info',
+                        "info",
                         {"text": "Agent entering wait mode - listening for events"},
                         turn_id=self._current_turn,
-                        round_id=self._current_round
+                        round_id=self._current_round,
                     )
-                    await self._emit('status', "Waiting for events...")
-                    
+                    await self._emit("status", "Waiting for events...")
+
                     # Wait for pipeline events with periodic polling
                     _wait_poll_interval = 1.0  # Check every 1 second
                     _max_wait_turns = 0  # 0 = wait indefinitely
                     _wait_turn_count = 0
-                    
+
                     while _max_wait_turns == 0 or _wait_turn_count < _max_wait_turns:
                         _wait_turn_count += 1
-                        
+
                         # Check for stop command
                         if input_hub.is_stop_requested():
                             logger.info("[Runner] Stop requested while waiting")
                             input_hub.clear_stop_request()
                             task_finished = True
                             initial_query = None
-                            await self._emit('status', "Task stopped")
+                            await self._emit("status", "Task stopped")
                             break
-                        
+
                         # Check for urgent commands
                         urgent_commands = input_hub.check_urgent_commands()
                         if urgent_commands:
@@ -1662,7 +1829,7 @@ class AgentRunner:
                                     input_hub.clear_stop_request()
                                     task_finished = True
                                     initial_query = None
-                                    await self._emit('status', "Task stopped by user")
+                                    await self._emit("status", "Task stopped by user")
                                     break
                                 elif content == "__NEW_SESSION__":
                                     logger.info("[Runner] New session requested while waiting")
@@ -1670,14 +1837,17 @@ class AgentRunner:
                                     _get_session_manager().start_new_session()
                                     self._turn_sid = _get_session_manager().get_current_session_id()
                                     self._load_history()
-                                    await self._emit('turn_start', 0)
-                                    await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                                    await bus.emit_async('current_session', {
-                                        'id': _get_session_manager().get_current_session_id(),
-                                        'title': 'Current Session'
-                                    })
+                                    await self._emit("turn_start", 0)
+                                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                                    await bus.emit_async(
+                                        "current_session",
+                                        {
+                                            "id": _get_session_manager().get_current_session_id(),
+                                            "title": "Current Session",
+                                        },
+                                    )
                                     await self._broadcast_token_stats()
-                                    await self._emit('info', "New session started")
+                                    await self._emit("info", "New session started")
                                     task_finished = True
                                     initial_query = None
                                     break
@@ -1693,12 +1863,17 @@ class AgentRunner:
                                     if _get_session_manager().load_history_session(sid):
                                         self._turn_sid = sid
                                         self._load_history()
-                                        await self._emit('turn_start', 0)
-                                        history_data = {'messages': _get_session_manager().get_messages(), 'events': _get_session_manager().get_events(), 'session_id': sid, 'is_working_session': True}
-                                        await bus.emit_async('history_sync', history_data)
-                                        await bus.emit_async('current_session', {'id': sid, 'title': 'Current Session'})
-                                        await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                                        await self._emit('info', f"Session loaded: {sid}")
+                                        await self._emit("turn_start", 0)
+                                        history_data = {
+                                            "messages": _get_session_manager().get_messages(),
+                                            "events": _get_session_manager().get_events(),
+                                            "session_id": sid,
+                                            "is_working_session": True,
+                                        }
+                                        await bus.emit_async("history_sync", history_data)
+                                        await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                                        await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                                        await self._emit("info", f"Session loaded: {sid}")
                                     task_finished = True
                                     initial_query = None
                                     break
@@ -1718,12 +1893,13 @@ class AgentRunner:
                                             if _get_session_manager().load_history_session(sid):
                                                 self._turn_sid = sid
                                                 self._load_history()
-                                                await self._emit('turn_start', 0)
-                                                await bus.emit_async('current_session', {
-                                                    'id': sid,
-                                                    'title': 'Current Session'
-                                                })
-                                                await bus.emit_async('session_list', _get_session_manager().get_session_list())
+                                                await self._emit("turn_start", 0)
+                                                await bus.emit_async(
+                                                    "current_session", {"id": sid, "title": "Current Session"}
+                                                )
+                                                await bus.emit_async(
+                                                    "session_list", _get_session_manager().get_session_list()
+                                                )
                                         else:
                                             logger.info(f"[Runner] Same session {sid}, skip context switch")
                                         initial_query = reply_content
@@ -1731,7 +1907,7 @@ class AgentRunner:
                                         break
                             if task_finished:
                                 break
-                        
+
                         # Check for user messages in input_hub
                         # CRITICAL: Determine whether the LLM is in "working mode" (waiting for
                         # tool results) or "idle mode" (just replied with plain text).
@@ -1740,22 +1916,20 @@ class AgentRunner:
                         _last_was_tool_call = False
                         if self.chat_api.req:
                             _last = self.chat_api.req[-1]
-                            if _last.get("role") == "assistant" and _last.get("tool_calls"):
+                            if (_last.get("role") == "assistant" and _last.get("tool_calls")) or _last.get(
+                                "role"
+                            ) == "tool":
                                 _last_was_tool_call = True
-                            # CRITICAL: role=tool also means LLM just completed a tool call
-                            # and is in working mode. Messages should go through add_pipeline_events
-                            # (role=tool) instead of add_user_message (role=user) to avoid
-                            # incrementing total_requests (which triggers quota/billing).
-                            elif _last.get("role") == "tool":
-                                _last_was_tool_call = True
-                        
+
                         supplements = input_hub.get_all_pending()
                         if supplements:
                             for item in supplements:
                                 content = item["content"]
-                                logger.info(f"[Runner] User message detected during wait (source={item.get('source', 'web')}, working_mode={_last_was_tool_call}): {content[:80]}")
-                            
-                            await self._emit('status', 'working')
+                                logger.info(
+                                    f"[Runner] User message detected during wait (source={item.get('source', 'web')}, working_mode={_last_was_tool_call}): {content[:80]}"
+                                )
+
+                            await self._emit("status", "working")
 
                             # Setup for next turn
                             await self._setup_prompt()
@@ -1770,8 +1944,10 @@ class AgentRunner:
                                     content = item.get("content", "")
                                     if content and content.strip():
                                         _get_session_manager().add_message("user", content)
-                                        await self._emit('user_msg', content)
-                                        logger.info(f"[Runner] Persisted supplement as user message (working mode): {content[:80]}")
+                                        await self._emit("user_msg", content)
+                                        logger.info(
+                                            f"[Runner] Persisted supplement as user message (working mode): {content[:80]}"
+                                        )
                             else:
                                 # LLM replied with plain text (not working): new message should be
                                 # injected as role=user so the conversation can continue naturally.
@@ -1787,26 +1963,29 @@ class AgentRunner:
                                         self.chat_api.add_user_message(content)
                                         # Persist to session history (survives page refresh)
                                         _get_session_manager().add_message("user", content)
-                                        await self._emit('user_msg', content)
-                                        logger.info(f"[Runner] Woke up from wait (idle mode), added message as role=user. req_len={len(self.chat_api.req)}")
-                            
+                                        await self._emit("user_msg", content)
+                                        logger.info(
+                                            f"[Runner] Woke up from wait (idle mode), added message as role=user. req_len={len(self.chat_api.req)}"
+                                        )
+
                             # Reset counters for next LLM call
                             self._inner_loop_count = 1
                             self._turn_start_time = time.perf_counter()
-                            
+
                             current_input = ""
                             break  # Break out of wait loop, continue with LLM call
-                        
+
                         # Pipeline events: break and process via add_pipeline_events.
                         # Do NOT drain here — events must remain in pipeline until
                         # the tool execution path drains them.
                         from opensquad.event_pipeline import event_pipeline
+
                         if event_pipeline.size > 0:
                             logger.debug(f"[Runner] Pipeline events pending during wait: {event_pipeline.size}")
                             # New message arrived via event_pipeline from message_queue
                             # (group/DM messages), not through input_hub queue.
                             # Break the wait loop and process it.
-                            await self._emit('status', 'working')
+                            await self._emit("status", "working")
 
                             # Setup for next turn
                             await self._setup_prompt()
@@ -1818,10 +1997,16 @@ class AgentRunner:
                                 # so they survive a page refresh. Previously this was missing —
                                 # events existed only in chat_api.req (LLM context) and vanished on reload.
                                 for evt in _raw_events:
-                                    if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
+                                    if (
+                                        evt.source in ("web", "gateway", "group", "dm")
+                                        and evt.content
+                                        and evt.content.strip()
+                                    ):
                                         _get_session_manager().add_message("user", evt.content)
-                                        await self._emit('user_msg', evt.content)
-                                        logger.info(f"[Runner] Persisted event_pipeline event as user message (source={evt.source}): {evt.content[:80]}")
+                                        await self._emit("user_msg", evt.content)
+                                        logger.info(
+                                            f"[Runner] Persisted event_pipeline event as user message (source={evt.source}): {evt.content[:80]}"
+                                        )
 
                                     # Format for LLM
                                     lines = ["", "--- External Events (arrived during processing) ---"]
@@ -1829,19 +2014,23 @@ class AgentRunner:
                                         lines.append(evt.format_for_llm())
                                     lines.append("--- End External Events ---")
                                     _pipeline_events = "\n".join(lines)
-                                    if hasattr(self.chat_api, 'add_pipeline_events'):
+                                    if hasattr(self.chat_api, "add_pipeline_events"):
                                         self.chat_api.add_pipeline_events(_pipeline_events)
                                     else:
-                                        logger.warning(f"[Runner] chat_api has no add_pipeline_events; pipeline events ({len(_pipeline_events)} chars) dropped")
-                                    logger.info(f"[Runner] Woke up from wait via event_pipeline, drained {len(_raw_events)} events ({len(_pipeline_events)} chars)")
-                            
+                                        logger.warning(
+                                            f"[Runner] chat_api has no add_pipeline_events; pipeline events ({len(_pipeline_events)} chars) dropped"
+                                        )
+                                    logger.info(
+                                        f"[Runner] Woke up from wait via event_pipeline, drained {len(_raw_events)} events ({len(_pipeline_events)} chars)"
+                                    )
+
                             # Reset counters for next LLM call
                             self._inner_loop_count = 1
                             self._turn_start_time = time.perf_counter()
-                            
+
                             current_input = ""
                             break  # Break out of wait loop, continue with LLM call
-                        
+
                         # Message queue: push to event_pipeline, don't break
                         pending_msgs = message_queue.get_all()
                         if pending_msgs:
@@ -1853,18 +2042,24 @@ class AgentRunner:
                                 else:
                                     msg_text = f"[{msg.type}] {msg.sender_name}: {msg.content}"
                                 evt_source = msg.type
-                                event_pipeline.push_nowait(evt_source, msg_text, {
-                                    "group_name": msg.source_name if msg.type == "group" else "",
-                                    "sender_name": msg.sender_name,
-                                })
-                            logger.debug(f"[Runner] Message queue pushed to pipeline: {len(pending_msgs)} messages (flow through role=tool)")
+                                event_pipeline.push_nowait(
+                                    evt_source,
+                                    msg_text,
+                                    {
+                                        "group_name": msg.source_name if msg.type == "group" else "",
+                                        "sender_name": msg.sender_name,
+                                    },
+                                )
+                            logger.debug(
+                                f"[Runner] Message queue pushed to pipeline: {len(pending_msgs)} messages (flow through role=tool)"
+                            )
 
                         # Sleep before next poll
                         await asyncio.sleep(_wait_poll_interval)
-                    
+
                     if task_finished:
                         break
-                    
+
                     # If we exited wait loop WITHOUT task_finished, we have new user input.
                     # CRITICAL FIX: Instead of 'continue' (which goes back to outer while loop
                     # and just enters idle wait), we need to call the LLM with the updated
@@ -1878,44 +2073,51 @@ class AgentRunner:
                     # at the start of a normal turn. We do this by jumping to the chat
                     # section via a controlled flow: increment turn counter and continue.
                     self._current_turn += 1
-                    await self._emit('turn_start', {"turn": self._current_turn, "started_ms": int(self._workflow_started_ms)})
+                    await self._emit(
+                        "turn_start", {"turn": self._current_turn, "started_ms": int(self._workflow_started_ms)}
+                    )
                     continue  # Goes back to for turn loop → _setup_prompt → chat()
-                
+
                 await self._setup_prompt()
-                
+
                 if stop:
-                    await self._broadcast_token_stats()   # Write cumulative stats immediately after conversation completes
+                    await (
+                        self._broadcast_token_stats()
+                    )  # Write cumulative stats immediately after conversation completes
                     # Workflow ended (normal completion): send turn_elapsed to ensure frontend closes the workflow timer block
                     _wf_ended_ms = int(datetime.now().timestamp() * 1000)
-                    await self._emit('turn_elapsed', {
-                        "started_ms": int(self._workflow_started_ms),
-                        "ended_ms": _wf_ended_ms
-                    })
-                    await self._emit('status', "Response complete")
+                    await self._emit(
+                        "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
+                    )
+                    await self._emit("status", "Response complete")
                     # Notify frontend that agent is idle so send button is restored
                     await _get_state_manager().set_state("idle")
                     await self._emit("state", "idle")
                     task_finished = True
                     initial_query = None  # Message has been processed, clear to prevent repetition
                     break
-                
+
                 await self._broadcast_token_stats()
                 current_input = next_input
-            
+
             # Continue loop to wait for next input
             if task_finished:
-                logger.debug(f"[Runner] ===== TASK FINISHED, looping back to wait for next input (initial_query={'set' if initial_query else 'None'}) =====")
+                logger.debug(
+                    f"[Runner] ===== TASK FINISHED, looping back to wait for next input (initial_query={'set' if initial_query else 'None'}) ====="
+                )
                 self._current_images = []  # Clear images to avoid repeating in next round
                 self._current_attachments = []  # Clear attachments to avoid repeating in next round
                 # Notify frontend that agent is idle so send button is restored.
                 # This covers the common path where _handle_turn_result returns went_to_sleep=True
                 # Also emit turn_elapsed for the went_to_sleep path (safety fallback)
                 _wf_ended_ms = int(datetime.now().timestamp() * 1000)
-                await self._emit("turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms})
+                await self._emit(
+                    "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
+                )
                 # (response complete, agent sleeps) and never reaches the `if stop:` block above.
                 await _get_state_manager().set_state("idle")
                 await self._emit("state", "idle")
-                await self._emit('status', f"Continuous mode - State: {await _get_state_manager().get_state()}")
+                await self._emit("status", f"Continuous mode - State: {await _get_state_manager().get_state()}")
                 # Note: when __SWITCH_AND_REPLY__ urgent handling sets initial_query = reply_content,
                 # do NOT clear it, otherwise the user message will be lost
                 if not initial_query:
@@ -1927,15 +2129,17 @@ class AgentRunner:
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "reason": sleep_controller._wake_reason or "Sleep duration ended",
             "planned": sleep_controller._planned_duration,
-            "actual": round((datetime.now() - sleep_controller._start_time).total_seconds(), 1) if sleep_controller._start_time else 0
+            "actual": round((datetime.now() - sleep_controller._start_time).total_seconds(), 1)
+            if sleep_controller._start_time
+            else 0,
         }
         sleep_controller._wake_reason = None
-        
+
         if wake_info["reason"] == "Sleep duration ended":
             return f"[Wake-{wake_info['time']}-Sleep duration ended]"
         else:
             return f"[Wake-{wake_info['time']}-{wake_info['reason']}]"
-    
+
     @staticmethod
     def _filter_native_tokens(text: str) -> str:
         """Filter leaked native tool call text from various models:
@@ -1946,19 +2150,16 @@ class AgentRunner:
             return text
 
         # --- Format 1: <|...|> format (Qwen3/DeepSeek) ---
-        if '<|' in text:
+        if "<|" in text:
             # First remove the entire tool_calls_section block
-            text = re.sub(r'<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>', '', text, flags=re.DOTALL)
+            text = re.sub(r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", "", text, flags=re.DOTALL)
             # Fallback: remove all remaining <|...|> tokens
-            text = re.sub(r'<\|[^|>]*\|>', '', text)
+            text = re.sub(r"<\|[^|>]*\|>", "", text)
 
         # --- Format 2: functions.<name>:<id>{...} format (Kimi/Moonshot) ---
         # Match functions.tool_name:index{...}, supporting at most one level of nested JSON
-        if 'functions.' in text:
-            text = re.sub(
-                r'\bfunctions\.[a-zA-Z0-9_]+:\d+\{(?:[^{}]|\{[^{}]*\})*\}',
-                '', text, flags=re.DOTALL
-            )
+        if "functions." in text:
+            text = re.sub(r"\bfunctions\.[a-zA-Z0-9_]+:\d+\{(?:[^{}]|\{[^{}]*\})*\}", "", text, flags=re.DOTALL)
 
         return text
 
@@ -1966,58 +2167,72 @@ class AgentRunner:
         """Minimally and thoroughly remove all XML/HTML format tags and their content, preserving Markdown formatting"""
         if not text:
             return ""
-        
+
         import re
+
         result = text
 
         # 0a. Filter native tool call tokens (<|...|> format)
         result = self._filter_native_tokens(result)
-        
+
         # 0. Special handling: remove possibly missing-'<' tool_call markers
         result = re.sub(r'tool_call\s+name="[^"]+"\s*>', "", result, flags=re.IGNORECASE)
-        
+
         # 1. Thoroughly remove these blocks and their content
-        silent_blocks = ["thought", "plan", "think", "tool_call", "tool_result", "to_system", "state", "wake", "sleep", "title", "option", "arguments"]
+        silent_blocks = [
+            "thought",
+            "plan",
+            "think",
+            "tool_call",
+            "tool_result",
+            "to_system",
+            "state",
+            "wake",
+            "sleep",
+            "title",
+            "option",
+            "arguments",
+        ]
         for tag in silent_blocks:
             result = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", result, flags=re.DOTALL | re.IGNORECASE)
             result = re.sub(rf"<{tag}\b[^>]*/>", "", result, flags=re.IGNORECASE)
-        
+
         # 2. Special handling for to_user tag: keep its content
-        result = re.sub(r'<to_user\b[^>]*>(.*?)</to_user>', r'\1', result, flags=re.DOTALL | re.IGNORECASE)
-        
+        result = re.sub(r"<to_user\b[^>]*>(.*?)</to_user>", r"\1", result, flags=re.DOTALL | re.IGNORECASE)
+
         # 3. Remove remaining tag names but keep content (if any)
-        result = re.sub(r'<[^>]+>', '', result)
-        
+        result = re.sub(r"<[^>]+>", "", result)
+
         # 4. Thoroughly clean up remaining orphaned closing tags (e.g. </thought>) and stray brackets
-        result = re.sub(r'</[a-zA-Z0-9_]+>', '', result)
-        result = re.sub(r'^\s*[<>]\s*$', '', result, flags=re.MULTILINE) # Remove lines containing only < or >
+        result = re.sub(r"</[a-zA-Z0-9_]+>", "", result)
+        result = re.sub(r"^\s*[<>]\s*$", "", result, flags=re.MULTILINE)  # Remove lines containing only < or >
 
         # 5. Clean up extra blank lines while preserving necessary single and double line breaks for Markdown
-        result = re.sub(r'\n{4,}', '\n\n\n', result)
-        
+        result = re.sub(r"\n{4,}", "\n\n\n", result)
+
         return result.strip()
 
-    def _extract_text_before_tool(self, text: str) -> Optional[str]:
+    def _extract_text_before_tool(self, text: str) -> str | None:
         """Extract text content before a tool call marker"""
         if not text:
             return None
-        
+
         # Find the position of the first tool_call tag
-        tool_match = re.search(r'<tool_call', text, re.IGNORECASE)
+        tool_match = re.search(r"<tool_call", text, re.IGNORECASE)
         if not tool_match:
             return None
-        
+
         # Extract text before tool_call
-        text_before = text[:tool_match.start()]
-        
+        text_before = text[: tool_match.start()]
+
         # Clean up text: remove other XML tags but keep plain text
-        text_before = re.sub(r'<(?!tool_call)[^>]+>', '', text_before)
+        text_before = re.sub(r"<(?!tool_call)[^>]+>", "", text_before)
         text_before = text_before.strip()
-        
+
         # If there is meaningful content after cleaning, return it
         if text_before and len(text_before) > 3:  # At least 3 chars to be meaningful
             return text_before
-        
+
         return None
 
     async def _handle_turn_result(
@@ -2027,48 +2242,57 @@ class AgentRunner:
         output_media=None,
         finish_reason: str | None = None,
         stream_error: bool = False,
-    ) -> Tuple[bool, str, bool]:
+    ) -> tuple[bool, str, bool]:
         """
         Handle one turn's result.
-        
+
         Args:
             full_response: LLM response text
             tool_data_from_api: Tool call data parsed by strategy (tool_name, tool_args) or None
             output_media: Media list generated by the model [{"type": "audio"/"image", "url": ..., "mime": ...}]
-            
+
         Returns: (should_stop, next_input, went_to_sleep)
         """
         # --- 1. Extract all interaction tags and persist them (ensure no loss on restart) ---
-        
+
         # Thinking process (supports both 'thought' and 'think')
         # Note: during streaming, stream_parser already pushed thought events to the frontend in real time.
         # Here we only persist (write to session history); do not re-emit to avoid the frontend displaying duplicates.
-        thought_text = ResponseParser.extract_tag(full_response, "thought") or ResponseParser.extract_tag(full_response, "think")
+        thought_text = ResponseParser.extract_tag(full_response, "thought") or ResponseParser.extract_tag(
+            full_response, "think"
+        )
         if thought_text:
-            _get_session_manager().add_event('thought', {'text': thought_text}, turn_id=self._current_turn, round_id=self._current_round)
+            _get_session_manager().add_event(
+                "thought", {"text": thought_text}, turn_id=self._current_turn, round_id=self._current_round
+            )
 
         # Task plan
         plan_text = ResponseParser.extract_tag(full_response, "plan")
         if plan_text:
             plan_id = f"plan_{datetime.now().strftime('%M%S')}"
-            await self._emit('plan', {"id": plan_id, "text": plan_text})
-            _get_session_manager().add_event('plan', {"id": plan_id, "text": plan_text}, turn_id=self._current_turn, round_id=self._current_round)
+            await self._emit("plan", {"id": plan_id, "text": plan_text})
+            _get_session_manager().add_event(
+                "plan", {"id": plan_id, "text": plan_text}, turn_id=self._current_turn, round_id=self._current_round
+            )
             # Write back to TaskManager so the next turn's {{TASK_STATE}} includes the AI's own plan
             self.task_manager.update(plan_text)
 
         # Option buttons
         import re
-        option_matches = re.findall(r'<option>(.*?)</option>', full_response, re.DOTALL)
+
+        option_matches = re.findall(r"<option>(.*?)</option>", full_response, re.DOTALL)
         for option_text in option_matches:
-            await self._emit('option', option_text.strip())
-            _get_session_manager().add_event('option', {'text': option_text.strip()}, turn_id=self._current_turn, round_id=self._current_round)
+            await self._emit("option", option_text.strip())
+            _get_session_manager().add_event(
+                "option", {"text": option_text.strip()}, turn_id=self._current_turn, round_id=self._current_round
+            )
 
         # --- 2. State and sleep tags ---
         new_state = self._extract_tag(full_response, "state")
         new_wake = self._extract_tag(full_response, "wake")
         sleep_seconds = self._extract_tag(full_response, "sleep")
         sys_cmd = self._extract_tag(full_response, "to_system")
-        
+
         # --- 2.1 Task supervision tags ---
         task_start = self._extract_tag(full_response, "task_start")
         if task_start:
@@ -2077,78 +2301,92 @@ class AgentRunner:
             task_name = task_start.strip()
             if task_name:
                 _get_session_manager().set_title(task_name)
-                await self._emit('current_session', {
-                    'id': _get_session_manager().get_current_session_id(),
-                    'title': task_name
-                })
-                await bus.emit_async('session_list', _get_session_manager().get_session_list())
-                await self._emit('session_title', {
-                    'id': _get_session_manager().get_current_session_id(),
-                    'title': task_name
-                })
-        
+                await self._emit(
+                    "current_session", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
+                )
+                await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                await self._emit(
+                    "session_title", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
+                )
+
         if sys_cmd in ["task_complete", "task_failed"]:
             self._in_task = False
             self._awaiting_user_reply = False
             self._last_user_msg_from_to_user = False
             self._auto_continue_retries = 0
-        
+
         # --- 3. Execute state update logic ---
         if new_state:
             logger.info(f"[Runner] Applying AI state change: {new_state}")
             await _get_state_manager().set_state(new_state)
-            await self._emit('state', new_state) # Explicitly emit state change event
-            
+            await self._emit("state", new_state)  # Explicitly emit state change event
+
             if new_state == "working" and not task_logger.has_active_task():
                 task_req = self._last_user_input[:200]
                 task_id = task_logger.start_task(task_req, "working")
                 logger.info(f"[Runner] Task recording started: {task_id}")
                 # --- Plugin Hook: on_task_start ---
                 if self._plugin_manager:
-                    await self._plugin_manager.run_hook("on_task_start", {
-                        "task_id": task_id,
-                        "requirement": task_req,
-                        "source": self._current_input_source,
-                        "agent_id": self._agent_id,
-                    })
-        
+                    await self._plugin_manager.run_hook(
+                        "on_task_start",
+                        {
+                            "task_id": task_id,
+                            "requirement": task_req,
+                            "source": self._current_input_source,
+                            "agent_id": self._agent_id,
+                        },
+                    )
+
         if new_wake:
             logger.info(f"[Runner] Applying wake mode change: {new_wake}")
             await _get_state_manager().set_wake_mode(new_wake)
-            await self._emit('wake', new_wake)
-        
+            await self._emit("wake", new_wake)
+
         # --- 3. Handle sleep command ---
         if sleep_seconds and sleep_seconds.isdigit():
             seconds = int(sleep_seconds)
             logger.info(f"[Runner] AI entering sleep for {seconds}s")
-            await self._emit('sleep', seconds)
+            await self._emit("sleep", seconds)
             await _get_state_manager().set_state("sleeping")
-            await self._emit('state', 'sleeping')
+            await self._emit("state", "sleeping")
             wake_info = await sleep_controller.sleep(seconds)
             await _get_state_manager().set_state("idle")
-            await self._emit('state', 'idle')
+            await self._emit("state", "idle")
             logger.info(f"[Runner] Sleep ended: {wake_info.get('wake_type')}, reason: {wake_info.get('wake_reason')}")
             return False, "", True
-        
+
         # --- 5. Text content persistence (regardless of whether tools are called) ---
         # Prefer streamed text accumulated by stream_parser during streaming.
         # stream_parser correctly identifies to_user content in real-time,
         # so its output is the authoritative source. This avoids the bug where
         # _remove_all_tags() would incorrectly strip tag names appearing as
         # explanatory text (e.g. AI explains "<to_user>" in a markdown table).
-        streamed = "".join(getattr(self, '_streamed_user_text', []))
+        streamed = "".join(getattr(self, "_streamed_user_text", []))
         user_msg_from_tag = None
         self._last_user_msg_from_to_user = False
         if streamed.strip():
             user_msg = streamed.strip()
-            user_msg_from_tag = getattr(self, '_streamed_user_tag', None) or "to_user"
+            user_msg_from_tag = getattr(self, "_streamed_user_tag", None) or "to_user"
             self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
             # Fallback: extract from full_response (non-streaming API or
             # stream_parser not set up)
-            interfering_tags = ["thought", "think", "plan", "tool_call", "tool_result", "to_system", "state", "wake", "sleep", "option", "title", "func"]
+            interfering_tags = [
+                "thought",
+                "think",
+                "plan",
+                "tool_call",
+                "tool_result",
+                "to_system",
+                "state",
+                "wake",
+                "sleep",
+                "option",
+                "title",
+                "func",
+            ]
             clean_context = self._remove_tags(full_response, interfering_tags)
-            
+
             user_msg = self._extract_tag(clean_context, "to_user_reply")
             if user_msg:
                 user_msg_from_tag = "to_user_reply"
@@ -2162,10 +2400,10 @@ class AgentRunner:
                 user_msg = self._remove_all_tags(clean_context)
             else:
                 user_msg = self._remove_all_tags(user_msg)
-        
+
         if user_msg_from_tag == "to_user_reply":
             self._awaiting_user_reply = True
-        
+
         # Guard: detect leaked tool call arguments (JSON or XML leaking as user-visible text).
         # This happens when the model outputs malformed or unclosed <tool_call> tags.
         # Report the error back to the model the same way a failed tool execution is reported,
@@ -2174,8 +2412,9 @@ class AgentRunner:
             preview = user_msg.strip()[:120]
             logger.warning(
                 "[Runner] Detected leaked tool parameters in user_msg "
-                 "(len=%d, preview=%r) -- sending format error back to model",
-                len(user_msg.strip()), preview
+                "(len=%d, preview=%r) -- sending format error back to model",
+                len(user_msg.strip()),
+                preview,
             )
             now_str = datetime.now().strftime("%M%S")
             fe_call_id = f"call_{now_str}_format_error"
@@ -2192,33 +2431,49 @@ class AgentRunner:
                 "Strict rule: all XML tags must come in pairs; never omit the </tool_call> closing tag."
             )
             # Notify frontend (WorkflowContainer)
-            await self._emit('tool_call', {"id": fe_call_id, "name": fe_name, "args": preview})
-            await self._emit('tool_result', {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"})
+            await self._emit("tool_call", {"id": fe_call_id, "name": fe_name, "args": preview})
+            await self._emit(
+                "tool_result", {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"}
+            )
             # Persist to session
-            _get_session_manager().add_event('tool_call', {"id": fe_call_id, "name": fe_name, "args": preview}, turn_id=self._current_turn, round_id=self._current_round)
-            _get_session_manager().add_event('tool_result', {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"}, turn_id=self._current_turn, round_id=self._current_round)
+            _get_session_manager().add_event(
+                "tool_call",
+                {"id": fe_call_id, "name": fe_name, "args": preview},
+                turn_id=self._current_turn,
+                round_id=self._current_round,
+            )
+            _get_session_manager().add_event(
+                "tool_result",
+                {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"},
+                turn_id=self._current_turn,
+                round_id=self._current_round,
+            )
             # Feed back to model in same format as a tool execution result
             return False, self._summarize_result(fe_name, f"Error: {fe_detail}"), False
 
         # Guard: detect repetitive output (stuttering) from lower-quality models.
         # Only run if enable_repetition_check is True in model config
         is_repetitive = False
-        if (getattr(self.chat_api, 'enable_repetition_check', False)):
+        if getattr(self.chat_api, "enable_repetition_check", False):
             # Check both user-visible message and internal thought process
             is_repetitive = self._is_repeated_content(user_msg) or self._is_repeated_content(thought_text)
-        
+
         if is_repetitive:
             if self._repetition_rewind_count >= 1:
-                logger.warning("[Runner] Repetition rewind already used once this turn, allowing it through to avoid infinite loop")
+                logger.warning(
+                    "[Runner] Repetition rewind already used once this turn, allowing it through to avoid infinite loop"
+                )
             else:
                 self._repetition_rewind_count += 1
-                logger.warning("[Runner] Detected repetitive output (stuttering) -- performing context rewind and requesting re-output")
-            
+                logger.warning(
+                    "[Runner] Detected repetitive output (stuttering) -- performing context rewind and requesting re-output"
+                )
+
                 # CRITICAL: Break the loop by removing the repetitive message from model history
                 # This 'Context Rewind' prevents the model from being biased by its own recent mistake.
-                if hasattr(self.chat_api, 'pop_last_assistant_message'):
+                if hasattr(self.chat_api, "pop_last_assistant_message"):
                     self.chat_api.pop_last_assistant_message()
-    
+
                 re_name = "repetition_error"
                 re_detail = (
                     "Detected repetitive output (stuttering / loop). "
@@ -2228,19 +2483,23 @@ class AgentRunner:
                 )
                 # Notify frontend
                 hint = "检测到模型输出内容重复（复读机行为），系统已自动回退上下文并要求模型修正。"
-                await self._emit('info', hint)
-                await self._emit('status', "Repetition loop detected, rewinding and retrying...")
-                
-                _get_session_manager().add_event('info', {"text": hint}, turn_id=self._current_turn, round_id=self._current_round)
-    
+                await self._emit("info", hint)
+                await self._emit("status", "Repetition loop detected, rewinding and retrying...")
+
+                _get_session_manager().add_event(
+                    "info", {"text": hint}, turn_id=self._current_turn, round_id=self._current_round
+                )
+
                 return False, self._summarize_result(re_name, f"Error: {re_detail}"), False
 
         # Auto-filter out raw conversational text when entering/exiting a task without a to_user wrapper
-        filtered_for_task = False
-        if (task_start or sys_cmd in ["task_complete", "task_failed"]) and "<to_user>" not in full_response and "<to_user_reply>" not in full_response:
+        if (
+            (task_start or sys_cmd in ["task_complete", "task_failed"])
+            and "<to_user>" not in full_response
+            and "<to_user_reply>" not in full_response
+        ):
             logger.info("[Runner] Auto-filtering bare conversational text during task start/complete")
             user_msg = ""
-            filtered_for_task = True
 
         _saved_msg = None
         _saved_output_media = None
@@ -2248,10 +2507,13 @@ class AgentRunner:
             # --- Plugin Hook: on_before_send ---
             _send_msg = user_msg
             if self._plugin_manager:
-                _hook_ctx = await self._plugin_manager.run_hook("on_before_send", {
-                    "message": _send_msg,
-                    "agent_id": self._agent_id,
-                })
+                _hook_ctx = await self._plugin_manager.run_hook(
+                    "on_before_send",
+                    {
+                        "message": _send_msg,
+                        "agent_id": self._agent_id,
+                    },
+                )
                 _send_msg = _hook_ctx.get("message", _send_msg)
                 if _hook_ctx.get("__stop__"):
                     logger.info("[Runner] on_before_send: send cancelled by plugin hook")
@@ -2261,23 +2523,26 @@ class AgentRunner:
                 # but defer session persistence until after tool execution
                 # so events (thought, tool_call, tool_result) appear before
                 # the assistant message in current_session.json
-                event_type = 'to_user_reply' if user_msg_from_tag == 'to_user_reply' else 'to_user_final'
+                event_type = "to_user_reply" if user_msg_from_tag == "to_user_reply" else "to_user_final"
                 await self._emit(event_type, _send_msg)
                 if output_media:
-                    await self._emit('output_media', output_media)
+                    await self._emit("output_media", output_media)
                 _saved_msg = _send_msg
                 _saved_output_media = output_media
                 # --- Plugin Hook: on_after_send ---
                 if self._plugin_manager:
-                    await self._plugin_manager.run_hook("on_after_send", {
-                        "message": _send_msg,
-                        "agent_id": self._agent_id,
-                    })
+                    await self._plugin_manager.run_hook(
+                        "on_after_send",
+                        {
+                            "message": _send_msg,
+                            "agent_id": self._agent_id,
+                        },
+                    )
 
         # --- 6. Tool call logic (placed after text is saved) ---
         tc_log = get_tool_call_debug_logger()
         tc_log.debug("[runner] full_response len=%d, first 500 chars: %s", len(full_response), full_response[:500])
-        
+
         # tool_data_from_api is now List[Tuple] for parallel tool call support
         if tool_data_from_api:
             tool_calls = tool_data_from_api  # List[(name, args_dict)]
@@ -2289,36 +2554,44 @@ class AgentRunner:
                 tc_log.info("[runner] [OK] Using tool_data from XML parser: %d tool(s)", len(tool_calls))
             else:
                 tool_calls = []
-        
+
         if tool_calls:
             tc_log.info("[runner] [tool] Executing %d parallel tool call(s)", len(tool_calls))
-            
+
             # Phase 1: Execute ALL tools and collect results (no add_tool_result yet)
             _tool_results = []  # List of dicts with tool metadata for batch commit
             _control_flow_return = None  # If a control tool requests immediate return
-            
+
             for call_index, (t_name, t_args_dict) in enumerate(tool_calls):
                 tc_log.info("[runner] [tool] #%d: name=%r, args=%r", call_index, t_name, t_args_dict)
                 call_id = f"call_{datetime.now().strftime('%M%S')}_{t_name}_{call_index}"
                 _sanitized = {k: ("..." if v is ... else v) for k, v in t_args_dict.items()} if t_args_dict else {}
                 t_args_json = json.dumps(_sanitized, ensure_ascii=False, indent=2) if _sanitized else "{}"
-                
+
                 tc_log.info("[runner] [emit] Emitting tool_call event: id=%s, name=%s", call_id, t_name)
                 # Skip internal synthetic event_pipeline — hidden from frontend & session
                 if t_name in ("system__event_pipeline", "system.event_pipeline"):
                     tc_log.debug("[runner] [emit] Skipping system__event_pipeline from frontend & session")
                 else:
-                    await self._emit('tool_call', {"id": call_id, "name": t_name, "args": t_args_json})
-                    _get_session_manager().add_event('tool_call', {"id": call_id, "name": t_name, "args": t_args_json}, turn_id=self._current_turn, round_id=self._current_round)
-                
+                    await self._emit("tool_call", {"id": call_id, "name": t_name, "args": t_args_json})
+                    _get_session_manager().add_event(
+                        "tool_call",
+                        {"id": call_id, "name": t_name, "args": t_args_json},
+                        turn_id=self._current_turn,
+                        round_id=self._current_round,
+                    )
+
                 # --- Plugin Hook: on_before_tool ---
                 _skip_tool = False
                 if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook("on_before_tool", {
-                        "tool_name": t_name,
-                        "arguments": t_args_dict,
-                        "agent_id": self._agent_id,
-                    })
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_before_tool",
+                        {
+                            "tool_name": t_name,
+                            "arguments": t_args_dict,
+                            "agent_id": self._agent_id,
+                        },
+                    )
                     t_name = _hook_ctx.get("tool_name", t_name)
                     t_args_dict = _hook_ctx.get("arguments", t_args_dict)
                     _skip_tool = _hook_ctx.get("skip", False)
@@ -2344,10 +2617,13 @@ class AgentRunner:
                 # Collaboration board auto-sync
                 try:
                     import os as _os
+
                     from opensquad.collab_board import update_latest_tool as _cb_update_latest_tool
+
                     _agent_dir = getattr(self, "_agent_dir", "") or ""
                     _agent_id = _os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
                     from opensquad.collab_board import list_tasks as _cb_list_tasks
+
                     _tasks = _cb_list_tasks()
                     _active_task_id = ""
                     for _t in _tasks:
@@ -2356,11 +2632,20 @@ class AgentRunner:
                             break
                     if _active_task_id:
                         _sensitive_tools = {
-                            "read_related_files", "glob", "grep", "rg",
-                            "filesystem__read", "filesystem__write", "filesystem__edit",
-                            "bash", "subprocess", "delegate_task",
-                            "system__send_file_to_web", "execute_command",
-                            "view_source_code", "find_files",
+                            "read_related_files",
+                            "glob",
+                            "grep",
+                            "rg",
+                            "filesystem__read",
+                            "filesystem__write",
+                            "filesystem__edit",
+                            "bash",
+                            "subprocess",
+                            "delegate_task",
+                            "system__send_file_to_web",
+                            "execute_command",
+                            "view_source_code",
+                            "find_files",
                         }
                         if t_name.startswith("collaboration.") or t_name.startswith("agent_setup."):
                             _sensitive_tools.add(t_name)
@@ -2384,33 +2669,40 @@ class AgentRunner:
 
                 # --- Plugin Hook: on_after_tool ---
                 if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook("on_after_tool", {
-                        "tool_name": t_name,
-                        "arguments": t_args_dict,
-                        "result": result,
-                        "agent_id": self._agent_id,
-                        "model": getattr(self.chat_api, 'model', ''),
-                    })
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_after_tool",
+                        {
+                            "tool_name": t_name,
+                            "arguments": t_args_dict,
+                            "result": result,
+                            "agent_id": self._agent_id,
+                            "model": getattr(self.chat_api, "model", ""),
+                        },
+                    )
                     result = _hook_ctx.get("result", result)
 
                 # --- Plugin Hook: on_tool_error ---
                 if self._plugin_manager and isinstance(result, str) and result.startswith("Error:"):
-                    _hook_ctx = await self._plugin_manager.run_hook("on_tool_error", {
-                        "tool_name": t_name,
-                        "arguments": t_args_dict,
-                        "error": result,
-                        "agent_id": self._agent_id,
-                    })
+                    _hook_ctx = await self._plugin_manager.run_hook(
+                        "on_tool_error",
+                        {
+                            "tool_name": t_name,
+                            "arguments": t_args_dict,
+                            "error": result,
+                            "agent_id": self._agent_id,
+                        },
+                    )
                     result = _hook_ctx.get("error", result)
 
                 # Drain event pipeline (per-tool, may contain events that arrived during execution)
                 from opensquad.event_pipeline import event_pipeline
+
                 _raw_events = event_pipeline.drain_sync()
 
                 for evt in _raw_events:
                     if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
                         _get_session_manager().add_message("user", evt.content)
-                        await self._emit('user_msg', evt.content)
+                        await self._emit("user_msg", evt.content)
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
                         img_paths = evt.metadata.get("image_paths", [])
                         if img_paths:
@@ -2420,7 +2712,9 @@ class AgentRunner:
                             if new_img_paths:
                                 self._current_images.extend(new_img_paths)
                             try:
-                                _ipf = os.path.join(self._agent_dir, "img_path.txt") if self._agent_dir else "img_path.txt"
+                                _ipf = (
+                                    os.path.join(self._agent_dir, "img_path.txt") if self._agent_dir else "img_path.txt"
+                                )
                                 with open(_ipf, "w", encoding="utf-8") as _f:
                                     _f.write(str(img_paths))
                             except Exception:
@@ -2452,6 +2746,7 @@ class AgentRunner:
                         if _ckpt_dir:
                             try:
                                 from opensquad import checkpoint as _ckpt2
+
                                 _ckpt2.clear_checkpoint(_ckpt_dir)
                             except Exception:
                                 pass
@@ -2466,15 +2761,24 @@ class AgentRunner:
                         _wait_result_text = wake_msg
 
                         self.chat_api.add_tool_result(
-                            tool_name=t_name, tool_args=t_args_dict,
-                            result=_wait_result_text, tool_call_id=call_id,
+                            tool_name=t_name,
+                            tool_args=t_args_dict,
+                            result=_wait_result_text,
+                            tool_call_id=call_id,
                         )
-                        if _pipeline_events:
-                            if hasattr(self.chat_api, 'add_pipeline_events'):
-                                self.chat_api.add_pipeline_events(_pipeline_events)
+                        if _pipeline_events and hasattr(self.chat_api, "add_pipeline_events"):
+                            self.chat_api.add_pipeline_events(_pipeline_events)
 
-                        _get_session_manager().add_event('tool_result', {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text}, turn_id=self._current_turn, round_id=self._current_round)
-                        await self._emit('tool_result', {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text})
+                        _get_session_manager().add_event(
+                            "tool_result",
+                            {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text},
+                            turn_id=self._current_turn,
+                            round_id=self._current_round,
+                        )
+                        await self._emit(
+                            "tool_result",
+                            {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text},
+                        )
                         logger.info(f"[Runner] system.wait finished: {wake_msg[:120]}")
 
                         _control_flow_return = (False, wake_msg, False)
@@ -2485,24 +2789,27 @@ class AgentRunner:
                     if isinstance(result, dict) and result.get("status") == "success":
                         msg = result.get("message", "")
                         import re as _re
+
                         _m = _re.search(r"'(\w+)'", msg)
                         if _m:
                             actual_state = _m.group(1)
-                            await self._emit('state', actual_state)
+                            await self._emit("state", actual_state)
                             if actual_state == "working" and not task_logger.has_active_task():
                                 task_req = self._last_user_input[:200]
                                 tid = task_logger.start_task(task_req, "working")
                                 logger.info(f"[Runner] Task recording started via set_state: {tid}")
 
                 # --- Collect result for batch commit ---
-                _tool_results.append({
-                    "name": t_name,
-                    "args": t_args_dict,
-                    "args_json": t_args_json,
-                    "result_text": _tool_result_text,
-                    "call_id": call_id,
-                    "pipeline_events": _pipeline_events,
-                })
+                _tool_results.append(
+                    {
+                        "name": t_name,
+                        "args": t_args_dict,
+                        "args_json": t_args_json,
+                        "result_text": _tool_result_text,
+                        "call_id": call_id,
+                        "pipeline_events": _pipeline_events,
+                    }
+                )
 
             if _control_flow_return:
                 logger.info(f"[Runner] [DIAG] _control_flow_return set: {_control_flow_return}")
@@ -2517,30 +2824,44 @@ class AgentRunner:
                     result=entry["result_text"],
                     tool_call_id=entry["call_id"],
                 )
-                if entry["pipeline_events"]:
-                    if hasattr(self.chat_api, 'add_pipeline_events'):
-                        self.chat_api.add_pipeline_events(entry["pipeline_events"])
+                if entry["pipeline_events"] and hasattr(self.chat_api, "add_pipeline_events"):
+                    self.chat_api.add_pipeline_events(entry["pipeline_events"])
 
-                _get_session_manager().add_event('tool_result', {
-                    "id": entry["call_id"], "name": entry["name"],
-                    "args": entry["args_json"], "result": entry["result_text"],
-                }, turn_id=self._current_turn, round_id=self._current_round)
-                await self._emit('tool_result', {
-                    "id": entry["call_id"], "name": entry["name"],
-                    "args": entry["args_json"], "result": entry["result_text"],
-                })
+                _get_session_manager().add_event(
+                    "tool_result",
+                    {
+                        "id": entry["call_id"],
+                        "name": entry["name"],
+                        "args": entry["args_json"],
+                        "result": entry["result_text"],
+                    },
+                    turn_id=self._current_turn,
+                    round_id=self._current_round,
+                )
+                await self._emit(
+                    "tool_result",
+                    {
+                        "id": entry["call_id"],
+                        "name": entry["name"],
+                        "args": entry["args_json"],
+                        "result": entry["result_text"],
+                    },
+                )
 
                 if task_logger.has_active_task():
                     task_logger.increment_turn(entry["name"])
 
-            tc_log.info("[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results))
+            tc_log.info(
+                "[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results)
+            )
             if _saved_msg:
                 # Update elapsed_ms on the assistant message that ChatAPI already saved
                 _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self._workflow_started_ms)
                 _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
                 logger.info(
                     "[Runner] Tool turn complete: saved_msg_len=%d, elapsed_ms=%d",
-                    len(_saved_msg), _elapsed_ms,
+                    len(_saved_msg),
+                    _elapsed_ms,
                 )
             return False, "", False
 
@@ -2549,17 +2870,23 @@ class AgentRunner:
         # even if user_msg was filtered out.
         clean_full = self._remove_all_tags(full_response).strip()
         needs_tool = clean_full.endswith(":") or clean_full.endswith("：")
-        
+
         if needs_tool and not tool_data_from_api:
             if finish_reason == "stop" and not stream_error:
-                if self._max_auto_continue_retries is None or self._auto_continue_retries < self._max_auto_continue_retries:
+                if (
+                    self._max_auto_continue_retries is None
+                    or self._auto_continue_retries < self._max_auto_continue_retries
+                ):
                     self._auto_continue_retries += 1
                     auto_continue_prompt = (
                         "[System Prompt] You ended with a trailing colon, which usually means you intended to call a tool next. "
                         "Continue immediately by calling the appropriate tool."
                     )
-                    logger.info("[Runner] Auto-continuing due to trailing colon (limit: %s/%s)", 
-                                self._auto_continue_retries, self._max_auto_continue_retries)
+                    logger.info(
+                        "[Runner] Auto-continuing due to trailing colon (limit: %s/%s)",
+                        self._auto_continue_retries,
+                        self._max_auto_continue_retries,
+                    )
                     return False, auto_continue_prompt, False
                 logger.warning("[Runner] Max auto-continue retries reached")
             elif stream_error:
@@ -2591,13 +2918,12 @@ class AgentRunner:
             # The LLM has produced output and is now waiting for more events.
             # In the 'never stop' architecture, the LLM calls system.wait after replying,
             # so we should enter waiting state, not exit the loop entirely.
-            
+
             # Don't add tool results since there are no tools in this branch
             # Return: continue loop, enter waiting state
             # Fix: return stop=True to exit inner LLM loop (turn_elapsed + state:idle)
             return True, "", False
 
-        
         # Handle task status change
         if sys_cmd:
             logger.info(f"[Runner] System command received: {sys_cmd}")
@@ -2606,23 +2932,26 @@ class AgentRunner:
                 if task_logger.has_active_task():
                     completed = task_logger.complete_task(
                         completion_status="completed" if sys_cmd == "task_complete" else "failed",
-                        result_summary="Task finished"
+                        result_summary="Task finished",
                     )
                 # --- Plugin Hook: on_task_complete ---
                 if completed and self._plugin_manager:
-                    await self._plugin_manager.run_hook("on_task_complete", {
-                        "task_id": completed.get("task_id", ""),
-                        "completion_status": completed.get("completion_status", ""),
-                        "tools_used": completed.get("tools_used", []),
-                        "turns": completed.get("turns", 0),
-                        "agent_id": self._agent_id,
-                    })
+                    await self._plugin_manager.run_hook(
+                        "on_task_complete",
+                        {
+                            "task_id": completed.get("task_id", ""),
+                            "completion_status": completed.get("completion_status", ""),
+                            "tools_used": completed.get("tools_used", []),
+                            "turns": completed.get("turns", 0),
+                            "agent_id": self._agent_id,
+                        },
+                    )
                 await _get_state_manager().set_state("idle")
-                await self._emit('state', "idle")
+                await self._emit("state", "idle")
                 return True, "", False
-        
+
         return False, "Error: No output produced", False
-    
+
     def _remove_tags(self, text: str, tags: list) -> str:
         """Remove specified XML tags (supports tags with attributes, e.g. <tool_call name="...">)"""
         if not text:
@@ -2643,7 +2972,7 @@ class AgentRunner:
 
     def _is_leaked_tool_params(self, text: str) -> bool:
         """Detect leaked tool parameters (JSON or XML parameter tags).
-        
+
         Detects two leak scenarios:
         1. JSON format leak: starts with { and ends with }, first key is an ASCII identifier
         2. XML parameter tag leak: tool parameter tags appear without an outer <tool_call>
@@ -2651,69 +2980,89 @@ class AgentRunner:
         s = text.strip()
         if not s:
             return False
-        
+
         # Detect JSON leak (preserve original logic)
-        if s.startswith('{') and re.search(r'\}\s*$', s):
+        if s.startswith("{") and re.search(r"\}\s*$", s):
             # Empty object {} -- no-argument tool call
-            if s == '{}':
+            if s == "{}":
                 return True
             # Check whether the first key of the JSON object is an ASCII identifier.
             # Tool call parameter keys are always ASCII (e.g. content, target_id, file_paths, etc.)
             if re.match(r'^\{\s*"[a-zA-Z_][a-zA-Z0-9_]*"\s*:', s):
                 logger.warning("[Runner] Detected leaked JSON parameters without <tool_call> wrapper")
                 return True
-        
+
         # Detect XML parameter tag leak (new)
         # Whitelist of legitimate system tags (these are not tool parameter leaks)
         system_tags = {
-            'title', 'thought', 'think', 'plan', 'to_user', 'to_user_reply', 'to_system',
-            'tool_call', 'tool_result', 'arguments', 'state', 'wake', 'sleep',
-            'option', 'forward', 'system_reminder', 'func', 'task_start', 'task_complete', 'task_failed'
+            "title",
+            "thought",
+            "think",
+            "plan",
+            "to_user",
+            "to_user_reply",
+            "to_system",
+            "tool_call",
+            "tool_result",
+            "arguments",
+            "state",
+            "wake",
+            "sleep",
+            "option",
+            "forward",
+            "system_reminder",
+            "func",
+            "task_start",
+            "task_complete",
+            "task_failed",
         }
-        
+
         # Extract all paired XML tags
-        xml_tags = re.findall(r'<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>', s, re.DOTALL | re.IGNORECASE)
-        
+        xml_tags = re.findall(r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE)
+
         # Check for non-system tags not inside a tool_call
-        if xml_tags and '<tool_call' not in text:
+        if xml_tags and "<tool_call" not in text:
             # Filter out system tags
             leaked_tags = [tag for tag in xml_tags if tag.lower() not in system_tags]
             if leaked_tags:
-                logger.warning("[Runner] Detected leaked XML parameter tags without <tool_call> wrapper: %s", leaked_tags)
+                logger.warning(
+                    "[Runner] Detected leaked XML parameter tags without <tool_call> wrapper: %s", leaked_tags
+                )
                 return True
-        
+
         return False
 
     def _is_repeated_content(self, text: str) -> bool:
         """Detect repetitive output (stuttering) from lower-quality models."""
         if not text or len(text) < 15:
             return False
-        
+
         # Pattern 1: Adjacent string repetition (fuzzy with optional whitespace)
         import re
-        
+
         # Check for 2+ repeats of patterns >= 6 chars (e.g. "现在执行测试：现在执行测试：")
         # \s* allows for variations in spacing
-        match2 = re.search(r'(.{6,})\s*\1+', text, re.DOTALL)
+        match2 = re.search(r"(.{6,})\s*\1+", text, re.DOTALL)
         if match2:
             pattern = match2.group(1).strip()
             # Avoid matching simple repeated punctuation or empty space patterns
             if len(pattern) >= 6 and any(c.isalnum() for c in pattern):
                 logger.warning(f"[Runner] Detected repetitive output (2x): {pattern[:50]}...")
                 return True
-        
+
         # Check for 3+ repeats of shorter patterns >= 4 chars (e.g. "启动... 启动... 启动...")
-        match3 = re.search(r'(.{4,})\s*\1{2,}', text, re.DOTALL)
+        match3 = re.search(r"(.{4,})\s*\1{2,}", text, re.DOTALL)
         if match3:
             pattern = match3.group(1).strip()
             if len(pattern) >= 4 and any(c.isalnum() for c in pattern):
                 logger.warning(f"[Runner] Detected repetitive output (3x short): {pattern[:50]}...")
                 return True
-        
+
         # Pattern 2: High density of identical lines
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
         if len(lines) > 2:
             from collections import Counter
+
             counts = Counter(lines)
             most_common, count = counts.most_common(1)[0]
             # If a line repeats 2+ times AND makes up > 50% of the output (for very short responses)
@@ -2722,31 +3071,36 @@ class AgentRunner:
                 if len(most_common) > 4:
                     logger.warning(f"[Runner] Detected repetitive lines: {most_common[:50]}")
                     return True
-                    
+
         # Pattern 3: Cross-turn repetition (detecting if model repeats exactly what it said last turn)
         current_clean = text.strip()
         # Find the last assistant message in session history
         history = _get_session_manager().get_messages()
         last_asst = None
         for msg in reversed(history):
-            if msg.get('role') == 'assistant':
-                last_asst = msg.get('content', '').strip()
+            if msg.get("role") == "assistant":
+                last_asst = msg.get("content", "").strip()
                 break
-        
+
         if last_asst and current_clean == last_asst:
             logger.warning(f"[Runner] Detected exact cross-turn repetition: {current_clean[:50]}...")
             return True
-            
+
         # Pattern 4: Meta-repetition (repeating "I am stuck in a loop" or similar apologies)
-        loop_phrases = ["stuck in a repetition loop", "stuck in a loop", "apologize for the repetition", "breaking out of the loop"]
+        loop_phrases = [
+            "stuck in a repetition loop",
+            "stuck in a loop",
+            "apologize for the repetition",
+            "breaking out of the loop",
+        ]
         for phrase in loop_phrases:
             if phrase in current_clean.lower() and last_asst and phrase in last_asst.lower():
                 logger.warning(f"[Runner] Detected meta-repetition (looping apologies): {phrase}")
                 return True
-        
+
         return False
-    
-    def _extract_tag(self, response: str, tag: str) -> Optional[str]:
+
+    def _extract_tag(self, response: str, tag: str) -> str | None:
         """Robustly extract XML tag content, supporting tag attributes and extra whitespace, with debug logging."""
         # Match <tag ...>content</tag>
         pattern = rf"<{tag}\b[^>]*>(.*?)</{tag}>"
@@ -2755,15 +3109,15 @@ class AgentRunner:
             val = match.group(1).strip()
             logger.info(f"[Extractor] Found tag <{tag}>: {val}")
             return val
-        
+
         # Fallback 1: if no closing tag, try extracting up to the next < symbol
         pattern_fallback = rf"<{tag}\b[^>]*>(.*)"
         match_fb = re.search(pattern_fallback, response, re.IGNORECASE | re.DOTALL)
         if match_fb:
-            val = match_fb.group(1).split('<')[0].strip()  # Extract up to next tag start
+            val = match_fb.group(1).split("<")[0].strip()  # Extract up to next tag start
             logger.info(f"[Extractor] Found unclosed tag <{tag}>: {val}")
             return val
-            
+
         # Fallback 2: support possibly missing < (for lazy AI output patterns)
         if tag in ["state", "wake", "sleep"]:
             pattern_lazy = rf"{tag}\s*>\s*(.*?)\s*</{tag}>"
@@ -2774,7 +3128,7 @@ class AgentRunner:
                 return val
 
         return None
-    
+
     @staticmethod
     def _truncate_result_text(text: str, max_len: int | None) -> str:
         """Truncate text to max_len chars, preserving head and tail portions.
@@ -2814,7 +3168,7 @@ class AgentRunner:
 
         res_str = AgentRunner._truncate_result_text(res_str, max_len)
         return f"[{now}] Tool '{name}' executed. Result: {res_str}"
-    
+
     def _get_tool_output_max_chars(self) -> int:
         """
         Read tool_output_max_chars from agent config.json.
@@ -2822,7 +3176,7 @@ class AgentRunner:
         """
         try:
             if self._config_path and _os.path.isfile(self._config_path):
-                with open(self._config_path, "r", encoding="utf-8") as _f:
+                with open(self._config_path, encoding="utf-8") as _f:
                     cfg = json.load(_f)
                 val = cfg.get("model", {}).get("tool_output_max_chars")
                 if val is not None:
@@ -2833,19 +3187,19 @@ class AgentRunner:
         except Exception:
             pass
         return 50000
-    
-    def _prepare_task(self, query: str) -> Tuple[str, str]:
+
+    def _prepare_task(self, query: str) -> tuple[str, str]:
         task_id, cleaned = extract_and_remove_first_tag(query[:30])
         if task_id:
-            query = query.replace(f'<{task_id}>', '')
+            query = query.replace(f"<{task_id}>", "")
             self.chat_api.load_his = task_id
-        
+
         # Long-term memory: advance turn count + evict expired memories
         if self._memory_manager:
             self._memory_manager.advance_turn()
 
         return query, self.chat_api.load_his or "continuous"
-    
+
     async def _setup_prompt(self):
         """P1-1: Delegate prompt building to ContextBuilder.
 
@@ -2871,15 +3225,16 @@ class AgentRunner:
         if is_changed:
             try:
                 import difflib
+
                 prev_prompt = self.chat_api.get_system_prompt()
                 if prev_prompt:
                     old_lines = prev_prompt.splitlines(keepends=True)
                     new_lines = final.splitlines(keepends=True)
-                    diff_lines = list(difflib.unified_diff(
-                        old_lines, new_lines,
-                        fromfile="old prompt", tofile="new prompt",
-                        lineterm=""
-                    ))
+                    diff_lines = list(
+                        difflib.unified_diff(
+                            old_lines, new_lines, fromfile="old prompt", tofile="new prompt", lineterm=""
+                        )
+                    )
             except Exception:
                 pass
 
@@ -2900,11 +3255,11 @@ class AgentRunner:
                 round_id=self._current_round,
             )
             self._context_builder.mark_snapshot_emitted()
-    
+
     def _setup_event_dispatch(self):
         if not self.chat_api.stream_parser:
             return
-        
+
         sid = self._turn_sid
         # Reset streamed text accumulator for this turn.
         # stream_parser correctly identifies to_user content during streaming,
@@ -2914,11 +3269,11 @@ class AgentRunner:
         # the AI explains runner.py architecture and mentions <to_user> as text).
         self._streamed_user_text = []
         self._streamed_user_tag = None
-        
+
         def emit_with_sid(etype, data):
             # Inject session_id into event data
             bus.emit(etype, {"sid": sid, "data": data})
-        
+
         def emit_user_stream(text):
             """Emit to_user_stream and accumulate for later persistence."""
             # Filter native tool call tokens to prevent <|...|> format tokens from leaking into user messages
@@ -2926,54 +3281,58 @@ class AgentRunner:
             if not text:
                 return
             self._streamed_user_text.append(text)
-            emit_with_sid('to_user_stream', text)
+            emit_with_sid("to_user_stream", text)
 
         def emit_to_user(text):
-            self._streamed_user_tag = 'to_user'
+            self._streamed_user_tag = "to_user"
             emit_user_stream(text)
 
         def emit_to_user_reply(text):
-            self._streamed_user_tag = 'to_user_reply'
+            self._streamed_user_tag = "to_user_reply"
             emit_user_stream(text)
-        
+
         self.chat_api.stream_parser._default_handler = emit_user_stream
-        
+
         # Strict separation of streaming vs non-streaming tags.
         # Streaming tags: emitted as they are parsed.
         # Non-streaming tags: empty handler intercepts them to prevent them from flowing to to_user_stream as plain text.
-        self.chat_api.stream_parser._handlers.update({
-            'thought': lambda x: emit_with_sid('thought', x),
-            'think': lambda x: emit_with_sid('thought', x),
-            'to_user': emit_to_user,
-            'to_user_reply': emit_to_user_reply,
-            # Intercept the following tags to prevent them from appearing in the content stream
-            'title': lambda x: None,        # Intercept title tag (subject handled elsewhere)
-            'plan': lambda x: None,
-            'tool_call': lambda x: None,
-            'arguments': lambda x: None,
-            'func': lambda x: None,         # Intercept func tag (new tool call format)
-            'state': lambda x: None,
-            'wake': lambda x: None,
-            'sleep': lambda x: None,
-            'to_system': lambda x: None,
-            'option': lambda x: None,
-        })
-    
+        self.chat_api.stream_parser._handlers.update(
+            {
+                "thought": lambda x: emit_with_sid("thought", x),
+                "think": lambda x: emit_with_sid("thought", x),
+                "to_user": emit_to_user,
+                "to_user_reply": emit_to_user_reply,
+                # Intercept the following tags to prevent them from appearing in the content stream
+                "title": lambda x: None,  # Intercept title tag (subject handled elsewhere)
+                "plan": lambda x: None,
+                "tool_call": lambda x: None,
+                "arguments": lambda x: None,
+                "func": lambda x: None,  # Intercept func tag (new tool call format)
+                "state": lambda x: None,
+                "wake": lambda x: None,
+                "sleep": lambda x: None,
+                "to_system": lambda x: None,
+                "option": lambda x: None,
+            }
+        )
+
     def _restore_cumulative_stats(self):
         """Restore historical cumulative stats from token_stats.json into _hist_* fields at startup.
-        
+
         Does not write to chat_api (chat_api.total_* only records the current session, starting from 0).
         Historical data is stored in self._hist_*; _broadcast_token_stats adds them when computing cumulative totals.
         """
         try:
-            import os, json
-            history_dir = getattr(self.chat_api, 'history_dir', None)
+            import json
+            import os
+
+            history_dir = getattr(self.chat_api, "history_dir", None)
             if not history_dir:
                 return
             stats_file = os.path.join(history_dir, "token_stats.json")
             if not os.path.isfile(stats_file):
                 return
-            with open(stats_file, 'r', encoding='utf-8') as f:
+            with open(stats_file, encoding="utf-8") as f:
                 old = json.load(f)
             cumul = old.get("cumulative") or {}
             if cumul.get("total_tokens", 0) == 0:
@@ -2993,6 +3352,7 @@ class AgentRunner:
             return
         logger.info(f"[Runner] Replaying {len(self._pending_buffer)} pending pre-ready message(s)")
         from opensquad.input_hub import input_hub
+
         for item in self._pending_buffer:
             input_hub.push(
                 content=item["content"],
@@ -3006,41 +3366,43 @@ class AgentRunner:
     def _reset_session_stats(self):
         """When a new session starts, roll the current session token stats into history, then reset chat_api counters."""
         # First roll current session totals into history
-        self._hist_input_tokens += getattr(self.chat_api, 'total_input_tokens', 0)
-        self._hist_output_tokens += getattr(self.chat_api, 'total_output_tokens', 0)
-        self._hist_requests += getattr(self.chat_api, 'total_requests', 0)
-        self._hist_cache_read_tokens += getattr(self.chat_api, 'total_cache_read_tokens', 0)
+        self._hist_input_tokens += getattr(self.chat_api, "total_input_tokens", 0)
+        self._hist_output_tokens += getattr(self.chat_api, "total_output_tokens", 0)
+        self._hist_requests += getattr(self.chat_api, "total_requests", 0)
+        self._hist_cache_read_tokens += getattr(self.chat_api, "total_cache_read_tokens", 0)
         # cache_creation is only tracked by ClaudeAPI; other backends report 0.
-        self._hist_cache_creation_tokens += getattr(self.chat_api, 'total_cache_creation_tokens', 0)
+        self._hist_cache_creation_tokens += getattr(self.chat_api, "total_cache_creation_tokens", 0)
         # Reset chat_api session counters
-        if hasattr(self.chat_api, 'total_input_tokens'):
+        if hasattr(self.chat_api, "total_input_tokens"):
             self.chat_api.total_input_tokens = 0
-        if hasattr(self.chat_api, 'total_output_tokens'):
+        if hasattr(self.chat_api, "total_output_tokens"):
             self.chat_api.total_output_tokens = 0
-        if hasattr(self.chat_api, 'total_requests'):
+        if hasattr(self.chat_api, "total_requests"):
             self.chat_api.total_requests = 0
-        if hasattr(self.chat_api, 'total_cache_read_tokens'):
+        if hasattr(self.chat_api, "total_cache_read_tokens"):
             self.chat_api.total_cache_read_tokens = 0
-        if hasattr(self.chat_api, 'total_cache_creation_tokens'):
+        if hasattr(self.chat_api, "total_cache_creation_tokens"):
             self.chat_api.total_cache_creation_tokens = 0
         # GoogleAPI-specific: reset prompt_token_count baseline to avoid incorrect delta calculation on first turn of new session
-        if hasattr(self.chat_api, '_last_prompt_token_count'):
+        if hasattr(self.chat_api, "_last_prompt_token_count"):
             self.chat_api._last_prompt_token_count = 0
 
     def _broadcast_token_stats_sync(self):
         """Sync version for __init__ — only writes token_stats.json (no WS event yet)."""
         try:
-            total = self.chat_api._count_tokens(self.chat_api.req, getattr(self.chat_api, '_last_tools', None))
+            total = self.chat_api._count_tokens(self.chat_api.req, getattr(self.chat_api, "_last_tools", None))
             token_data = {
                 "used": total,
                 "max": self.chat_api.token_max,
-                "model": getattr(self.chat_api, 'model', ''),
+                "model": getattr(self.chat_api, "model", ""),
             }
-            import os, json
-            data_dir = getattr(self.chat_api, 'history_dir', None)
+            import json
+            import os
+
+            data_dir = getattr(self.chat_api, "history_dir", None)
             if data_dir:
                 stats_file = os.path.join(data_dir, "token_stats.json")
-                with open(stats_file, 'w', encoding='utf-8') as f:
+                with open(stats_file, "w", encoding="utf-8") as f:
                     json.dump(token_data, f, ensure_ascii=False)
         except Exception as e:
             logger.debug(f"[Runner] _broadcast_token_stats_sync: {e}")
@@ -3048,7 +3410,8 @@ class AgentRunner:
     async def _broadcast_token_stats(self):
         try:
             import json
-            tools = getattr(self.chat_api, '_last_tools', None)
+
+            tools = getattr(self.chat_api, "_last_tools", None)
             total = self.chat_api._count_tokens(self.chat_api.req, tools)
             # `tool` = real tool IO (tool_call args, tool_result content).
             # `tool_defs` = the OpenAI tools JSON schema sent via the API `tools`
@@ -3057,11 +3420,11 @@ class AgentRunner:
             # and got N tokens of results" from "the API is billed M tokens/turn just
             # to advertise the tool catalogue" — the latter dominates and was
             # previously hidden inside `tool`, making "工具调用" misleading.
-            stats = {"system": 0, "user": 0, "thought": 0, "tool": 0,
-                     "tool_defs": 0, "response": 0}
+            stats = {"system": 0, "user": 0, "thought": 0, "tool": 0, "tool_defs": 0, "response": 0}
 
             # Use tiktoken to accurately count tokens per category (consistent with _count_tokens)
-            encoding = getattr(self.chat_api, 'encoding', None)
+            encoding = getattr(self.chat_api, "encoding", None)
+
             def _count_str(text: str) -> int:
                 if text is None:
                     return 0
@@ -3089,9 +3452,9 @@ class AgentRunner:
                         stats["tool_defs"] += _count_str(json.dumps(fn["parameters"], ensure_ascii=False))
 
             # Pre-compile regexes once
-            _THOUGHT_RE = re.compile(r'<(thought|think)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
-            _TOOL_CALL_RE = re.compile(r'<tool_call[^>]*>(.*?)</tool_call>', re.DOTALL | re.IGNORECASE)
-            _TOOL_RESULT_RE = re.compile(r'<tool_result[^>]*>(.*?)</tool_result>', re.DOTALL | re.IGNORECASE)
+            _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+            _TOOL_CALL_RE = re.compile(r"<tool_call[^>]*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
+            _TOOL_RESULT_RE = re.compile(r"<tool_result[^>]*>(.*?)</tool_result>", re.DOTALL | re.IGNORECASE)
 
             def _count_content_list(items: list, target: str) -> None:
                 """Count tokens in a Claude-style content list."""
@@ -3110,10 +3473,10 @@ class AgentRunner:
                             thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
                             if thought_sum:
                                 stats["thought"] += thought_sum
-                                text = _THOUGHT_RE.sub('', text).strip()
+                                text = _THOUGHT_RE.sub("", text).strip()
                             stats["response"] += _count_str(text)
                     elif t == "tool_result":
-                        for c in (item.get("content") or []):
+                        for c in item.get("content") or []:
                             if isinstance(c, dict) and c.get("type") == "text":
                                 stats["tool"] += _count_str(c["text"])
                     elif t == "tool_use":
@@ -3133,7 +3496,7 @@ class AgentRunner:
                             if isinstance(item, dict) and item.get("type") == "text":
                                 stats["tool"] += _count_str(item["text"])
                             elif isinstance(item, dict) and item.get("type") == "tool_result":
-                                for c in (item.get("content") or []):
+                                for c in item.get("content") or []:
                                     if isinstance(c, dict) and c.get("type") == "text":
                                         stats["tool"] += _count_str(c["text"])
                     continue
@@ -3169,9 +3532,9 @@ class AgentRunner:
                         if "<tool_result>" in content or "<tool_result " in content:
                             tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
                             stats["tool"] += tool_sum
-                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub('', content).strip())
+                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub("", content).strip())
                             counted_as_content = True
-                        elif re.match(r'^\[\d{2}:\d{2}:\d{2}\] Tool \'', content):
+                        elif re.match(r"^\[\d{2}:\d{2}:\d{2}\] Tool \'", content):
                             # _summarize_result format: treat whole message as tool result
                             stats["tool"] += _count_str(content)
                             counted_as_content = True
@@ -3182,12 +3545,12 @@ class AgentRunner:
                         # Extract thought blocks first
                         thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
                         stats["thought"] += thought_sum
-                        text_no_thought = _THOUGHT_RE.sub('', content).strip()
+                        text_no_thought = _THOUGHT_RE.sub("", content).strip()
 
                         # Then tool_call blocks; remaining text is response
                         tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
                         stats["tool"] += tool_sum
-                        text_response = _TOOL_CALL_RE.sub('', text_no_thought).strip()
+                        text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
 
                         stats["response"] += _count_str(text_response)
                         counted_as_content = True
@@ -3216,19 +3579,21 @@ class AgentRunner:
             # The token_analytics plugin reads data.cumulative.* from the
             # 'token_stats' EventBus event; without these fields its DB rows
             # store zeros and the dashboard renders empty token numbers.
-            cumul_input = self._hist_input_tokens + getattr(self.chat_api, 'total_input_tokens', 0)
-            cumul_output = self._hist_output_tokens + getattr(self.chat_api, 'total_output_tokens', 0)
+            cumul_input = self._hist_input_tokens + getattr(self.chat_api, "total_input_tokens", 0)
+            cumul_output = self._hist_output_tokens + getattr(self.chat_api, "total_output_tokens", 0)
             cumul_total = cumul_input + cumul_output
-            cumul_requests = self._hist_requests + getattr(self.chat_api, 'total_requests', 0)
-            cumul_cache_read = self._hist_cache_read_tokens + getattr(self.chat_api, 'total_cache_read_tokens', 0)
+            cumul_requests = self._hist_requests + getattr(self.chat_api, "total_requests", 0)
+            cumul_cache_read = self._hist_cache_read_tokens + getattr(self.chat_api, "total_cache_read_tokens", 0)
             # cache_creation is only tracked by ClaudeAPI; other backends report 0.
-            cumul_cache_creation = self._hist_cache_creation_tokens + getattr(self.chat_api, 'total_cache_creation_tokens', 0)
+            cumul_cache_creation = self._hist_cache_creation_tokens + getattr(
+                self.chat_api, "total_cache_creation_tokens", 0
+            )
 
             token_data = {
                 "used": total,
                 "max": self.chat_api.token_max,
                 "breakdown": stats,
-                "model": getattr(self.chat_api, 'model', ''),
+                "model": getattr(self.chat_api, "model", ""),
                 "cumulative": {
                     "total_input_tokens": cumul_input,
                     "total_output_tokens": cumul_output,
@@ -3238,21 +3603,22 @@ class AgentRunner:
                     "cache_creation_tokens": cumul_cache_creation,
                 },
                 "session": {
-                    "input_tokens": getattr(self.chat_api, 'total_input_tokens', 0),
-                    "output_tokens": getattr(self.chat_api, 'total_output_tokens', 0),
-                    "total_input_tokens": getattr(self.chat_api, 'total_input_tokens', 0),
-                    "total_output_tokens": getattr(self.chat_api, 'total_output_tokens', 0),
-                    "total_tokens": getattr(self.chat_api, 'total_input_tokens', 0)
-                                   + getattr(self.chat_api, 'total_output_tokens', 0),
-                    "requests": getattr(self.chat_api, 'total_requests', 0),
-                    "total_requests": getattr(self.chat_api, 'total_requests', 0),
-                    "cache_read_tokens": getattr(self.chat_api, 'total_cache_read_tokens', 0),
+                    "input_tokens": getattr(self.chat_api, "total_input_tokens", 0),
+                    "output_tokens": getattr(self.chat_api, "total_output_tokens", 0),
+                    "total_input_tokens": getattr(self.chat_api, "total_input_tokens", 0),
+                    "total_output_tokens": getattr(self.chat_api, "total_output_tokens", 0),
+                    "total_tokens": getattr(self.chat_api, "total_input_tokens", 0)
+                    + getattr(self.chat_api, "total_output_tokens", 0),
+                    "requests": getattr(self.chat_api, "total_requests", 0),
+                    "total_requests": getattr(self.chat_api, "total_requests", 0),
+                    "cache_read_tokens": getattr(self.chat_api, "total_cache_read_tokens", 0),
                 },
             }
-            
+
             logger.warning(
                 "[Runner] _broadcast_token_stats: used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d thought=%d overhead=%d",
-                total, self.chat_api.token_max,
+                total,
+                self.chat_api.token_max,
                 (total / max(self.chat_api.token_max, 1)) * 100,
                 len(self.chat_api.req),
                 stats.get("system", 0),
@@ -3260,15 +3626,16 @@ class AgentRunner:
                 stats.get("thought", 0),
                 stats.get("overhead", 0),
             )
-            await bus.emit_async('token_stats', {"sid": self._turn_sid, "agent_id": self._agent_id, "data": token_data})
-            
+            await bus.emit_async("token_stats", {"sid": self._turn_sid, "agent_id": self._agent_id, "data": token_data})
+
             # Write stats file to the agent data directory (for Launcher to read)
             try:
                 import os
-                data_dir = getattr(self.chat_api, 'history_dir', None)
+
+                data_dir = getattr(self.chat_api, "history_dir", None)
                 if data_dir:
                     stats_file = os.path.join(data_dir, "token_stats.json")
-                    with open(stats_file, 'w', encoding='utf-8') as f:
+                    with open(stats_file, "w", encoding="utf-8") as f:
                         json.dump(token_data, f, ensure_ascii=False)
             except Exception:
                 pass
@@ -3278,12 +3645,12 @@ class AgentRunner:
 
 if __name__ == "__main__":
     import argparse
-    import json
     import asyncio
+    import json
+    import logging
     import os
     import sys
     import warnings
-    import logging
 
     # Suppress Windows Proactor pipe closing errors (harmless noise)
     warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed transport")
@@ -3291,13 +3658,13 @@ if __name__ == "__main__":
         # Suppress "I/O operation on closed pipe" which is raised as ValueError in asyncio logs
         logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
-    from opensquad.registry import ToolRegistry
     from opensquad.chat_api import ChatAPI
     from opensquad.claude_api import ClaudeAPI
-    from opensquad.xml_parser import StreamingTagParser
     from opensquad.gateway_adapter import GatewayAdapter
+    from opensquad.registry import ToolRegistry
     from opensquad.sdk import AgentConfig
     from opensquad.tool import logger
+    from opensquad.xml_parser import StreamingTagParser
 
     # Ensure we are in the project root if possible, or handle paths correctly
     # start_team.py runs with python -m opensquad.runner, so cwd is project root.
@@ -3310,7 +3677,7 @@ if __name__ == "__main__":
         print(f"Config file not found: {args.config}")
         sys.exit(1)
 
-    with open(args.config, "r", encoding="utf-8") as f:
+    with open(args.config, encoding="utf-8") as f:
         config = json.load(f)
 
     # 1. Initialize ToolRegistry
@@ -3318,6 +3685,7 @@ if __name__ == "__main__":
     # Load default tools (with try-except to prevent one broken module from blocking all)
     try:
         from opensquad.tools import system
+
         registry.register(system, "system", level="core")
     except ImportError as e:
         logger.warning(f"Failed to import system tool: {e}")
@@ -3325,6 +3693,7 @@ if __name__ == "__main__":
 
     try:
         from opensquad.tools import filesystem
+
         registry.register(filesystem, "filesystem", level="core")
     except ImportError as e:
         logger.warning(f"Failed to import filesystem tool: {e}")
@@ -3335,7 +3704,7 @@ if __name__ == "__main__":
     except ImportError as e:
         logger.warning(f"Failed to import memory tool: {e}")
         memory = None
-    
+
     # Check config for enabled tools
     tools_list = config.get("tools", [])
     if "websearch" in tools_list:
@@ -3343,11 +3712,12 @@ if __name__ == "__main__":
         pass
     if "long_memory" in tools_list:
         registry.register(memory, "memory")
-    
+
     # agent_setup tool for project management skill
     if "agent_setup" in tools_list:
         try:
             from opensquad.tools import agent_setup
+
             registry.register(agent_setup, "agent_setup")
         except ImportError:
             logger.warning("Failed to import agent_setup tool")
@@ -3356,6 +3726,7 @@ if __name__ == "__main__":
     if "mcp_query" in tools_list:
         try:
             from opensquad.tools import mcp_query
+
             registry.register(mcp_query, "mcp_query")
         except ImportError:
             logger.warning("Failed to import mcp_query tool")
@@ -3364,6 +3735,7 @@ if __name__ == "__main__":
     if "media" in tools_list:
         try:
             from opensquad.tools import media
+
             registry.register(media, "media")
         except ImportError:
             logger.warning("Failed to import media tool")
@@ -3372,10 +3744,11 @@ if __name__ == "__main__":
     if "im" in tools_list:
         try:
             from opensquad.tools import im
+
             registry.register(im, "im")
         except ImportError:
             logger.warning("Failed to import im tool")
-            
+
     # 2. Initialize ChatAPI
     model_conf = config.get("model", {})
     api_key = model_conf.get("api_key")
@@ -3393,37 +3766,42 @@ if __name__ == "__main__":
         )
         # Push an immediate error event so frontend/websocket users see it
         from opensquad.bus import bus as _boot_bus
-        _boot_bus.emit("agent_error", {
-            "agent_id": agent_id or agent_name,
-            "error": (
-                "LLM API key not configured. "
-                "Please set 'api_key' in the model card (model_cards/*.json) "
-                "or via the OPENAI_API_KEY environment variable, then restart the agent."
-            ),
-            "fatal": True,
-        })
+
+        _boot_bus.emit(
+            "agent_error",
+            {
+                "agent_id": config.get("agent_id") or agent_name,
+                "error": (
+                    "LLM API key not configured. "
+                    "Please set 'api_key' in the model card (model_cards/*.json) "
+                    "or via the OPENAI_API_KEY environment variable, then restart the agent."
+                ),
+                "fatal": True,
+            },
+        )
     token_max = model_conf.get("token_max", 128000)
 
     # Prompt
     prompt_conf = config.get("prompt", {})
     base_prompt_path = prompt_conf.get("base", "prompts/base.md")
     role_prompt_path = prompt_conf.get("role", "role.md")
-    
+
     # Resolve prompt paths relative to config file location
     agent_dir = os.path.dirname(os.path.abspath(args.config))
-    
+
     def read_prompt(path):
-        if not path: return ""
+        if not path:
+            return ""
         # If absolute, use it. If relative, try relative to agent_dir, then relative to cwd.
         if os.path.isabs(path):
             p = path
         else:
             p = os.path.join(agent_dir, path)
             if not os.path.exists(p):
-                p = os.path.abspath(path) # try cwd relative
-        
+                p = os.path.abspath(path)  # try cwd relative
+
         if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
+            with open(p, encoding="utf-8") as f:
                 return f.read()
         logger.warning(f"Prompt file not found: {path} (looked in {agent_dir} and cwd)")
         return ""
@@ -3437,19 +3815,19 @@ if __name__ == "__main__":
     stream_parser = StreamingTagParser(handlers={})
 
     if model_name.startswith("claude"):
-        chat_api = ClaudeAPI(api_key, model_name, base_url, full_prompt, 
-                             stream_parser=stream_parser, token_max=token_max)
+        chat_api = ClaudeAPI(
+            api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max
+        )
     else:
-        chat_api = ChatAPI(api_key, model_name, base_url, full_prompt, 
-                           stream_parser=stream_parser, token_max=token_max)
-    
+        chat_api = ChatAPI(api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max)
+
     # Set history dir to agent dir for persistence
     chat_api.history_dir = os.path.join(agent_dir, "history")
     os.makedirs(chat_api.history_dir, exist_ok=True)
 
     # 3. Vision Config
     vision_config = config.get("vision", {})
-    
+
     # 4. Memory Manager (Optional)
     # Note: MemoryManager requires 'agent_memory_tool' which is an external dependency.
     # If not available, we gracefully skip it.
@@ -3457,15 +3835,16 @@ if __name__ == "__main__":
     if "long_memory" in tools_list:
         try:
             from opensquad.memory_manager import MemoryManager
+
             # We need agent_memory_tool, which is external. Try to import.
             from opensquad.tools.agent_memory_tool.memory import AgentMemory
-            
+
             agent_name = config.get("agent_name", "unknown_agent")
             memory_dir = os.path.join(agent_dir, "memory")
-            
+
             # Initialize AgentMemory
             am = AgentMemory(data_dir=memory_dir)
-            
+
             # Instantiate MemoryManager
             memory_manager = MemoryManager(am, agent_name)
             logger.info("Memory Manager initialized successfully")
@@ -3474,7 +3853,13 @@ if __name__ == "__main__":
             memory_manager = None
 
     # 5. Initialize Runner
-    runner = AgentRunner(chat_api, registry, vision_config=vision_config, memory_manager=memory_manager, agent_id=config.get("agent_id", "unknown"))
+    runner = AgentRunner(
+        chat_api,
+        registry,
+        vision_config=vision_config,
+        memory_manager=memory_manager,
+        agent_id=config.get("agent_id", "unknown"),
+    )
 
     # 6. Gateway Adapter Configuration
     gateway_conf = config.get("gateway", {})
@@ -3495,11 +3880,11 @@ if __name__ == "__main__":
     async def main():
         if adapter:
             asyncio.create_task(adapter.start())
-        
+
         logger.info(f"Agent '{config.get('agent_name')}' started successfully.")
         logger.info(f"ID: {config.get('agent_id')}")
         logger.info(f"Model: {model_name}")
-        
+
         await runner.run()
 
     try:
@@ -3509,5 +3894,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         import traceback
+
         traceback.print_exc()
-        input("Press Enter to exit...") # Keep window open on crash
+        input("Press Enter to exit...")  # Keep window open on crash

@@ -24,6 +24,7 @@ Features:
 import argparse
 import asyncio
 import base64
+import contextlib
 import io
 import json
 import logging
@@ -52,10 +53,8 @@ if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     for _s in (sys.stdout, sys.stderr):
         if hasattr(_s, "reconfigure"):
-            try:
+            with contextlib.suppress(Exception):
                 _s.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
 
 from opensquad.system_config import syscfg
 
@@ -93,7 +92,6 @@ BOOT_MODULE = "opensquad.agents_boot"
 from opensquad.launcher.process_manager import (
     MANAGEMENT_PORT,
     MAX_RESTART_ATTEMPTS,
-    PROJECT_ROOT,
     RUNTIME_REGISTRY_DIR,
     STABLE_RESET_SECONDS,
     AgentProcess,
@@ -101,8 +99,6 @@ from opensquad.launcher.process_manager import (
     _cleanup_runtime_registry,
     _install_builtin_plugin_deps,
     _kill_port_owner,
-    _plugin_services,
-    _processes,
     _read_json,
     _resolve_discovery_port,
     check_port_conflict,
@@ -111,6 +107,8 @@ from opensquad.launcher.process_manager import (
 # Workspace migration background task status table (shared across requests)
 _workspace_migration_tasks: dict = {}
 
+
+import contextlib
 
 from opensquad.agent_config_schema import apply_config_defaults, validate_agent_config
 
@@ -150,7 +148,7 @@ def discover_plugin_services(plugins_dir: str) -> list[dict]:
     return result
 
 
-def discover_agents(agents_dir: str, only: list[str] = None, exclude: list[str] = None) -> list[dict]:
+def discover_agents(agents_dir: str, only: list[str] | None = None, exclude: list[str] | None = None) -> list[dict]:
     """
     Scan the agents/ directory for all subdirectories with config.json.
     Returns [{dir, name, config}, ...]
@@ -393,10 +391,8 @@ def _start_launcher_ws_tunnel(management_port: int):
                                 )
                             except _uerr.HTTPError as e:
                                 err_body = {}
-                                try:
+                                with contextlib.suppress(Exception):
                                     err_body = json.loads(e.read())
-                                except Exception:
-                                    pass
                                 await ws.send(
                                     json.dumps(
                                         {
@@ -420,10 +416,8 @@ def _start_launcher_ws_tunnel(management_port: int):
                                 )
                     finally:
                         _ka_task.cancel()
-                        try:
+                        with contextlib.suppress(asyncio.CancelledError):
                             await _ka_task
-                        except asyncio.CancelledError:
-                            pass
 
             except websockets.exceptions.ConnectionClosed:
                 _log.info("[Launcher] WS tunnel disconnected (normal). Reconnecting in 3s…")
@@ -533,10 +527,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     # Client disconnected before we could respond — skip silently
                     pass
                 except Exception as e:
-                    try:
+                    with contextlib.suppress(ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
                         self._send_json({"error": f"Internal server error: {e!s}"}, 500)
-                    except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
-                        pass
 
         def do_OPTIONS(self):
             self.send_response(204)
@@ -1059,7 +1051,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 def _walk(v):
                     if v is None:
                         return
-                    if isinstance(v, (list, tuple, set)):
+                    if isinstance(v, list | tuple | set):
                         for item in v:
                             _walk(item)
                         return
@@ -2116,7 +2108,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     except Exception:
                         pass
             # Also stop plugin services
-            for pid, psp in list(_plugin_services.items()):
+            for _pid, psp in list(_plugin_services.items()):
                 if psp.is_alive():
                     try:
                         psp.stop()
@@ -2292,9 +2284,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             central_path = syscfg.workspace_data_dir("mcp_config.json")
             if not os.path.isfile(central_path):
                 # Migration: if central config doesn't exist yet, try to build it from the first agent
-                agents_dir_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents")
+                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents")
                 if hasattr(self, "_find_agents_dir"):
-                    agents_dir_path = AGENTS_DIR
+                    pass
                 merged = {}
                 if os.path.isdir(AGENTS_DIR):
                     for dname in sorted(os.listdir(AGENTS_DIR)):
@@ -2950,7 +2942,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """Create or register a workspace on the Launcher server (does not auto-switch)"""
             from datetime import datetime as _dt
 
-            from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace, _copy_default_resources
+            from opensquad.workspace_utils import (
+                _copy_default_resources,
+                get_default_workspace_path,
+                save_last_workspace,
+            )
 
             raw_path = (body.get("path") or "").strip()
             name = (body.get("name") or "").strip()
@@ -3008,7 +3004,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """Switch the current workspace (recorded to config; requires Launcher restart to fully take effect)"""
             from datetime import datetime as _dt
 
-            from opensquad.workspace_utils import save_last_workspace, persist_desktop_workspace_switch
+            from opensquad.workspace_utils import persist_desktop_workspace_switch, save_last_workspace
 
             raw_path = (body.get("path") or "").strip()
             if not raw_path:
@@ -3210,10 +3206,8 @@ def _collab_supervisor_loop():
                                 f"建议: 1) 查看状态 2) 重试 3) 重新分配"
                             )
                             # Queue a message to PM's input hub (non-blocking try)
-                            try:
+                            with contextlib.suppress(Exception):
                                 _send_system_message_to_agent(ap.dir_name, msg)
-                            except Exception:
-                                pass
                             break
                 except Exception:
                     pass
@@ -3434,7 +3428,7 @@ def _init_and_start_plugin_services():
 def _auto_start_agents(args, agents_info):
     """Phase 8: Auto-start agents with auto_start_on_boot=true (unless --no-auto-start)."""
     if not args.no_auto_start and agents_info:
-        for name, ap in _processes.items():
+        for _name, ap in _processes.items():
             auto_flag = bool((ap.config or {}).get("ui", {}).get("auto_start_on_boot", False))
             if not auto_flag:
                 continue
@@ -3460,7 +3454,7 @@ def _monitor_loop():
     """Phase 10: Monitor process health and auto-restart crashed agents/services."""
     try:
         while not _shutdown_event.is_set():
-            for name, ap in list(_processes.items()):
+            for _name, ap in list(_processes.items()):
                 if not ap.is_alive() and ap.should_run:
                     exit_code = ap.process.returncode if ap.process else -1
                     _log.info(f"[Launcher] {ap.agent_name} exited (code: {exit_code})")
@@ -3474,7 +3468,7 @@ def _monitor_loop():
                                 f"[Launcher] {ap.agent_name} stable for {stable_duration:.0f}s, resetting restart_count ({ap.restart_count} -> 0)"
                             )
                             ap.restart_count = 0
-            for pid, psp in list(_plugin_services.items()):
+            for _pid, psp in list(_plugin_services.items()):
                 if not psp.is_alive() and psp.should_run:
                     exit_code = psp.process.returncode if psp.process else -1
                     _log.info(f"[Launcher] Plugin service {psp.plugin_id} exited (code: {exit_code})")
@@ -3491,13 +3485,13 @@ def _shutdown_all():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         _log.info("\n[Launcher] Shutting down all plugin services...")
-        for pid, psp in list(_plugin_services.items()):
+        for _pid, psp in list(_plugin_services.items()):
             psp.stop()
         _stale_ports = {9700, 9001, 5001}
         for _stale_port in _stale_ports:
             _kill_port_owner(_stale_port)
         _log.info("\n[Launcher] Shutting down all agents...")
-        for name, ap in list(_processes.items()):
+        for _name, ap in list(_processes.items()):
             ap.stop()
         _log.info("[Launcher] All agents stopped. Goodbye.")
     finally:
@@ -3506,10 +3500,8 @@ def _shutdown_all():
             if os.path.isdir(RUNTIME_REGISTRY_DIR):
                 for _f in os.listdir(RUNTIME_REGISTRY_DIR):
                     if _f.endswith(".json"):
-                        try:
+                        with contextlib.suppress(Exception):
                             os.remove(os.path.join(RUNTIME_REGISTRY_DIR, _f))
-                        except Exception:
-                            pass
         except Exception:
             pass
 

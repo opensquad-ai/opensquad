@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Regression tests for UTF-8 BOM tolerance in MCP / JSON config readers.
 
 Background
@@ -25,15 +24,14 @@ The fix is two-sided:
 These tests pin the contract so future regressions are caught at
 ``pytest`` time rather than at deploy time.
 """
+
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
 from opensquad.json_cache import load_json_cached
-
 
 # ── json_cache.load_json_cached ──────────────────────────────────────────
 
@@ -89,9 +87,7 @@ def test_filesystem_write_file_does_not_add_bom(tmp_path, monkeypatch):
 
     assert result["status"] == "success", result
     raw = open(target, "rb").read()
-    assert not raw.startswith(b"\xef\xbb\xbf"), (
-        f"filesystem.write_file wrote a BOM; first bytes: {raw[:6]!r}"
-    )
+    assert not raw.startswith(b"\xef\xbb\xbf"), f"filesystem.write_file wrote a BOM; first bytes: {raw[:6]!r}"
     # And of course the file must still be valid JSON without it.
     assert json.loads(raw.decode("utf-8"))["mcpServers"]["playwright"]["enabled"] is True
 
@@ -111,9 +107,7 @@ def test_filesystem_replace_in_file_does_not_add_bom(tmp_path, monkeypatch):
     assert result["status"] == "success", result
 
     raw = open(target, "rb").read()
-    assert not raw.startswith(b"\xef\xbb\xbf"), (
-        f"filesystem.replace_in_file wrote a BOM; first bytes: {raw[:6]!r}"
-    )
+    assert not raw.startswith(b"\xef\xbb\xbf"), f"filesystem.replace_in_file wrote a BOM; first bytes: {raw[:6]!r}"
     assert json.loads(raw.decode("utf-8")) == {"k": "new"}
 
 
@@ -136,7 +130,7 @@ def test_readers_consume_both_bom_and_plain_files(tmp_path):
 
     # The exact pattern used in the patched read sites.
     for path, expected in [(bom_path, 1), (plain_path, 2)]:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         assert data["v"] == expected, f"failed for {path}"
 
@@ -154,7 +148,6 @@ def test_plain_utf8_reader_still_fails_on_bom(tmp_path):
     path = tmp_path / "bom.json"
     path.write_bytes(b"\xef\xbb\xbf" + b'{"x": 1}')
 
-    with pytest.raises(json.JSONDecodeError) as excinfo:
-        with open(path, "r", encoding="utf-8") as f:
-            json.load(f)
+    with pytest.raises(json.JSONDecodeError) as excinfo, open(path, encoding="utf-8") as f:
+        json.load(f)
     assert "BOM" in str(excinfo.value) or "utf-8-sig" in str(excinfo.value).lower()

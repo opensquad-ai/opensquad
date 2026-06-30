@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad Plugin API (Decorator-based)
 
@@ -30,11 +29,12 @@ Lifecycle:
     7. Scans @on_event methods -> EventBus.subscribe()
     8. Auto-generates plugin.json for Launcher static reads
 """
+
 import functools
 import inspect
 import logging
-import os
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Context: runtime information injected into every plugin
 # ---------------------------------------------------------------------------
+
 
 class Context:
     """
@@ -56,9 +57,14 @@ class Context:
         data_dir:     absolute path to data/plugins/{plugin_name}/
         plugin_dir:   absolute path to plugins/{plugin_name}/
     """
+
     __slots__ = (
-        "agent_id", "project_root", "event_bus",
-        "config", "data_dir", "plugin_dir",
+        "agent_id",
+        "config",
+        "data_dir",
+        "event_bus",
+        "plugin_dir",
+        "project_root",
     )
 
     def __init__(
@@ -66,7 +72,7 @@ class Context:
         agent_id: str = "",
         project_root: str = ".",
         event_bus: Any = None,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
         data_dir: str = "",
         plugin_dir: str = "",
     ):
@@ -78,13 +84,13 @@ class Context:
         self.plugin_dir = plugin_dir
 
     def __repr__(self):
-        return (f"Context(agent_id={self.agent_id!r}, "
-                f"data_dir={self.data_dir!r})")
+        return f"Context(agent_id={self.agent_id!r}, data_dir={self.data_dir!r})"
 
 
 # ---------------------------------------------------------------------------
 # Plugin: base class for all new-style plugins
 # ---------------------------------------------------------------------------
+
 
 class Plugin:
     """
@@ -121,6 +127,7 @@ class Plugin:
 # @register decorator
 # ---------------------------------------------------------------------------
 
+
 def register(
     name: str,
     author: str = "",
@@ -128,11 +135,11 @@ def register(
     version: str = "1.0.0",
     plugin_type: str = "tool",
     display_name: str = "",
-    config_schema: Optional[Dict[str, Any]] = None,
+    config_schema: dict[str, Any] | None = None,
     config_section: str = "",
-    dependencies: Optional[Dict[str, List[str]]] = None,
-    contributes: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
+    dependencies: dict[str, list[str]] | None = None,
+    contributes: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
     node_scope: str = "all",
 ):
     """
@@ -170,6 +177,7 @@ def register(
                                   IMAP listener); generated plugin.json will have
                                   enabled=False so only the chosen node is activated.
     """
+
     def decorator(cls):
         cls.__plugin_meta__ = {
             "name": name,
@@ -186,12 +194,14 @@ def register(
             "node_scope": node_scope,
         }
         return cls
+
     return decorator
 
 
 # ---------------------------------------------------------------------------
 # @tool decorator
 # ---------------------------------------------------------------------------
+
 
 def tool(
     name: str = "",
@@ -220,6 +230,7 @@ def tool(
         auto_register:    if True, auto-registered to all agents
         requires_agent_id: if True, agent_id will be available via self.context
     """
+
     def decorator(method):
         method.__tool_meta__ = {
             "name": name or method.__name__,
@@ -229,12 +240,14 @@ def tool(
             "requires_agent_id": requires_agent_id,
         }
         return method
+
     return decorator
 
 
 # ---------------------------------------------------------------------------
 # @hook decorators
 # ---------------------------------------------------------------------------
+
 
 class _HookDecorators:
     """
@@ -256,26 +269,28 @@ class _HookDecorators:
     """
 
     # All valid hook names
-    HOOK_NAMES = frozenset({
-        # -- Input / LLM pipeline --
-        "on_message_received",  # message received, before any processing
-        "on_before_llm",        # just before LLM API call
-        "on_after_llm",         # just after LLM API response
-        # -- Tool execution --
-        "on_before_tool",       # before a tool is called (supports skip)
-        "on_after_tool",        # after a tool call (success or error)
-        "on_tool_error",        # after a tool call that returned Error:...
-        # -- Output --
-        "on_before_send",       # before reply is persisted + emitted (supports stop/rewrite)
-        "on_after_send",        # after reply has been sent
-        # -- Prompt --
-        "on_before_prompt",     # before system prompt is finalized each turn (supports rewrite)
-        # -- Task lifecycle --
-        "on_task_start",        # when a new task begins (state -> working)
-        "on_task_complete",     # when a task ends (task_complete / task_failed)
-        # -- State machine --
-        "on_state_change",      # when agent state transitions (idle/working/sleeping)
-    })
+    HOOK_NAMES = frozenset(
+        {
+            # -- Input / LLM pipeline --
+            "on_message_received",  # message received, before any processing
+            "on_before_llm",  # just before LLM API call
+            "on_after_llm",  # just after LLM API response
+            # -- Tool execution --
+            "on_before_tool",  # before a tool is called (supports skip)
+            "on_after_tool",  # after a tool call (success or error)
+            "on_tool_error",  # after a tool call that returned Error:...
+            # -- Output --
+            "on_before_send",  # before reply is persisted + emitted (supports stop/rewrite)
+            "on_after_send",  # after reply has been sent
+            # -- Prompt --
+            "on_before_prompt",  # before system prompt is finalized each turn (supports rewrite)
+            # -- Task lifecycle --
+            "on_task_start",  # when a new task begins (state -> working)
+            "on_task_complete",  # when a task ends (task_complete / task_failed)
+            # -- State machine --
+            "on_state_change",  # when agent state transitions (idle/working/sleeping)
+        }
+    )
 
     @staticmethod
     def on_message_received(method=None, *, priority: int = 0):
@@ -284,11 +299,13 @@ class _HookDecorators:
         Context: message, channel, sender_name, chat_name, source_chat_id, input_source.
         Set context['__stop__'] = True to drop the message entirely.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_message_received", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -300,11 +317,13 @@ class _HookDecorators:
         Context: messages (list), model (str), agent_id.
         Set context['__stop__'] = True to skip the LLM call entirely.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_before_llm", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -316,11 +335,13 @@ class _HookDecorators:
         Context: response (str), agent_id.
         Modify context['response'] to rewrite the raw LLM output.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_after_llm", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -332,11 +353,13 @@ class _HookDecorators:
         Context: tool_name, arguments, agent_id.
         Set context['skip'] = True to skip execution (provide context['result'] as substitute).
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_before_tool", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -348,11 +371,13 @@ class _HookDecorators:
         Context: tool_name, arguments, result, agent_id, model.
         Modify context['result'] to rewrite the tool result seen by the LLM.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_after_tool", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -366,11 +391,13 @@ class _HookDecorators:
         Modify context['error'] to override the error message sent to the LLM
         (e.g. inject a retry instruction or substitute a fallback result).
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_tool_error", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -383,11 +410,13 @@ class _HookDecorators:
         Modify context['message'] to rewrite the reply.
         Set context['__stop__'] = True to cancel sending entirely.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_before_send", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -399,11 +428,13 @@ class _HookDecorators:
         Context: message (str), agent_id.
         Read-only in practice; use for logging, analytics, side-effects.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_after_send", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -416,11 +447,13 @@ class _HookDecorators:
         Modify context['prompt'] to inject or rewrite the system prompt dynamically.
         Useful for: real-time data injection, SLA countdowns, per-turn context.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_before_prompt", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -432,11 +465,13 @@ class _HookDecorators:
         Context: task_id, requirement (str), source (str), agent_id.
         Use for: external notifications, SLA timer start, task chain triggers.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_task_start", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -449,11 +484,13 @@ class _HookDecorators:
                  turns (int), agent_id.
         Use for: completion notifications, audit logging, chaining follow-up tasks.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_task_complete", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -470,11 +507,13 @@ class _HookDecorators:
         so handlers must not assume the state hasn't changed again by the time
         they run. Do NOT call state_manager.get_state() from within this hook.
         """
+
         def decorator(m):
             if not hasattr(m, "__hook_meta__"):
                 m.__hook_meta__ = []
             m.__hook_meta__.append({"hook_name": "on_state_change", "priority": priority})
             return m
+
         if method is not None:
             return decorator(method)
         return decorator
@@ -494,6 +533,7 @@ Hook decorator namespace. Usage:
 # @on_event decorator
 # ---------------------------------------------------------------------------
 
+
 def on_event(event_type: str):
     """
     Method decorator: auto-subscribe to an EventBus event.
@@ -510,17 +550,20 @@ def on_event(event_type: str):
     Args:
         event_type: EventBus event name (e.g. "token_stats")
     """
+
     def decorator(method):
         if not hasattr(method, "__event_meta__"):
             method.__event_meta__ = []
         method.__event_meta__.append({"event_type": event_type})
         return method
+
     return decorator
 
 
 # ---------------------------------------------------------------------------
 # ToolModuleWrapper: bridge between @tool methods and ToolRegistry
 # ---------------------------------------------------------------------------
+
 
 class ToolModuleWrapper:
     """
@@ -541,7 +584,7 @@ class ToolModuleWrapper:
     def __init__(self, plugin_instance: Plugin, namespace: str):
         self._plugin = plugin_instance
         self._namespace = namespace
-        self._functions: Dict[str, Callable] = {}
+        self._functions: dict[str, Callable] = {}
 
     def add_method(self, method_name: str, bound_method: Callable, doc: str = ""):
         """
@@ -550,6 +593,7 @@ class ToolModuleWrapper:
         The function is exposed with proper signature (without 'self') so
         that ToolRegistry's inspect-based discovery works correctly.
         """
+
         # Create a wrapper function that strips 'self' from the signature
         @functools.wraps(bound_method)
         def wrapper_func(**kwargs):
@@ -557,10 +601,7 @@ class ToolModuleWrapper:
 
         # Rebuild signature without 'self'
         orig_sig = inspect.signature(bound_method)
-        params = [
-            p for name, p in orig_sig.parameters.items()
-            if name != "self"
-        ]
+        params = [p for name, p in orig_sig.parameters.items() if name != "self"]
         wrapper_func.__signature__ = orig_sig.replace(parameters=params)
 
         if doc:
@@ -579,12 +620,13 @@ class ToolModuleWrapper:
 # Utility: extract metadata from a plugin class
 # ---------------------------------------------------------------------------
 
-def get_plugin_meta(cls) -> Optional[Dict[str, Any]]:
+
+def get_plugin_meta(cls) -> dict[str, Any] | None:
     """Get __plugin_meta__ from a class, or None if not decorated."""
     return getattr(cls, "__plugin_meta__", None)
 
 
-def get_tool_methods(instance) -> List[Dict[str, Any]]:
+def get_tool_methods(instance) -> list[dict[str, Any]]:
     """
     Scan a plugin instance for @tool-decorated methods.
 
@@ -600,21 +642,23 @@ def get_tool_methods(instance) -> List[Dict[str, Any]]:
         except Exception:
             continue
         if callable(attr) and hasattr(attr, "__tool_meta__"):
-            results.append({
-                "method_name": attr_name,
-                "bound_method": attr,
-                "meta": attr.__tool_meta__,
-            })
+            results.append(
+                {
+                    "method_name": attr_name,
+                    "bound_method": attr,
+                    "meta": attr.__tool_meta__,
+                }
+            )
     return results
 
 
-def get_hook_methods(instance) -> Dict[str, List[Callable]]:
+def get_hook_methods(instance) -> dict[str, list[Callable]]:
     """
     Scan a plugin instance for @hook-decorated methods.
 
     Returns dict of: {hook_name: [bound_method, ...]}
     """
-    hooks: Dict[str, List[Callable]] = {}
+    hooks: dict[str, list[Callable]] = {}
     for attr_name in dir(instance):
         if attr_name.startswith("_"):
             continue
@@ -631,7 +675,7 @@ def get_hook_methods(instance) -> Dict[str, List[Callable]]:
     return hooks
 
 
-def get_event_methods(instance) -> List[Dict[str, Any]]:
+def get_event_methods(instance) -> list[dict[str, Any]]:
     """
     Scan a plugin instance for @on_event-decorated methods.
 
@@ -647,14 +691,16 @@ def get_event_methods(instance) -> List[Dict[str, Any]]:
             continue
         if callable(attr) and hasattr(attr, "__event_meta__"):
             for entry in attr.__event_meta__:
-                results.append({
-                    "event_type": entry["event_type"],
-                    "bound_method": attr,
-                })
+                results.append(
+                    {
+                        "event_type": entry["event_type"],
+                        "bound_method": attr,
+                    }
+                )
     return results
 
 
-def generate_plugin_json(cls, instance=None) -> Dict[str, Any]:
+def generate_plugin_json(cls, instance=None) -> dict[str, Any]:
     """
     Generate a plugin.json-compatible dict from @register + @tool + @hook metadata.
 
@@ -686,13 +732,15 @@ def generate_plugin_json(cls, instance=None) -> Dict[str, Any]:
             ns = tmeta["name"]
             if ns not in seen_namespaces:
                 seen_namespaces.add(ns)
-                tools.append({
-                    "name": ns,
-                    "module": "plugin_api",
-                    "level": tmeta.get("level", "extended"),
-                    "auto_register": tmeta.get("auto_register", False),
-                    "requires_agent_id": tmeta.get("requires_agent_id", False),
-                })
+                tools.append(
+                    {
+                        "name": ns,
+                        "module": "plugin_api",
+                        "level": tmeta.get("level", "extended"),
+                        "auto_register": tmeta.get("auto_register", False),
+                        "requires_agent_id": tmeta.get("requires_agent_id", False),
+                    }
+                )
 
     # Collect hooks
     hook_names = []

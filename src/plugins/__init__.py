@@ -2,10 +2,11 @@
 """
 Common utilities shared across plugins.
 """
-from typing import Dict, Any
+
+from typing import Any
 
 
-def get_current_source_chat_id() -> Dict[str, Any]:
+def get_current_source_chat_id() -> dict[str, Any]:
     """
     Get the source_chat_id of the current incoming message (if from Feishu/Telegram).
     Useful when you want to reply to the same chat where the message came from.
@@ -16,6 +17,7 @@ def get_current_source_chat_id() -> Dict[str, Any]:
     """
     try:
         from opensquad import _runtime_ctx
+
         return {
             "status": "success",
             "source_chat_id": _runtime_ctx.get("source_chat_id", ""),

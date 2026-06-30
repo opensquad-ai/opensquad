@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
 """Unit tests for parser.py utility functions.
 
 Tests cover: ResponseParser.parse_param_value type inference, _normalize_key,
 _normalize_arg_key, _normalize_tool_name, ResponseParser.parse_xml_arguments
 boundary cases.
 """
-import pytest
 
 
 class TestParseParamValue:
@@ -14,6 +12,7 @@ class TestParseParamValue:
     @staticmethod
     def _target(value_str: str):
         from opensquad.parser import ResponseParser
+
         return ResponseParser.parse_param_value(value_str)
 
     def test_plain_string(self):
@@ -65,6 +64,7 @@ class TestNormalizeKey:
     @staticmethod
     def _target(key: str):
         from opensquad.parser import _normalize_key
+
         return _normalize_key(key)
 
     def test_camel_case_becomes_lowercase(self):
@@ -91,6 +91,7 @@ class TestNormalizeArgKey:
     @staticmethod
     def _target(key: str):
         from opensquad.parser import _normalize_arg_key
+
         return _normalize_arg_key(key)
 
     def test_camel_to_snake(self):
@@ -106,6 +107,7 @@ class TestNormalizeToolName:
     @staticmethod
     def _target(name: str):
         from opensquad.parser import _normalize_tool_name
+
         return _normalize_tool_name(name)
 
     def test_system_tool(self):
@@ -131,6 +133,7 @@ class TestParseXmlArguments:
     @staticmethod
     def _target(xml_content: str):
         from opensquad.parser import ResponseParser
+
         return ResponseParser.parse_xml_arguments(xml_content)
 
     def test_simple_params(self):

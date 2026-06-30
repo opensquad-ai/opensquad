@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Plugin Handler Mixin — plugin management HTTP handler methods.
 
@@ -6,19 +5,19 @@ Extracted from _launcher_api/__init__.py to reduce its size.
 This mixin provides all plugin-related handler methods for the
 ManagementHandler class.
 """
+
 from __future__ import annotations
 
-import os
-import json
-import io
-import re
-import time
 import base64
-import shutil
-import zipfile
+import io
+import json
 import logging
+import os
+import re
+import shutil
 import sys
-from typing import Any, Dict, Optional
+import time
+import zipfile
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ class PluginHandlerMixin:
                 manifest = os.path.join(plugin_dir, "plugin.json")
                 if os.path.isfile(manifest):
                     try:
-                        with open(manifest, "r", encoding="utf-8") as f:
+                        with open(manifest, encoding="utf-8") as f:
                             meta = json.load(f)
                         if meta.get("name") == plugin_name:
                             return plugin_dir, entry
@@ -73,7 +72,7 @@ class PluginHandlerMixin:
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                 except (OSError, ValueError):
                     meta = {}
@@ -83,28 +82,30 @@ class PluginHandlerMixin:
             if is_builtin and not meta:
                 bp_cfg = self.state.builtin_plugins[name]
                 meta["enabled"] = bp_cfg.get("default_enabled", True)
-            plugins.append({
-                "name": meta.get("name", name),
-                "dir_name": name,
-                "display_name": meta.get("display_name", name),
-                "version": meta.get("version", "0.0.0"),
-                "type": meta.get("type", "tool"),
-                "enabled": meta.get("enabled", True),
-                "description": meta.get("description", ""),
-                "author": meta.get("author", ""),
-                "tags": meta.get("tags", []),
-                "category": meta.get("category", ""),
-                "tools": meta.get("tools", []),
-                "hooks": meta.get("hooks", []),
-                "config": meta.get("config", {}),
-                "config_schema": meta.get("config_schema", {}),
-                "contributes": meta.get("contributes", {}),
-                "dependencies": meta.get("dependencies", {}),
-                "service": meta.get("service"),
-                "service_only": meta.get("service_only", False),
-                "service_toggle": meta.get("service_toggle", False),
-                "builtin": is_builtin,
-            })
+            plugins.append(
+                {
+                    "name": meta.get("name", name),
+                    "dir_name": name,
+                    "display_name": meta.get("display_name", name),
+                    "version": meta.get("version", "0.0.0"),
+                    "type": meta.get("type", "tool"),
+                    "enabled": meta.get("enabled", True),
+                    "description": meta.get("description", ""),
+                    "author": meta.get("author", ""),
+                    "tags": meta.get("tags", []),
+                    "category": meta.get("category", ""),
+                    "tools": meta.get("tools", []),
+                    "hooks": meta.get("hooks", []),
+                    "config": meta.get("config", {}),
+                    "config_schema": meta.get("config_schema", {}),
+                    "contributes": meta.get("contributes", {}),
+                    "dependencies": meta.get("dependencies", {}),
+                    "service": meta.get("service"),
+                    "service_only": meta.get("service_only", False),
+                    "service_toggle": meta.get("service_toggle", False),
+                    "builtin": is_builtin,
+                }
+            )
         return self._send_json({"plugins": plugins})
 
     def _handle_plugin_set_enabled(self, name: str, enabled: bool):
@@ -115,7 +116,7 @@ class PluginHandlerMixin:
         plugin_json_path = os.path.join(plugin_dir, "plugin.json")
         if os.path.isfile(plugin_json_path):
             try:
-                with open(plugin_json_path, "r", encoding="utf-8") as f:
+                with open(plugin_json_path, encoding="utf-8") as f:
                     meta = json.load(f)
             except (OSError, ValueError):
                 meta = {}
@@ -133,7 +134,7 @@ class PluginHandlerMixin:
         if meta.get("service_toggle"):
             try:
                 sys_cfg_path = self.state.syscfg.workspace_config_path()
-                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                with open(sys_cfg_path, encoding="utf-8") as f:
                     full_cfg = json.load(f)
                 if "services" not in full_cfg:
                     full_cfg["services"] = {}
@@ -143,6 +144,7 @@ class PluginHandlerMixin:
                 with open(sys_cfg_path, "w", encoding="utf-8") as f:
                     json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                 from opensquad import system_config as _syscfg_mod
+
                 _syscfg_mod._cache = None
             except Exception as e:
                 self.state.logger.warning(f"[Launcher] Failed to sync services config: {e}", exc_info=True)
@@ -176,7 +178,7 @@ class PluginHandlerMixin:
         plugin_type = "tool"
         if os.path.isfile(plugin_json_path):
             try:
-                with open(plugin_json_path, "r", encoding="utf-8") as f:
+                with open(plugin_json_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 schema = meta.get("config_schema", {})
                 section = meta.get("config", {}).get("section")
@@ -186,7 +188,7 @@ class PluginHandlerMixin:
         if section and plugin_type == "platform":
             try:
                 sys_cfg_path = self.state.syscfg.workspace_config_path()
-                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                with open(sys_cfg_path, encoding="utf-8") as f:
                     full_cfg = json.load(f)
                 sec_data = full_cfg.get(section, {})
                 values = {
@@ -200,7 +202,7 @@ class PluginHandlerMixin:
             values = {}
             if os.path.isfile(config_path):
                 try:
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         values = json.load(f)
                 except (OSError, ValueError):
                     pass
@@ -227,7 +229,7 @@ class PluginHandlerMixin:
         plugin_type = "tool"
         if os.path.isfile(plugin_json_path):
             try:
-                with open(plugin_json_path, "r", encoding="utf-8") as f:
+                with open(plugin_json_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 section = meta.get("config", {}).get("section")
                 plugin_type = meta.get("type", "tool")
@@ -236,7 +238,7 @@ class PluginHandlerMixin:
         if section and plugin_type == "platform":
             try:
                 sys_cfg_path = self.state.syscfg.workspace_config_path()
-                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                with open(sys_cfg_path, encoding="utf-8") as f:
                     full_cfg = json.load(f)
                 if section not in full_cfg:
                     full_cfg[section] = {}
@@ -258,6 +260,7 @@ class PluginHandlerMixin:
                 with open(sys_cfg_path, "w", encoding="utf-8") as f:
                     json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                 from opensquad import system_config as _syscfg_mod
+
                 _syscfg_mod._cache = None
             except (OSError, ValueError) as e:
                 return self._send_json({"error": f"Failed to write system config: {e}"}, 500)
@@ -287,6 +290,7 @@ class PluginHandlerMixin:
         if not os.path.isfile(query_module_path):
             return self._send_json({"error": f"Plugin '{name}' has no data query module (query.py)"}, 404)
         import importlib
+
         module_name = f"plugins.{name}.query"
         try:
             if module_name in sys.modules:
@@ -307,6 +311,7 @@ class PluginHandlerMixin:
     def _handle_plugin_view_error(self, body: dict):
         """POST /api/plugin-view-error — log a plugin view error."""
         import datetime as _dt
+
         plugin_name = body.get("plugin_name", "unknown")
         view_key = body.get("view_key", "")
         error_msg = body.get("error", "")
@@ -315,12 +320,7 @@ class PluginHandlerMixin:
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            entry = (
-                f"[{ts}] view={view_key}\n"
-                f"  error: {error_msg}\n"
-                f"  stack: {stack[:800]}\n"
-                f"{'─' * 60}\n"
-            )
+            entry = f"[{ts}] view={view_key}\n  error: {error_msg}\n  stack: {stack[:800]}\n{'─' * 60}\n"
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(entry)
             return self._send_json({"ok": True, "log": log_path})
@@ -358,11 +358,13 @@ class PluginHandlerMixin:
                 reload_ts_path = os.path.join(base_dir, ".reload_ts")
                 with open(reload_ts_path, "w") as rf:
                     rf.write(str(time.time()))
-            return self._send_json({
-                "success": True,
-                "message": f"Successfully uploaded {len(files)} files to {resource_type}",
-                "resources": list(resource_names),
-            })
+            return self._send_json(
+                {
+                    "success": True,
+                    "message": f"Successfully uploaded {len(files)} files to {resource_type}",
+                    "resources": list(resource_names),
+                }
+            )
         except Exception as e:
             return self._send_json({"error": str(e)}, 500)
 
@@ -404,6 +406,7 @@ class PluginHandlerMixin:
             return self._send_json({"error": f"Plugin '{name}' does not support actions"}, 400)
         try:
             import importlib.util as _ilu
+
             spec = _ilu.spec_from_file_location(f"plugins.{name}.query", query_module_path)
             mod = _ilu.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -432,10 +435,10 @@ class PluginHandlerMixin:
         existing_enabled = True
         existing_version = None
         existing_category = None
-        existing_plugin_py: Optional[bytes] = None
+        existing_plugin_py: bytes | None = None
         if os.path.isfile(existing_manifest):
             try:
-                with open(existing_manifest, "r", encoding="utf-8") as f:
+                with open(existing_manifest, encoding="utf-8") as f:
                     existing_data = json.load(f)
                 existing_enabled = existing_data.get("enabled", True)
                 existing_version = existing_data.get("version")
@@ -476,7 +479,7 @@ class PluginHandlerMixin:
                 pass
         if os.path.isfile(existing_manifest):
             try:
-                with open(existing_manifest, "r", encoding="utf-8") as f:
+                with open(existing_manifest, encoding="utf-8") as f:
                     new_manifest = json.load(f)
                 new_manifest["enabled"] = existing_enabled
                 if existing_category and not new_manifest.get("category"):

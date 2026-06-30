@@ -1,10 +1,7 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -69,7 +66,9 @@ def test_create_memory_manager_returns_none_without_tool(tmp_path: Path):
     assert memory_manager is None
 
 
-def test_create_memory_manager_gracefully_skips_missing_dependency(tmp_path: Path, monkeypatch, runner_bootstrap_module):
+def test_create_memory_manager_gracefully_skips_missing_dependency(
+    tmp_path: Path, monkeypatch, runner_bootstrap_module
+):
     config = {"tools": ["long_memory"], "agent_name": "demo"}
 
     original_find_spec = importlib.util.find_spec

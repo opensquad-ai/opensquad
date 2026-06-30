@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Agent Self-Evolution Tools
 
@@ -13,9 +12,9 @@ Allows agents to manage their own capabilities at runtime:
   8. publish_skill          -- Copy a skill to the public skill library for local development
 """
 
-import os
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -35,15 +34,15 @@ _GIT_INSTALLS_DIR = os.path.join(_project_root, "skills", "_git")
 
 def _is_git_url(s: str) -> bool:
     """Return True if the string looks like a Git remote URL."""
-    return bool(re.match(r'^(https?://|git@|ssh://)', s))
+    return bool(re.match(r"^(https?://|git@|ssh://)", s))
 
 
 def _repo_name_from_url(url: str) -> str:
     """Extract a filesystem-safe repo name from a Git URL."""
     name = url.rstrip("/").split("/")[-1]
-    name = re.sub(r'\.git$', '', name)
+    name = re.sub(r"\.git$", "", name)
     # Replace any non-alphanumeric chars (except - and _) with _
-    name = re.sub(r'[^\w\-]', '_', name)
+    name = re.sub(r"[^\w\-]", "_", name)
     return name or "skill_repo"
 
 
@@ -65,7 +64,9 @@ def _clone_or_update(git_url: str) -> dict:
         result = subprocess.run(
             ["git", "pull"],
             cwd=clone_dest,
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode != 0:
             # Non-fatal: repo might be dirty; log and continue with existing files
@@ -76,7 +77,9 @@ def _clone_or_update(git_url: str) -> dict:
         logger.info(f"[install_skill] Cloning {git_url} -> {clone_dest}")
         result = subprocess.run(
             ["git", "clone", "--depth=1", git_url, clone_dest],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         if result.returncode != 0:
             return {
@@ -109,15 +112,15 @@ def _install_pip_deps_from_skill_json(skill_dir: str) -> list:
             if packages:
                 logger.info(f"[install_skill] pip install {packages}")
                 proc = subprocess.run(
-                    [sys.executable, "-m", "pip", "install"] + packages,
-                    capture_output=True, text=True, timeout=300,
+                    [sys.executable, "-m", "pip", "install", *packages],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
                 )
                 if proc.returncode == 0:
                     installed.extend(packages)
                 else:
-                    logger.warning(
-                        f"[install_skill] pip install {packages} failed: {proc.stderr.strip()}"
-                    )
+                    logger.warning(f"[install_skill] pip install {packages} failed: {proc.stderr.strip()}")
     return installed
 
 
@@ -162,9 +165,9 @@ def _find_public_skills_dir() -> tuple:
 
 def _parse_frontmatter_name(filepath: str) -> str:
     """Extract the name field from a SKILL.md YAML frontmatter. Returns empty string if not found."""
-    fm_pattern = re.compile(r'^---\s*\n(.*?)\n---', re.DOTALL)
+    fm_pattern = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             raw = f.read()
     except Exception:
         return ""
@@ -183,7 +186,7 @@ def _parse_frontmatter_full(filepath: str) -> dict:
     fm_pattern = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
     result = {}
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             raw = f.read()
     except Exception:
         return result
@@ -289,7 +292,7 @@ def publish_skill(skill_dir: str, overwrite: bool = False) -> str:
     # --- Validate frontmatter is well-formed ---
     fm_pattern = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
     try:
-        with open(skill_md, "r", encoding="utf-8") as f:
+        with open(skill_md, encoding="utf-8") as f:
             raw = f.read()
     except Exception as e:
         return json.dumps(
@@ -310,7 +313,7 @@ def publish_skill(skill_dir: str, overwrite: bool = False) -> str:
     generated = False
     if os.path.isfile(skill_json_path):
         try:
-            with open(skill_json_path, "r", encoding="utf-8") as f:
+            with open(skill_json_path, encoding="utf-8") as f:
                 sj = json.load(f)
             sj_name = (sj.get("name") or "").strip().lower().replace(" ", "-")
             if sj_name and sj_name != name:
@@ -388,6 +391,7 @@ def publish_skill(skill_dir: str, overwrite: bool = False) -> str:
 
     # Hot-load into runtime so list_skills() sees it immediately without restart
     from ..skill_loader import add_skill as _hot_add_skill
+
     load_result = _hot_add_skill(target_dir, name)
     hot_loaded = load_result.get("success", False)
 
@@ -457,11 +461,14 @@ def install_skill(
             local_skill_dir = clone_result["clone_dir"]
 
         if not os.path.isdir(local_skill_dir):
-            return json.dumps({
-                "success": False,
-                "error": f"Skill directory not found after clone: {local_skill_dir}",
-                **extra,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Skill directory not found after clone: {local_skill_dir}",
+                    **extra,
+                },
+                ensure_ascii=False,
+            )
 
     # -- Local directory path ----------------------------------------------------
     else:
@@ -513,38 +520,50 @@ def read_skill(skill_name: str, mode: str = "full") -> str:
 
     mode_norm = (mode or "full").strip().lower()
     if mode_norm not in ("full", "summary"):
-        return json.dumps({
-            "success": False,
-            "error": f"Invalid mode '{mode}'. Supported: full, summary",
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Invalid mode '{mode}'. Supported: full, summary",
+            },
+            ensure_ascii=False,
+        )
 
     for skill in get_loaded_skills():
         if skill.name == skill_name:
             if mode_norm == "summary":
-                return json.dumps({
+                return json.dumps(
+                    {
+                        "success": True,
+                        "skill": skill_name,
+                        "display_name": skill.display_name,
+                        "description": skill.description,
+                        "is_private": skill.is_private,
+                        "mode": "summary",
+                        "content": (skill.description or "").strip(),
+                    },
+                    ensure_ascii=False,
+                )
+
+            return json.dumps(
+                {
                     "success": True,
                     "skill": skill_name,
                     "display_name": skill.display_name,
                     "description": skill.description,
                     "is_private": skill.is_private,
-                    "mode": "summary",
-                    "content": (skill.description or "").strip(),
-                }, ensure_ascii=False)
+                    "mode": "full",
+                    "content": skill.content,
+                },
+                ensure_ascii=False,
+            )
 
-            return json.dumps({
-                "success": True,
-                "skill": skill_name,
-                "display_name": skill.display_name,
-                "description": skill.description,
-                "is_private": skill.is_private,
-                "mode": "full",
-                "content": skill.content,
-            }, ensure_ascii=False)
-
-    return json.dumps({
-        "success": False,
-        "error": f"Skill '{skill_name}' not found in loaded skills",
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "success": False,
+            "error": f"Skill '{skill_name}' not found in loaded skills",
+        },
+        ensure_ascii=False,
+    )
 
 
 def list_skills() -> str:
@@ -556,6 +575,7 @@ def list_skills() -> str:
     """
     try:
         from ..skill_loader import list_skills as _list_skills
+
         skills = _list_skills()
     except Exception as e:
         skills = {"_status": f"Skill loader unavailable: {e}"}
@@ -573,17 +593,16 @@ def list_installed() -> str:
     # Graceful degradation: MCP adapter may not be available
     try:
         from .mcp_adapter import get_mcp_adapter
+
         adapter = get_mcp_adapter()
-        if adapter:
-            mcp_servers = adapter.list_servers()
-        else:
-            mcp_servers = {"_status": "MCP adapter not initialized or disabled"}
+        mcp_servers = adapter.list_servers() if adapter else {"_status": "MCP adapter not initialized or disabled"}
     except Exception as e:
         mcp_servers = {"_status": f"MCP adapter unavailable: {e}"}
 
     # Graceful degradation: skill_loader may not be available
     try:
         from ..skill_loader import list_skills
+
         skills = list_skills()
     except Exception as e:
         skills = {"_status": f"Skill loader unavailable: {e}"}
@@ -619,20 +638,22 @@ def plugin_list(enabled_only: bool = True) -> str:
         if not os.path.isfile(manifest):
             continue
         try:
-            with open(manifest, "r", encoding="utf-8") as f:
+            with open(manifest, encoding="utf-8") as f:
                 meta = json.load(f) or {}
             enabled = bool(meta.get("enabled", True))
             if enabled_only and not enabled:
                 continue
             name = meta.get("name", entry)
-            results.append({
-                "name": name,
-                "display_name": meta.get("display_name", name),
-                "description": (meta.get("description", "") or "").strip(),
-                "enabled": enabled,
-                "version": meta.get("version", ""),
-                "category": meta.get("category", ""),
-            })
+            results.append(
+                {
+                    "name": name,
+                    "display_name": meta.get("display_name", name),
+                    "description": (meta.get("description", "") or "").strip(),
+                    "enabled": enabled,
+                    "version": meta.get("version", ""),
+                    "category": meta.get("category", ""),
+                }
+            )
         except Exception:
             continue
 
@@ -655,6 +676,6 @@ def reload_plugins() -> str:
         JSON string with loaded[], unloaded[], and active_tools[]
     """
     from opensquad.runner import do_plugin_reload
+
     result = do_plugin_reload()
     return json.dumps(result, ensure_ascii=False)
-

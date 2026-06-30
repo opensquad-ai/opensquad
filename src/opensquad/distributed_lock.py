@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Distributed lock based on OS file locking.
 
@@ -16,15 +15,16 @@ Usage:
         # exclusive access to session abc123
         ...
 """
+
 from __future__ import annotations
 
+import logging
 import os
 import sys
-import time
-import logging
 import tempfile
-from contextlib import contextmanager
-from typing import Generator, Optional
+import time
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 # Internal: OS-level file lock primitives (same approach as service_plugin.py)
 # ---------------------------------------------------------------------------
 
-def _acquire_file_lock(lock_path: str, timeout: float = 10.0) -> Optional[object]:
+
+def _acquire_file_lock(lock_path: str, timeout: float = 10.0) -> object | None:
     """Try to acquire an exclusive file lock. Returns file handle or None."""
     try:
         # Use os.open for atomic creation on both Windows and Unix
@@ -44,6 +45,7 @@ def _acquire_file_lock(lock_path: str, timeout: float = 10.0) -> Optional[object
     try:
         if sys.platform == "win32":
             import msvcrt
+
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -55,6 +57,7 @@ def _acquire_file_lock(lock_path: str, timeout: float = 10.0) -> Optional[object
             return None
         else:
             import fcntl
+
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -74,17 +77,17 @@ def _release_file_lock(lock_file: object) -> None:
     try:
         if sys.platform == "win32":
             import msvcrt
+
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception:
         pass
     finally:
-        try:
+        with suppress(Exception):
             lock_file.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +107,7 @@ def _lock_path(resource_id: str, lock_dir: str = DEFAULT_LOCK_DIR) -> str:
 
 class LockTimeoutError(Exception):
     """Raised when a distributed lock cannot be acquired within the timeout."""
+
     pass
 
 
@@ -131,7 +135,7 @@ class SessionLock:
         self.resource_id = resource_id
         self.timeout = timeout
         self.lock_dir = lock_dir
-        self._lock_file: Optional[object] = None
+        self._lock_file: object | None = None
         self._lock_path = _lock_path(resource_id, lock_dir)
 
     def acquire(self) -> bool:
@@ -151,11 +155,9 @@ class SessionLock:
             self._lock_file = None
             logger.debug(f"[Lock] released {self.resource_id}")
 
-    def __enter__(self) -> "SessionLock":
+    def __enter__(self) -> SessionLock:
         if not self.acquire():
-            raise LockTimeoutError(
-                f"Could not acquire lock for '{self.resource_id}' within {self.timeout}s"
-            )
+            raise LockTimeoutError(f"Could not acquire lock for '{self.resource_id}' within {self.timeout}s")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -172,9 +174,7 @@ def session_lock(
     """Context-manager shortcut for SessionLock (acquires on enter)."""
     lock = SessionLock(resource_id, timeout=timeout, lock_dir=lock_dir)
     if not lock.acquire():
-        raise LockTimeoutError(
-            f"Could not acquire lock for '{resource_id}' within {timeout}s"
-        )
+        raise LockTimeoutError(f"Could not acquire lock for '{resource_id}' within {timeout}s")
     try:
         yield lock
     finally:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Collaboration board storage.
 
@@ -8,6 +7,7 @@ Key behaviors:
 - Only latest tool-call snapshot is kept per (task_id, agent_id, item_type)
 - Task list supports history-style browsing with duration/progress stats
 """
+
 from __future__ import annotations
 
 import json
@@ -16,13 +16,13 @@ import os
 import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+from opensquad._storage.json_io import atomic_write_json, read_json
+from opensquad.distributed_lock import SessionLock
 from opensquad.system_config import syscfg
-from opensquad._storage.json_io import read_json, atomic_write_json
-from opensquad.distributed_lock import SessionLock, LockTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ def _board_lock(timeout: float = 15.0):
         finally:
             lock.release()
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -83,24 +84,24 @@ def _write_json(path: str, data) -> None:
     atomic_write_json(path, data)
 
 
-def _read_items() -> List[Dict[str, Any]]:
+def _read_items() -> list[dict[str, Any]]:
     data = _read_json(_items_file(), [])
     return data if isinstance(data, list) else []
 
 
-def _write_items(items: List[Dict[str, Any]]) -> None:
+def _write_items(items: list[dict[str, Any]]) -> None:
     wal_file = _wal_append("write_items", {"items": items})
     _write_json(_items_file(), items)
     # Main file committed successfully — the WAL entry has served its purpose.
     _wal_remove(wal_file)
 
 
-def _read_tasks() -> List[Dict[str, Any]]:
+def _read_tasks() -> list[dict[str, Any]]:
     data = _read_json(_tasks_file(), [])
     return data if isinstance(data, list) else []
 
 
-def _write_tasks(tasks: List[Dict[str, Any]]) -> None:
+def _write_tasks(tasks: list[dict[str, Any]]) -> None:
     wal_file = _wal_append("write_tasks", {"tasks": tasks})
     _write_json(_tasks_file(), tasks)
     # Main file committed successfully — the WAL entry has served its purpose.
@@ -122,7 +123,7 @@ def _wal_dir() -> str:
     return _WAL_DIR_CACHE
 
 
-def _wal_append(op_type: str, data: dict) -> Optional[str]:
+def _wal_append(op_type: str, data: dict) -> str | None:
     """Append an operation to the WAL before performing the actual write.
 
     Returns the WAL filename so the caller can remove it once the main file
@@ -150,14 +151,12 @@ def _wal_append(op_type: str, data: dict) -> Optional[str]:
         return wal_file
 
 
-def _wal_remove(wal_file: Optional[str]) -> None:
+def _wal_remove(wal_file: str | None) -> None:
     """Remove a committed WAL entry. Silently ignores missing/None."""
     if not wal_file:
         return
-    try:
+    with suppress(OSError):
         os.remove(wal_file)
-    except OSError:
-        pass
 
 
 def _wal_replay() -> None:
@@ -194,7 +193,7 @@ def _wal_replay() -> None:
         except OSError:
             continue
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 entry = json.load(f)
         except Exception:
             continue
@@ -225,10 +224,8 @@ def _wal_replay() -> None:
     # Always clean the WAL dir on a successful startup so committed entries
     # (whose main file was already written) do not accumulate forever.
     for fname in wal_files:
-        try:
+        with suppress(OSError):
             os.remove(os.path.join(wdir, fname))
-        except OSError:
-            pass
 
 
 def _gen_task_id(existing: set[str]) -> str:
@@ -245,8 +242,9 @@ def _gen_task_id(existing: set[str]) -> str:
     return uuid.uuid4().hex[:8].upper()
 
 
-def create_task(*, task_name: str, created_by: str, task_id: Optional[str] = None,
-                metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def create_task(
+    *, task_name: str, created_by: str, task_id: str | None = None, metadata: dict[str, Any] | None = None
+) -> dict[str, Any]:
     with _board_lock():
         tasks = _read_tasks()
         existing = {str(t.get("task_id", "")) for t in tasks}
@@ -273,9 +271,15 @@ def create_task(*, task_name: str, created_by: str, task_id: Optional[str] = Non
         return rec
 
 
-def update_task(*, task_id: str, progress: Optional[int] = None, task_name: Optional[str] = None,
-                status: Optional[str] = None, add_member: Optional[str] = None,
-                extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def update_task(
+    *,
+    task_id: str,
+    progress: int | None = None,
+    task_name: str | None = None,
+    status: str | None = None,
+    add_member: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with _board_lock():
         tasks = _read_tasks()
         idx = next((i for i, t in enumerate(tasks) if str(t.get("task_id", "")) == task_id), -1)
@@ -312,7 +316,7 @@ def update_task(*, task_id: str, progress: Optional[int] = None, task_name: Opti
         return rec
 
 
-def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+def _parse_iso(s: str | None) -> datetime | None:
     if not s or not isinstance(s, str):
         return None
     try:
@@ -324,7 +328,7 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def list_tasks(*, include_stale: bool = False) -> List[Dict[str, Any]]:
+def list_tasks(*, include_stale: bool = False) -> list[dict[str, Any]]:
     with _board_lock():
         tasks = _read_tasks()
         items = _read_items()
@@ -333,7 +337,7 @@ def list_tasks(*, include_stale: bool = False) -> List[Dict[str, Any]]:
         tasks = [t for t in tasks if t.get("status") != "stale"]
 
     # enrich stats
-    by_task: Dict[str, List[Dict[str, Any]]] = {}
+    by_task: dict[str, list[dict[str, Any]]] = {}
     for i in items:
         tid = str(i.get("collab_id", ""))
         if not tid:
@@ -361,20 +365,22 @@ def list_tasks(*, include_stale: bool = False) -> List[Dict[str, Any]]:
 
         task_members = t.get("members") if isinstance(t.get("members"), list) else []
         merged_members = set(task_members) | member_set
-        out.append({
-            **t,
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_seconds": duration_sec,
-            "members": list(merged_members),
-            "member_count": len(merged_members),
-            "item_count": len(lst),
-        })
+        out.append(
+            {
+                **t,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "duration_seconds": duration_sec,
+                "members": list(merged_members),
+                "member_count": len(merged_members),
+                "item_count": len(lst),
+            }
+        )
     out.sort(key=lambda x: str(x.get("updated_at", "")), reverse=True)
     return out
 
 
-def _match_identity(item: Dict[str, Any], collab_id: str, agent_id: str, item_type: str, item_key: str = "") -> bool:
+def _match_identity(item: dict[str, Any], collab_id: str, agent_id: str, item_type: str, item_key: str = "") -> bool:
     """Match item identity for upsert. If item_key is provided, it is also matched."""
     return (
         str(item.get("collab_id", "")) == str(collab_id)
@@ -384,7 +390,7 @@ def _match_identity(item: Dict[str, Any], collab_id: str, agent_id: str, item_ty
     )
 
 
-def _derive_task_status_progress_from_content(content: str) -> tuple[Optional[str], Optional[int]]:
+def _derive_task_status_progress_from_content(content: str) -> tuple[str | None, int | None]:
     """Derive task status/progress from checklist markers in content.
 
     Supported markers (matched only at the start of a line, after up to 3
@@ -415,11 +421,11 @@ def _derive_task_status_progress_from_content(content: str) -> tuple[Optional[st
         if len(raw) - len(stripped) > 3:
             continue
         line = stripped.lower()
-        if line.startswith('[x]'):
+        if line.startswith("[x]"):
             done += 1
-        elif line.startswith('[>]'):
+        elif line.startswith("[>]"):
             doing += 1
-        elif line.startswith('[ ]'):
+        elif line.startswith("[ ]"):
             pending += 1
 
     total = done + doing + pending
@@ -427,14 +433,14 @@ def _derive_task_status_progress_from_content(content: str) -> tuple[Optional[st
         return None, None
 
     # [>] counts as half progress for aggregate percentage.
-    progress = int(round(((done + doing * 0.5) / total) * 100))
+    progress = round(((done + doing * 0.5) / total) * 100)
 
     if doing > 0:
-        status = 'doing'
+        status = "doing"
     elif done == total:
-        status = 'done'
+        status = "done"
     else:
-        status = 'pending'
+        status = "pending"
 
     return status, progress
 
@@ -449,12 +455,12 @@ def upsert_item(
     status: str = "doing",
     progress: int = 0,
     visibility: str = "public",
-    latest_tool_name: Optional[str] = None,
-    latest_tool_summary: Optional[str] = None,
+    latest_tool_name: str | None = None,
+    latest_tool_summary: str | None = None,
     task_name: str = "",
     item_key: str = "",
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not collab_id:
         raise ValueError("collab_id(task_id) is required")
     # Unified assignment-progress logic:
@@ -534,7 +540,7 @@ def upsert_item(
         return base
 
 
-def list_items(*, collab_id: str, agent_id: Optional[str] = None, visibility: str = "public") -> List[Dict[str, Any]]:
+def list_items(*, collab_id: str, agent_id: str | None = None, visibility: str = "public") -> list[dict[str, Any]]:
     if not collab_id:
         raise ValueError("collab_id(task_id) is required")
     with _board_lock():
@@ -554,7 +560,9 @@ def list_items(*, collab_id: str, agent_id: Optional[str] = None, visibility: st
     return out
 
 
-def append_public_discussion(*, collab_id: str, task_name: str, author_agent_id: str, title: str, content: str) -> Dict[str, Any]:
+def append_public_discussion(
+    *, collab_id: str, task_name: str, author_agent_id: str, title: str, content: str
+) -> dict[str, Any]:
     if not collab_id:
         raise ValueError("collab_id(task_id) is required")
     with _board_lock():
@@ -582,7 +590,9 @@ def append_public_discussion(*, collab_id: str, task_name: str, author_agent_id:
         return rec
 
 
-def update_latest_tool(*, collab_id: str, agent_id: str, tool_name: str, tool_result: Any, task_name: str = "") -> Dict[str, Any]:
+def update_latest_tool(
+    *, collab_id: str, agent_id: str, tool_name: str, tool_result: Any, task_name: str = ""
+) -> dict[str, Any]:
     summary = str(tool_result)
     if len(summary) > 300:
         summary = summary[:300] + "..."
@@ -615,7 +625,7 @@ def delete_item(*, item_id: str) -> bool:
         return True
 
 
-def delete_task(*, task_id: str) -> Dict[str, Any]:
+def delete_task(*, task_id: str) -> dict[str, Any]:
     """Delete a collaboration task and all its associated board items.
 
     Removes:
@@ -660,7 +670,7 @@ def _plan_history_dir(collab_id: str) -> str:
     return d
 
 
-def save_plan_snapshot(*, collab_id: str, content: str, title: str = "", author_agent_id: str = "") -> Dict[str, Any]:
+def save_plan_snapshot(*, collab_id: str, content: str, title: str = "", author_agent_id: str = "") -> dict[str, Any]:
     """Save current plan content as a snapshot before overwriting. Returns snapshot metadata."""
     if not collab_id:
         raise ValueError("collab_id is required")
@@ -679,10 +689,8 @@ def save_plan_snapshot(*, collab_id: str, content: str, title: str = "", author_
             f.write(content)
         os.replace(tmp, filepath)
     except Exception:
-        try:
+        with suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
         raise
     # Also write to unified snapshot store (same path upsert_item uses for Agent updates).
     save_snapshot(
@@ -711,7 +719,7 @@ def save_plan_snapshot(*, collab_id: str, content: str, title: str = "", author_
 STALE_TASK_TIMEOUT_SECONDS = 86400  # 24 hours without update = stale
 
 
-def cleanup_stale_tasks(*, max_age_seconds: int = STALE_TASK_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
+def cleanup_stale_tasks(*, max_age_seconds: int = STALE_TASK_TIMEOUT_SECONDS) -> list[dict[str, Any]]:
     """Mark tasks with no updates within max_age_seconds as 'stale'.
 
     Returns list of tasks that were marked stale.
@@ -752,8 +760,9 @@ def _snapshot_subdir(collab_id: str, zone: str) -> str:
     return d
 
 
-def save_snapshot(*, collab_id: str, zone: str, content: str, title: str = "",
-                  author_agent_id: str = "", item_key: str = "") -> Dict[str, Any]:
+def save_snapshot(
+    *, collab_id: str, zone: str, content: str, title: str = "", author_agent_id: str = "", item_key: str = ""
+) -> dict[str, Any]:
     """Save current board item content as a snapshot before overwriting.
 
     Zones: 'requirement', 'plan', 'status', 'discussion'
@@ -790,7 +799,7 @@ def save_snapshot(*, collab_id: str, zone: str, content: str, title: str = "",
     return {"filename": filename, "saved_at": now, "zone": zone, "collab_id": collab_id}
 
 
-def list_snapshots(*, collab_id: str, zone: str = "") -> List[Dict[str, Any]]:
+def list_snapshots(*, collab_id: str, zone: str = "") -> list[dict[str, Any]]:
     """List snapshots for a collaboration task, newest first.
 
     Args:
@@ -815,26 +824,29 @@ def list_snapshots(*, collab_id: str, zone: str = "") -> List[Dict[str, Any]]:
             if not os.path.isfile(fpath) or not fname.endswith(".json"):
                 continue
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
+                with open(fpath, encoding="utf-8") as f:
                     entry = json.load(f)
                 entry["filename"] = fname
                 entry["size"] = os.path.getsize(fpath)
                 snapshots.append(entry)
             except Exception:
-                snapshots.append({
-                    "filename": fname,
-                    "zone": zn,
-                    "content": "(Failed to read)",
-                    "saved_at": datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
-                        .isoformat().replace("+00:00", "Z"),
-                    "size": os.path.getsize(fpath),
-                })
+                snapshots.append(
+                    {
+                        "filename": fname,
+                        "zone": zn,
+                        "content": "(Failed to read)",
+                        "saved_at": datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "size": os.path.getsize(fpath),
+                    }
+                )
 
     snapshots.sort(key=lambda x: str(x.get("saved_at", "")), reverse=True)
     return snapshots
 
 
-def list_plan_snapshots(*, collab_id: str) -> List[Dict[str, Any]]:
+def list_plan_snapshots(*, collab_id: str) -> list[dict[str, Any]]:
     """List all plan snapshots for a collaboration task, newest first.
 
     Merges legacy plan_history/*.md files with unified snapshots/plan/*.json
@@ -843,10 +855,10 @@ def list_plan_snapshots(*, collab_id: str) -> List[Dict[str, Any]]:
     if not collab_id:
         raise ValueError("collab_id is required")
 
-    snapshots: List[Dict[str, Any]] = []
+    snapshots: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
-    def _add(entry: Dict[str, Any]) -> None:
+    def _add(entry: dict[str, Any]) -> None:
         key = f"{entry.get('saved_at', '')}|{entry.get('filename', '')}"
         if key in seen_keys:
             return
@@ -860,36 +872,43 @@ def list_plan_snapshots(*, collab_id: str) -> List[Dict[str, Any]]:
             if not os.path.isfile(fpath) or not fname.endswith(".md"):
                 continue
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
+                with open(fpath, encoding="utf-8") as f:
                     content = f.read()
             except Exception:
                 content = "(Failed to read)"
-            saved_at = datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc).isoformat().replace("+00:00", "Z")
-            _add({
-                "filename": fname,
-                "saved_at": saved_at,
-                "title": f"Plan snapshot — {fname}",
-                "content": content,
-                "size": os.path.getsize(fpath),
-                "collab_id": collab_id,
-                "source": "plan_history",
-            })
+            saved_at = (
+                datetime.fromtimestamp(os.path.getmtime(fpath), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+            _add(
+                {
+                    "filename": fname,
+                    "saved_at": saved_at,
+                    "title": f"Plan snapshot — {fname}",
+                    "content": content,
+                    "size": os.path.getsize(fpath),
+                    "collab_id": collab_id,
+                    "source": "plan_history",
+                }
+            )
 
     for entry in list_snapshots(collab_id=collab_id, zone="plan"):
-        _add({
-            "filename": entry.get("filename", ""),
-            "saved_at": entry.get("saved_at", ""),
-            "title": entry.get("title") or entry.get("filename", "Plan snapshot"),
-            "content": entry.get("content", ""),
-            "size": entry.get("size", 0),
-            "collab_id": collab_id,
-            "author_agent_id": entry.get("author_agent_id", ""),
-            "item_key": entry.get("item_key", ""),
-            "source": "snapshots",
-        })
+        _add(
+            {
+                "filename": entry.get("filename", ""),
+                "saved_at": entry.get("saved_at", ""),
+                "title": entry.get("title") or entry.get("filename", "Plan snapshot"),
+                "content": entry.get("content", ""),
+                "size": entry.get("size", 0),
+                "collab_id": collab_id,
+                "author_agent_id": entry.get("author_agent_id", ""),
+                "item_key": entry.get("item_key", ""),
+                "source": "snapshots",
+            }
+        )
 
     snapshots.sort(key=lambda x: str(x.get("saved_at", "")), reverse=True)
     return snapshots
+
 
 # Run WAL replay on module import — recovers data from any uncommitted WAL entries
 # that were written before a crash. Must be at end of file so all helpers are defined.

@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad Workspace Utilities
 
 Workspace management tools: detect, initialize, and record recently used workspaces.
 """
-import os
+
 import json
+import os
 import platform
-from typing import Optional
 from pathlib import Path
 
 # Global workspace config directory (across installation directories)
@@ -34,7 +33,7 @@ def _load_last_workspace_raw() -> dict:
         return _last_workspace_cache
     if LAST_WORKSPACE_FILE.exists():
         try:
-            with open(LAST_WORKSPACE_FILE, "r", encoding="utf-8") as f:
+            with open(LAST_WORKSPACE_FILE, encoding="utf-8") as f:
                 _last_workspace_cache = json.load(f)
         except Exception:
             _last_workspace_cache = {}
@@ -48,11 +47,11 @@ def get_default_workspace_path() -> str:
         base_dir = Path(os.environ.get("USERPROFILE", "C:\\Users\\Default")) / "Documents"
     else:
         base_dir = Path.home() / "Documents"
-    
+
     return str(base_dir / "OpenSquad-Workspace")
 
 
-def load_last_workspace() -> Optional[str]:
+def load_last_workspace() -> str | None:
     """Load the most recently used workspace path (cached in-process)."""
     data = _load_last_workspace_raw()
     workspace_path = data.get("last_workspace")
@@ -62,7 +61,7 @@ def load_last_workspace() -> Optional[str]:
     return None
 
 
-def save_last_workspace(workspace_path: str, workspace_name: str = None, set_as_current: bool = True):
+def save_last_workspace(workspace_path: str, workspace_name: str | None = None, set_as_current: bool = True):
     """Save workspace record (write-guarded: only writes when data actually changes).
 
     set_as_current=True  -> also update last_workspace (used when switching)
@@ -78,17 +77,17 @@ def save_last_workspace(workspace_path: str, workspace_name: str = None, set_as_
 
     # Compute new values
     new_recent = data.get("recent_workspaces", [])
-    if set_as_current:
-        new_last = workspace_path
-    else:
-        new_last = data.get("last_workspace")
+    new_last = workspace_path if set_as_current else data.get("last_workspace")
 
     new_recent = [w for w in new_recent if w["path"] != workspace_path]
-    new_recent.insert(0, {
-        "path": workspace_path,
-        "name": workspace_name or os.path.basename(workspace_path),
-        "last_opened": datetime.now(timezone.utc).isoformat() + "Z"
-    })
+    new_recent.insert(
+        0,
+        {
+            "path": workspace_path,
+            "name": workspace_name or os.path.basename(workspace_path),
+            "last_opened": datetime.now(timezone.utc).isoformat() + "Z",
+        },
+    )
     new_recent = new_recent[:10]
 
     # Write-guarded: skip disk write if nothing changed
@@ -109,7 +108,7 @@ def save_last_workspace(workspace_path: str, workspace_name: str = None, set_as_
 def detect_legacy_data(install_dir: str) -> bool:
     """
     Detect whether the installation directory contains legacy user data (pre-workspace era).
-    
+
     Detection markers:
     - chat.db or sessions/ directory containing files
     - data/ directory containing user files
@@ -121,7 +120,7 @@ def detect_legacy_data(install_dir: str) -> bool:
         os.path.join(install_dir, "sessions"),
         os.path.join(install_dir, "agents"),
     ]
-    
+
     for path in legacy_indicators:
         if os.path.exists(path):
             # If it's a directory, check if it's non-empty
@@ -135,23 +134,23 @@ def detect_legacy_data(install_dir: str) -> bool:
             else:
                 # File exists = treat as having data
                 return True
-    
+
     return False
 
 
-def get_desktop_app_data_dir() -> Optional[str]:
+def get_desktop_app_data_dir() -> str | None:
     """Return Electron's fixed app config dir (OPENSQUAD_APP_DATA), if set."""
     raw = os.environ.get("OPENSQUAD_APP_DATA", "").strip()
     return os.path.abspath(raw) if raw else None
 
 
-def load_desktop_workspace_path(app_data_dir: str) -> Optional[str]:
+def load_desktop_workspace_path(app_data_dir: str) -> str | None:
     """Read the user-chosen workspace path from desktop-workspace.json."""
     cfg_path = os.path.join(app_data_dir, DESKTOP_WORKSPACE_CONFIG)
     if not os.path.isfile(cfg_path):
         return None
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
+        with open(cfg_path, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return None
@@ -174,9 +173,7 @@ def save_desktop_workspace_path(app_data_dir: str, workspace_path: str) -> None:
 
 
 def _is_valid_workspace_dir(workspace_path: str) -> bool:
-    return os.path.isdir(workspace_path) and os.path.isdir(
-        os.path.join(workspace_path, ".opensquad")
-    )
+    return os.path.isdir(workspace_path) and os.path.isdir(os.path.join(workspace_path, ".opensquad"))
 
 
 def resolve_desktop_workspace() -> tuple[str, str]:
@@ -213,6 +210,7 @@ def bootstrap_desktop_workspace() -> str:
     Called from both the gateway (main.py) and the launcher.
     """
     import sys as _sys
+
     from opensquad import system_config as syscfg
 
     if not getattr(_sys, "frozen", False):
@@ -264,7 +262,7 @@ def _copy_default_resources(workspace_path: str, install_dir: str):
     if os.path.isfile(src_mcp) and not os.path.isfile(ws_mcp):
         os.makedirs(ws_data, exist_ok=True)
         shutil.copy2(src_mcp, ws_mcp)
-        print(f"[Workspace] Created default MCP config: data/mcp_config.json")
+        print("[Workspace] Created default MCP config: data/mcp_config.json")
 
     # Copy seed agents into the workspace.
     # pm/coder/qa: the multi-agent collaboration team that ships out of the
@@ -288,6 +286,7 @@ def bootstrap_workspace() -> str:
     Returns the finalized workspace path.
     """
     import sys as _sys
+
     from opensquad import system_config as syscfg
 
     # ── Frozen (desktop app): workspace path comes from Electron via

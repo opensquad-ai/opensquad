@@ -13,15 +13,16 @@ API endpoints:
     GET  /status      - Service status
 """
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import logging
 import os
 import sys
 import tempfile
 import time
-import logging
 from datetime import datetime
 from pathlib import Path
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 # ── Windows compat patch for openai-whisper ──
 # whisper.py tries ctypes.CDLL(find_library('c')) which returns None on Windows,
@@ -29,11 +30,14 @@ from pathlib import Path
 # Monkey-patch ctypes.util.find_library to return a safe fallback for 'c' / 'libc'.
 if sys.platform == "win32":
     import ctypes.util
+
     _orig_find_library = ctypes.util.find_library
+
     def _patched_find_library(name):
-        if name in ('c', 'libc'):
-            return 'msvcrt'
+        if name in ("c", "libc"):
+            return "msvcrt"
         return _orig_find_library(name)
+
     ctypes.util.find_library = _patched_find_library
 
 try:
@@ -49,16 +53,13 @@ except Exception as _import_err:
 # _project_root: project root (opensquad/), 3 levels up
 _here = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
-sys.path.insert(0, _here)          # current dir (reserved for future cross-file imports)
+sys.path.insert(0, _here)  # current dir (reserved for future cross-file imports)
 sys.path.insert(0, _project_root)  # project root, for `from opensquad.system_config import syscfg`
 
 from opensquad.system_config import syscfg
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("whisper_service")
 
 app = Flask(__name__)
@@ -74,7 +75,7 @@ STATS = {
     "total_requests": 0,
     "successful_requests": 0,
     "failed_requests": 0,
-    "startup_time": datetime.now().isoformat()
+    "startup_time": datetime.now().isoformat(),
 }
 
 
@@ -90,7 +91,8 @@ def _resolve_service_port() -> int:
     if os.path.isfile(config_path):
         try:
             import json as _json
-            with open(config_path, "r", encoding="utf-8") as _f:
+
+            with open(config_path, encoding="utf-8") as _f:
                 _cfg = _json.load(_f)
             if "port" in _cfg:
                 return int(_cfg["port"])
@@ -127,23 +129,25 @@ def load_model():
         return False
 
 
-@app.route('/health', methods=['GET'])
+@app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint"""
-    return jsonify({
-        "status": "healthy" if STATS["model_loaded"] else "unhealthy",
-        "model_loaded": STATS["model_loaded"],
-        "uptime": (datetime.now() - datetime.fromisoformat(STATS["startup_time"])).total_seconds()
-    })
+    return jsonify(
+        {
+            "status": "healthy" if STATS["model_loaded"] else "unhealthy",
+            "model_loaded": STATS["model_loaded"],
+            "uptime": (datetime.now() - datetime.fromisoformat(STATS["startup_time"])).total_seconds(),
+        }
+    )
 
 
-@app.route('/status', methods=['GET'])
+@app.route("/status", methods=["GET"])
 def status():
     """Service status endpoint"""
     return jsonify(STATS)
 
 
-@app.route('/transcribe', methods=['POST'])
+@app.route("/transcribe", methods=["POST"])
 def transcribe():
     """
     Audio transcription endpoint.
@@ -167,36 +171,27 @@ def transcribe():
     # Check if model is loaded
     if not STATS["model_loaded"] or MODEL is None:
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": "Model not loaded, please try again later"
-        }), 503
+        return jsonify({"success": False, "error": "Model not loaded, please try again later"}), 503
 
     # Check if a file was provided
-    if 'file' not in request.files:
+    if "file" not in request.files:
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": "No audio file found, please upload using the 'file' field"
-        }), 400
+        return jsonify({"success": False, "error": "No audio file found, please upload using the 'file' field"}), 400
 
-    audio_file = request.files['file']
-    if audio_file.filename == '':
+    audio_file = request.files["file"]
+    if audio_file.filename == "":
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": "Filename is empty"
-        }), 400
+        return jsonify({"success": False, "error": "Filename is empty"}), 400
 
     # Get optional parameters
-    language = request.form.get('language', None)  # auto-detect
-    task = request.form.get('task', 'transcribe')  # transcribe or translate
+    language = request.form.get("language", None)  # auto-detect
+    task = request.form.get("task", "transcribe")  # transcribe or translate
 
     # Save temp file
     temp_file = None
     try:
         # Create a temp file
-        suffix = os.path.splitext(audio_file.filename)[1] or '.wav'
+        suffix = os.path.splitext(audio_file.filename)[1] or ".wav"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             audio_file.save(tmp.name)
             temp_file = tmp.name
@@ -209,7 +204,7 @@ def transcribe():
             temp_file,
             language=language,
             task=task,
-            fp16=False  # May need to be False on Windows
+            fp16=False,  # May need to be False on Windows
         )
 
         duration = time.time() - start_time
@@ -217,21 +212,20 @@ def transcribe():
 
         logger.info(f"Transcription complete! Time taken: {duration:.2f} seconds")
 
-        return jsonify({
-            "success": True,
-            "text": result["text"].strip(),
-            "language": result.get("language", "unknown"),
-            "duration": round(duration, 2),
-            "segments": len(result.get("segments", []))
-        })
+        return jsonify(
+            {
+                "success": True,
+                "text": result["text"].strip(),
+                "language": result.get("language", "unknown"),
+                "duration": round(duration, 2),
+                "segments": len(result.get("segments", [])),
+            }
+        )
 
     except Exception as e:
         STATS["failed_requests"] += 1
         logger.error(f"Transcription failed: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
     finally:
         # Clean up temp file
@@ -242,7 +236,7 @@ def transcribe():
                 logger.warning(f"Failed to clean up temp file: {e}")
 
 
-@app.route('/transcribe/url', methods=['POST'])
+@app.route("/transcribe/url", methods=["POST"])
 def transcribe_url():
     """
     Transcribe via local file path (suitable for same-machine deployment).
@@ -259,63 +253,48 @@ def transcribe_url():
 
     if not STATS["model_loaded"] or MODEL is None:
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": "Model not loaded"
-        }), 503
+        return jsonify({"success": False, "error": "Model not loaded"}), 503
 
     data = request.get_json()
-    if not data or 'path' not in data:
+    if not data or "path" not in data:
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": "Please provide the 'path' parameter"
-        }), 400
+        return jsonify({"success": False, "error": "Please provide the 'path' parameter"}), 400
 
-    audio_path = data['path']
+    audio_path = data["path"]
     if not os.path.exists(audio_path):
         STATS["failed_requests"] += 1
-        return jsonify({
-            "success": False,
-            "error": f"File not found: {audio_path}"
-        }), 404
+        return jsonify({"success": False, "error": f"File not found: {audio_path}"}), 404
 
-    language = data.get('language', None)
-    task = data.get('task', 'transcribe')
+    language = data.get("language", None)
+    task = data.get("task", "transcribe")
 
     try:
         logger.info(f"Starting transcription: {audio_path}")
         start_time = time.time()
 
-        result = MODEL.transcribe(
-            audio_path,
-            language=language,
-            task=task,
-            fp16=False
-        )
+        result = MODEL.transcribe(audio_path, language=language, task=task, fp16=False)
 
         duration = time.time() - start_time
         STATS["successful_requests"] += 1
 
         logger.info(f"Transcription complete! Time taken: {duration:.2f} seconds")
 
-        return jsonify({
-            "success": True,
-            "text": result["text"].strip(),
-            "language": result.get("language", "unknown"),
-            "duration": round(duration, 2)
-        })
+        return jsonify(
+            {
+                "success": True,
+                "text": result["text"].strip(),
+                "language": result.get("language", "unknown"),
+                "duration": round(duration, 2),
+            }
+        )
 
     except Exception as e:
         STATS["failed_requests"] += 1
         logger.error(f"Transcription failed: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("Whisper Speech-to-Text Service starting...")
     logger.info("=" * 60)
@@ -334,16 +313,16 @@ if __name__ == '__main__':
     # Start Flask service
     port = _resolve_service_port()
     logger.info(f"Service address: http://localhost:{port}")
-    logger.info(f"API endpoints:")
-    logger.info(f"  - POST /transcribe       Upload audio file for transcription")
-    logger.info(f"  - POST /transcribe/url   Transcribe by file path")
-    logger.info(f"  - GET  /health           Health check")
-    logger.info(f"  - GET  /status           Service status")
+    logger.info("API endpoints:")
+    logger.info("  - POST /transcribe       Upload audio file for transcription")
+    logger.info("  - POST /transcribe/url   Transcribe by file path")
+    logger.info("  - GET  /health           Health check")
+    logger.info("  - GET  /status           Service status")
     logger.info("=" * 60)
 
     app.run(
-        host='0.0.0.0',
+        host="0.0.0.0",
         port=port,
         debug=False,  # Set to False for production
-        threaded=True  # Support concurrent requests
+        threaded=True,  # Support concurrent requests
     )

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for config.json pydantic schema validation (Config Validation).
 
 Validates:
@@ -9,9 +8,10 @@ Validates:
 5. token_max <= 0 is rejected
 6. Invalid config produces human-readable error
 """
+
 import pytest
 
-from opensquad.config_schema import validate_agent_config, ConfigValidationError
+from opensquad.config_schema import ConfigValidationError, validate_agent_config
 
 
 class TestValidConfig:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Task Watch - SQLite Storage Layer
 
@@ -9,13 +8,13 @@ Tables:
 - task_events: lifecycle events (start, update, stall, complete, abandon)
 - tool_activity: per-tool-call timestamps for activity heatmap
 """
+
 import logging
 import os
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("plugins.task_watch.storage")
 
@@ -90,8 +89,8 @@ class TaskWatchStorage:
             self._conn.execute(idx_sql)
         self._conn.commit()
 
-        self._event_buf: List[tuple] = []
-        self._activity_buf: List[tuple] = []
+        self._event_buf: list[tuple] = []
+        self._activity_buf: list[tuple] = []
         self._lock = threading.Lock()
         self._last_flush = time.time()
 
@@ -108,15 +107,12 @@ class TaskWatchStorage:
         elapsed_sec: float = 0,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        row = (now, event_type, task_id, agent_id, description[:500],
-               detail[:1000], stall_count, round(elapsed_sec, 1))
+        row = (now, event_type, task_id, agent_id, description[:500], detail[:1000], stall_count, round(elapsed_sec, 1))
         with self._lock:
             self._event_buf.append(row)
             self._maybe_flush()
 
-    def record_tool_activity(
-        self, agent_id: str, tool_name: str, success: bool = True
-    ) -> None:
+    def record_tool_activity(self, agent_id: str, tool_name: str, success: bool = True) -> None:
         now = datetime.now(timezone.utc).isoformat()
         row = (now, agent_id, tool_name, 1 if success else 0)
         with self._lock:

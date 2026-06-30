@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """Allow running CLI as: python -m opensquad.cli [command]"""
+
 from opensquad.cli.main import main
 
 if __name__ == "__main__":

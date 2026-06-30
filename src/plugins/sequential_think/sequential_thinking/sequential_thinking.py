@@ -1,23 +1,26 @@
-import json
-import os
-from typing import List, Optional
-
-from .models import ThoughtData, ThoughtStage
-from .storage import ThoughtStorage
 from .analysis import ThoughtAnalyzer
 from .logging_conf import configure_logging
+from .models import ThoughtData, ThoughtStage
+from .storage import ThoughtStorage
 
 logger = configure_logging("sequential-thinking")
 
+
 class SequentialThinking:
-    def __init__(self, storage_dir: Optional[str] = None):
+    def __init__(self, storage_dir: str | None = None):
         self.storage = ThoughtStorage(storage_dir)
 
-    def process_thought(self, thought: str, thought_number: int, total_thoughts: int,
-                        next_thought_needed: bool, stage: str,
-                        tags: Optional[List[str]] = None,
-                        axioms_used: Optional[List[str]] = None,
-                        assumptions_challenged: Optional[List[str]] = None) -> dict:
+    def process_thought(
+        self,
+        thought: str,
+        thought_number: int,
+        total_thoughts: int,
+        next_thought_needed: bool,
+        stage: str,
+        tags: list[str] | None = None,
+        axioms_used: list[str] | None = None,
+        assumptions_challenged: list[str] | None = None,
+    ) -> dict:
         """Add a sequential thought with its metadata."""
         try:
             logger.info(f"Processing thought #{thought_number}/{total_thoughts} in stage '{stage}'")
@@ -32,7 +35,7 @@ class SequentialThinking:
                 stage=thought_stage,
                 tags=tags or [],
                 axioms_used=axioms_used or [],
-                assumptions_challenged=assumptions_challenged or []
+                assumptions_challenged=assumptions_challenged or [],
             )
 
             self.storage.add_thought(thought_data)
@@ -42,7 +45,7 @@ class SequentialThinking:
             logger.info(f"Successfully processed thought #{thought_number}")
             return analysis
         except Exception as e:
-            logger.error(f"Error processing thought: {str(e)}")
+            logger.error(f"Error processing thought: {e!s}")
             return {"error": str(e), "status": "failed"}
 
     def generate_summary(self) -> dict:
@@ -52,7 +55,7 @@ class SequentialThinking:
             all_thoughts = self.storage.get_all_thoughts()
             return ThoughtAnalyzer.generate_summary(all_thoughts)
         except Exception as e:
-            logger.error(f"Error generating summary: {str(e)}")
+            logger.error(f"Error generating summary: {e!s}")
             return {"error": str(e), "status": "failed"}
 
     def clear_history(self) -> dict:
@@ -62,7 +65,7 @@ class SequentialThinking:
             self.storage.clear_history()
             return {"status": "success", "message": "Thought history cleared"}
         except Exception as e:
-            logger.error(f"Error clearing history: {str(e)}")
+            logger.error(f"Error clearing history: {e!s}")
             return {"error": str(e), "status": "failed"}
 
     def export_session(self, file_path: str) -> dict:
@@ -72,7 +75,7 @@ class SequentialThinking:
             self.storage.export_session(file_path)
             return {"status": "success", "message": f"Session exported to {file_path}"}
         except Exception as e:
-            logger.error(f"Error exporting session: {str(e)}")
+            logger.error(f"Error exporting session: {e!s}")
             return {"error": str(e), "status": "failed"}
 
     def import_session(self, file_path: str) -> dict:
@@ -82,5 +85,5 @@ class SequentialThinking:
             self.storage.import_session(file_path)
             return {"status": "success", "message": f"Session imported from {file_path}"}
         except Exception as e:
-            logger.error(f"Error importing session: {str(e)}")
+            logger.error(f"Error importing session: {e!s}")
             return {"error": str(e), "status": "failed"}

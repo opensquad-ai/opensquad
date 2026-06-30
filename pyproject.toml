@@ -93,6 +93,9 @@ skills = ["**/*"]
 [tool.ruff]
 target-version = "py310"
 line-length = 120
+exclude = [
+    "src/opensquad/gateway/nexuschat-pro/resources",
+]
 
 [tool.ruff.lint]
 select = [
@@ -112,6 +115,36 @@ ignore = [
     "E501",     # line-too-long (handled by formatter)
     "N806",     # non-lowercase-variable-in-function (permissive for ML code)
     "T201",     # allow print() in non-production scripts
+    # Legacy codebase — tighten incrementally (see ci-fast ruff job)
+    "G003",     # logging-string-concat
+    "G004",     # logging-f-string
+    "G201",     # logging-exc-info
+    "B008",     # function-call-in-default-argument (FastAPI Depends)
+    "B904",     # raise-without-from-inside-except
+    "E402",     # module-import-not-at-top-of-file
+    "E701",     # multiple-statements-on-one-line-colon
+    "E741",     # ambiguous-variable-name
+    "N802",     # invalid-function-name
+    "N803",     # invalid-argument-name
+    "RUF001",   # ambiguous-unicode-character-string (Chinese docs)
+    "RUF002",   # ambiguous-unicode-character-docstring
+    "RUF003",   # ambiguous-unicode-character-comment
+    "RUF006",   # asyncio-dangling-task
+    "RUF012",   # mutable-class-default
+    "SIM102",   # collapsible-if
+    "SIM105",   # suppressible-exception
+    "SIM108",   # if-else-block-instead-of-if-exp
+    "SIM115",   # open-file-with-context-handler
+    "SIM117",   # multiple-with-statements
+    "B007",     # unused-loop-control-variable
+    "B012",     # jump-statement-in-finally
+    "B023",     # function-uses-loop-variable
+    "N812",     # lowercase-imported-as-non-lowercase
+    "N814",     # camelcase-imported-as-constant
+    "N817",     # camelcase-imported-as-acronym
+    "RUF034",   # useless-if-else
+    "UP035",    # deprecated-import (typing.Dict etc.)
+    "RUF100",   # unused-noqa
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -120,6 +153,12 @@ ignore = [
 "src/plugins/*/adapter.py" = ["T201"]
 "src/plugins/*/service/*.py" = ["T201"]
 "conftest.py" = ["T201"]
+"src/opensquad/_syscfg/__init__.py" = ["F401"]  # re-exports
+"src/opensquad/_syscfg/_paths.py" = ["F401"]  # re-exports
+"src/opensquad/_launcher_api/__init__.py" = ["F821"]  # unreachable blocks after early returns
+"src/opensquad/launcher/__init__.py" = ["F401"]
+"src/opensquad/tools/agent_memory_tool/memory/__init__.py" = ["F401"]
+"src/plugins/sequential_think/sequential_thinking/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

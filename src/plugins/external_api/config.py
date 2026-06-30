@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 External Adapter Configuration (Multi-instance)
 
@@ -17,11 +16,11 @@ Config structure in system_config.json:
     ]
   }
 """
+
 import os
-import sys
 import secrets
+import sys
 from dataclasses import dataclass
-from typing import List
 
 # Ensure project root is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -31,6 +30,7 @@ from opensquad.system_config import syscfg
 @dataclass
 class ExternalApiInstanceConfig:
     """Single External API adapter instance config."""
+
     name: str
     host: str
     port: int
@@ -56,6 +56,7 @@ GATEWAY_TOKEN: str = syscfg.ensure_gateway_token()
 # needs to know explicitly because the silent failure mode is a 502.
 if not GATEWAY_TOKEN or GATEWAY_TOKEN == "YOUR_GATEWAY_TOKEN_HERE":
     import logging as _logging
+
     _logging.getLogger(__name__).error(
         "auth.gateway_token is still the placeholder after ensure_gateway_token(). "
         "external_api will fail to authenticate with the Gateway; every chat "
@@ -66,7 +67,7 @@ if not GATEWAY_TOKEN or GATEWAY_TOKEN == "YOUR_GATEWAY_TOKEN_HERE":
 EXTERNAL_API_LOG_LEVEL: str = syscfg.get("external_api", "log_level", "INFO")
 
 
-def load_instance_configs() -> List[ExternalApiInstanceConfig]:
+def load_instance_configs() -> list[ExternalApiInstanceConfig]:
     """Load all enabled instance configs from system_config.json."""
     raw_instances = syscfg.get("external_api", "instances", [])
     configs = []
@@ -81,16 +82,18 @@ def load_instance_configs() -> List[ExternalApiInstanceConfig]:
             api_key = secrets.token_urlsafe(32)
             auto_generated = True
 
-        configs.append(ExternalApiInstanceConfig(
-            name=inst.get("name", f"instance-{len(configs)+1}"),
-            host=inst.get("host", "0.0.0.0"),
-            port=inst.get("port", 9700 + len(configs)),
-            api_key=api_key,
-            auto_generated_key=auto_generated,
-            request_timeout=inst.get("request_timeout", 120),
-            async_result_ttl=inst.get("async_result_ttl", 600),
-            enabled=True,
-        ))
+        configs.append(
+            ExternalApiInstanceConfig(
+                name=inst.get("name", f"instance-{len(configs) + 1}"),
+                host=inst.get("host", "0.0.0.0"),
+                port=inst.get("port", 9700 + len(configs)),
+                api_key=api_key,
+                auto_generated_key=auto_generated,
+                request_timeout=inst.get("request_timeout", 120),
+                async_result_ttl=inst.get("async_result_ttl", 600),
+                enabled=True,
+            )
+        )
 
     # Fallback: if no instances configured, build one from legacy config
     if not configs:
@@ -99,14 +102,16 @@ def load_instance_configs() -> List[ExternalApiInstanceConfig]:
         if not api_key or api_key == "YOUR_EXTERNAL_API_KEY_HERE":
             api_key = secrets.token_urlsafe(32)
             auto_generated = True
-        configs.append(ExternalApiInstanceConfig(
-            name="default",
-            host=syscfg.host("external_adapter"),
-            port=syscfg.port("external_adapter"),
-            api_key=api_key,
-            auto_generated_key=auto_generated,
-            request_timeout=syscfg.default_timeout(),
-            async_result_ttl=syscfg.async_result_ttl(),
-        ))
+        configs.append(
+            ExternalApiInstanceConfig(
+                name="default",
+                host=syscfg.host("external_adapter"),
+                port=syscfg.port("external_adapter"),
+                api_key=api_key,
+                auto_generated_key=auto_generated,
+                request_timeout=syscfg.default_timeout(),
+                async_result_ttl=syscfg.async_result_ttl(),
+            )
+        )
 
     return configs

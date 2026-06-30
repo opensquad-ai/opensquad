@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 """HandlerState — typed container for all runtime state passed to ManagementHandler."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
-
 import threading
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -17,12 +16,12 @@ class HandlerState:
     makes the handler methods easier to extract into separate modules.
     """
 
-    procesos: Dict[str, Any] = field(default_factory=dict)
-    plug_svcs: Dict[str, Any] = field(default_factory=dict)
-    task_hb: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    procesos: dict[str, Any] = field(default_factory=dict)
+    plug_svcs: dict[str, Any] = field(default_factory=dict)
+    task_hb: dict[str, dict[str, Any]] = field(default_factory=dict)
     task_sn: set = field(default_factory=set)
     shut_ev: Any = None
-    ws_mig: Dict[str, Any] = field(default_factory=dict)
+    ws_mig: dict[str, Any] = field(default_factory=dict)
 
     agents_dir: str = ""
     plugins_dir: str = ""

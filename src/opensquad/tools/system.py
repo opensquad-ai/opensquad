@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 System Tools v2.1
 Provides system information, control functions, and a powerful background job management system.
 Allows agents to execute time-consuming commands in a "non-blocking" manner and poll for results.
 """
+
 import asyncio
 import os
 import platform
@@ -13,18 +13,20 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import psutil
 
 try:
     from ..sleep_controller import sleep_controller
-    from ..system_config import syscfg
     from ..tool import logger
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
     sleep_controller = None
+
+import contextlib
 
 from opensquad.utils.path_utils import get_workspace_root as _get_workspace_root
 from opensquad.utils.path_utils import is_path_safe as _is_path_safe
@@ -33,7 +35,7 @@ from opensquad.utils.path_utils import is_path_safe as _is_path_safe
 _PROJECT_ROOT = _get_workspace_root()
 
 
-def _resolve_working_directory(working_directory: Optional[str]) -> str:
+def _resolve_working_directory(working_directory: str | None) -> str:
     """
     Resolve working directory relative to workspace root.
     - None/empty -> workspace root
@@ -52,11 +54,12 @@ def _resolve_working_directory(working_directory: Optional[str]) -> str:
 
 # --- Background job management core ---
 
+
 class Job:
-    def __init__(self, job_id: str, command: str, shell: bool = True, working_directory: Optional[str] = None):
+    def __init__(self, job_id: str, command: str, shell: bool = True, working_directory: str | None = None):
         self.id = job_id
         self.command = command
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.stdout_queue = queue.Queue()
         self.start_time = None
         self.end_time = None
@@ -69,22 +72,19 @@ class Job:
         try:
             # Subprocess environment: force Python subprocesses to output UTF-8
             env = os.environ.copy()
-            if platform.system() == 'Windows':
-                env.setdefault('PYTHONUTF8', '1')
-                env.setdefault('PYTHONIOENCODING', 'utf-8')
+            if platform.system() == "Windows":
+                env.setdefault("PYTHONUTF8", "1")
+                env.setdefault("PYTHONIOENCODING", "utf-8")
 
             # Start process with redirected output
             # Windows: create a new process group so Ctrl+C / console shutdown
             # signals from the launcher are less likely to cascade into this job.
             creationflags = 0
-            if platform.system() == 'Windows':
+            if platform.system() == "Windows":
                 # CREATE_NEW_PROCESS_GROUP: isolate from parent's Ctrl+C group
                 # CREATE_NO_WINDOW: fully detach from launcher's console so that
                 # taskkill /F on this process cannot leak console signals back
-                creationflags = (
-                    subprocess.CREATE_NEW_PROCESS_GROUP
-                    | subprocess.CREATE_NO_WINDOW
-                )
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
 
             self.process = subprocess.Popen(
                 self.command,
@@ -96,15 +96,15 @@ class Job:
                 # in the agent's role card / tool definitions.
                 shell=self.shell,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Merge stderr into stdout
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 stdin=subprocess.DEVNULL,
-                bufsize=0, # Unbuffered for real-time reading
-                text=False, # Binary read to prevent encoding crashes
+                bufsize=0,  # Unbuffered for real-time reading
+                text=False,  # Binary read to prevent encoding crashes
                 env=env,
                 cwd=self.working_directory,
                 creationflags=creationflags,
             )
-            
+
             # Start listener thread
             t = threading.Thread(target=self._read_output, daemon=True)
             t.start()
@@ -115,8 +115,9 @@ class Job:
 
     def _read_output(self):
         """Background thread: read output stream in real-time."""
-        if not self.process: return
-        
+        if not self.process:
+            return
+
         while True:
             # Blocking read one byte (or one line) until stream closes
             line = self.process.stdout.readline()
@@ -124,12 +125,12 @@ class Job:
                 break
             try:
                 # Prefer UTF-8 (Python scripts, npm, git, and other UTF-8 programs)
-                decoded = line.decode('utf-8').rstrip()
+                decoded = line.decode("utf-8").rstrip()
             except UnicodeDecodeError:
                 # Fall back to GBK (Windows system commands like dir/type with native GBK output)
-                decoded = line.decode('gbk', errors='replace').rstrip()
+                decoded = line.decode("gbk", errors="replace").rstrip()
             self.stdout_queue.put(decoded)
-        
+
         # Wait for process to fully exit
         self.return_code = self.process.wait()
         self.end_time = datetime.now()
@@ -145,21 +146,23 @@ class Job:
         return "\n".join(lines)
 
     def is_running(self) -> bool:
-        if self.process is None: return False
+        if self.process is None:
+            return False
         return self.process.poll() is None
 
     def stop(self):
         if self.process and self.is_running():
             pid = self.process.pid
             try:
-                if platform.system() == 'Windows':
+                if platform.system() == "Windows":
                     # Use taskkill /F /T to force-kill the entire process tree.
                     # IMPORTANT: Do NOT call terminate() first — it kills the cmd.exe
                     # wrapper (shell=True), orphaning child processes and creating a
                     # PID-reuse race condition where taskkill may hit a recycled PID.
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        capture_output=True, timeout=10,
+                        capture_output=True,
+                        timeout=10,
                     )
                 else:
                     self.process.terminate()
@@ -168,29 +171,28 @@ class Job:
                     except subprocess.TimeoutExpired:
                         self.process.kill()
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self.process.kill()
-                except Exception:
-                    pass
+
 
 # Global job store
-_JOBS: Dict[str, Job] = {}
+_JOBS: dict[str, Job] = {}
 
 # --- Persistent shell session (to unify api_process into system namespace) ---
 _DEFAULT_SESSION_ID = "default"
 
 
 class ShellSession:
-    def __init__(self, session_id: str, shell_type: Optional[str] = None, working_directory: Optional[str] = None):
+    def __init__(self, session_id: str, shell_type: str | None = None, working_directory: str | None = None):
         self.session_id = session_id
         self.shell_type = shell_type or ("cmd" if os.name == "nt" else "bash")
         self.working_directory = _resolve_working_directory(working_directory)
-        self.output_buffer: List[str] = []
+        self.output_buffer: list[str] = []
         self._max_buffer_size = 10000
         self._lock = threading.Lock()
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self._stop_event = threading.Event()
-        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_thread: threading.Thread | None = None
         self._start_process()
 
     def _start_process(self):
@@ -214,7 +216,9 @@ class ShellSession:
         # Shell bootstrap
         if os.name == "nt":
             if "powershell" in self.shell_type.lower():
-                self._send_raw("$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n")
+                self._send_raw(
+                    "$OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+                )
             else:
                 self._send_raw("@echo off\n")
                 self._send_raw("chcp 65001 >nul 2>nul\n")
@@ -241,7 +245,7 @@ class ShellSession:
                 if len(self.output_buffer) > self._max_buffer_size:
                     self.output_buffer.pop(0)
 
-    def execute(self, command: str, timeout: float = 120.0) -> Dict[str, Any]:
+    def execute(self, command: str, timeout: float = 120.0) -> dict[str, Any]:
         if not self.process or self.process.poll() is not None:
             return {"status": "error", "message": "Session shell is not running."}
 
@@ -287,7 +291,8 @@ class ShellSession:
                 if os.name == "nt":
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
-                        capture_output=True, timeout=10,
+                        capture_output=True,
+                        timeout=10,
                     )
                 else:
                     self.process.terminate()
@@ -296,16 +301,15 @@ class ShellSession:
                     except subprocess.TimeoutExpired:
                         self.process.kill()
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self.process.kill()
-                except Exception:
-                    pass
 
 
-_SESSIONS: Dict[str, ShellSession] = {}
+_SESSIONS: dict[str, ShellSession] = {}
 
 
 _CLEANUP_INTERVAL_MINUTES = 30
+
 
 def _cleanup_old_jobs():
     """Clean up jobs that have been finished for more than 30 minutes to prevent memory leaks."""
@@ -322,7 +326,9 @@ def _cleanup_old_jobs():
         logger.info(f"Cleaned up {len(to_remove)} old jobs: {to_remove}")
 
 
-def _get_or_create_session(session_id: str = _DEFAULT_SESSION_ID, working_directory: Optional[str] = None, shell_type: Optional[str] = None) -> ShellSession:
+def _get_or_create_session(
+    session_id: str = _DEFAULT_SESSION_ID, working_directory: str | None = None, shell_type: str | None = None
+) -> ShellSession:
     sess = _SESSIONS.get(session_id)
     if sess is None:
         resolved_cwd = _resolve_working_directory(working_directory)
@@ -333,7 +339,9 @@ def _get_or_create_session(session_id: str = _DEFAULT_SESSION_ID, working_direct
     return sess
 
 
-def create_shell_session(session_id: str = _DEFAULT_SESSION_ID, working_directory: Optional[str] = None, shell_type: Optional[str] = None) -> Dict[str, Any]:
+def create_shell_session(
+    session_id: str = _DEFAULT_SESSION_ID, working_directory: str | None = None, shell_type: str | None = None
+) -> dict[str, Any]:
     """Create a persistent shell session under system namespace."""
     try:
         sess = _get_or_create_session(session_id=session_id, working_directory=working_directory, shell_type=shell_type)
@@ -347,9 +355,9 @@ def create_shell_session(session_id: str = _DEFAULT_SESSION_ID, working_director
         return {"status": "error", "message": str(e)}
 
 
-def run_session_job(command: str, timeout: float = 120.0, session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, Any]:
+def run_session_job(command: str, timeout: float = 120.0, session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
     """Run command in persistent shell session. Uses the same shell per session_id.
-    
+
     WARNING: If a previous command in this session started a foreground process
     (e.g. npm run dev, python server.py), this call will BLOCK until that process
     exits, then time out. For long-running services, use start_job instead.
@@ -361,7 +369,7 @@ def run_session_job(command: str, timeout: float = 120.0, session_id: str = _DEF
         return {"status": "error", "message": str(e)}
 
 
-def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, Any]:
+def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
     """Get status of a shell session."""
     try:
         sess = _get_or_create_session(session_id=session_id)
@@ -378,7 +386,7 @@ def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str,
         return {"status": "error", "message": str(e)}
 
 
-def restart_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, Any]:
+def restart_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
     """Restart a shell session while preserving its configured shell/cwd."""
     try:
         old = _SESSIONS.get(session_id)
@@ -401,7 +409,7 @@ def restart_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, An
         return {"status": "error", "message": str(e)}
 
 
-def close_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, Any]:
+def close_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
     """Close and remove a shell session."""
     sess = _SESSIONS.get(session_id)
     if not sess:
@@ -411,28 +419,32 @@ def close_shell_session(session_id: str = _DEFAULT_SESSION_ID) -> Dict[str, Any]
     return {"status": "success", "message": f"Session {session_id} closed."}
 
 
-def list_shell_sessions() -> Dict[str, Any]:
+def list_shell_sessions() -> dict[str, Any]:
     """List active shell sessions."""
     items = []
     for sid, sess in _SESSIONS.items():
-        items.append({
-            "session_id": sid,
-            "shell_type": sess.shell_type,
-            "working_directory": sess.working_directory,
-            "pid": sess.process.pid if sess.process else None,
-            "alive": bool(sess.process and sess.process.poll() is None),
-        })
+        items.append(
+            {
+                "session_id": sid,
+                "shell_type": sess.shell_type,
+                "working_directory": sess.working_directory,
+                "pid": sess.process.pid if sess.process else None,
+                "alive": bool(sess.process and sess.process.poll() is None),
+            }
+        )
     return {"status": "success", "count": len(items), "sessions": items}
 
+
 # --- Tool functions exposed to the agent ---
+
 
 def start_job(
     command: str,
     wait_seconds: float = 3.0,
-    working_directory: Optional[str] = None,
+    working_directory: str | None = None,
     blocking: bool = False,
-    max_wait_seconds: Optional[float] = None,
-) -> Dict[str, Any]:
+    max_wait_seconds: float | None = None,
+) -> dict[str, Any]:
     """
     Start a background command job.
     Suitable for time-consuming tasks (e.g. npm install, running a server, long scripts, large compilations).
@@ -499,9 +511,7 @@ def start_job(
                         "working_directory": resolved_cwd,
                     }
         output = job.get_new_output(max_lines=2000)
-        elapsed = round(
-            (job.end_time - job.start_time).total_seconds(), 2
-        ) if job.end_time and job.start_time else None
+        elapsed = round((job.end_time - job.start_time).total_seconds(), 2) if job.end_time and job.start_time else None
         return {
             "status": "success",
             "completed": True,
@@ -522,9 +532,11 @@ def start_job(
             if not job.is_running():
                 # Task completed within the wait window; collect all output and return directly
                 output = job.get_new_output(max_lines=500)
-                elapsed = round(
-                    (job.end_time - job.start_time).total_seconds(), 2
-                ) if job.end_time and job.start_time else None
+                elapsed = (
+                    round((job.end_time - job.start_time).total_seconds(), 2)
+                    if job.end_time and job.start_time
+                    else None
+                )
                 return {
                     "status": "success",
                     "completed": True,
@@ -542,32 +554,34 @@ def start_job(
         "status": "success",
         "completed": False,
         "blocking": False,
-        "message": (
-            f"Job is still running after {wait_seconds}s. "
-            f"Use check_job('{job_id}') to poll for results."
-        ),
+        "message": (f"Job is still running after {wait_seconds}s. Use check_job('{job_id}') to poll for results."),
         "job_id": job_id,
         "command": command,
         "working_directory": resolved_cwd,
     }
 
-def check_job(job_id: str) -> Dict[str, Any]:
+
+def check_job(job_id: str) -> dict[str, Any]:
     """
     Check the status of a background job and get the **latest** output.
     Note: Only returns new logs since the last check; does not return full history.
-    
+
     Args:
         job_id: ID returned by start_job.
     """
     job = _JOBS.get(job_id)
     if not job:
         return {"status": "error", "message": f"Job ID {job_id} not found."}
-    
+
     is_running = job.is_running()
     new_output = job.get_new_output()
-    
-    status_str = "RUNNING" if is_running else (f"FINISHED (Code: {job.return_code})" if job.return_code is not None else "UNKNOWN")
-    
+
+    status_str = (
+        "RUNNING"
+        if is_running
+        else (f"FINISHED (Code: {job.return_code})" if job.return_code is not None else "UNKNOWN")
+    )
+
     return {
         "status": "success",
         "data": {
@@ -576,46 +590,47 @@ def check_job(job_id: str) -> Dict[str, Any]:
             "new_output": new_output or "(No new output)",
             "return_code": job.return_code,
             "working_directory": job.working_directory,
-        }
+        },
     }
 
-def stop_job(job_id: str) -> Dict[str, Any]:
+
+def stop_job(job_id: str) -> dict[str, Any]:
     """
     Force-terminate a background job.
     """
     job = _JOBS.get(job_id)
     if not job:
         return {"status": "error", "message": f"Job ID {job_id} not found."}
-    
+
     job.stop()
     return {"status": "success", "message": f"Job {job_id} terminated."}
 
-def list_jobs() -> Dict[str, Any]:
+
+def list_jobs() -> dict[str, Any]:
     """
     List all active or recently finished background jobs.
     """
     data = []
-    
+
     for jid, job in _JOBS.items():
         state = "RUNNING" if job.is_running() else "FINISHED"
-        data.append({
-            "id": jid,
-            "command": job.command[:50] + "..." if len(job.command)>50 else job.command,
-            "state": state,
-            "working_directory": job.working_directory,
-            "start_time": job.start_time.strftime("%H:%M:%S") if job.start_time else "-"
-        })
-    
-    return {
-        "status": "success",
-        "count": len(data),
-        "jobs": data
-    }
+        data.append(
+            {
+                "id": jid,
+                "command": job.command[:50] + "..." if len(job.command) > 50 else job.command,
+                "state": state,
+                "working_directory": job.working_directory,
+                "start_time": job.start_time.strftime("%H:%M:%S") if job.start_time else "-",
+            }
+        )
 
-def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
+    return {"status": "success", "count": len(data), "jobs": data}
+
+
+def write_binary_file(path: str, data_base64: str) -> dict[str, Any]:
     """
     Write a base64 string to the specified file.
-    
+
     Args:
         path: Target file path (safe path within the project).
         data_base64: Base64-encoded file content (without data: prefix).
@@ -624,6 +639,7 @@ def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
         return {"status": "error", "message": "Security Denied: Path outside project."}
     try:
         import base64
+
         if not data_base64:
             return {"status": "error", "message": "No data provided."}
         data = base64.b64decode(data_base64)
@@ -634,9 +650,11 @@ def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 # --- Original system functions ---
 
-def get_system_info() -> Dict[str, Any]:
+
+def get_system_info() -> dict[str, Any]:
     """Get core information about the current system, such as OS, CPU, memory, etc."""
     try:
         mem = psutil.virtual_memory()
@@ -649,13 +667,14 @@ def get_system_info() -> Dict[str, Any]:
                 "memory_total_gb": round(mem.total / (1024**3), 2),
                 "memory_available_gb": round(mem.available / (1024**3), 2),
                 "current_path": _get_workspace_root(),
-                "python_version": platform.python_version()
-            }
+                "python_version": platform.python_version(),
+            },
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def get_time() -> Dict[str, Any]:
+
+def get_time() -> dict[str, Any]:
     """Get the current system time."""
     now = datetime.now()
     return {
@@ -663,26 +682,27 @@ def get_time() -> Dict[str, Any]:
         "data": {
             "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
             "timestamp": int(time.time()),
-            "timezone": time.tzname[0]
-        }
+            "timezone": time.tzname[0],
+        },
     }
 
-async def wait(seconds: float, interruptible: bool = True) -> Dict[str, Any]:
+
+async def wait(seconds: float, interruptible: bool = True) -> dict[str, Any]:
     """
     Pause agent execution for a specified number of seconds.
-    
+
     Args:
         seconds: Seconds to wait (must be positive).
         interruptible: Whether wakeup by external events is allowed (default True).
             - True: use interruptible sleep; can be woken by group messages or other external events
                     (suitable for waiting on user replies)
             - False: use fixed wait; cannot be interrupted (suitable for API rate limiting, retry intervals, etc.)
-    
+
     Returns:
         Non-interruptible mode:
             Success: {"status": "success", "message": "Wait completed for {seconds}s."}
             Failure: {"status": "error", "message": "error message"}
-        
+
         Interruptible mode:
             Returns {
                 "status": "success",
@@ -692,44 +712,43 @@ async def wait(seconds: float, interruptible: bool = True) -> Dict[str, Any]:
                 "wake_reason": str,
                 "wake_time": str
             }
-    
+
     Usage tips:
         - Fixed delay, no interruption needed: wait(5, interruptible=False)
         - Waiting for group chat reply, can be woken: wait(300, interruptible=True)
     """
     try:
         sec = float(seconds)
-        if sec < 0: 
+        if sec < 0:
             raise ValueError("Seconds must be positive")
-        
+
         # Interruptible mode: use sleep_controller
         if interruptible:
             if sleep_controller is None:
                 return {
-                    "status": "error", 
-                    "message": "Interruptible sleep not available (sleep_controller not imported)"
+                    "status": "error",
+                    "message": "Interruptible sleep not available (sleep_controller not imported)",
                 }
             try:
                 from ..state_manager import state_manager
+
                 await state_manager.set_state("sleeping")
             except Exception:
                 pass
             wake_info = await sleep_controller.sleep(int(sec))
             try:
                 from ..state_manager import state_manager
+
                 await state_manager.set_state("idle")
             except Exception:
                 pass
-            return {
-                "status": "success",
-                **wake_info
-            }
-        
+            return {"status": "success", **wake_info}
+
         # Non-interruptible mode: use asyncio.sleep
         else:
             await asyncio.sleep(sec)
             return {"status": "success", "message": f"Wait completed for {sec}s."}
-            
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -743,57 +762,54 @@ def send_file_to_web(file_paths, message: str = "", agent_id: str = "") -> dict:
     """
     Send one or more files to the AI Web chat panel.
     Supports images (displayed inline), videos, audio, and any other file type.
-    
+
     Args:
         file_paths: List of absolute file paths or single path string. E.g., ["C:/data/chart.png"] or "C:/data/chart.png"
         message: Optional accompanying text message
         agent_id: Optional explicit target agent_id. Recommended in multi-agent runtime.
-    
+
     Returns:
         Dict with status and message
-    
+
     Example:
         send_file_to_web(file_paths=["C:/workspace/chart.png"], message="分析结果")
         send_file_to_web(file_paths="C:/workspace/chart.png", message="分析结果")
     """
     import json
-    
+
     # Handle different input types
     if isinstance(file_paths, str):
         # Try to parse as JSON array
         try:
             parsed = json.loads(file_paths)
-            if isinstance(parsed, list):
-                file_paths = parsed
-            else:
-                file_paths = [file_paths]
+            file_paths = parsed if isinstance(parsed, list) else [file_paths]
         except json.JSONDecodeError:
             # It's a single string path
             file_paths = [file_paths]
     elif not isinstance(file_paths, list):
         file_paths = [str(file_paths)]
-    
+
     return _web_send_file(file_paths=file_paths, message=message, agent_id=agent_id)
 
 
 def send_message_to_web(content: str, agent_id: str = "") -> dict:
     """
     Send a text message to the AI Web chat panel.
-    
+
     Args:
         content: Message text to send
         agent_id: Optional explicit target agent_id. Recommended in multi-agent runtime.
-    
+
     Returns:
         Dict with status and message
-    
+
     Example:
         send_message_to_web(content="分析完成！")
     """
     return _web_send_message(content=content, agent_id=agent_id)
 
 
-async def set_state(state: str) -> Dict[str, Any]:
+async def set_state(state: str) -> dict[str, Any]:
     """
     Update this agent's internal state. Controls message filtering and behavior mode.
 
@@ -818,13 +834,14 @@ async def set_state(state: str) -> Dict[str, Any]:
         return {"status": "error", "message": f"Invalid state: {state!r}. Must be one of {valid_states}"}
     try:
         from ..state_manager import state_manager
+
         await state_manager.set_state(state_lower)
     except Exception as e:
         return {"status": "error", "message": f"Failed to set state: {e}"}
     return {"status": "success", "message": f"State changed to '{state_lower}'."}
 
 
-async def get_wake_mode() -> Dict[str, Any]:
+async def get_wake_mode() -> dict[str, Any]:
     """
     Query this agent's current wake mode, which controls which group-chat messages wake you from idle.
 
@@ -842,13 +859,14 @@ async def get_wake_mode() -> Dict[str, Any]:
     """
     try:
         from ..state_manager import state_manager
+
         mode = await state_manager.get_wake_mode()
     except Exception as e:
         return {"status": "error", "message": f"Failed to get wake mode: {e}"}
     return {"status": "success", "wake_mode": mode}
 
 
-async def set_wake_mode(mode: str) -> Dict[str, Any]:
+async def set_wake_mode(mode: str) -> dict[str, Any]:
     """
     Switch this agent's wake mode at runtime — controls which group-chat messages wake you from idle.
 
@@ -876,8 +894,8 @@ async def set_wake_mode(mode: str) -> Dict[str, Any]:
         return {"status": "error", "message": f"Invalid wake mode: {mode!r}. Must be one of {valid_modes}"}
     try:
         from ..state_manager import state_manager
+
         await state_manager.set_wake_mode(mode_lower)
     except Exception as e:
         return {"status": "error", "message": f"Failed to set wake mode: {e}"}
     return {"status": "success", "message": f"Wake mode changed to '{mode_lower}'.", "wake_mode": mode_lower}
-

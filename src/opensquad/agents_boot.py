@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 agents/boot.py - Generic Agent Launcher (config-driven)
 
@@ -13,16 +12,17 @@ Three customizable parts of an Agent:
 
 Each boot.py process = one independent Agent (independent global state).
 """
-import os
-import sys
-import asyncio
+
 import argparse
-import logging
+import asyncio
 import importlib
 import importlib.util
-import warnings
-import time
 import json
+import logging
+import os
+import sys
+import time
+import warnings
 
 # Suppress noisy warnings globally
 warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -36,6 +36,7 @@ if sys.platform == "win32":
 # Fixes anyio CancelScope leakage into main asyncio event loop.
 try:
     from opensquad.anyio_patches import apply as _apply_anyio_patches
+
     _apply_anyio_patches()
 except Exception:
     pass  # Not fatal if patch fails — runner has its own safety net
@@ -47,8 +48,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # Load the user's last selected workspace and set it in syscfg so that all
 # subsequent paths (including api_process cwd) point to the correct workspace
 try:
-    from opensquad.workspace_utils import load_last_workspace as _load_last_ws
     from opensquad.system_config import syscfg as _syscfg_early
+    from opensquad.workspace_utils import load_last_workspace as _load_last_ws
+
     _last_ws = _load_last_ws()
     if _last_ws and os.path.exists(_last_ws):
         _syscfg_early.set_workspace(_last_ws)
@@ -58,22 +60,22 @@ try:
 except Exception as _ws_err:
     print(f"[Boot] Warning: failed to load last workspace: {_ws_err}")
 
+import contextlib
+
 from opensquad import ToolRegistry, bus
+from opensquad._context import AgentContext, set_current_context
+from opensquad.agent_boot_phases import AgentBootPhases
 from opensquad.chat_api import ChatAPI
 from opensquad.claude_api import ClaudeAPI
-from opensquad.google_api import GoogleAPI
-from opensquad.xml_parser import StreamingTagParser
-from opensquad.input_hub import input_hub
-from opensquad.message_queue import message_queue
-from opensquad.state_manager import state_manager
-from opensquad.session_manager import session_manager
-from opensquad.sleep_controller import sleep_controller
 from opensquad.event_pipeline import event_pipeline
-from opensquad.message_router import message_router
+from opensquad.google_api import GoogleAPI
+from opensquad.input_hub import input_hub
 from opensquad.log_setup import setup_logging as _setup_logging
-from opensquad.agent_boot_phases import AgentBootPhases
+from opensquad.message_queue import message_queue
+from opensquad.message_router import message_router
+from opensquad.sleep_controller import sleep_controller
 from opensquad.system_config import syscfg
-from opensquad._context import AgentContext, set_current_context
+from opensquad.xml_parser import StreamingTagParser
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model card hot-reload helpers (used by Runner for dynamic model switching)
 # ---------------------------------------------------------------------------
+
 
 def resolve_provider(model_cfg: dict) -> str:
     """Normalise the API protocol string from a model config dict.
@@ -98,8 +101,7 @@ def resolve_provider(model_cfg: dict) -> str:
     return provider
 
 
-def create_chat_api_from_config(model_cfg: dict, system_prompt: str,
-                                 stream_parser=None):
+def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_parser=None):
     """Factory: create the correct ChatAPI/ClaudeAPI/GoogleAPI from *model_cfg*.
 
     Used by Runner's hot-reload path when the provider class changes (e.g.
@@ -178,71 +180,72 @@ def ensure_agent_in_workspace(agent_name: str) -> str:
     """
     Ensure the agent exists in the workspace. If not, automatically copy the template
     from the installation directory.
-    
+
     Args:
         agent_name: Agent name (e.g. "ultimate")
-        
+
     Returns:
         Full path to the agent in the workspace
-        
+
     Raises:
         FileNotFoundError: If the agent also does not exist in the installation directory
     """
     import shutil
-    
+
     # Workspace agent path
     workspace_agent_dir = syscfg.workspace_agents_dir(agent_name)
-    
+
     # If it already exists, return directly
     if os.path.exists(workspace_agent_dir):
         logger.info(f"[Boot] Agent '{agent_name}' found in workspace: {workspace_agent_dir}")
         return workspace_agent_dir
-    
+
     # Not found, try to copy from the installation directory
     _builtin_root = syscfg.get_builtin_root()
     if _builtin_root is None:
         _builtin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     builtin_agent_dir = os.path.join(_builtin_root, "agents", agent_name)
-    
+
     if not os.path.exists(builtin_agent_dir):
         raise FileNotFoundError(
             f"Agent '{agent_name}' not found in workspace or installation directory.\n"
             f"  Workspace: {workspace_agent_dir}\n"
             f"  Builtin: {builtin_agent_dir}"
         )
-    
+
     logger.info(f"[Boot] Agent '{agent_name}' not found in workspace. Copying from installation directory...")
     logger.info(f"  Source: {builtin_agent_dir}")
     logger.info(f"  Target: {workspace_agent_dir}")
-    
+
     try:
         # Ensure parent directory exists
         os.makedirs(os.path.dirname(workspace_agent_dir), exist_ok=True)
-        
+
         # Copy the entire agent directory
         shutil.copytree(builtin_agent_dir, workspace_agent_dir)
-        
+
         logger.info(f"[Boot] Agent '{agent_name}' successfully copied to workspace")
         return workspace_agent_dir
-        
+
     except Exception as e:
         logger.error(f"[Boot] Failed to copy agent '{agent_name}' to workspace: {e}")
         raise
+
 
 # ---------------------------------------------------------------------------
 # Tool module mapping: config.json tools string -> actual module path
 # ---------------------------------------------------------------------------
 TOOL_MODULES = {
     # --- Core framework tools (remain built-in for now) ---
-    "system":        "opensquad.tools.system",
-    "filesystem":    "opensquad.tools.filesystem",
-    "im":            "opensquad.tools.im",
-    "agent_setup":   "opensquad.tools.agent_setup",
-    "long_memory":   "opensquad.tools.long_memory",
+    "system": "opensquad.tools.system",
+    "filesystem": "opensquad.tools.filesystem",
+    "im": "opensquad.tools.im",
+    "agent_setup": "opensquad.tools.agent_setup",
+    "long_memory": "opensquad.tools.long_memory",
     "collaboration": "opensquad.tools.collaboration",
     "delegate_task": "opensquad.tools.delegate",
-    "workspace":     "opensquad.tools.workspace",
-    "task_watch":    "opensquad.tools.task_watch",
+    "workspace": "opensquad.tools.workspace",
+    "task_watch": "opensquad.tools.task_watch",
     # --- Plugin-owned tools: resolved via PluginManager, not direct import here ---
     # websearch        -> plugins/websearch/
     # vision           -> plugins/vision/
@@ -259,7 +262,16 @@ CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration"}
 
 # Mandatory tools: automatically injected into every agent regardless of config.json tools list.
 # These are the built-in core tools shown in the UI as "系统内置".
-MANDATORY_TOOLS = {"system", "filesystem", "agent_setup", "im", "collaboration", "delegate_task", "workspace", "task_watch"}
+MANDATORY_TOOLS = {
+    "system",
+    "filesystem",
+    "agent_setup",
+    "im",
+    "collaboration",
+    "delegate_task",
+    "workspace",
+    "task_watch",
+}
 
 BOOT_PHASES = AgentBootPhases(
     tool_modules=TOOL_MODULES,
@@ -267,10 +279,7 @@ BOOT_PHASES = AgentBootPhases(
     core_tools=CORE_TOOLS,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 # Apply rotating file handler via unified log_setup
 _setup_logging(logging.getLogger(), "agent_run.log")
 # Suppress httpx verbose HTTP request logging (noisy proxy calls)
@@ -281,6 +290,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 # ===================================================================
 # Part 1: context.py -- Lifecycle hooks
 # ===================================================================
+
 
 def load_context_module(agent_dir: str):
     """
@@ -310,19 +320,22 @@ def load_context_module(agent_dir: str):
 # Part 2: config.json -- Config loading and prompt building
 # ===================================================================
 
+
 def load_config(agent_dir: str) -> dict:
     """Load config.json from the agent directory (supports BOM) and validate schema."""
     config_path = os.path.join(agent_dir, "config.json")
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config not found: {config_path}")
-    with open(config_path, "r", encoding="utf-8-sig") as f:
+    with open(config_path, encoding="utf-8-sig") as f:
         raw = json.load(f)
 
     from opensquad.agent_config_schema import apply_config_defaults
+
     apply_config_defaults(raw)
 
     # Config Validation: validate config.json schema at boot time
-    from opensquad.config_schema import validate_agent_config, ConfigValidationError
+    from opensquad.config_schema import ConfigValidationError, validate_agent_config
+
     try:
         validated = validate_agent_config(raw)
         return validated
@@ -346,7 +359,8 @@ def _resolve_tool_format(config: dict) -> str:
         return "xml"
     else:  # auto -- query model capabilities database
         from opensquad.model_capabilities import get_model_capability
-        provider   = model_cfg.get("api_protocol", "openai_compat")
+
+        provider = model_cfg.get("api_protocol", "openai_compat")
         model_name = model_cfg.get("model_name", "")
         cap = get_model_capability(model_name, provider)
         # Default to function calling (fc) when model is not in DB — most modern models support it
@@ -365,8 +379,8 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
        in context_base.py (not here).
     """
     prompt_cfg = config.get("prompt", {})
-    model_cfg  = config.get("model", {})
-    is_think   = model_cfg.get("is_think", False)
+    model_cfg = config.get("model", {})
+    is_think = model_cfg.get("is_think", False)
 
     _builtin_root = syscfg.get_builtin_root()
     if _builtin_root is None:
@@ -388,14 +402,14 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
     if base_rel:
         base_path = os.path.join(_builtin_root, base_rel)
     else:
-        tool_fmt = _resolve_tool_format(config)          # "fc" or "xml"
-        prefix   = "base" if is_think else "thought"     # native thinking model vs. requires explicit <thought>
+        tool_fmt = _resolve_tool_format(config)  # "fc" or "xml"
+        prefix = "base" if is_think else "thought"  # native thinking model vs. requires explicit <thought>
         base_path = os.path.join(prompt_root, f"{prefix}_{tool_fmt}.md")
 
     logger.info(f"[Boot] is_think={is_think}, base prompt: {base_path}")
     if not os.path.exists(base_path):
         raise FileNotFoundError(f"Base prompt not found: {base_path}")
-    with open(base_path, "r", encoding="utf-8") as f:
+    with open(base_path, encoding="utf-8") as f:
         base_prompt = f.read()
 
     # role.md path (relative to agent directory)
@@ -403,7 +417,7 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
     role_path = os.path.join(agent_dir, role_file)
     role_content = ""
     if os.path.exists(role_path):
-        with open(role_path, "r", encoding="utf-8") as f:
+        with open(role_path, encoding="utf-8") as f:
             role_content = f.read()
 
     # Inject role card
@@ -411,7 +425,7 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
 
     # Collaboration protocol is injected per-turn via {{TEAM_COLLAB_CARDS}} by
     # context_base.py; nothing to do here at boot time.
-    
+
     # Inject MCP usage guide (only when mcp.enabled = true)
     mcp_cfg = config.get("mcp", {})
     if mcp_cfg.get("enabled", True):
@@ -467,6 +481,7 @@ The currently enabled MCP services and their tool details are shown in the "Curr
 # Part 3: Tool registration
 # ===================================================================
 
+
 def register_builtin_tools_sync(config: dict, registry: ToolRegistry, agent_dir: str) -> None:
     """
     Synchronous version: register only built-in tool modules from TOOL_MODULES.
@@ -494,33 +509,33 @@ async def register_tools(config: dict, registry: ToolRegistry, agent_dir: str) -
 # Connections and routing
 # ===================================================================
 
+
 async def setup_response_router(logger: logging.Logger):
     """
     Response router -- listens to Runner output and prints it to the console.
     Does not auto-forward to group chat (AI must explicitly call im.send_message).
     """
+
     def on_ai_response(data):
         try:
             content = ""
-            if isinstance(data, dict):
-                content = data.get("data", "") or data.get("content", "")
-            else:
-                content = str(data)
+            content = data.get("data", "") or data.get("content", "") if isinstance(data, dict) else str(data)
             if not content:
                 return
             print(f"\n[AI Reply]: {content[:100]}...")
         except Exception as e:
             logger.error(f"[Router] Error: {e}")
 
-    bus.subscribe('to_user', on_ai_response)
-    bus.subscribe('to_user_final', on_ai_response)
+    bus.subscribe("to_user", on_ai_response)
+    bus.subscribe("to_user_final", on_ai_response)
 
 
 # ===================================================================
 # Main entry point
 # ===================================================================
 
-async def main(agent_dir: str, override_port: int = None):
+
+async def main(agent_dir: str, override_port: int | None = None):
     """
     Main entry point: three-part initialization flow
     1. Load config.json (Part 2)
@@ -539,7 +554,7 @@ async def main(agent_dir: str, override_port: int = None):
         else:
             # Direct name: ultimate
             agent_name = parts[-1] if len(parts) == 1 else parts[-1]
-        
+
         # Ensure the agent exists in the workspace (auto-copy if not)
         try:
             agent_dir = ensure_agent_in_workspace(agent_name)
@@ -549,21 +564,21 @@ async def main(agent_dir: str, override_port: int = None):
             agent_dir = os.path.abspath(agent_dir)
     else:
         agent_dir = os.path.abspath(agent_dir)
-    
+
     # 0. Configure independent log file for each agent
     # Log path: agents/{agent_name}/data/logs/agent.log
     agent_name = os.path.basename(agent_dir)
     agent_log_dir = os.path.join(agent_dir, "data", "logs")
     os.makedirs(agent_log_dir, exist_ok=True)
-    
+
     # Reconfigure root logger to write to the agent-specific log directory
     _setup_logging(
-        logging.getLogger(), 
+        logging.getLogger(),
         "agent.log",  # Every agent uses agent.log
         force=True,
-        log_dir=agent_log_dir  # Specify the agent-specific directory
+        log_dir=agent_log_dir,  # Specify the agent-specific directory
     )
-    
+
     boot_main_t0 = time.perf_counter()
     config = load_config(agent_dir)
 
@@ -613,10 +628,12 @@ async def main(agent_dir: str, override_port: int = None):
 
     # 0.0.1 Register event loop with task_supervisor (for background monitor)
     from opensquad.task_supervisor import task_supervisor
+
     task_supervisor.set_event_loop(asyncio.get_running_loop())
 
     # 0.0.2 Start lightweight health-check HTTP server (P0-2: Launcher probes this for hang detection)
-    from opensquad.health_server import start_health_server, get_health_port
+    from opensquad.health_server import start_health_server
+
     _health_port = start_health_server()
     agent_logger.info(f"[Boot] Health server on port {_health_port}")
 
@@ -632,11 +649,12 @@ async def main(agent_dir: str, override_port: int = None):
     # P0-2: Write health port to runtime registry so Launcher can discover it quickly
     try:
         import json as _json
+
         _runtime_dir = syscfg.workspace_metadata_dir("runtime")
         os.makedirs(_runtime_dir, exist_ok=True)
         _registry_file = os.path.join(_runtime_dir, f"agent_{agent_id}.json")
         if os.path.isfile(_registry_file):
-            with open(_registry_file, "r", encoding="utf-8") as _f:
+            with open(_registry_file, encoding="utf-8") as _f:
                 _reg = _json.load(_f)
         else:
             _reg = {}
@@ -665,7 +683,9 @@ async def main(agent_dir: str, override_port: int = None):
     # 3. Start connections ASAP (Web/Bridge/Gateway) to minimize time-to-chat-ready.
     # Heavy tool/plugin/MCP initialization continues in background after chat entrypoint is up.
     await BOOT_PHASES.setup_connections(config, agent_logger, data_dir)
-    agent_logger.info(f"[BootPerf] phase_ready_chat={int((time.perf_counter()-boot_main_t0)*1000)}ms agent_id={agent_id}")
+    agent_logger.info(
+        f"[BootPerf] phase_ready_chat={int((time.perf_counter() - boot_main_t0) * 1000)}ms agent_id={agent_id}"
+    )
 
     # 4. Register tools (config.json tools field + MCP)
     tool_registry = ToolRegistry()
@@ -746,6 +766,7 @@ async def main(agent_dir: str, override_port: int = None):
                     input_hub.push(text, source="cli")
             except (EOFError, KeyboardInterrupt, asyncio.CancelledError):
                 break
+
     asyncio.create_task(cli_loop())
 
     # 8. Startup info
@@ -758,7 +779,7 @@ async def main(agent_dir: str, override_port: int = None):
     if config.get("gateway", {}).get("enabled"):
         print(f"  Gateway ID: {agent_id}")
     if config.get("group_chat", {}).get("enabled"):
-        print(f"  Group Chat: Enabled")
+        print("  Group Chat: Enabled")
     if context_module:
         print(f"  Hooks: {', '.join(hooks.keys()) or 'init only'}")
     if skills:
@@ -781,6 +802,7 @@ async def main(agent_dir: str, override_port: int = None):
     # process lifetime and survives CancelledError restarts.
     try:
         from opensquad.model_switch import init as _model_switch_init
+
         _model_switch_init(_early_runner, os.path.join(agent_dir, "config.json"))
     except Exception as _e:
         agent_logger.warning(f"[Boot] model_switch coordinator init failed: {_e}")
@@ -794,19 +816,9 @@ async def main(agent_dir: str, override_port: int = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Boot an AI agent from config")
-    parser.add_argument(
-        "--agent-dir",
-        required=True,
-        help="Path to agent directory containing config.json"
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        help="Override web server port"
-    )
+    parser.add_argument("--agent-dir", required=True, help="Path to agent directory containing config.json")
+    parser.add_argument("--port", type=int, help="Override web server port")
     args = parser.parse_args()
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt, SystemExit):
         asyncio.run(main(args.agent_dir, override_port=args.port))
-    except (KeyboardInterrupt, SystemExit):
-        pass

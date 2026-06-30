@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Long-Term Memory System Configuration Plugin
 
@@ -9,7 +8,9 @@ through the Web interface.
 Configuration changes immediately update the running MemoryManager instance (no restart needed).
 Underlying matrix parameters (max_dim) require an Agent restart to fully take effect.
 """
+
 import logging
+
 from opensquad.plugin_api import Plugin, register
 
 logger = logging.getLogger(__name__)
@@ -92,14 +93,15 @@ class LongMemoryPlugin(Plugin):
 
         try:
             from opensquad.tools.long_memory import get_memory_manager
+
             mm = get_memory_manager()
 
             if mm is not None:
                 # ---- MemoryManager parameters (take effect immediately) ----
-                mm._token_budget  = int(cfg.get("token_budget",  3000))
-                mm._window_size   = int(cfg.get("window_size",   5))
+                mm._token_budget = int(cfg.get("token_budget", 3000))
+                mm._window_size = int(cfg.get("window_size", 5))
                 mm._context_depth = int(cfg.get("context_depth", 4))
-                mm._cache_ttl     = int(cfg.get("cache_ttl",     8))
+                mm._cache_ttl = int(cfg.get("cache_ttl", 8))
 
                 logger.info(
                     f"[LongMemoryPlugin] MemoryManager updated — "
@@ -110,16 +112,16 @@ class LongMemoryPlugin(Plugin):
                 # ---- AgentMemory underlying parameters (take effect on next matrix rebuild) ----
                 am = getattr(mm, "_am", None)
                 if am is not None:
-                    am._config["min_cooccurrence"]  = float(cfg.get("min_cooccurrence",  5))
-                    am._config["decay_rate"]         = float(cfg.get("decay_rate",        0.005))
-                    am._config["decay_interval"]     = int(cfg.get("decay_interval",      500))
-                    am._config["time_decay_lambda"]  = float(cfg.get("time_decay_lambda", 0.1))
+                    am._config["min_cooccurrence"] = float(cfg.get("min_cooccurrence", 5))
+                    am._config["decay_rate"] = float(cfg.get("decay_rate", 0.005))
+                    am._config["decay_interval"] = int(cfg.get("decay_interval", 500))
+                    am._config["time_decay_lambda"] = float(cfg.get("time_decay_lambda", 0.1))
 
                     # Sync DecayManager runtime parameters
                     decay = getattr(am, "_decay", None)
                     if decay is not None:
-                        decay.decay_rate     = float(cfg.get("decay_rate",     0.005))
-                        decay.decay_interval = int(cfg.get("decay_interval",   500))
+                        decay.decay_rate = float(cfg.get("decay_rate", 0.005))
+                        decay.decay_interval = int(cfg.get("decay_interval", 500))
 
                     logger.info(
                         f"[LongMemoryPlugin] AgentMemory updated — "

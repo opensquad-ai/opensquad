@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for the lightweight health-check server (P0-2).
 
 Validates:
@@ -7,14 +6,16 @@ Validates:
 3. Other paths return 404
 4. Server can be stopped gracefully
 """
+
 import json
 import urllib.request
+
 import pytest
 
 from opensquad.health_server import (
+    get_health_port,
     start_health_server,
     stop_health_server,
-    get_health_port,
 )
 
 

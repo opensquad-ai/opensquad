@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for ContextBuilder (P1-1: extracted from AgentRunner).
 
 Validates:
@@ -7,12 +6,13 @@ Validates:
 3. ContextBuilder instantiation works without full runner
 4. build() returns expected tuple shape
 """
+
 import pytest
 
 from opensquad.context_builder import (
+    ContextBuilder,
     build_context_prefix,
     build_dynamic_mcp_state,
-    ContextBuilder,
 )
 
 
@@ -69,11 +69,14 @@ def test_build_dynamic_mcp_state_with_no_adapter():
 
 def test_context_builder_init_minimal():
     """ContextBuilder can be instantiated with minimal dependencies."""
+
     class FakeChatAPI:
         def get_template(self):
             return "{{SKILLS_INSTRUCTIONS}}"
+
         def get_system_prompt(self):
             return ""
+
         def update_system_prompt(self, p):
             pass
 
@@ -97,12 +100,16 @@ def test_context_builder_init_minimal():
 @pytest.mark.asyncio
 async def test_context_builder_build_returns_tuple():
     """build() must return (system_prompt, dynamic_prefix, llm_params, is_changed)."""
+
     class FakeChatAPI:
         req = []
+
         def get_template(self):
             return "template"
+
         def get_system_prompt(self):
             return ""
+
         def update_system_prompt(self, p):
             pass
 

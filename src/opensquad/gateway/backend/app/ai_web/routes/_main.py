@@ -7,55 +7,63 @@ HTTP APIs for the frontend:
   - Image upload
   - Admin management (proxy to launcher.py)
 """
-import os
-from opensquad.system_config import syscfg
-from typing import Optional, Any, List
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Body, UploadFile, File, Request
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
-import asyncio
+
 import logging
-import httpx
-import uuid
 import os
 import re
-import json
-import io
-import zipfile
 import time
-import shutil
-import ast
-import hashlib
-import base64
-import ssl
+import uuid
+
+import httpx
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from opensquad.system_config import syscfg
 
 # SSL context for GitHub API calls (Windows may lack proper CA certificates)
 # Default to "1" (verify SSL). Set OPENQUAD_SSL_VERIFY="0" to disable in dev/air-gapped environments.
 _SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
-from datetime import timezone, datetime
 
 # Import gateway authentication
 from app.api import get_current_user_dep
 from app.models import User
-
-from ..registry import registry
-from ..sessions import gateway_session_cache
-from ..agent_sessions import get_reader as get_agent_session_reader, async_get_reader as async_get_agent_session_reader
-from ..audit_routes import router as audit_router
-from ..websocket import launcher_handler
-from .. import model_preset_service
+from opensquad.collab_board import (
+    append_public_discussion as collab_board_append_public_discussion,
+)
+from opensquad.collab_board import (
+    create_task as collab_board_create_task,
+)
+from opensquad.collab_board import (
+    delete_item as collab_board_delete_item,
+)
+from opensquad.collab_board import (
+    delete_task as collab_board_delete_task,
+)
 from opensquad.collab_board import (
     list_items as collab_board_list_items,
-    list_tasks as collab_board_list_tasks,
-    create_task as collab_board_create_task,
-    update_task as collab_board_update_task,
-    delete_task as collab_board_delete_task,
-    upsert_item as collab_board_upsert_item,
-    append_public_discussion as collab_board_append_public_discussion,
-    delete_item as collab_board_delete_item,
-    save_plan_snapshot as collab_board_save_plan_snapshot,
+)
+from opensquad.collab_board import (
     list_plan_snapshots as collab_board_list_plan_snapshots,
 )
+from opensquad.collab_board import (
+    list_tasks as collab_board_list_tasks,
+)
+from opensquad.collab_board import (
+    save_plan_snapshot as collab_board_save_plan_snapshot,
+)
+from opensquad.collab_board import (
+    update_task as collab_board_update_task,
+)
+from opensquad.collab_board import (
+    upsert_item as collab_board_upsert_item,
+)
+
+from ..agent_sessions import async_get_reader as async_get_agent_session_reader
+from ..audit_routes import router as audit_router
+from ..registry import registry
+from ..sessions import gateway_session_cache
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +94,7 @@ def _normalize_session_message(msg: dict) -> dict:
         out["images"] = [
             (i if isinstance(i, str) else (i.get("url") or i.get("path") or i.get("src") or ""))
             for i in out["images"]
-            if isinstance(i, str) or isinstance(i, dict)
+            if isinstance(i, str | dict)
         ]
         out["images"] = [u for u in out["images"] if isinstance(u, str) and u.strip()]
     if not isinstance(out.get("attachments"), list):
@@ -98,7 +106,7 @@ def _normalize_session_message(msg: dict) -> dict:
         out["images"] = [
             (i if isinstance(i, str) else (i.get("url") or i.get("path") or i.get("src") or ""))
             for i in extra.get("images")
-            if isinstance(i, str) or isinstance(i, dict)
+            if isinstance(i, str | dict)
         ]
         out["images"] = [u for u in out["images"] if isinstance(u, str) and u.strip()]
     if not out["attachments"] and isinstance(extra.get("attachments"), list):
@@ -111,34 +119,38 @@ def _normalize_session_message(msg: dict) -> dict:
     content_text = out.get("content") or ""
     parsed_files = []
     for m in re.finditer(r"\[File:\s*(.*?)\]\((.*?)\)", content_text):
-      name = (m.group(1) or "file").strip()
-      url = (m.group(2) or "").strip()
-      if not url:
-          continue
-      lower = url.lower()
-      is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
-      is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
-      is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
-      parsed_files.append({
-          "original_name": name,
-          "url": url,
-          "is_image": is_image,
-          "is_audio": is_audio,
-          "is_video": is_video,
-      })
+        name = (m.group(1) or "file").strip()
+        url = (m.group(2) or "").strip()
+        if not url:
+            continue
+        lower = url.lower()
+        is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
+        is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
+        is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+        parsed_files.append(
+            {
+                "original_name": name,
+                "url": url,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     # Also parse <image>...</image> markers commonly used by runner/session text.
     for m in re.finditer(r"<image>(.*?)</image>", content_text, flags=re.IGNORECASE | re.DOTALL):
         url = (m.group(1) or "").strip()
         if not url:
             continue
-        parsed_files.append({
-            "original_name": "image",
-            "url": url,
-            "is_image": True,
-            "is_audio": False,
-            "is_video": False,
-        })
+        parsed_files.append(
+            {
+                "original_name": "image",
+                "url": url,
+                "is_image": True,
+                "is_audio": False,
+                "is_video": False,
+            }
+        )
 
     if parsed_files and not out["files"]:
         out["files"] = parsed_files
@@ -146,7 +158,8 @@ def _normalize_session_message(msg: dict) -> dict:
     # Derive image urls from files when needed
     if not out["images"] and out["files"]:
         out["images"] = [
-            (f.get("url") or f.get("path") or f.get("src")) for f in out["files"]
+            (f.get("url") or f.get("path") or f.get("src"))
+            for f in out["files"]
             if isinstance(f, dict)
             and (f.get("url") or f.get("path") or f.get("src"))
             and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/"))
@@ -173,7 +186,7 @@ def _normalize_session_message(msg: dict) -> dict:
     return out
 
 
-def _normalize_session_payload(session: Optional[dict]) -> Optional[dict]:
+def _normalize_session_payload(session: dict | None) -> dict | None:
     """Normalize a session payload so frontend can rely on one schema."""
     if not isinstance(session, dict):
         return session
@@ -181,6 +194,7 @@ def _normalize_session_payload(session: Optional[dict]) -> Optional[dict]:
     messages = out.get("messages") if isinstance(out.get("messages"), list) else []
     out["messages"] = [_normalize_session_message(m) for m in messages]
     return out
+
 
 # Launcher management API address - from system_config.json
 LAUNCHER_URL = syscfg.launcher_url()
@@ -190,30 +204,32 @@ router = APIRouter(prefix="/api/ai-web")
 router.include_router(audit_router)
 from ._admin import admin_router
 from ._market import market_router
+
 router.include_router(admin_router)
 router.include_router(market_router)
 
 
 class ConfigUpdateRequest(BaseModel):
     """Configuration update request"""
-    system_prompt: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = None
+
+    system_prompt: str | None = None
+    model: str | None = None
+    temperature: float | None = None
 
 
 @router.get("/agents")
 async def list_agents(
-    category: str = None,
-    status: str = None,
-    search: str = None,
-    current_user: User = Depends(get_current_user_dep)
+    category: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    current_user: User = Depends(get_current_user_dep),
 ):
     """
     Get Agent list
     Returns Agent list categorized by type
     """
     agents = registry.list_agents(status=status, agent_type=category)
-    
+
     # Group by type
     categorized = {}
     for agent in agents:
@@ -222,39 +238,35 @@ async def list_agents(
             categorized[agent_type] = {
                 "name": _get_category_name(agent_type),
                 "icon": _get_category_icon(agent_type),
-                "agents": []
+                "agents": [],
             }
-        
-        categorized[agent_type]["agents"].append({
-            "id": agent.agent_id,
-            "name": agent.agent_name,
-            "type": agent_type,
-            "capabilities": agent.capabilities,
-            "description": agent.description,
-            "status": agent.status,
-            "load_percent": agent.load_percent,
-            "today_chats": agent.today_chats
-        })
-    
+
+        categorized[agent_type]["agents"].append(
+            {
+                "id": agent.agent_id,
+                "name": agent.agent_name,
+                "type": agent_type,
+                "capabilities": agent.capabilities,
+                "description": agent.description,
+                "status": agent.status,
+                "load_percent": agent.load_percent,
+                "today_chats": agent.today_chats,
+            }
+        )
+
     # Get stats
     stats = registry.get_stats()
-    
-    return {
-        "categories": categorized,
-        "stats": stats
-    }
+
+    return {"categories": categorized, "stats": stats}
 
 
 @router.get("/agents/{agent_id}")
-async def get_agent(
-    agent_id: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_agent(agent_id: str, current_user: User = Depends(get_current_user_dep)):
     """Get details for a single Agent"""
     agent = registry.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
-    
+
     return {
         "id": agent.agent_id,
         "name": agent.agent_name,
@@ -265,59 +277,49 @@ async def get_agent(
         "load_percent": agent.load_percent,
         "today_chats": agent.today_chats,
         "total_chats": agent.total_chats,
-        "registered_at": agent.registered_at
+        "registered_at": agent.registered_at,
     }
 
 
 @router.get("/sessions")
-async def get_user_sessions(
-    agent_id: str = None,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_user_sessions(agent_id: str | None = None, current_user: User = Depends(get_current_user_dep)):
     """Get session list for the current user"""
     sessions = await gateway_session_cache.async_get_user_sessions(current_user.id)
-    
+
     result = []
     for session in sessions:
         # Get Agent info
         agent = registry.get_agent(session["agent_id"])
         agent_name = agent.agent_name if agent else "Unknown"
-        
-        result.append({
-            "session_key": session["session_key"],
-            "agent_id": session["agent_id"],
-            "agent_name": agent_name,
-            "message_count": session["message_count"],
-            "last_message": session["last_message"],
-            "updated_at": session["updated_at"],
-            "created_at": session["created_at"]
-        })
-    
+
+        result.append(
+            {
+                "session_key": session["session_key"],
+                "agent_id": session["agent_id"],
+                "agent_name": agent_name,
+                "message_count": session["message_count"],
+                "last_message": session["last_message"],
+                "updated_at": session["updated_at"],
+                "created_at": session["created_at"],
+            }
+        )
+
     return {"sessions": result}
 
 
 @router.get("/sessions/{agent_id}/history")
 async def get_session_history(
-    agent_id: str,
-    limit: int = Query(50, ge=1, le=200),
-    current_user: User = Depends(get_current_user_dep)
+    agent_id: str, limit: int = Query(50, ge=1, le=200), current_user: User = Depends(get_current_user_dep)
 ):
     """Get session history with a specific Agent"""
     # Check permissions (can only view own sessions)
     history = await gateway_session_cache.async_get_history(current_user.id, agent_id, limit)
-    
-    return {
-        "agent_id": agent_id,
-        "history": history,
-        "count": len(history)
-    }
+
+    return {"agent_id": agent_id, "history": history, "count": len(history)}
 
 
 @router.post("/sessions/{agent_id}/clear")
-async def clear_session(
-    agent_id: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def clear_session(agent_id: str, current_user: User = Depends(get_current_user_dep)):
     """Clear session history with a specific Agent"""
     await gateway_session_cache.async_clear_session(current_user.id, agent_id)
     return {"message": "Session cleared"}
@@ -325,9 +327,7 @@ async def clear_session(
 
 @router.post("/agents/{agent_id}/config")
 async def update_agent_config(
-    agent_id: str,
-    config: ConfigUpdateRequest,
-    current_user: User = Depends(get_current_user_dep)
+    agent_id: str, config: ConfigUpdateRequest, current_user: User = Depends(get_current_user_dep)
 ):
     """
     Update Agent config (hot reload)
@@ -337,10 +337,10 @@ async def update_agent_config(
     agent = registry.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
-    
+
     if agent.status == "offline":
         raise HTTPException(400, "Agent is offline")
-    
+
     # Build config update command
     update_config = {}
     if config.system_prompt is not None:
@@ -349,17 +349,15 @@ async def update_agent_config(
         update_config["model"] = config.model
     if config.temperature is not None:
         update_config["temperature"] = config.temperature
-    
+
     if not update_config:
         raise HTTPException(400, "No config to update")
-    
+
     # Send command to Agent
-    success = await registry.send_to_agent(agent_id, {
-        "type": "command",
-        "command": "update_config",
-        "config": update_config
-    })
-    
+    success = await registry.send_to_agent(
+        agent_id, {"type": "command", "command": "update_config", "config": update_config}
+    )
+
     if success:
         return {"message": "Config update sent to agent"}
     else:
@@ -367,17 +365,12 @@ async def update_agent_config(
 
 
 @router.get("/stats")
-async def get_stats(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_stats(current_user: User = Depends(get_current_user_dep)):
     """Get system statistics"""
     agent_stats = registry.get_stats()
     session_stats = await gateway_session_cache.async_get_stats()
 
-    return {
-        "agents": agent_stats,
-        "sessions": session_stats
-    }
+    return {"agents": agent_stats, "sessions": session_stats}
 
 
 def _get_current_version() -> str:
@@ -407,6 +400,7 @@ def _get_current_version() -> str:
     # 1. importlib.metadata — canonical, post-install source of truth.
     try:
         from importlib.metadata import version as _pkg_version
+
         v = _pkg_version("opensquad")
         if v and v != "0.0.0":
             return v
@@ -415,7 +409,8 @@ def _get_current_version() -> str:
 
     # 2. opensquad.__version__ — dev / source-tree fallback.
     try:
-        from opensquad import __version__ as v  # noqa: F401
+        from opensquad import __version__ as v
+
         if v and v != "unknown":
             return v
     except Exception:
@@ -432,6 +427,7 @@ def _detect_channel(version: str) -> str:
     detect_channel` directly.
     """
     from opensquad.utils.version_channel import detect_channel
+
     return detect_channel(version)
 
 
@@ -481,6 +477,7 @@ async def check_version():
                 if tag and current and tag != current:
                     try:
                         from packaging.version import Version
+
                         result["update_available"] = Version(tag) > Version(current)
                     except Exception:
                         # Fallback: simple string comparison
@@ -499,22 +496,15 @@ def _get_category_name(agent_type: str) -> str:
         "writer": "Writing & Creation",
         "analyst": "Data Analysis",
         "general": "General Assistant",
-        "translator": "Translation Services"
+        "translator": "Translation Services",
     }
     return names.get(agent_type, "Other")
 
 
 def _get_category_icon(agent_type: str) -> str:
     """Get category icon"""
-    icons = {
-        "coder": "💻",
-        "writer": "✍️",
-        "analyst": "📊",
-        "general": "🤖",
-        "translator": "🌐"
-    }
+    icons = {"coder": "💻", "writer": "✍️", "analyst": "📊", "general": "🤖", "translator": "🌐"}
     return icons.get(agent_type, "🔧")
-
 
 
 # ============================================================
@@ -614,6 +604,7 @@ async def agent_current_session(
 # ---- Upload routes MUST be defined BEFORE the {session_id} catch-all ----
 # Otherwise {session_id} matches "upload-file" etc. and returns 405.
 
+
 @router.post("/agent-sessions/{agent_id}/upload-image")
 async def agent_upload_image(
     agent_id: str,
@@ -671,8 +662,7 @@ async def agent_upload_file(
     is_video = content_type.startswith("video/")
 
     logger.info(
-        f"File uploaded for {agent_id}: {filepath} "
-        f"({file_size} bytes, type={content_type}, original={original_name})"
+        f"File uploaded for {agent_id}: {filepath} ({file_size} bytes, type={content_type}, original={original_name})"
     )
 
     return {
@@ -715,17 +705,19 @@ async def agent_upload_files(
         is_audio = content_type.startswith("audio/")
         is_video = content_type.startswith("video/")
 
-        results.append({
-            "path": filepath,
-            "filename": filename,
-            "original_name": original_name,
-            "url": f"/uploads/{filename}",
-            "size": file_size,
-            "content_type": content_type,
-            "is_image": is_image,
-            "is_audio": is_audio,
-            "is_video": is_video,
-        })
+        results.append(
+            {
+                "path": filepath,
+                "filename": filename,
+                "original_name": original_name,
+                "url": f"/uploads/{filename}",
+                "size": file_size,
+                "content_type": content_type,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     logger.info(f"Batch upload for {agent_id}: {len(results)} files")
 
@@ -735,6 +727,7 @@ async def agent_upload_files(
 # ============================================================
 # Collaboration Board API
 # ============================================================
+
 
 def _user_identity_set(current_user: User) -> set[str]:
     vals = {
@@ -761,23 +754,23 @@ def _is_pm_for_collab(collab_id: str, current_user: User) -> bool:
 
 class CollabBoardUpsertRequest(BaseModel):
     collab_id: str
-    task_name: Optional[str] = None
+    task_name: str | None = None
     agent_id: str
     item_type: str = "task"
-    item_key: Optional[str] = ""
-    title: Optional[str] = ""
-    content: Optional[str] = ""
+    item_key: str | None = ""
+    title: str | None = ""
+    content: str | None = ""
     status: str = "doing"
     progress: int = 0
     visibility: str = "public"
-    latest_tool_name: Optional[str] = None
-    latest_tool_summary: Optional[str] = None
-    extra: Optional[dict] = None
+    latest_tool_name: str | None = None
+    latest_tool_summary: str | None = None
+    extra: dict | None = None
 
 
 class CollabBoardDiscussionRequest(BaseModel):
     collab_id: str
-    task_name: Optional[str] = None
+    task_name: str | None = None
     agent_id: str
     title: str = "Public discussion"
     content: str = ""
@@ -789,9 +782,9 @@ class CollabTaskCreateRequest(BaseModel):
 
 
 class CollabTaskUpdateRequest(BaseModel):
-    task_name: Optional[str] = None
-    progress: Optional[int] = None
-    status: Optional[str] = None
+    task_name: str | None = None
+    progress: int | None = None
+    status: str | None = None
 
 
 @router.get("/collab-board/tasks")
@@ -879,15 +872,15 @@ async def upsert_collab_board_item(
         )
         target = next(
             (
-                i for i in existing_items
+                i
+                for i in existing_items
                 if str(i.get("item_type", "")) == str(body.item_type)
                 and str(i.get("item_key", "")) == str(body.item_key or "")
             ),
             None,
         )
-        if isinstance(target, dict):
-            if (body.title or "") and str(body.title) != str(target.get("title", "")):
-                raise HTTPException(403, "Workers cannot change task title; update progress content only")
+        if isinstance(target, dict) and (body.title or "") and str(body.title) != str(target.get("title", "")):
+            raise HTTPException(403, "Workers cannot change task title; update progress content only")
 
     item = collab_board_upsert_item(
         collab_id=body.collab_id,
@@ -956,6 +949,7 @@ async def list_plan_snapshots(
 
 
 # ---- Catch-all {session_id} routes AFTER specific routes ----
+
 
 @router.get("/agent-sessions/{agent_id}/{session_id}/paged")
 async def agent_session_history_paged(
@@ -1034,12 +1028,14 @@ async def agent_session_delete(
 # Agent Push API - Agents push files/messages to chat & groups
 # ============================================================
 
+
 class AgentPushRequest(BaseModel):
     """Request body for agent push to AI chat"""
+
     agent_id: str
-    user_id: Optional[str] = None  # if None, broadcast to all connected users
-    message: Optional[str] = None
-    files: Optional[List[dict]] = None  # [{path, original_name, url, size, content_type, is_image}]
+    user_id: str | None = None  # if None, broadcast to all connected users
+    message: str | None = None
+    files: list[dict] | None = None  # [{path, original_name, url, size, content_type, is_image}]
 
 
 def _check_node_secret(request: Request) -> bool:
@@ -1054,6 +1050,7 @@ def _check_node_secret(request: Request) -> bool:
 def _require_agent_auth(request: Request):
     """Auth dependency for agent-invoked endpoints. Uses node_secret."""
     from fastapi import HTTPException, status
+
     if not _check_node_secret(request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1102,28 +1099,41 @@ async def agent_push_to_chat(
         # Broadcast to all users (and all their devices) connected to this agent
         delivered = await user_handler.broadcast_to_agent(agent_id, ws_message)
         sent_count = len(delivered) if delivered else 0
-        for uid in (delivered or []):
+        for uid in delivered or []:
             if uid:
                 delivered_user_ids.add(uid)
 
     # Persist pushed content to session history (so refresh can restore it)
     if sent_count > 0 and (body.message or body.files):
         persisted_text = body.message or ""
-        for f in (body.files or []):
+        for f in body.files or []:
             name = f.get("original_name") or f.get("filename") or "file"
             size = f.get("size", 0)
             ctype = f.get("content_type", "application/octet-stream")
-            media = "image" if str(ctype).startswith("image/") else ("video" if str(ctype).startswith("video/") else ("audio" if str(ctype).startswith("audio/") else "file"))
+            media = (
+                "image"
+                if str(ctype).startswith("image/")
+                else (
+                    "video"
+                    if str(ctype).startswith("video/")
+                    else ("audio" if str(ctype).startswith("audio/") else "file")
+                )
+            )
             url = f.get("url") or ""
-            line = f"[File: {name} ({size} B) type={media}]({url})" if url else f"[File: {name} ({size} B) type={media}]"
+            line = (
+                f"[File: {name} ({size} B) type={media}]({url})" if url else f"[File: {name} ({size} B) type={media}]"
+            )
             persisted_text = f"{persisted_text}\n\n{line}" if persisted_text else line
 
         for uid in delivered_user_ids:
             try:
                 all_files = body.files or []
                 image_urls = [
-                    f.get("url") for f in all_files
-                    if isinstance(f, dict) and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/")) and f.get("url")
+                    f.get("url")
+                    for f in all_files
+                    if isinstance(f, dict)
+                    and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/"))
+                    and f.get("url")
                 ]
                 await gateway_session_cache.async_add_message(
                     uid,
@@ -1153,8 +1163,8 @@ async def agent_push_to_chat(
 @router.post("/agent-push/upload-and-chat")
 async def agent_push_upload_and_chat(
     agent_id: str = Query(...),
-    message: Optional[str] = Query(None),
-    user_id: Optional[str] = Query(None),
+    message: str | None = Query(None),
+    user_id: str | None = Query(None),
     files: list[UploadFile] = File(...),
     request: Request = None,
 ):
@@ -1189,17 +1199,19 @@ async def agent_push_upload_and_chat(
         is_audio = content_type.startswith("audio/")
         is_video = content_type.startswith("video/")
 
-        file_infos.append({
-            "path": filepath,
-            "filename": filename,
-            "original_name": original_name,
-            "url": f"/uploads/{filename}",
-            "size": file_size,
-            "content_type": content_type,
-            "is_image": is_image,
-            "is_audio": is_audio,
-            "is_video": is_video,
-        })
+        file_infos.append(
+            {
+                "path": filepath,
+                "filename": filename,
+                "original_name": original_name,
+                "url": f"/uploads/{filename}",
+                "size": file_size,
+                "content_type": content_type,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     # Build WS message
     file_push_message_id = f"fp_{uuid.uuid4().hex[:12]}"
@@ -1225,7 +1237,7 @@ async def agent_push_upload_and_chat(
     else:
         delivered = await user_handler.broadcast_to_agent(agent_id, ws_message)
         sent_count = len(delivered) if delivered else 0
-        for uid in (delivered or []):
+        for uid in delivered or []:
             if uid:
                 delivered_user_ids.add(uid)
         targeted_conn_keys = [f"{u}:{agent_id}" for u in delivered] or [f"*:{agent_id}"]
@@ -1250,15 +1262,18 @@ async def agent_push_upload_and_chat(
     if sent_count > 0:
         persisted_text = message or ""
         for f in file_infos:
-            media = "image" if f.get("is_image") else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+            media = (
+                "image"
+                if f.get("is_image")
+                else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+            )
             line = f"[File: {f.get('original_name') or f.get('filename')} ({f.get('size', 0)} B) type={media}]({f.get('url')})"
             persisted_text = f"{persisted_text}\n\n{line}" if persisted_text else line
 
         for uid in delivered_user_ids:
             try:
                 image_urls = [
-                    f.get("url") for f in file_infos
-                    if isinstance(f, dict) and f.get("is_image") and f.get("url")
+                    f.get("url") for f in file_infos if isinstance(f, dict) and f.get("is_image") and f.get("url")
                 ]
                 await gateway_session_cache.async_add_message(
                     uid,
@@ -1314,11 +1329,16 @@ async def agent_push_to_group(
     if not agent:
         raise HTTPException(404, f"Agent not found: {agent_id}")
 
-    from app.database import AsyncSessionLocal
-    from app.models import User as DBUser, Message as DBMessage, Attachment as DBAttachment
-    from app.models import group_members, MessageType as DBMessageType, beijing_now
-    from sqlalchemy import select
     import datetime
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Attachment as DBAttachment
+    from app.models import Message as DBMessage
+    from app.models import MessageType as DBMessageType
+    from app.models import User as DBUser
+    from app.models import beijing_now, group_members
 
     async with AsyncSessionLocal() as db:
         # Find agent's user account
@@ -1343,8 +1363,7 @@ async def agent_push_to_group(
 
         # Check membership
         stmt = select(group_members).where(
-            group_members.c.user_id == agent_user.id,
-            group_members.c.group_id == group_id
+            group_members.c.user_id == agent_user.id, group_members.c.group_id == group_id
         )
         result = await db.execute(stmt)
         membership = result.first()
@@ -1353,7 +1372,11 @@ async def agent_push_to_group(
 
         # Create the message
         now = beijing_now()
-        msg_id = f"m_{now.timestamp()}" if hasattr(now, 'timestamp') else f"m_{datetime.datetime.now(datetime.timezone.utc).timestamp()}"
+        msg_id = (
+            f"m_{now.timestamp()}"
+            if hasattr(now, "timestamp")
+            else f"m_{datetime.datetime.now(datetime.timezone.utc).timestamp()}"
+        )
         db_msg = DBMessage(
             id=msg_id,
             group_id=group_id,
@@ -1369,23 +1392,27 @@ async def agent_push_to_group(
         attachments_for_response = []
         for i, att in enumerate(attach_list):
             att_id = f"a_{datetime.datetime.now(datetime.timezone.utc).timestamp()}_{i}"
-            db.add(DBAttachment(
-                id=att_id,
-                message_id=msg_id,
-                name=att.get("name", "file"),
-                size=str(att.get("size", "0")),
-                url=att.get("url", ""),
-                type=att.get("type", "file"),
-                duration=att.get("duration"),
-            ))
-            attachments_for_response.append({
-                "id": att_id,
-                "name": att.get("name", "file"),
-                "size": att.get("size", "0"),
-                "url": att.get("url", ""),
-                "type": att.get("type", "file"),
-                "duration": att.get("duration"),
-            })
+            db.add(
+                DBAttachment(
+                    id=att_id,
+                    message_id=msg_id,
+                    name=att.get("name", "file"),
+                    size=str(att.get("size", "0")),
+                    url=att.get("url", ""),
+                    type=att.get("type", "file"),
+                    duration=att.get("duration"),
+                )
+            )
+            attachments_for_response.append(
+                {
+                    "id": att_id,
+                    "name": att.get("name", "file"),
+                    "size": att.get("size", "0"),
+                    "url": att.get("url", ""),
+                    "type": att.get("type", "file"),
+                    "duration": att.get("duration"),
+                }
+            )
 
         # Build response BEFORE commit (async SQLAlchemy golden rule)
         response_data = {
@@ -1396,7 +1423,7 @@ async def agent_push_to_group(
             "sender_name": agent_user.name,
             "content": content,
             "attachments": attachments_for_response,
-            "timestamp": now.isoformat() if hasattr(now, 'isoformat') else str(now),
+            "timestamp": now.isoformat() if hasattr(now, "isoformat") else str(now),
         }
 
         await db.commit()
@@ -1404,10 +1431,14 @@ async def agent_push_to_group(
     # Notify group chat WebSocket subscribers
     try:
         from app.websocket import manager as ws_manager
-        await ws_manager.broadcast_to_group(group_id, {
-            "type": "new_message",
-            "message": response_data,
-        })
+
+        await ws_manager.broadcast_to_group(
+            group_id,
+            {
+                "type": "new_message",
+                "message": response_data,
+            },
+        )
     except Exception as e:
         logger.warning(f"Failed to broadcast group message: {e}")
 
@@ -1449,17 +1480,17 @@ async def register_node(request: Request):
     """POST /api/ai-web/nodes/register — called by Launcher on startup."""
     _verify_node_token(request)
     data = await request.json()
-    node_id      = data.get("node_id", "")
-    node_label   = data.get("node_label", node_id)
+    node_id = data.get("node_id", "")
+    node_label = data.get("node_label", node_id)
     launcher_url = data.get("launcher_url", "")
     if not node_id:
         raise HTTPException(status_code=400, detail="node_id is required")
     _node_registry[node_id] = {
-        "node_id":      node_id,
-        "node_label":   node_label,
+        "node_id": node_id,
+        "node_label": node_label,
         "launcher_url": launcher_url,
-        "last_seen":    time.time(),
-        "agent_count":  0,
+        "last_seen": time.time(),
+        "agent_count": 0,
     }
     logger.info(f"Node registered: {node_id} ({node_label}) launcher={launcher_url}")
     return {"ok": True}
@@ -1470,16 +1501,16 @@ async def node_heartbeat(node_id: str, request: Request):
     """PUT /api/ai-web/nodes/{node_id}/heartbeat — periodic keepalive from Launcher."""
     data = await request.json()
     if node_id in _node_registry:
-        _node_registry[node_id]["last_seen"]   = time.time()
+        _node_registry[node_id]["last_seen"] = time.time()
         _node_registry[node_id]["agent_count"] = data.get("agent_count", 0)
     else:
         # Auto-register on heartbeat if not yet in registry
         _node_registry[node_id] = {
-            "node_id":      node_id,
-            "node_label":   data.get("node_label", node_id),
+            "node_id": node_id,
+            "node_label": data.get("node_label", node_id),
             "launcher_url": data.get("launcher_url", ""),
-            "last_seen":    time.time(),
-            "agent_count":  data.get("agent_count", 0),
+            "last_seen": time.time(),
+            "agent_count": data.get("agent_count", 0),
         }
     return {"ok": True}
 
@@ -1490,8 +1521,10 @@ async def list_nodes(current_user: User = Depends(get_current_user_dep)):
     now = time.time()
     nodes = []
     for n in _node_registry.values():
-        nodes.append({
-            **n,
-            "online": (now - n["last_seen"]) < 120,  # consider offline after 2 min
-        })
+        nodes.append(
+            {
+                **n,
+                "online": (now - n["last_seen"]) < 120,  # consider offline after 2 min
+            }
+        )
     return {"nodes": nodes}

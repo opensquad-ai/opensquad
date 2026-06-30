@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg/_logging.py -- Logging configuration.
 
 Extracted from system_config.py.
 """
+
 from __future__ import annotations
 
 import os
@@ -20,6 +20,7 @@ def log_dir() -> str:
     if cfg_val:
         return cfg_val
     from ._paths import workspace_logs_dir
+
     return workspace_logs_dir()
 
 
@@ -49,10 +50,7 @@ def log_level() -> str:
 
 def log_format() -> str:
     """Log format string."""
-    return get(
-        "logging", "log_format",
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    return get("logging", "log_format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 
 def log_date_format() -> str:

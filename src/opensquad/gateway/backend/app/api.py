@@ -38,6 +38,8 @@ def _utc_aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
+import contextlib
+
 from app.auth import (
     authenticate_user,
     create_access_token,
@@ -1047,29 +1049,28 @@ def format_message_response(msg: Message) -> MessageResponse:
     attachments_list = []
     # Check if attachments are loaded, to avoid MissingGreenlet errors in async context
     state = inspect(msg)
-    if "attachments" not in state.unloaded:
-        if msg.attachments:
-            for att in list(msg.attachments):
-                size_value = 0
-                if att.size:
-                    try:
-                        size_value = int(att.size)
-                    except ValueError:
-                        size_match = re.match(r"(\d+(?:\.\d+)?)", str(att.size))
-                        if size_match:
-                            size_value = int(float(size_match.group(1)))
+    if "attachments" not in state.unloaded and msg.attachments:
+        for att in list(msg.attachments):
+            size_value = 0
+            if att.size:
+                try:
+                    size_value = int(att.size)
+                except ValueError:
+                    size_match = re.match(r"(\d+(?:\.\d+)?)", str(att.size))
+                    if size_match:
+                        size_value = int(float(size_match.group(1)))
 
-                attachments_list.append(
-                    AttachmentResponse(
-                        id=str(att.id),
-                        message_id=str(att.message_id),
-                        name=str(att.name) if att.name else "",
-                        size=str(size_value),
-                        url=str(att.url) if att.url else "",
-                        type=str(att.type) if att.type else "",
-                        duration=getattr(att, "duration", None),
-                    )
+            attachments_list.append(
+                AttachmentResponse(
+                    id=str(att.id),
+                    message_id=str(att.message_id),
+                    name=str(att.name) if att.name else "",
+                    size=str(size_value),
+                    url=str(att.url) if att.url else "",
+                    type=str(att.type) if att.type else "",
+                    duration=getattr(att, "duration", None),
                 )
+            )
 
     # Compute in real-time whether recall can be undone (within 2 minutes)
     can_undo = False
@@ -1168,7 +1169,7 @@ async def get_messages_around(
 @router.get("/groups/{group_id}/pinned-messages", response_model=list[MessageResponse])
 async def get_pinned_messages(group_id: str, db: AsyncSession = Depends(get_db)):
     """Get pinned messages in a group"""
-    query = select(Message).where(and_(Message.group_id == group_id, Message.is_pinned == True))
+    query = select(Message).where(and_(Message.group_id == group_id, Message.is_pinned is True))
     result = await db.execute(query.options(selectinload(Message.attachments)))
     return [format_message_response(msg) for msg in result.scalars().all()]
 
@@ -1188,15 +1189,11 @@ async def search_messages_in_group(
     if sender_id:
         query = query.where(Message.sender_id == sender_id)
     if date_from:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             query = query.where(Message.timestamp >= datetime.fromisoformat(date_from.replace("Z", "+00:00")))
-        except (ValueError, TypeError):
-            pass
     if date_to:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             query = query.where(Message.timestamp <= datetime.fromisoformat(date_to.replace("Z", "+00:00")))
-        except (ValueError, TypeError):
-            pass
 
     query = query.order_by(desc(Message.timestamp)).limit(limit)
     result = await db.execute(query.options(selectinload(Message.attachments)))
@@ -1623,17 +1620,17 @@ async def get_direct_messages(
     # Build query
     if filter_type == "sent":
         query = select(DirectMessage).where(
-            and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender == False)
+            and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender is False)
         )
     elif filter_type == "received":
         query = select(DirectMessage).where(
-            and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient == False)
+            and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient is False)
         )
     else:
         query = select(DirectMessage).where(
             or_(
-                and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender == False),
-                and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient == False),
+                and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender is False),
+                and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient is False),
             )
         )
 

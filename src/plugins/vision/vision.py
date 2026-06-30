@@ -1,8 +1,5 @@
-# -*- coding: utf-8 -*-
-
-import os
 import logging
-from typing import Dict
+import os
 
 logger = logging.getLogger("plugins.vision")
 
@@ -11,6 +8,7 @@ def _get_img_path_file() -> str:
     """Return the absolute path to img_path.txt (preferably placed in the agent's own directory)."""
     try:
         from opensquad.input_hub import input_hub
+
         if input_hub.agent_dir:
             return os.path.join(input_hub.agent_dir, "img_path.txt")
     except Exception:
@@ -47,7 +45,7 @@ def _get_img_path_file() -> str:
 #     3.  **Precise content retrieval:** Pass the 2-3 most relevant `url` values to the `fetch` tool for in-depth reading.
 #     4. **If querying only Chinese-language internet content, set contains_chinese=True.**
 #     """
-def read_image(image_path_list: list) -> Dict[str, str]:
+def read_image(image_path_list: list) -> dict[str, str]:
     """
     Read local images at the specified absolute paths. The argument is a list;
     even a single image path should be placed in a list, e.g.: ['C:\\pic_01.jpg'].
@@ -74,6 +72,7 @@ def read_image(image_path_list: list) -> Dict[str, str]:
         # instead of a proper Python list. Detect and parse.
         if isinstance(image_path_list, str):
             import json as _json
+
             try:
                 image_path_list = _json.loads(image_path_list)
             except Exception:
@@ -84,6 +83,7 @@ def read_image(image_path_list: list) -> Dict[str, str]:
 
         # Verify files exist
         import os as _os
+
         valid_paths = []
         for p in image_path_list:
             if _os.path.isfile(p):
@@ -104,13 +104,14 @@ def read_image(image_path_list: list) -> Dict[str, str]:
         # in the same turn via tool result processing
         try:
             from opensquad.event_pipeline import event_pipeline
+
             event_pipeline.push_nowait(
                 source="vision_tool",
                 content=f"[Image injection requested: {valid_paths}]",
                 metadata={
                     "image_paths": valid_paths,
                     "action": "inject_images",
-                }
+                },
             )
         except Exception:
             pass

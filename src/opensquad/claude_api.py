@@ -254,7 +254,7 @@ class ClaudeAPI:
 
     def delete_all_uploaded_files(self):
         """Clean up all Files API files uploaded during this session."""
-        for path, fid in list(self._file_id_cache.items()):
+        for _path, fid in list(self._file_id_cache.items()):
             self._delete_file_claude(fid)
         self._file_id_cache.clear()
 
@@ -533,7 +533,7 @@ class ClaudeAPI:
             f"[ClaudeAPI] add_pipeline_events: events_len={len(events_text)}, total_req_messages={len(self.req)}"
         )
 
-    def add_assistant_message(self, content: str, reasoning_content: str = None):
+    def add_assistant_message(self, content: str, reasoning_content: str | None = None):
         """Add assistant message, optionally with reasoning_content for extended thinking pass-back."""
         msg = {"role": "assistant", "content": content}
         if reasoning_content:
@@ -997,7 +997,7 @@ class ClaudeAPI:
 
         # Inject reasoning_content into assistant messages when tools are involved
         # (Claude extended thinking requires thinking blocks to be passed back in multi-turn tool flows)
-        has_tool_involvement = any(m.get("tool_calls") or m.get("role") == "tool" for m in messages)
+        any(m.get("tool_calls") or m.get("role") == "tool" for m in messages)
         if self._prev_reasoning_content and messages:
             injected_count = 0
             for m in messages:

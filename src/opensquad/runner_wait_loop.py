@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -99,7 +98,9 @@ class RunnerWaitLoop:
                         self.runner._load_history()
                         await self.runner._emit("turn_start", 0)
                         await self.runner._bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
-                        await self.runner._bus.emit_async("session_list", self.runner._session_manager.get_session_list())
+                        await self.runner._bus.emit_async(
+                            "session_list", self.runner._session_manager.get_session_list()
+                        )
                     return WaitLoopResult(True, reply_content, "", False)
         return None
 
@@ -107,9 +108,9 @@ class RunnerWaitLoop:
         last_was_tool_call = False
         if self.runner.chat_api.req:
             last_message = self.runner.chat_api.req[-1]
-            if last_message.get("role") == "assistant" and last_message.get("tool_calls"):
-                last_was_tool_call = True
-            elif last_message.get("role") == "tool":
+            if (last_message.get("role") == "assistant" and last_message.get("tool_calls")) or last_message.get(
+                "role"
+            ) == "tool":
                 last_was_tool_call = True
 
         supplements = self.runner._input_hub.get_all_pending()
@@ -139,6 +140,7 @@ class RunnerWaitLoop:
 
     async def _handle_pipeline_events(self, initial_query: str | None) -> WaitLoopResult | None:
         from opensquad.event_pipeline import get_event_pipeline
+
         event_pipeline = get_event_pipeline()
 
         if event_pipeline.size <= 0:

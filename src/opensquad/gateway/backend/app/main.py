@@ -46,9 +46,7 @@ if not _console_log.handlers:
 # Frozen (desktop app): resolve workspace via Electron env vars.
 # OPENSQUAD_APP_DATA = fixed Electron userData (app prefs).
 # OPENSQUAD_USER_DATA = active workspace path (may differ after user switch).
-if _IS_FROZEN and (
-    os.environ.get("OPENSQUAD_APP_DATA") or os.environ.get("OPENSQUAD_USER_DATA")
-):
+if _IS_FROZEN and (os.environ.get("OPENSQUAD_APP_DATA") or os.environ.get("OPENSQUAD_USER_DATA")):
     from opensquad.workspace_utils import bootstrap_desktop_workspace
 
     try:
@@ -354,7 +352,7 @@ app = FastAPI(
 # Defaults to ["http://localhost:5173"] for local development.
 # For production, explicitly set gateway.cors_origins in system_config.json.
 _allowed_origins = _syscfg.cors_origins()
-_allow_creds = False if _allowed_origins == ["*"] else True
+_allow_creds = _allowed_origins != ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,

@@ -2,13 +2,11 @@
 AI Web Gateway - Multi-Agent Management Platform
 Embedded in gateway, providing Agent registration management and user conversation services
 """
+
 import json
-import os
-import asyncio
-from datetime import datetime
-from typing import Dict, List, Optional, Set
-from dataclasses import dataclass, asdict
 import logging
+from dataclasses import asdict, dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +14,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AgentInfo:
     """Agent information"""
+
     agent_id: str
     agent_name: str
     agent_type: str
-    capabilities: List[str]
+    capabilities: list[str]
     description: str
     status: str = "online"  # online/busy/offline
     load_percent: int = 0
@@ -28,22 +27,22 @@ class AgentInfo:
     registered_at: str = ""
     last_heartbeat: str = ""
     today_date: str = ""  # Records the date corresponding to today_chats, used for cross-day reset
-    node_id: str = ""     # Owning node ID (multi-machine deployment, e.g. "node-local" / "node-gpu-01")
+    node_id: str = ""  # Owning node ID (multi-machine deployment, e.g. "node-local" / "node-gpu-01")
     node_label: str = ""  # Human-readable label for the owning node
-    
+
     def to_dict(self):
         return asdict(self)
 
 
 class AgentRegistry:
     """Agent registry - in-memory storage of online Agents"""
-    
+
     def __init__(self):
-        self.agents: Dict[str, AgentInfo] = {}  # agent_id -> AgentInfo
-        self.connections: Dict[str, object] = {}  # agent_id -> WebSocket
+        self.agents: dict[str, AgentInfo] = {}  # agent_id -> AgentInfo
+        self.connections: dict[str, object] = {}  # agent_id -> WebSocket
         # Heartbeat mechanism removed - no longer needed
-    
-    def register(self, agent_info: AgentInfo, websocket) -> Optional[object]:
+
+    def register(self, agent_info: AgentInfo, websocket) -> object | None:
         """Register Agent.
 
         Returns the previous WebSocket if this agent_id was already
@@ -67,48 +66,44 @@ class AgentRegistry:
 
         logger.info(f"Agent {agent_id} ({agent_info.agent_name}) registered")
         return old_ws
-    
+
     def unregister(self, agent_id: str):
         """Unregister Agent"""
         if agent_id in self.agents:
             del self.agents[agent_id]
         if agent_id in self.connections:
             del self.connections[agent_id]
-        
+
         logger.info(f"Agent {agent_id} unregistered")
-    
-    def update_heartbeat(self, agent_id: str, stats: dict = None):
+
+    def update_heartbeat(self, agent_id: str, stats: dict | None = None):
         """Update heartbeat - no-op, heartbeat mechanism removed"""
         pass
-    
+
     def set_busy(self, agent_id: str, busy: bool = True):
         """Set Agent busy status"""
         if agent_id in self.agents:
             self.agents[agent_id].status = "busy" if busy else "online"
-    
-    def get_agent(self, agent_id: str) -> Optional[AgentInfo]:
+
+    def get_agent(self, agent_id: str) -> AgentInfo | None:
         """Get Agent information"""
         return self.agents.get(agent_id)
-    
-    def get_connection(self, agent_id: str) -> Optional[object]:
+
+    def get_connection(self, agent_id: str) -> object | None:
         """Get Agent's WebSocket connection"""
         return self.connections.get(agent_id)
-    
-    def list_agents(
-        self, 
-        status: str = None, 
-        agent_type: str = None
-    ) -> List[AgentInfo]:
+
+    def list_agents(self, status: str | None = None, agent_type: str | None = None) -> list[AgentInfo]:
         """List Agents"""
         agents = list(self.agents.values())
-        
+
         if status:
             agents = [a for a in agents if a.status == status]
         if agent_type:
             agents = [a for a in agents if a.agent_type == agent_type]
-        
+
         return agents
-    
+
     def increment_today_chats(self, agent_id: str):
         """Increment today's chat count, auto-reset at day boundary"""
         if agent_id not in self.agents:
@@ -129,9 +124,9 @@ class AgentRegistry:
             "total": len(agents),
             "online": sum(1 for a in agents if a.status == "online"),
             "busy": sum(1 for a in agents if a.status == "busy"),
-            "offline": sum(1 for a in agents if a.status == "offline")
+            "offline": sum(1 for a in agents if a.status == "offline"),
         }
-    
+
     async def send_to_agent(self, agent_id: str, message: dict) -> bool:
         """Send message to Agent"""
         ws = self.connections.get(agent_id)

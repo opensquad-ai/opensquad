@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Unified JSON read/write with atomic file replacement.
 
@@ -27,13 +26,12 @@ def read_json(path: str, default: Any = None) -> Any:
     if not os.path.exists(path):
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         import logging
-        logging.getLogger(__name__).warning(
-            "[JsonIO] Failed to read %s: %s", path, exc
-        )
+
+        logging.getLogger(__name__).warning("[JsonIO] Failed to read %s: %s", path, exc)
         return default
 
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 opensquad/context_base.py - Common standard context injection base layer
 
@@ -22,9 +21,9 @@ Design principles:
     - inject_standard() is called by runner.py _setup_prompt() each turn to get standard variables
     - A role's context.py before_input() may return the same key to override (role takes priority)
 """
-import os
-import json
+
 import logging
+import os
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -32,12 +31,12 @@ logger = logging.getLogger(__name__)
 # Module-level cache
 _memory_manager = None
 _agent_md_path = None
-_agent_dir = None       # Agent's own directory path (e.g. C:\...\agents\coder)
-_project_root = None    # Project root directory path (e.g. C:\...\opensquad)
+_agent_dir = None  # Agent's own directory path (e.g. C:\...\agents\coder)
+_project_root = None  # Project root directory path (e.g. C:\...\opensquad)
 _workspace_root = None  # Currently active workspace root path (from syscfg.get_workspace())
-_bridge = None          # ChatPro Bridge instance (for retrieving group member list)
-_agent_config = None    # Current agent's config.json (for checking collaboration config)
-_agents_dir = None      # agents/ directory path (for reading other agents' config.json)
+_bridge = None  # ChatPro Bridge instance (for retrieving group member list)
+_agent_config = None  # Current agent's config.json (for checking collaboration config)
+_agents_dir = None  # agents/ directory path (for reading other agents' config.json)
 
 
 def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, agent_config=None, agents_dir=None):
@@ -45,7 +44,15 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
     Initialize at startup. Called by boot.py.
     Caches memory_manager, agent.md path, bridge, and agent_config.
     """
-    global _memory_manager, _agent_md_path, _agent_dir, _project_root, _workspace_root, _bridge, _agent_config, _agents_dir
+    global \
+        _memory_manager, \
+        _agent_md_path, \
+        _agent_dir, \
+        _project_root, \
+        _workspace_root, \
+        _bridge, \
+        _agent_config, \
+        _agents_dir
     _memory_manager = memory_manager
     _agent_md_path = agent_md_path
     _bridge = bridge
@@ -64,6 +71,7 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
     # Workspace root: prefer syscfg (authoritative source), fall back to _project_root
     try:
         from opensquad.system_config import syscfg as _syscfg
+
         _workspace_root = _syscfg.get_workspace()
     except Exception:
         _workspace_root = _project_root
@@ -102,7 +110,7 @@ def _read_agent_md() -> str:
     if not _agent_md_path or not os.path.exists(_agent_md_path):
         return ""
     try:
-        with open(_agent_md_path, "r", encoding="utf-8") as f:
+        with open(_agent_md_path, encoding="utf-8") as f:
             return f.read().strip()
     except Exception as e:
         logger.warning(f"[ContextBase] Failed to read agent.md: {e}")
@@ -144,7 +152,9 @@ def inject_standard(context: dict) -> tuple:
     if agent_profile:
         system_vars["AGENT_PROFILE"] = agent_profile
     else:
-        system_vars["AGENT_PROFILE"] = "(No permanent memory yet. When the user asks you to remember something, update agent.md using filesystem.write_file.)"
+        system_vars["AGENT_PROFILE"] = (
+            "(No permanent memory yet. When the user asks you to remember something, update agent.md using filesystem.write_file.)"
+        )
 
     # --- Context summary (changes only on compression) ---
     chat_api = context.get("chat_api")
@@ -152,7 +162,9 @@ def inject_standard(context: dict) -> tuple:
     if latest_summary and latest_summary.strip():
         system_vars["CONTEXT_SUMMARY"] = latest_summary
     else:
-        system_vars["CONTEXT_SUMMARY"] = "(Context compression has not been triggered yet; no historical summary available.)"
+        system_vars["CONTEXT_SUMMARY"] = (
+            "(Context compression has not been triggered yet; no historical summary available.)"
+        )
 
     # --- Agent workspace path (static) ---
     if _agent_dir:
@@ -193,7 +205,7 @@ def inject_standard(context: dict) -> tuple:
                 fpath = os.path.join(collab_cards_dir, fname)
                 fm = {}
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         raw = f.read()
                     if raw.startswith("---"):
                         end = raw.find("\n---", 3)
@@ -209,10 +221,8 @@ def inject_standard(context: dict) -> tuple:
                 catalog_rows.append(f"| `{card_name}` | {desc} | {tags} |")
 
         if catalog_rows:
-            catalog_table = (
-                "| Collab Card | Description | Tags |\n"
-                "|-------------|-------------|------|\n"
-                + "\n".join(catalog_rows)
+            catalog_table = "| Collab Card | Description | Tags |\n|-------------|-------------|------|\n" + "\n".join(
+                catalog_rows
             )
         else:
             catalog_table = "(collab_cards/ directory is empty; no collab cards available)"
@@ -222,11 +232,11 @@ def inject_standard(context: dict) -> tuple:
             f"{catalog_table}\n\n"
             "**Usage (PM-driven)**:\n"
             "1. Based on the current task type, choose an appropriate collab card from the table above\n"
-            "2. Call `start_collaboration(card=\"<name>\")` to load the card and start collaboration\n"
+            '2. Call `start_collaboration(card="<name>")` to load the card and start collaboration\n'
             "   - The `suggested_roles` in the card are for reference only; the PM decides which members to invite\n"
             "   - You can omit members initially and invite after deciding via group chat\n"
-            "3. Members call `join_collaboration(card=\"<name>\")` upon receiving an invitation\n"
-            "4. When done, the PM calls `end_collaboration(card=\"<name>\")` and members call `leave_collaboration(card=\"<name>\")`"
+            '3. Members call `join_collaboration(card="<name>")` upon receiving an invitation\n'
+            '4. When done, the PM calls `end_collaboration(card="<name>")` and members call `leave_collaboration(card="<name>")`'
         )
 
     else:
@@ -236,10 +246,7 @@ def inject_standard(context: dict) -> tuple:
 
     # --- Runtime state (timestamp changes every turn) ---
     dynamic_vars["RUNTIME_STATE"] = (
-        f"Current time: {now}\n"
-        f"Input source: {source}\n"
-        f"Working state: {current_state}\n"
-        f"Wakeup level: {current_wake}"
+        f"Current time: {now}\nInput source: {source}\nWorking state: {current_state}\nWakeup level: {current_wake}"
     )
 
     # --- Long-term memory (semantic recall based on current query, different each turn) ---
@@ -248,14 +255,14 @@ def inject_standard(context: dict) -> tuple:
 
     if mm and query and query.strip():
         try:
-            req_length = len(chat_api.req) if chat_api and hasattr(chat_api, 'req') else 0
+            req_length = len(chat_api.req) if chat_api and hasattr(chat_api, "req") else 0
             logger.debug(f"[ContextBase] auto_recall: query='{query[:60]}' req_length={req_length}")
             memory_text = mm.auto_recall(recent_messages, query, req_length=req_length)
             if memory_text and memory_text.strip():
                 logger.info(f"[ContextBase] MemoryManager injected {len(memory_text)} chars")
                 dynamic_vars["MEMORY_CONTEXT"] = memory_text
             else:
-                logger.debug(f"[ContextBase] auto_recall returned empty")
+                logger.debug("[ContextBase] auto_recall returned empty")
                 dynamic_vars["MEMORY_CONTEXT"] = ""
         except Exception as e:
             logger.warning(f"[ContextBase] MemoryManager auto_recall failed: {e}")

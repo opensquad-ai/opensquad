@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad External Adapter (Multi-instance)
 
@@ -27,10 +26,10 @@ Usage:
 import asyncio
 import json
 import logging
+import os
+import sys
 import time
 import uuid
-import sys
-import os
 import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -40,21 +39,22 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT_DIR)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from typing import Optional, List
+
 import uvicorn
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field
 
 from plugins.external_api.config import (
+    EXTERNAL_API_LOG_LEVEL,
+    GATEWAY_TOKEN,
+    GATEWAY_WS_URL,
     ExternalApiInstanceConfig,
     load_instance_configs,
-    GATEWAY_WS_URL, GATEWAY_TOKEN,
-    EXTERNAL_API_LOG_LEVEL,
 )
-from plugins.external_api.gateway_client import GatewayWSClient, AgentEvent, _ws_is_closed
+from plugins.external_api.gateway_client import GatewayWSClient, _ws_is_closed
 
 # ── Logging ──
 logging.basicConfig(
@@ -69,12 +69,13 @@ logger = logging.getLogger("external.adapter")
 #  Request/Response models
 # ══════════════════════════════════════════════
 
+
 class ChatRequest(BaseModel):
-    agent_id: Optional[str] = Field(default=None, description="Target Agent ID (defaults to instance config)")
+    agent_id: str | None = Field(default=None, description="Target Agent ID (defaults to instance config)")
     message: str = Field(..., description="Message content")
     user_id: str = Field(default="external-user", description="Caller identity")
-    images: List[str] = Field(default_factory=list, description="Image paths")
-    timeout: Optional[int] = Field(default=None, description="Timeout seconds")
+    images: list[str] = Field(default_factory=list, description="Image paths")
+    timeout: int | None = Field(default=None, description="Timeout seconds")
     channel: str = Field(default="external", description="Source channel")
     sender_name: str = Field(default="", description="Sender display name")
     chat_name: str = Field(default="", description="Chat/group name")
@@ -84,8 +85,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     status: str = "ok"
     message: str = ""
-    thoughts: List[str] = Field(default_factory=list)
-    tool_calls: List[dict] = Field(default_factory=list)
+    thoughts: list[str] = Field(default_factory=list)
+    tool_calls: list[dict] = Field(default_factory=list)
     duration_ms: int = 0
 
 
@@ -98,12 +99,13 @@ class AsyncSubmitResponse(BaseModel):
 class AsyncResultResponse(BaseModel):
     status: str = "pending"
     task_id: str = ""
-    result: Optional[ChatResponse] = None
+    result: ChatResponse | None = None
 
 
 # ══════════════════════════════════════════════
 #  App factory: creates one FastAPI app per instance
 # ══════════════════════════════════════════════
+
 
 def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
     """Create a FastAPI app for one External API instance."""
@@ -148,8 +150,7 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
         agent_id = req.agent_id
         if not agent_id:
             raise HTTPException(
-                status_code=400,
-                detail="agent_id is required. Specify which agent should handle the request."
+                status_code=400, detail="agent_id is required. Specify which agent should handle the request."
             )
         timeout = req.timeout or inst_cfg.request_timeout
         return agent_id, timeout
@@ -186,8 +187,7 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
             await asyncio.sleep(60)
             now = time.time()
             expired = [
-                tid for tid, r in async_results.items()
-                if now - r.get("created_at", 0) > inst_cfg.async_result_ttl
+                tid for tid, r in async_results.items() if now - r.get("created_at", 0) > inst_cfg.async_result_ttl
             ]
             for tid in expired:
                 del async_results[tid]
@@ -196,7 +196,9 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
 
     @app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
     async def chat_sync(req: ChatRequest):
-        inst_log.info(f"[API] /api/chat from user={req.user_id}, agent={req.agent_id}, channel={req.channel}, msg={req.message[:60]}")
+        inst_log.info(
+            f"[API] /api/chat from user={req.user_id}, agent={req.agent_id}, channel={req.channel}, msg={req.message[:60]}"
+        )
         agent_id, timeout = resolve_request(req)
         start = time.time()
 
@@ -220,8 +222,10 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
         if errors and not pending.final_text:
             error_msg = errors[0].content if errors[0].content else "Unknown error"
             inst_log.error(
-                "[API] 502: agent=%s duration=%dms error=\"%s\" all_events=%s",
-                agent_id, duration, error_msg,
+                '[API] 502: agent=%s duration=%dms error="%s" all_events=%s',
+                agent_id,
+                duration,
+                error_msg,
                 [(ev.event_type, str(ev.content)[:80]) for ev in pending.all_events],
             )
             # Build a more helpful error detail that includes the actual cause
@@ -354,19 +358,23 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
 
         connected = await client.ensure_connected(resolved_agent)
         if not connected:
-            await websocket.send_json({
-                "type": "error",
-                "content": f"Agent '{resolved_agent}' is not available",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "content": f"Agent '{resolved_agent}' is not available",
+                }
+            )
             await websocket.close(code=4002, reason="Agent unavailable")
             return
 
-        await websocket.send_json({
-            "type": "connected",
-            "agent_id": resolved_agent,
-            "instance": inst_cfg.name,
-            "message": f"Connected to agent '{resolved_agent}' via [{inst_cfg.name}]",
-        })
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "agent_id": resolved_agent,
+                "instance": inst_cfg.name,
+                "message": f"Connected to agent '{resolved_agent}' via [{inst_cfg.name}]",
+            }
+        )
 
         try:
             while True:
@@ -413,10 +421,12 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
                     except Exception:
                         break
                 else:
-                    await websocket.send_json({
-                        "type": "error",
-                        "content": f"Unknown type: {msg_type}. Use 'chat' or 'ping'.",
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": f"Unknown type: {msg_type}. Use 'chat' or 'ping'.",
+                        }
+                    )
 
         except WebSocketDisconnect:
             inst_log.info(f"[WS] Client disconnected (agent '{resolved_agent}')")
@@ -440,10 +450,12 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
         agents = []
         if client:
             for aid, ws in client._connections.items():
-                agents.append({
-                    "agent_id": aid,
-                    "connected": not _ws_is_closed(ws) if ws else False,
-                })
+                agents.append(
+                    {
+                        "agent_id": aid,
+                        "connected": not _ws_is_closed(ws) if ws else False,
+                    }
+                )
         return {"agents": agents}
 
     return app
@@ -452,6 +464,7 @@ def create_app(inst_cfg: ExternalApiInstanceConfig) -> FastAPI:
 # ══════════════════════════════════════════════
 #  Helper
 # ══════════════════════════════════════════════
+
 
 def _extract_events(all_events: list) -> tuple:
     """Extract thoughts and tool_calls from event list."""
@@ -475,6 +488,7 @@ def _extract_events(all_events: list) -> tuple:
 #  Entry point: run all instances concurrently
 # ══════════════════════════════════════════════
 
+
 async def run_all_instances():
     """Start all configured External API instances."""
     instance_configs = load_instance_configs()
@@ -490,7 +504,7 @@ async def run_all_instances():
     print(f"  Instances:  {len(instance_configs)}")
     for i, cfg in enumerate(instance_configs):
         key_display = cfg.api_key if cfg.auto_generated_key else f"{cfg.api_key[:8]}...{cfg.api_key[-4:]}"
-        print(f"    [{i+1}] {cfg.name}: port={cfg.port}, key={key_display}")
+        print(f"    [{i + 1}] {cfg.name}: port={cfg.port}, key={key_display}")
     print("=" * 60)
 
     servers = []

@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """Unit tests for ChatAPI pure-logic methods.
 
 Tests cover: add_user_message, add_tool_result, _is_tool_result_msg,
 _build_conv_text, _prepare_messages entry logic.
 """
+
 import pytest
 
 
@@ -11,6 +11,7 @@ import pytest
 def chat():
     """Create a minimal ChatAPI instance for testing."""
     from opensquad.chat_api import ChatAPI
+
     return ChatAPI(
         api_key="test-key",
         model="gpt-4",
@@ -89,6 +90,7 @@ class TestIsToolResultMsg:
     @staticmethod
     def _target(msg: dict) -> bool:
         from opensquad.chat_api import ChatAPI
+
         return ChatAPI._is_tool_result_msg(msg)
 
     def test_tool_result_true(self):
@@ -110,6 +112,7 @@ class TestBuildConvText:
     @staticmethod
     def _target(messages, budget_chars=5000):
         from opensquad.chat_api import ChatAPI
+
         chat = object.__new__(ChatAPI)
         return ChatAPI._build_conv_text(chat, messages, budget_chars)
 
@@ -129,6 +132,7 @@ class TestBuildConvText:
 
     def test_respects_budget(self):
         from opensquad.chat_api import ChatAPI
+
         msgs = [
             {"role": "user", "content": "A" * 1000},
             {"role": "assistant", "content": "B" * 1000},
@@ -138,6 +142,7 @@ class TestBuildConvText:
 
 
 # ── _prepare_messages (entry logic only) ────────────────────────────────
+
 
 class TestPrepareMessages:
     """Test _prepare_messages — context compression trigger logic.
@@ -152,7 +157,7 @@ class TestPrepareMessages:
 
     def test_early_return_for_few_messages(self, chat):
         chat.token_max = 100
-        for i in range(100):
+        for _i in range(100):
             chat._prepare_messages()
         pass  # just verifies no exception
 

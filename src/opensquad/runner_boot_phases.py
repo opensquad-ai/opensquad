@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from opensquad.gateway_adapter import GatewayAdapter
 from opensquad.registry import ToolRegistry

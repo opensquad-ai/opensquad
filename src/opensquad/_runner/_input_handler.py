@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Input handler module -- internal command routing from the main run() loop.
 
@@ -8,12 +7,12 @@ Handles the ``__STOP__``, ``__NEW_SESSION__``, ``__COMPRESS_CONTEXT__``,
 
 Extracted from runner.py to reduce its size.
 """
+
 from __future__ import annotations
 
-import asyncio
-import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from opensquad.tool import logger
 
@@ -41,7 +40,7 @@ class InputHandler:
         self,
         initial_query: str,
         runner: Any,
-        input_hub: "InputHub",
+        input_hub: InputHub,
         emit: Callable[[str, Any], Any],
         get_session_manager: Callable[[], Any],
         broadcast_token_stats: Callable[[], Any],
@@ -114,9 +113,7 @@ class InputHandler:
                         "is_working_session": True,
                     },
                 )
-                await bus.emit_async(
-                    "current_session", {"id": sid, "title": "Current Session"}
-                )
+                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                 await bus.emit_async("session_list", sm.get_session_list())
                 await emit("info", f"Session loaded: {sid}")
                 now_ms = int(datetime.now().timestamp() * 1000)
@@ -134,7 +131,7 @@ class InputHandler:
         self,
         cmd: str,
         runner: Any,
-        input_hub: "InputHub",
+        input_hub: InputHub,
         emit: Callable[[str, Any], Any],
         get_session_manager: Callable[[], Any],
         broadcast_token_stats: Callable[[], Any],
@@ -197,9 +194,7 @@ class InputHandler:
                         "is_working_session": True,
                     },
                 )
-                await bus.emit_async(
-                    "current_session", {"id": sid, "title": "Current Session"}
-                )
+                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                 await bus.emit_async("session_list", sm.get_session_list())
                 await emit("info", f"Session loaded: {sid}")
             return True, None
@@ -228,8 +223,8 @@ class InputHandler:
     async def handle_queue_process(
         self,
         runner: Any,
-        input_hub: "InputHub",
-        message_queue: "MessageQueue",
+        input_hub: InputHub,
+        message_queue: MessageQueue,
         emit: Callable[[str, Any], Any],
     ) -> str | None:
         """
@@ -244,8 +239,7 @@ class InputHandler:
 
         if extra_web:
             logger.info(
-                "[InputHandler] __PROCESS_QUEUE__: also found %d pending web "
-                "message(s) in input_hub, merging",
+                "[InputHandler] __PROCESS_QUEUE__: also found %d pending web message(s) in input_hub, merging",
                 len(extra_web),
             )
 
@@ -266,16 +260,10 @@ class InputHandler:
             runner._current_user_id = first_web.get("user_id", "")
 
             if len(extra_web) > 1:
-                extra_parts = [
-                    w.get("content", "")
-                    for w in extra_web[1:]
-                    if w.get("content")
-                ]
+                extra_parts = [w.get("content", "") for w in extra_web[1:] if w.get("content")]
                 if extra_parts:
                     result = result + "\n" + "\n".join(extra_parts)
-            logger.info(
-                "[InputHandler] __PROCESS_QUEUE__ with only web messages"
-            )
+            logger.info("[InputHandler] __PROCESS_QUEUE__ with only web messages")
             return result
 
         # -- Format group messages as AI input ----------------------------
@@ -283,10 +271,7 @@ class InputHandler:
         all_images = []
         for msg in pending:
             if msg.type == "group":
-                msg_parts.append(
-                    f"[{msg.source_name} | group_id={msg.source_id}] "
-                    f"{msg.sender_name}: {msg.content}"
-                )
+                msg_parts.append(f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}")
             elif msg.type == "dm":
                 msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
             if msg.images:
@@ -340,17 +325,11 @@ class InputHandler:
                 if wc and wc != "__PROCESS_QUEUE__":
                     web_parts.append(f"[Web User] {wc}")
                     if w.get("images"):
-                        runner._current_images = (runner._current_images or []) + w[
-                            "images"
-                        ]
+                        runner._current_images = (runner._current_images or []) + w["images"]
                     if w.get("attachments"):
-                        runner._current_attachments = (
-                            runner._current_attachments or []
-                        ) + w["attachments"]
+                        runner._current_attachments = (runner._current_attachments or []) + w["attachments"]
             if web_parts:
-                result += "\n\n[Simultaneously received web messages]\n" + "\n".join(
-                    web_parts
-                )
+                result += "\n\n[Simultaneously received web messages]\n" + "\n".join(web_parts)
                 logger.info(
                     "[InputHandler] Merged %d web message(s) into __PROCESS_QUEUE__ turn",
                     len(web_parts),
@@ -379,10 +358,7 @@ class InputHandler:
         all_images = []
         for msg in pending_group_messages:
             if msg.type == "group":
-                msg_parts.append(
-                    f"[{msg.source_name} | group_id={msg.source_id}] "
-                    f"{msg.sender_name}: {msg.content}"
-                )
+                msg_parts.append(f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}")
             elif msg.type == "dm":
                 msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
             if msg.images:
@@ -392,6 +368,4 @@ class InputHandler:
             runner._current_images = (runner._current_images or []) + all_images
 
         formatted = "\n".join(msg_parts)
-        return (
-            f"\n\n[Simultaneously received group messages]\n{formatted}"
-        )
+        return f"\n\n[Simultaneously received group messages]\n{formatted}"

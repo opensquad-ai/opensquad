@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Token Analytics - Query Module
 
@@ -14,12 +13,12 @@ Legacy entry point (direct call):
 
 All functions return plain dicts suitable for JSON serialization.
 """
-import os
-import json
-import sqlite3
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
 
+import json
+import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 # ── Standard entry point for dynamic plugin data routing ──
 
@@ -131,24 +130,23 @@ def query_data(project_root: str, params: dict) -> dict:
     actual_root = ws_root if ws_root and os.path.isdir(ws_root) else project_root
 
     db_rel = "data/plugins/token_analytics/analytics.db"
-    config_path = os.path.join(actual_root, "data", "plugins",
-                               "token_analytics", "config.json")
+    config_path = os.path.join(actual_root, "data", "plugins", "token_analytics", "config.json")
     if os.path.isfile(config_path):
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             db_rel = cfg.get("db_path", db_rel)
         except Exception:
             pass
 
     db_path = os.path.join(actual_root, db_rel)
-    return query_dashboard(db_path, time_range=time_range, agent_id=agent_id,
-                            metric=metric)
+    return query_dashboard(db_path, time_range=time_range, agent_id=agent_id, metric=metric)
 
 
 # ── Internal helpers ──
 
-def _connect(db_path: str) -> Optional[sqlite3.Connection]:
+
+def _connect(db_path: str) -> sqlite3.Connection | None:
     """Open a read-only connection to the analytics DB."""
     if not os.path.isfile(db_path):
         return None
@@ -180,9 +178,9 @@ def _range_to_cutoff(time_range: str) -> str:
     return cutoff.isoformat()
 
 
-def query_dashboard(db_path: str, time_range: str = "24h",
-                    agent_id: Optional[str] = None,
-                    metric: str = "total") -> Dict[str, Any]:
+def query_dashboard(
+    db_path: str, time_range: str = "24h", agent_id: str | None = None, metric: str = "total"
+) -> dict[str, Any]:
     """
     Main dashboard query. Returns all data needed for the Token Analytics
     dashboard in a single call.
@@ -209,6 +207,7 @@ def query_dashboard(db_path: str, time_range: str = "24h",
         }
     """
     import time as _time
+
     t0 = _time.monotonic()
     if metric not in _METRIC_DELTA_COLS:
         metric = "total"
@@ -224,14 +223,19 @@ def query_dashboard(db_path: str, time_range: str = "24h",
             "by_agent": [],
             "top_tools": [],
             "recent_snapshots": [],
-            "meta": {"db_path": db_path, "time_range": time_range,
-                     "cutoff": "", "query_time_ms": 0, "error": "DB not found",
-                     "metric": metric},
+            "meta": {
+                "db_path": db_path,
+                "time_range": time_range,
+                "cutoff": "",
+                "query_time_ms": 0,
+                "error": "DB not found",
+                "metric": metric,
+            },
         }
 
     cutoff = _range_to_cutoff(time_range)
     agent_filter = ""
-    params: List[Any] = [cutoff]
+    params: list[Any] = [cutoff]
     if agent_id:
         agent_filter = " AND agent_id = ?"
         params.append(agent_id)
@@ -268,7 +272,7 @@ def query_dashboard(db_path: str, time_range: str = "24h",
     }
 
 
-def _empty_summary() -> Dict[str, Any]:
+def _empty_summary() -> dict[str, Any]:
     return {
         "total_tokens": 0,
         "total_requests": 0,
@@ -281,9 +285,9 @@ def _empty_summary() -> Dict[str, Any]:
     }
 
 
-def _query_summary(conn: sqlite3.Connection, cutoff: str,
-                   agent_filter: str, params: List,
-                   time_range: str) -> Dict[str, Any]:
+def _query_summary(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str
+) -> dict[str, Any]:
     """Aggregate summary stats from token_snapshots.
 
     All token columns come from SUM(delta_*) so each call is counted once,
@@ -320,9 +324,9 @@ def _query_summary(conn: sqlite3.Connection, cutoff: str,
     }
 
 
-def _query_timeline(conn: sqlite3.Connection, cutoff: str,
-                    agent_filter: str, params: List,
-                    time_range: str, metric: str = "total") -> List[Dict[str, Any]]:
+def _query_timeline(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+) -> list[dict[str, Any]]:
     """Per-bucket totals + request counts for a simple line/bar chart."""
     bucket_expr, bucket_label = _bucket_expr(time_range)
     deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
@@ -340,13 +344,14 @@ def _query_timeline(conn: sqlite3.Connection, cutoff: str,
         LIMIT 500
     """
     rows = conn.execute(sql, params).fetchall()
-    return [{"bucket": r["bucket"], "tokens": r["tokens"],
-             "requests": r["requests"], "label": bucket_label} for r in rows]
+    return [
+        {"bucket": r["bucket"], "tokens": r["tokens"], "requests": r["requests"], "label": bucket_label} for r in rows
+    ]
 
 
-def _query_timeline_by_model(conn: sqlite3.Connection, cutoff: str,
-                              agent_filter: str, params: List,
-                              time_range: str, metric: str = "total") -> List[Dict[str, Any]]:
+def _query_timeline_by_model(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+) -> list[dict[str, Any]]:
     """
     Per-bucket × per-model token breakdown — drives the stacked bar chart.
 
@@ -370,8 +375,8 @@ def _query_timeline_by_model(conn: sqlite3.Connection, cutoff: str,
     """
     rows = conn.execute(sql, params).fetchall()
 
-    bucket_map: Dict[str, Dict[str, int]] = {}
-    bucket_order: List[str] = []
+    bucket_map: dict[str, dict[str, int]] = {}
+    bucket_order: list[str] = []
     for r in rows:
         b = r["bucket"]
         if b not in bucket_map:
@@ -382,9 +387,9 @@ def _query_timeline_by_model(conn: sqlite3.Connection, cutoff: str,
     return [{"bucket": b, "by_model": bucket_map[b]} for b in bucket_order]
 
 
-def _query_by_model(conn: sqlite3.Connection, cutoff: str,
-                    agent_filter: str, params: List,
-                    time_range: str, metric: str = "total") -> List[Dict[str, Any]]:
+def _query_by_model(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+) -> list[dict[str, Any]]:
     """Per-model totals (metric-aware) + cache fields (absolute)."""
     bucket_expr, _ = _bucket_expr(time_range)
     deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
@@ -404,18 +409,21 @@ def _query_by_model(conn: sqlite3.Connection, cutoff: str,
         LIMIT 20
     """
     rows = conn.execute(sql, params).fetchall()
-    return [{
-        "model": r["model"],
-        "tokens": r["tokens"],
-        "requests": r["requests"],
-        "cache_read_tokens": r["cache_read_tokens"],
-        "cache_creation_tokens": r["cache_creation_tokens"],
-    } for r in rows]
+    return [
+        {
+            "model": r["model"],
+            "tokens": r["tokens"],
+            "requests": r["requests"],
+            "cache_read_tokens": r["cache_read_tokens"],
+            "cache_creation_tokens": r["cache_creation_tokens"],
+        }
+        for r in rows
+    ]
 
 
-def _query_by_agent(conn: sqlite3.Connection, cutoff: str,
-                    agent_filter: str, params: List,
-                    time_range: str, metric: str = "total") -> List[Dict[str, Any]]:
+def _query_by_agent(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+) -> list[dict[str, Any]]:
     """Per-agent totals (metric-aware) + cache fields (absolute)."""
     bucket_expr, _ = _bucket_expr(time_range)
     deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
@@ -435,17 +443,19 @@ def _query_by_agent(conn: sqlite3.Connection, cutoff: str,
         LIMIT 20
     """
     rows = conn.execute(sql, params).fetchall()
-    return [{
-        "agent_id": r["agent_id"],
-        "tokens": r["tokens"],
-        "requests": r["requests"],
-        "cache_read_tokens": r["cache_read_tokens"],
-        "cache_creation_tokens": r["cache_creation_tokens"],
-    } for r in rows]
+    return [
+        {
+            "agent_id": r["agent_id"],
+            "tokens": r["tokens"],
+            "requests": r["requests"],
+            "cache_read_tokens": r["cache_read_tokens"],
+            "cache_creation_tokens": r["cache_creation_tokens"],
+        }
+        for r in rows
+    ]
 
 
-def _query_top_tools(conn: sqlite3.Connection, cutoff: str,
-                     agent_filter: str, params: List) -> List[Dict[str, Any]]:
+def _query_top_tools(conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list) -> list[dict[str, Any]]:
     """Top tools by call count from tool_usage table."""
     sql = f"""
         SELECT
@@ -460,14 +470,20 @@ def _query_top_tools(conn: sqlite3.Connection, cutoff: str,
         LIMIT 20
     """
     rows = conn.execute(sql, params).fetchall()
-    return [{"tool_name": r["tool_name"], "call_count": r["call_count"],
-             "total_args_tokens": r["total_args_tokens"],
-             "total_result_tokens": r["total_result_tokens"]} for r in rows]
+    return [
+        {
+            "tool_name": r["tool_name"],
+            "call_count": r["call_count"],
+            "total_args_tokens": r["total_args_tokens"],
+            "total_result_tokens": r["total_result_tokens"],
+        }
+        for r in rows
+    ]
 
 
-def _query_recent_snapshots(conn: sqlite3.Connection, cutoff: str,
-                            agent_filter: str,
-                            params: List) -> List[Dict[str, Any]]:
+def _query_recent_snapshots(
+    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list
+) -> list[dict[str, Any]]:
     """Most recent snapshot records (for a detail table)."""
     sql = f"""
         SELECT

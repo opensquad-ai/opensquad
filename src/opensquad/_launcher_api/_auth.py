@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Auth helpers for the Launcher Management API handler.
 
@@ -7,6 +6,7 @@ size of ``_launcher_api/__init__.py``.  Each function takes a ``handler``
 argument (the ``ManagementHandler`` instance) so it can delegate back
 to the base handler for response/syscfg lookups.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -23,6 +23,7 @@ _log = logging.getLogger("launcher_api")
 def get_launcher_token() -> str:
     """Read the launcher token from system_config (or env override)."""
     from opensquad.system_config import syscfg
+
     try:
         return syscfg.get("launcher_token", "")
     except (OSError, ValueError):
@@ -36,6 +37,7 @@ def encrypt_password(password: str) -> str:
     """
     try:
         from passlib.hash import bcrypt as passlib_bcrypt
+
         return passlib_bcrypt.using(rounds=12).hash(password)
     except ImportError:
         _log.warning("passlib not available, falling back to SHA-256 for password hashing")
@@ -55,6 +57,7 @@ def verify_password(password: str, stored: str) -> bool:
     if stored.startswith("$2"):
         try:
             from passlib.hash import bcrypt as passlib_bcrypt
+
             return passlib_bcrypt.verify(password, stored)
         except ImportError:
             _log.error("passlib not available, cannot verify bcrypt hash")
@@ -99,6 +102,7 @@ def check_auth(handler: BaseHTTPRequestHandler) -> bool:
 def _send_json(handler, data: dict, status: int = 200):
     """Write a JSON response.  Inline copy of the original helper."""
     import json
+
     body = json.dumps(data, ensure_ascii=False).encode("utf-8")
     try:
         handler.send_response(status)

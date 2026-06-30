@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """ModelConfig — Unified dataclass for LLM client parameters (P2-1).
 
 Consolidates the 20+ scattered parameters from ChatAPI, ClaudeAPI, and GoogleAPI
@@ -11,11 +10,12 @@ Usage:
     cfg = ModelConfig.from_dict(config.get("model", {}), system_prompt="...")
     chat_api = ChatAPI(config=cfg)
 """
+
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class ModelConfig:
     temperature: float = 0.3
     reduction_strategy: str = "start"
     reduction_batch_size: int = 2
-    load_his: Optional[str] = None
+    load_his: str | None = None
 
     # ── Media / multimodal ──
     is_img_model: bool = False
@@ -69,10 +69,10 @@ class ModelConfig:
     @classmethod
     def from_dict(
         cls,
-        model_cfg: Dict[str, Any],
+        model_cfg: dict[str, Any],
         prompt: str = "",
         provider: str = "openai",
-    ) -> "ModelConfig":
+    ) -> ModelConfig:
         """Build ModelConfig from config.json's ``model`` section.
 
         Args:
@@ -83,6 +83,7 @@ class ModelConfig:
         Returns:
             Populated ``ModelConfig`` instance with sensible defaults.
         """
+
         # Helper: safely get with default
         def _get(key: str, default: Any) -> Any:
             return model_cfg.get(key, default)
@@ -102,9 +103,7 @@ class ModelConfig:
             is_audio_model=_get("is_audio_model", False),
             is_video_model=_get("is_video", False),
             use_file_api=_get("use_file_api", False),
-            file_api_size_threshold=int(
-                _get("file_api_size_threshold", 4 * 1024 * 1024)
-            ),
+            file_api_size_threshold=int(_get("file_api_size_threshold", 4 * 1024 * 1024)),
             # OpenAI-specific
             is_audio_output=_get("is_audio_output", False),
             audio_output_voice=_get("audio_output_voice", "alloy"),
@@ -122,7 +121,7 @@ class ModelConfig:
             provider=provider,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to plain dict (useful for passing to delegate tools)."""
         return {
             "provider": self.provider,
@@ -138,5 +137,5 @@ class ModelConfig:
             "use_file_api": self.use_file_api,
             "file_api_size_threshold": self.file_api_size_threshold,
             "tool_call_mode": "auto",  # default for delegate
-            "tool_filter": "all",      # default for delegate
+            "tool_filter": "all",  # default for delegate
         }

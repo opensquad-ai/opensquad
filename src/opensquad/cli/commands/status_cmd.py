@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """opensquad status — Show agent and service status."""
+
 import socket
 import sys
 
@@ -14,7 +14,7 @@ def _check_port(host: str, port: int, timeout: float = 1.0) -> bool:
         s = socket.create_connection((host, port), timeout=timeout)
         s.close()
         return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return False
 
 
@@ -23,8 +23,8 @@ def run_status(args):
         print("[status] Error: httpx is required. Install with: pip install httpx", file=sys.stderr)
         sys.exit(1)
 
-    from opensquad.system_config import syscfg
     from opensquad.cli.commands.service_scan import discover_all_services
+    from opensquad.system_config import syscfg
 
     # ── All services (core + plugin, auto-discovered) ──
     launcher_port = args.port or syscfg.port("launcher")
@@ -40,7 +40,7 @@ def run_status(args):
     launcher_alive = False
     for name, port in core_services:
         alive = _check_port("127.0.0.1", port)
-        icon = "\u2705 running" if alive else "\u274C DOWN"
+        icon = "\u2705 running" if alive else "\u274c DOWN"
         print(f"{name:<25} {port:<8} {icon}")
         if name == "Launcher" and alive:
             launcher_alive = True
@@ -69,8 +69,8 @@ def run_status(args):
         except Exception as e:
             print(f"\n[status] Launcher up but API error: {e}", file=sys.stderr)
     else:
-        print(f"\n[status] Launcher not running \u2014 agent list unavailable.")
-        print(f"[status] Start it with: opensquad start")
+        print("\n[status] Launcher not running \u2014 agent list unavailable.")
+        print("[status] Start it with: opensquad start")
 
     # ── Plugin services ──
     if plugin_services:
@@ -78,12 +78,13 @@ def run_status(args):
         print("-" * 45)
         for name, port in plugin_services:
             alive = _check_port("127.0.0.1", port)
-            icon = "\u2705 running" if alive else "\u274C DOWN"
+            icon = "\u2705 running" if alive else "\u274c DOWN"
             print(f"{name:<25} {port:<8} {icon}")
 
     # ── Watchdog ──
     try:
         import psutil
+
         wd_running = False
         for proc in psutil.process_iter(["name", "cmdline"]):
             try:
@@ -93,7 +94,7 @@ def run_status(args):
                     break
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-        icon = "\u2705 running" if wd_running else "\u274C NOT RUNNING"
+        icon = "\u2705 running" if wd_running else "\u274c NOT RUNNING"
         print(f"\n{'Watchdog':<15} {'-':<8} {icon}")
     except ImportError:
-        print(f"\n{'Watchdog':<15} {'-':<8} \u26A0 psutil not installed")
+        print(f"\n{'Watchdog':<15} {'-':<8} \u26a0 psutil not installed")

@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
-import requests
 import json
 import logging
-import sys, os as _os
+import os as _os
+import sys
+
+import requests
+
 sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+
 from opensquad.system_config import syscfg
-from typing import List, Dict, Optional
 
 logger = logging.getLogger("plugins.websearch")
 
@@ -20,6 +22,7 @@ def _get_encoding():
     if _encoding is None:
         try:
             import tiktoken
+
             _encoding = tiktoken.get_encoding("cl100k_base")
         except Exception:
             _encoding = False
@@ -47,13 +50,13 @@ def _truncate_content_by_tokens(text: str, max_tokens: int) -> str:
         tokens = enc.encode(text)
         first = enc.decode(tokens[:part_tokens])
         mid_start = max(0, len(tokens) // 2 - part_tokens // 2)
-        mid = enc.decode(tokens[mid_start:mid_start + part_tokens])
+        mid = enc.decode(tokens[mid_start : mid_start + part_tokens])
         last = enc.decode(tokens[-part_tokens:])
     else:
         chars = part_tokens * 4
         first = text[:chars]
         mid_start = max(0, len(text) // 2 - chars // 2)
-        mid = text[mid_start:mid_start + chars]
+        mid = text[mid_start : mid_start + chars]
         last = text[-chars:]
     return f"{first}\n\n[…中间内容已截断…]\n\n{mid}\n\n[…中间内容已截断…]\n\n{last}"
 
@@ -75,7 +78,7 @@ def _get_service_url() -> str:
     _cfg_path = syscfg.workspace_data_dir("plugins", "websearch", "config.json")
     if _os.path.isfile(_cfg_path):
         try:
-            with open(_cfg_path, "r", encoding="utf-8") as _f:
+            with open(_cfg_path, encoding="utf-8") as _f:
                 _cfg = json.load(_f)
             if "port" in _cfg:
                 return f"http://127.0.0.1:{int(_cfg['port'])}"
@@ -84,7 +87,7 @@ def _get_service_url() -> str:
     return syscfg.websearch_url()
 
 
-def _make_request(endpoint: str, params: Dict) -> Dict:
+def _make_request(endpoint: str, params: dict) -> dict:
     """
     A generic function for sending GET requests to the WebSearch API.
     """
@@ -111,7 +114,7 @@ def _make_request(endpoint: str, params: Dict) -> Dict:
         return {"error": f"Invalid JSON response from API endpoint '{endpoint}'."}
 
 
-def search(queries: List[str], max_results: int = 30) -> List[Dict[str, str]]:
+def search(queries: list[str], max_results: int = 30) -> list[dict[str, str]]:
     """
     Call the WebSearch service's /search endpoint to retrieve search results for multiple queries.
     Usage tips:
@@ -141,7 +144,7 @@ def search(queries: List[str], max_results: int = 30) -> List[Dict[str, str]]:
     return _make_request("search", params)
 
 
-def fetch(urls: List[str], max_token=100000) -> Dict[str, str]:
+def fetch(urls: list[str], max_token=100000) -> dict[str, str]:
     """
     Call the WebSearch service's /fetch endpoint to retrieve the body content of one or more URLs.
     **Best Practices:**
@@ -154,9 +157,7 @@ def fetch(urls: List[str], max_token=100000) -> Dict[str, str]:
     """
     max_token = int(max_token)
     logger.info(f"Executing 'fetch' tool for {len(urls)} URLs.")
-    params = {
-        "urls": ",".join(urls)
-    }
+    params = {"urls": ",".join(urls)}
     res_dict = _make_request("fetch", params)
     if not isinstance(res_dict, dict):
         return res_dict
@@ -185,23 +186,21 @@ def fetch(urls: List[str], max_token=100000) -> Dict[str, str]:
     return result
 
 
-def fetch_html(url: str = None) -> Dict:
+def fetch_html(url: str | None = None) -> dict:
     """
-       Call the WebSearch service's /fetch_html endpoint to retrieve the raw HTML content of a URL.
+    Call the WebSearch service's /fetch_html endpoint to retrieve the raw HTML content of a URL.
 
-       **Best Practices:**
-       - **For deep search:** This tool is generally used in deep search tasks. A webpage often contains
-       a large amount of text and link addresses. Deep searches often require identifying new search
-       directions from the page's HTML links, making this a key step in determining critical links
-       for the search task.
-       - **Use after search:** This tool is typically used after the `search` tool to deeply investigate
-       high-value filtered links.
+    **Best Practices:**
+    - **For deep search:** This tool is generally used in deep search tasks. A webpage often contains
+    a large amount of text and link addresses. Deep searches often require identifying new search
+    directions from the page's HTML links, making this a key step in determining critical links
+    for the search task.
+    - **Use after search:** This tool is typically used after the `search` tool to deeply investigate
+    high-value filtered links.
 
-       """
+    """
     logger.info(f"Executing 'fetch_html' tool for {url} URL.")
-    params = {
-        "url": url
-    }
+    params = {"url": url}
     return _make_request("fetch_html", params)
 
 

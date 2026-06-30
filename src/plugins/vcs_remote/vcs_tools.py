@@ -1,46 +1,31 @@
-# -*- coding: utf-8 -*-
-import subprocess
 import json
 import logging
-import os
 import re
-from typing import Dict, List, Optional, Any, Tuple
+import subprocess
+from typing import Any
 
 logger = logging.getLogger("plugins.vcs_remote")
 
-def _run_gh(args: List[str], cwd: Optional[str] = None) -> str:
+
+def _run_gh(args: list[str], cwd: str | None = None) -> str:
     """Helper to run gh commands."""
     try:
-        cmd = ["gh"] + args
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
+        cmd = ["gh", *args]
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             return f"Error (code {result.returncode}): {result.stderr.strip()}"
         return result.stdout.strip() or "Success"
     except Exception as e:
         logger.error(f"GH command failed: {e}")
-        return f"Error: {str(e)}"
+        return f"Error: {e!s}"
 
 
-def _run_gh_json(args: List[str], cwd: Optional[str] = None) -> Tuple[Any, Optional[str]]:
+def _run_gh_json(args: list[str], cwd: str | None = None) -> tuple[Any, str | None]:
     """Run a gh command expecting JSON output.
     Returns (parsed_data, error_string). On success error_string is None."""
     try:
-        cmd = ["gh"] + args
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
+        cmd = ["gh", *args]
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             return None, f"Error (code {result.returncode}): {result.stderr.strip()}"
         try:
@@ -49,10 +34,10 @@ def _run_gh_json(args: List[str], cwd: Optional[str] = None) -> Tuple[Any, Optio
             return result.stdout.strip(), None
     except Exception as e:
         logger.error(f"GH JSON command failed: {e}")
-        return None, f"Error: {str(e)}"
+        return None, f"Error: {e!s}"
 
 
-def _resolve_repo(repo: str, path: Optional[str]) -> Tuple[str, Optional[str]]:
+def _resolve_repo(repo: str, path: str | None) -> tuple[str, str | None]:
     """Resolve owner/repo string from argument or git remote.
     Returns (repo_string, error_string)."""
     if repo:
@@ -63,12 +48,12 @@ def _resolve_repo(repo: str, path: Optional[str]) -> Tuple[str, Optional[str]]:
             cwd=path,
             capture_output=True,
             text=True,
-            encoding='utf-8',
-            errors='replace'
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0:
             url = result.stdout.strip()
-            m = re.search(r'github\.com[:/](.+?/.+?)(?:\.git)?$', url)
+            m = re.search(r"github\.com[:/](.+?/.+?)(?:\.git)?$", url)
             if m:
                 return m.group(1), None
     except Exception:
@@ -76,8 +61,9 @@ def _resolve_repo(repo: str, path: Optional[str]) -> Tuple[str, Optional[str]]:
     return "", "Error: Could not determine repository. Provide 'repo' as owner/name."
 
 
-def issue_create(title: str, body: str, labels: Optional[List[str]] = None,
-                 assignee: Optional[str] = None, path: Optional[str] = None) -> str:
+def issue_create(
+    title: str, body: str, labels: list[str] | None = None, assignee: str | None = None, path: str | None = None
+) -> str:
     """Create a new issue on GitHub.
     path: local repo directory (uses current working directory if omitted)."""
     args = ["issue", "create", "--title", title, "--body", body]
@@ -89,25 +75,25 @@ def issue_create(title: str, body: str, labels: Optional[List[str]] = None,
     return _run_gh(args, cwd=path)
 
 
-def issue_list(limit: int = 10, state: str = "open", path: Optional[str] = None) -> str:
+def issue_list(limit: int = 10, state: str = "open", path: str | None = None) -> str:
     """List issues in the repository.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["issue", "list", f"--limit={limit}", f"--state={state}"], cwd=path)
 
 
-def issue_view(issue_id: str, path: Optional[str] = None) -> str:
+def issue_view(issue_id: str, path: str | None = None) -> str:
     """View details of a specific issue, including all comment content.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["issue", "view", issue_id, "--comments"], cwd=path)
 
 
-def issue_comment(issue_id: str, body: str, path: Optional[str] = None) -> str:
+def issue_comment(issue_id: str, body: str, path: str | None = None) -> str:
     """Add a comment to an issue or pull request.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["issue", "comment", issue_id, "--body", body], cwd=path)
 
 
-def issue_close(issue_id: str, reason: str = "", path: Optional[str] = None) -> str:
+def issue_close(issue_id: str, reason: str = "", path: str | None = None) -> str:
     """Close an issue.
     reason: optional close reason (completed / not_planned / reopened).
     path: local repo directory (uses current working directory if omitted)."""
@@ -117,8 +103,7 @@ def issue_close(issue_id: str, reason: str = "", path: Optional[str] = None) -> 
     return _run_gh(args, cwd=path)
 
 
-def pr_create(title: str, body: str, base: str = "main", draft: bool = False,
-              path: Optional[str] = None) -> str:
+def pr_create(title: str, body: str, base: str = "main", draft: bool = False, path: str | None = None) -> str:
     """Create a pull request.
     path: local repo directory (uses current working directory if omitted)."""
     args = ["pr", "create", "--title", title, "--body", body, "--base", base]
@@ -127,19 +112,19 @@ def pr_create(title: str, body: str, base: str = "main", draft: bool = False,
     return _run_gh(args, cwd=path)
 
 
-def pr_list(limit: int = 10, state: str = "open", path: Optional[str] = None) -> str:
+def pr_list(limit: int = 10, state: str = "open", path: str | None = None) -> str:
     """List pull requests.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["pr", "list", f"--limit={limit}", f"--state={state}"], cwd=path)
 
 
-def pr_view(pr_id: str, path: Optional[str] = None) -> str:
+def pr_view(pr_id: str, path: str | None = None) -> str:
     """View details of a specific PR, including all comment content.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["pr", "view", pr_id, "--comments"], cwd=path)
 
 
-def pr_merge(pr_id: str, delete_branch: bool = True, path: Optional[str] = None) -> str:
+def pr_merge(pr_id: str, delete_branch: bool = True, path: str | None = None) -> str:
     """Merge a pull request.
     path: local repo directory (uses current working directory if omitted)."""
     args = ["pr", "merge", pr_id, "--merge"]
@@ -148,33 +133,28 @@ def pr_merge(pr_id: str, delete_branch: bool = True, path: Optional[str] = None)
     return _run_gh(args, cwd=path)
 
 
-def pr_status(path: Optional[str] = None) -> str:
+def pr_status(path: str | None = None) -> str:
     """Check the status of relevant pull requests.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["pr", "status"], cwd=path)
 
 
-def pr_checkout(pr_id: str, path: Optional[str] = None) -> str:
+def pr_checkout(pr_id: str, path: str | None = None) -> str:
     """Check out a pull request branch locally.
     path: local repo directory (uses current working directory if omitted)."""
     return _run_gh(["pr", "checkout", pr_id], cwd=path)
 
 
-def push(remote: str = "origin", branch: str = "main", path: Optional[str] = None) -> str:
+def push(remote: str = "origin", branch: str = "main", path: str | None = None) -> str:
     """Push local commits to remote.
     path: local repo directory (uses current working directory if omitted)."""
     try:
-        result = subprocess.run(
-            ["git", "push", remote, branch],
-            cwd=path,
-            capture_output=True,
-            text=True
-        )
+        result = subprocess.run(["git", "push", remote, branch], cwd=path, capture_output=True, text=True)
         if result.returncode != 0:
             return f"Error: {result.stderr.strip()}"
         return result.stdout.strip() or "Success"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e!s}"
 
 
 def repo_fork(repo_url: str) -> str:
@@ -187,7 +167,7 @@ def repo_clone(repo: str, path: str) -> str:
     return _run_gh(["repo", "clone", repo, path])
 
 
-def repo_view(repo: str = "", path: Optional[str] = None) -> str:
+def repo_view(repo: str = "", path: str | None = None) -> str:
     """View repository information.
     repo: owner/name or URL (omit to use repo inferred from path).
     path: local repo directory (uses current working directory if omitted)."""
@@ -212,6 +192,7 @@ def auth_check() -> str:
 
 
 # ── Public User Info Query ────────────────────────────────────────────────────
+
 
 def user_info(username: str) -> str:
     """Query the public profile of a GitHub user.
@@ -247,18 +228,14 @@ def user_info(username: str) -> str:
     return "\n".join(lines)
 
 
-def issue_author_info(issue_id: str, path: Optional[str] = None) -> str:
+def issue_author_info(issue_id: str, path: str | None = None) -> str:
     """Get the public GitHub profile of an issue's author.
 
     Fetches the issue to identify the author login, then queries the user's
     public profile via the GitHub API.
     issue_id: issue number (e.g. '42').
     path    : local repo directory (uses current working directory if omitted)."""
-    data, err = _run_gh_json(
-        ["issue", "view", issue_id,
-         "--json", "author,title,number,state,createdAt"],
-        cwd=path
-    )
+    data, err = _run_gh_json(["issue", "view", issue_id, "--json", "author,title,number,state,createdAt"], cwd=path)
     if err:
         return err
     if not isinstance(data, dict):
@@ -278,7 +255,7 @@ def issue_author_info(issue_id: str, path: Optional[str] = None) -> str:
     return header + user_info(login)
 
 
-def pr_author_info(pr_id: str, path: Optional[str] = None) -> str:
+def pr_author_info(pr_id: str, path: str | None = None) -> str:
     """Get the public GitHub profile of a pull request's author.
 
     Fetches the PR to identify the author login, then queries the user's
@@ -286,9 +263,7 @@ def pr_author_info(pr_id: str, path: Optional[str] = None) -> str:
     pr_id: pull request number (e.g. '7').
     path : local repo directory (uses current working directory if omitted)."""
     data, err = _run_gh_json(
-        ["pr", "view", pr_id,
-         "--json", "author,title,number,state,createdAt,headRefName,baseRefName"],
-        cwd=path
+        ["pr", "view", pr_id, "--json", "author,title,number,state,createdAt,headRefName,baseRefName"], cwd=path
     )
     if err:
         return err
@@ -310,8 +285,7 @@ def pr_author_info(pr_id: str, path: Optional[str] = None) -> str:
     return header + user_info(login)
 
 
-def repo_contributors(repo: str = "", limit: int = 30,
-                      path: Optional[str] = None) -> str:
+def repo_contributors(repo: str = "", limit: int = 30, path: str | None = None) -> str:
     """List contributors to the repository sorted by commit count.
 
     Shows login, contribution count, and account type for each contributor.
@@ -324,9 +298,7 @@ def repo_contributors(repo: str = "", limit: int = 30,
         return err
 
     per_page = min(limit, 100)
-    data, err = _run_gh_json(
-        ["api", f"repos/{repo}/contributors?per_page={per_page}&anon=false"]
-    )
+    data, err = _run_gh_json(["api", f"repos/{repo}/contributors?per_page={per_page}&anon=false"])
     if err:
         return err
     if not isinstance(data, list):
@@ -344,8 +316,7 @@ def repo_contributors(repo: str = "", limit: int = 30,
     return "\n".join(lines)
 
 
-def user_repo_activity(username: str, repo: str = "",
-                       path: Optional[str] = None) -> str:
+def user_repo_activity(username: str, repo: str = "", path: str | None = None) -> str:
     """Query a user's issues and pull requests in this repository.
 
     Useful for understanding a contributor's history before reviewing their
@@ -361,10 +332,7 @@ def user_repo_activity(username: str, repo: str = "",
     lines = [f"Activity of @{username} in {repo}:\n"]
 
     # Issues (GitHub /issues endpoint also returns PRs; exclude them)
-    issues_data, issues_err = _run_gh_json([
-        "api",
-        f"repos/{repo}/issues?creator={username}&state=all&per_page=20"
-    ])
+    issues_data, issues_err = _run_gh_json(["api", f"repos/{repo}/issues?creator={username}&state=all&per_page=20"])
     lines.append("── Issues ─────────────────────────────────────")
     if issues_err:
         lines.append(f"  {issues_err}")
@@ -372,9 +340,7 @@ def user_repo_activity(username: str, repo: str = "",
         real_issues = [i for i in issues_data if not i.get("pull_request")]
         if real_issues:
             for issue in real_issues[:10]:
-                lines.append(
-                    f"  #{issue['number']:>5} [{issue['state']:<6}]  {issue['title']}"
-                )
+                lines.append(f"  #{issue['number']:>5} [{issue['state']:<6}]  {issue['title']}")
             if len(real_issues) > 10:
                 lines.append(f"  … and {len(real_issues) - 10} more")
         else:
@@ -385,10 +351,7 @@ def user_repo_activity(username: str, repo: str = "",
     lines.append("")
 
     # Pull Requests — use search/issues API (supports author: filter for PRs)
-    pr_data, pr_err = _run_gh_json([
-        "api",
-        f"search/issues?q=repo:{repo}+type:pr+author:{username}&per_page=20"
-    ])
+    pr_data, pr_err = _run_gh_json(["api", f"search/issues?q=repo:{repo}+type:pr+author:{username}&per_page=20"])
     lines.append("── Pull Requests ───────────────────────────────")
     if pr_err:
         lines.append(f"  {pr_err}")
@@ -396,9 +359,7 @@ def user_repo_activity(username: str, repo: str = "",
         prs = pr_data.get("items", [])
         if prs:
             for pr in prs[:10]:
-                lines.append(
-                    f"  #{pr['number']:>5} [{pr['state']:<6}]  {pr['title']}"
-                )
+                lines.append(f"  #{pr['number']:>5} [{pr['state']:<6}]  {pr['title']}")
             if len(prs) > 10:
                 lines.append(f"  … and {len(prs) - 10} more")
         else:

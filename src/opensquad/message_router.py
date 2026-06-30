@@ -1,17 +1,18 @@
-# -*- coding: utf-8 -*-
 """
 Message router - decides how to handle group messages based on AI state.
 """
-import time
-from typing import Dict, Any
-import logging
 
-from opensquad.state_manager import get_state_manager
-from opensquad.sleep_controller import get_sleep_controller
+import logging
+import time
+from typing import Any
+
 from opensquad.input_hub import get_input_hub
-from opensquad.message_queue import get_message_queue, QueueMessage
+from opensquad.message_queue import QueueMessage, get_message_queue
+from opensquad.sleep_controller import get_sleep_controller
+from opensquad.state_manager import get_state_manager
 
 logger = logging.getLogger(__name__)
+
 
 class MessageRouter:
     """
@@ -29,12 +30,14 @@ class MessageRouter:
     """
 
     def __init__(self):
-        self._cooldown_until = 0.0   # cooldown expiry timestamp
+        self._cooldown_until = 0.0  # cooldown expiry timestamp
         self._cooldown_seconds = 10  # default cooldown duration in seconds
-        self._last_send_time = 0.0   # timestamp of the last group message sent
-        self._await_reply_seconds = 30  # reply-wait timeout in seconds (reduced from 120s to 30s to avoid long blocking)
+        self._last_send_time = 0.0  # timestamp of the last group message sent
+        self._await_reply_seconds = (
+            30  # reply-wait timeout in seconds (reduced from 120s to 30s to avoid long blocking)
+        )
 
-    def set_cooldown(self, seconds: float = None):
+    def set_cooldown(self, seconds: float | None = None):
         """Set the message-filter cooldown period (filter only, no wake trigger)."""
         dur = seconds if seconds is not None else self._cooldown_seconds
         self._cooldown_until = time.time() + dur
@@ -71,40 +74,32 @@ class MessageRouter:
         """Clear the awaiting-reply flag (call when a reply is received)."""
         self._last_send_time = 0.0
 
-    async def route_group_message(self, msg_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def route_group_message(self, msg_data: dict[str, Any]) -> dict[str, Any]:
         """
         Route a group message.
         Returns a result dict describing the action taken.
         """
-        from opensquad.state_manager import get_state_manager
-        from opensquad.sleep_controller import get_sleep_controller
-        from opensquad.input_hub import get_input_hub
-        from opensquad.message_queue import get_message_queue
 
         state_manager = get_state_manager()
         sleep_controller = get_sleep_controller()
         input_hub = get_input_hub()
         message_queue = get_message_queue()
-        
-        result = {
-            "action": "unknown",
-            "queued": False,
-            "pushed": False,
-            "woke_up": False,
-            "reason": ""
-        }
-        
+
+        result = {"action": "unknown", "queued": False, "pushed": False, "woke_up": False, "reason": ""}
+
         # Get current AI state
         ai_state = await state_manager.get_state()
         wake_mode = await state_manager.get_wake_mode()
-        
+
         # Check whether the message @-mentions the AI
         is_mentioned = MessageRouter._check_mention(msg_data)
         sender_name = msg_data.get("sender_name", "Unknown user")
         group_name = msg_data.get("group_name") or msg_data.get("source_name", "Unknown group")
         content = msg_data.get("content", "")[:50]  # first 50 chars
-        logger.info(f"[Router] ai_state={ai_state}, wake_mode={wake_mode}, is_mentioned={is_mentioned}, sender={sender_name}")
-        
+        logger.info(
+            f"[Router] ai_state={ai_state}, wake_mode={wake_mode}, is_mentioned={is_mentioned}, sender={sender_name}"
+        )
+
         # 1. In strict mode, non-@ messages are discarded — the agent never sees them.
         #    This applies in ALL states (idle/working/sleeping). Previously a sleeping
         #    exception let non-@ messages through while awaiting a reply, but that
@@ -113,17 +108,21 @@ class MessageRouter:
         #    agent back, so strict now filters non-@ unconditionally. If a user needs
         #    every message delivered (including while awaiting reply), use normal mode.
         if wake_mode == "strict" and not is_mentioned:
-            result.update({
-                "action": "filtered",
-                "queued": False,
-                "pushed": False,
-                "reason": "strict mode, not @-mentioned, message filtered and discarded (applies in all states incl. sleeping)"
-            })
-            logger.info(f"[Router] FILTERED (strict, not mentioned, state={ai_state}): [{group_name}] {sender_name}: {content}")
+            result.update(
+                {
+                    "action": "filtered",
+                    "queued": False,
+                    "pushed": False,
+                    "reason": "strict mode, not @-mentioned, message filtered and discarded (applies in all states incl. sleeping)",
+                }
+            )
+            logger.info(
+                f"[Router] FILTERED (strict, not mentioned, state={ai_state}): [{group_name}] {sender_name}: {content}"
+            )
             return result
-        
+
         # 2. Non-strict or @-mentioned: put into the message pipeline
-        
+
         queue_msg = QueueMessage(
             id=msg_data.get("id", f"msg_{time.time()}"),
             type="group",
@@ -135,126 +134,122 @@ class MessageRouter:
             timestamp=msg_data.get("timestamp", time.time()),
             mentions=msg_data.get("mentions", []),
             raw_data=msg_data,
-            images=msg_data.get("_image_paths", [])
+            images=msg_data.get("_image_paths", []),
         )
-        
+
         await message_queue.put(queue_msg)
         result["queued"] = True
-        
+
         # Receiving a group message means someone replied; clear the awaiting flag
         self.clear_await_reply()
-        
+
         # 3. Decide follow-up action based on state.
         # (Messages reaching here: @-mentioned / wake_mode=normal / sleeping-state non-@ allowed through)
-        
+
         if ai_state == "sleeping":
             wake_reason = f"group-message-{sender_name}"
             if is_mentioned:
                 wake_reason += "(@you)"
-            
+
             sleep_controller.wake_up(wake_reason)
-            
-            input_hub.push(
-                f"[wakeup-{wake_reason}]",
-                source="wake"
-            )
-            
-            result.update({
-                "action": "wake_from_sleep",
-                "pushed": True,
-                "woke_up": True,
-                "reason": wake_reason
-            })
+
+            input_hub.push(f"[wakeup-{wake_reason}]", source="wake")
+
+            result.update({"action": "wake_from_sleep", "pushed": True, "woke_up": True, "reason": wake_reason})
             logger.info(f"[Router] Wake from sleep: {wake_reason}")
-            
+
         elif ai_state == "working":
             if is_mentioned:
                 # @mention during working state: push trigger to ensure the message is not missed
                 source_label = f"group:{group_name}" if group_name else "chatpro"
-                input_hub.push(
-                    "__PROCESS_QUEUE__",
-                    source=source_label
+                input_hub.push("__PROCESS_QUEUE__", source=source_label)
+                result.update(
+                    {
+                        "action": "queue_mention_working",
+                        "pushed": True,
+                        "reason": "received @mention while working, pushed trigger to ensure delivery",
+                    }
                 )
-                result.update({
-                    "action": "queue_mention_working",
-                    "pushed": True,
-                    "reason": "received @mention while working, pushed trigger to ensure delivery"
-                })
                 logger.info(f"[Router] @mention during working, pushed trigger: {content}")
             else:
                 # normal mode non-@: message already queued; Runner turn loop will consume it
-                result.update({
-                    "action": "queue_notify",
-                    "pushed": False,
-                    "reason": "working+normal, message queued pending consumption"
-                })
+                result.update(
+                    {
+                        "action": "queue_notify",
+                        "pushed": False,
+                        "reason": "working+normal, message queued pending consumption",
+                    }
+                )
                 logger.info(f"[Router] Queued for working AI: {content}")
-                
+
         elif ai_state == "idle":
             if self.in_cooldown and not is_mentioned:
                 # In cooldown + not @-mentioned: only enqueue, do not trigger
                 remaining = self._cooldown_until - time.time()
-                result.update({
-                    "action": "queue_cooldown",
-                    "pushed": False,
-                    "reason": f"in cooldown ({remaining:.0f}s remaining), message queued"
-                })
+                result.update(
+                    {
+                        "action": "queue_cooldown",
+                        "pushed": False,
+                        "reason": f"in cooldown ({remaining:.0f}s remaining), message queued",
+                    }
+                )
                 logger.info(f"[Router] Cooldown active ({remaining:.0f}s left), queued: {content}")
             else:
                 # Cooldown expired or @-mentioned: trigger consumption
                 if is_mentioned and self.in_cooldown:
-                    logger.info(f"[Router] @mention overrides cooldown, triggering immediately")
-                
+                    logger.info("[Router] @mention overrides cooldown, triggering immediately")
+
                 # Use a meaningful source label (e.g. group:agent-chat-group) to guide the AI's reply
                 source_label = f"group:{group_name}" if group_name else "chatpro"
-                
-                input_hub.push(
-                    "__PROCESS_QUEUE__",
-                    source=source_label
+
+                input_hub.push("__PROCESS_QUEUE__", source=source_label)
+                result.update(
+                    {
+                        "action": "push_trigger",
+                        "pushed": True,
+                        "reason": "idle, triggering Runner to consume message queue",
+                    }
                 )
-                result.update({
-                    "action": "push_trigger",
-                    "pushed": True,
-                    "reason": "idle, triggering Runner to consume message queue"
-                })
                 logger.info(f"[Router] Trigger idle AI to process queue: {content}")
-        
+
         return result
-    
+
     @staticmethod
-    def _check_mention(msg_data: Dict) -> bool:
+    def _check_mention(msg_data: dict) -> bool:
         """Check whether the message @-mentions this agent (exact match against AI username/ID)."""
         # Must read the module attribute dynamically, not via a from...import binding.
         # agents_boot.py replaces bridge_module.bridge with the logged-in instance after startup;
         # only dynamic attribute access picks up the replaced value.
         try:
             import opensquad.bridge as _bridge_mod
+
             _bridge = _bridge_mod.bridge
             if _bridge is None:
                 return False  # Bridge not initialized yet
         except (ImportError, AttributeError):
             return False  # Bridge module not available
-        
+
         mentions = msg_data.get("mentions", [])
         content = msg_data.get("content", "").lower()
-        
+
         # AI identity markers (for exact matching)
         ai_user_id = (_bridge.user_id or "").lower()
         ai_user_name = (_bridge.user_name or "").lower()
-        
+
         # 1. Check whether the mentions list contains the AI's user_id or user_name
         if mentions:
             for m in mentions:
                 m_lower = m.lower() if isinstance(m, str) else ""
-                if m_lower and (m_lower == ai_user_id or m_lower == ai_user_name):
+                if m_lower and (m_lower in (ai_user_id, ai_user_name)):
                     return True
-        
+
         # 2. Fallback: search message text for @{agent_name} (own NAME only).
         # Do NOT text-match the user_id here — numeric/UUID ids are almost
         # never typed as @mentions and substring matching causes false
         # positives (e.g. discussing "user 12345678"). The user_id is already
         # covered by the exact mentions-list check above.
         import re
+
         names_to_check = set()
         if ai_user_name:
             names_to_check.add(ai_user_name)
@@ -267,6 +262,7 @@ class MessageRouter:
 
         return False
 
+
 # Global singleton
 message_router = MessageRouter()
 
@@ -277,5 +273,6 @@ def get_message_router(ctx=None):
     if ctx is not None:
         return ctx.message_router
     from opensquad._context import get_current_context
+
     ctx = get_current_context()
     return ctx.message_router if ctx is not None else message_router

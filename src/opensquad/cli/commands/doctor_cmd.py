@@ -1,17 +1,26 @@
-# -*- coding: utf-8 -*-
 """opensquad doctor — Diagnostic report for troubleshooting."""
+
 import json
 import os
 import socket
 import sys
-import time
 from datetime import datetime
 
 
-def _ok(msg):     return f"  \u2705 {msg}"
-def _warn(msg):   return f"  \u26A0 {msg}"
-def _err(msg):    return f"  \u274C {msg}"
-def _info(msg):   return f"  \u2139 {msg}"
+def _ok(msg):
+    return f"  \u2705 {msg}"
+
+
+def _warn(msg):
+    return f"  \u26a0 {msg}"
+
+
+def _err(msg):
+    return f"  \u274c {msg}"
+
+
+def _info(msg):
+    return f"  \u2139 {msg}"
 
 
 def _port_listening(host, port, timeout=1.0):
@@ -19,21 +28,23 @@ def _port_listening(host, port, timeout=1.0):
         s = socket.create_connection((host, port), timeout=timeout)
         s.close()
         return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return False
 
 
 def run_doctor(args):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  OpenSquad Doctor — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     from opensquad.system_config import syscfg
 
     issues = 0
 
     # ── 1. Python Environment ──
-    print("\u2501\u2501 Python Environment \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\u2501\u2501 Python Environment \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     py_ver = sys.version.split()[0]
     print(_ok(f"Python {py_ver} ({sys.executable})"))
     for pkg in ("fastapi", "uvicorn", "httpx", "openai", "lark_oapi", "psutil"):
@@ -46,7 +57,9 @@ def run_doctor(args):
             issues += 1
 
     # ── 2. Workspace ──
-    print("\n\u2501\u2501 Workspace \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Workspace \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     ws = syscfg.get_workspace()
     print(_info(f"Workspace: {ws}"))
     cfg_path = os.path.join(ws, "system_config.json")
@@ -56,7 +69,7 @@ def run_doctor(args):
     else:
         print(_ok(f"Config: {cfg_path}"))
         try:
-            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            with open(cfg_path, encoding="utf-8-sig") as f:
                 cfg = json.load(f)
             # Check key sections
             for section in ("hosts", "ports", "auth"):
@@ -65,6 +78,7 @@ def run_doctor(args):
                     issues += 1
             # Auto-discover all plugin services and their toggle status
             from opensquad.cli.commands.service_scan import discover_plugin_status
+
             plugins = discover_plugin_status()
             if plugins:
                 for p in plugins:
@@ -77,8 +91,11 @@ def run_doctor(args):
             issues += 1
 
     # ── 3. All Services (port scan, auto-discovered from plugins/) ──
-    print("\n\u2501\u2501 Services (Port Scan) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Services (Port Scan) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     from opensquad.cli.commands.service_scan import discover_all_services
+
     all_services = discover_all_services()
     port_issues = 0
     for name, port in all_services:
@@ -94,9 +111,12 @@ def run_doctor(args):
         print(_warn(f"{port_issues}/{len(all_services)} service(s) not running. Try: opensquad start"))
 
     # ── 4. Watchdog ──
-    print("\n\u2501\u2501 Watchdog \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Watchdog \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     try:
         import psutil
+
         found = False
         for proc in psutil.process_iter(["name", "cmdline"]):
             try:
@@ -107,7 +127,7 @@ def run_doctor(args):
                     # Show last few log lines
                     log_path = os.path.join(ws, "data", "logs", "watchdog.log")
                     if os.path.isfile(log_path):
-                        with open(log_path, "r", encoding="utf-8") as f:
+                        with open(log_path, encoding="utf-8") as f:
                             lines = [l.strip() for l in f.readlines() if l.strip()]
                         if lines:
                             print(_info(f"Last log: {lines[-1][:100]}"))
@@ -120,12 +140,14 @@ def run_doctor(args):
         print(_warn("psutil not installed, can't check watchdog"))
 
     # ── 5. Path Sanity (install dir vs workspace) ──
-    print("\n\u2501\u2501 Path Sanity \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Path Sanity \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     install_root = syscfg.get_builtin_root()
     # Check: data should NOT be written to install dir
     install_data = os.path.join(install_root, "data")
     if os.path.isdir(install_data):
-        for root, dirs, files in os.walk(install_data):
+        for root, _dirs, files in os.walk(install_data):
             dbs = [f for f in files if f.endswith(".db") or f.endswith(".sqlite")]
             logs = [f for f in files if f.endswith(".log")]
             if dbs or logs:
@@ -138,9 +160,12 @@ def run_doctor(args):
         print(_ok("No data in install directory"))
 
     # ── 6. Disk ──
-    print("\n\u2501\u2501 Disk \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Disk \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     try:
         import shutil
+
         usage = shutil.disk_usage(ws)
         gb_free = usage.free / (1024**3)
         gb_total = usage.total / (1024**3)
@@ -153,11 +178,13 @@ def run_doctor(args):
         print(_warn("Could not check disk"))
 
     # ── 6. Recent Error Logs (tail 5 lines from gateway websocket.log) ──
-    print("\n\u2501\u2501 Recent Errors (Gateway) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+    print(
+        "\n\u2501\u2501 Recent Errors (Gateway) \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+    )
     ws_log = os.path.join(ws, "data", "logs", "gateway", "websocket.log")
     if os.path.isfile(ws_log):
         try:
-            with open(ws_log, "r", encoding="utf-8", errors="replace") as f:
+            with open(ws_log, encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             error_lines = [l.strip() for l in lines if " ERROR " in l or " WARNING " in l][-5:]
             if error_lines:
@@ -172,9 +199,9 @@ def run_doctor(args):
         print(_info("No gateway log found (service may not have started yet)"))
 
     # ── Summary ──
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if issues == 0:
-        print(f"  \u2705 All checks passed. System is healthy.")
+        print("  \u2705 All checks passed. System is healthy.")
     else:
-        print(f"  \u26A0 {issues} issue(s) found. Review the items marked \u274C above.")
-    print(f"{'='*60}\n")
+        print(f"  \u26a0 {issues} issue(s) found. Review the items marked \u274c above.")
+    print(f"{'=' * 60}\n")

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Timezone utility: ALL timestamps in the system are stored and transmitted as UTC.
 
@@ -12,21 +11,21 @@ Migration note:
   - Legacy code used beijing_now() (UTC+8), datetime.now() (local), datetime.utcnow() (naive UTC).
   - New code should use functions from this module.
 """
+
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone, timedelta
-from typing import Union
+from datetime import datetime, timedelta, timezone
 
 __all__ = [
+    "format_beijing_iso",  # for display-only, not storage
+    "format_iso",
+    "monotonic_ms",
+    "utc_from_iso",
+    "utc_from_timestamp",
     "utc_now",
     "utc_now_iso",
     "utc_now_ms",
-    "utc_from_iso",
-    "utc_from_timestamp",
-    "format_iso",
-    "format_beijing_iso",  # for display-only, not storage
-    "monotonic_ms",
 ]
 
 
@@ -67,7 +66,7 @@ def utc_from_iso(iso_str: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def utc_from_timestamp(ts: Union[int, float]) -> datetime:
+def utc_from_timestamp(ts: int | float) -> datetime:
     """Convert Unix timestamp (seconds or milliseconds) to UTC datetime."""
     if ts > 1e11:  # likely milliseconds
         ts = ts / 1000.0

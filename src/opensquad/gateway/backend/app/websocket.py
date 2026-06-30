@@ -1,19 +1,13 @@
 """
 WebSocket connection management and real-time communication
 """
-import json
-import asyncio
-from typing import Dict, List, Set
-from datetime import datetime
 
 from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 
-from app.models import User, Group, Message, UserGroupSettings, UserStatus, beijing_now, beijing_timestamp
-from app.schemas import WebSocketMessage, TypingIndicator, PresenceUpdate
 from app.database import AsyncSessionLocal
 from app.json_utils import make_json_safe
+from app.models import Message, User, UserGroupSettings, UserStatus, beijing_now, beijing_timestamp
 
 
 class ConnectionManager:
@@ -21,13 +15,13 @@ class ConnectionManager:
 
     def __init__(self):
         # user_id -> List[WebSocket] connection list (supports multiple devices)
-        self.active_connections: Dict[str, List[WebSocket]] = {}
+        self.active_connections: dict[str, list[WebSocket]] = {}
         # connection_id -> user_id reverse lookup
-        self.connection_to_user: Dict[int, str] = {}
+        self.connection_to_user: dict[int, str] = {}
         # group_id -> set of user_ids
-        self.group_subscriptions: Dict[str, Set[str]] = {}
+        self.group_subscriptions: dict[str, set[str]] = {}
         # user_id -> set of group_ids
-        self.user_groups: Dict[str, Set[str]] = {}
+        self.user_groups: dict[str, set[str]] = {}
 
     async def connect(self, websocket: WebSocket, user_id: str):
         """Establish connection - supports multiple devices for the same user"""
@@ -41,13 +35,13 @@ class ConnectionManager:
         # Clean up stale disconnected connections
         active_conns = []
         for conn in self.active_connections[user_id]:
-            if hasattr(conn, 'client_state') and conn.client_state.name == 'CONNECTED':
+            if hasattr(conn, "client_state") and conn.client_state.name == "CONNECTED":
                 active_conns.append(conn)
             else:
                 conn_id = id(conn)
                 if conn_id in self.connection_to_user:
                     del self.connection_to_user[conn_id]
-        
+
         self.active_connections[user_id] = active_conns
 
         self.active_connections[user_id].append(websocket)
@@ -123,7 +117,7 @@ class ConnectionManager:
         for websocket in disconnected:
             await self.disconnect(websocket, user_id)
 
-    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str = None):
+    async def broadcast_to_group(self, group_id: str, message: dict, exclude_user: str | None = None):
         """Broadcast a message to a group - sends to all devices of each user"""
         if group_id not in self.group_subscriptions:
             return
@@ -137,11 +131,11 @@ class ConnectionManager:
             if user_id in self.active_connections:
                 conns = self.active_connections[user_id]
                 disconnected = []
-                for i, websocket in enumerate(conns):
+                for _i, websocket in enumerate(conns):
                     try:
                         safe_message = make_json_safe(message)
                         await websocket.send_json(safe_message)
-                    except Exception as e:
+                    except Exception:
                         disconnected.append(websocket)
 
                 for websocket in disconnected:
@@ -149,14 +143,7 @@ class ConnectionManager:
 
     async def broadcast_presence(self, user_id: str, status: str):
         """Broadcast a user's status change to all devices of all users"""
-        message = {
-            "type": "presence",
-            "data": {
-                "user_id": user_id,
-                "status": status
-            },
-            "timestamp": beijing_timestamp()
-        }
+        message = {"type": "presence", "data": {"user_id": user_id, "status": status}, "timestamp": beijing_timestamp()}
 
         # Use list(self.active_connections.items()) to create a copy
         for uid, connections in list(self.active_connections.items()):
@@ -177,13 +164,8 @@ class ConnectionManager:
         """Broadcast typing status"""
         message = {
             "type": "typing",
-            "data": {
-                "group_id": group_id,
-                "user_id": user_id,
-                "user_name": user_name,
-                "is_typing": is_typing
-            },
-            "timestamp": beijing_timestamp()
+            "data": {"group_id": group_id, "user_id": user_id, "user_name": user_name, "is_typing": is_typing},
+            "timestamp": beijing_timestamp(),
         }
         await self.broadcast_to_group(group_id, message, exclude_user=user_id)
 
@@ -211,7 +193,7 @@ class ConnectionManager:
                     await websocket.send_json(message)
                 except Exception:
                     disconnected.append(websocket)
-            
+
             # Clean up disconnected connections
             for websocket in disconnected:
                 if websocket in self.active_connections[user_id]:
@@ -219,7 +201,7 @@ class ConnectionManager:
                 conn_id = id(websocket)
                 if conn_id in self.connection_to_user:
                     del self.connection_to_user[conn_id]
-            
+
             # If all connections are gone, clean up the user
             if not self.active_connections[user_id]:
                 del self.active_connections[user_id]
@@ -253,19 +235,17 @@ async def handle_websocket(websocket: WebSocket, token: str):
         if user is None:
             await websocket.close(code=4002, reason="User not found")
             return
-        user_name = user.name or user.id  # fallback to id if name is empty
 
         # Send connection success message
         try:
-            await websocket.send_json({
-                "type": "connected",
-                "data": {
-                    "user_id": user_id,
-                    "message": "Connected to chat server"
-                },
-                "timestamp": beijing_timestamp()
-            })
-        except Exception as e:
+            await websocket.send_json(
+                {
+                    "type": "connected",
+                    "data": {"user_id": user_id, "message": "Connected to chat server"},
+                    "timestamp": beijing_timestamp(),
+                }
+            )
+        except Exception:
             return
 
         # Message processing loop
@@ -276,15 +256,14 @@ async def handle_websocket(websocket: WebSocket, token: str):
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                await websocket.send_json({
-                    "type": "error",
-                    "data": {"message": str(e)},
-                    "timestamp": beijing_timestamp()
-                })
+                await websocket.send_json(
+                    {"type": "error", "data": {"message": str(e)}, "timestamp": beijing_timestamp()}
+                )
 
     except Exception as e:
         print(f"[WebSocket] Error in handle_websocket for user {user_id}: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         await manager.disconnect(websocket, user_id)
@@ -300,11 +279,13 @@ async def handle_message(user_id: str, data: dict, websocket: WebSocket):
         group_id = msg_data.get("group_id")
         if group_id:
             await manager.subscribe_to_group(user_id, group_id)
-            await websocket.send_json({
-                "type": "joined" if msg_type == "join_group" else "subscribed",
-                "data": {"group_id": group_id},
-                "timestamp": beijing_timestamp()
-            })
+            await websocket.send_json(
+                {
+                    "type": "joined" if msg_type == "join_group" else "subscribed",
+                    "data": {"group_id": group_id},
+                    "timestamp": beijing_timestamp(),
+                }
+            )
 
     elif msg_type == "unsubscribe":
         # Unsubscribe from a group
@@ -330,11 +311,7 @@ async def handle_message(user_id: str, data: dict, websocket: WebSocket):
 
     elif msg_type == "ping":
         # Heartbeat response
-        await websocket.send_json({
-            "type": "pong",
-            "data": {},
-            "timestamp": beijing_timestamp()
-        })
+        await websocket.send_json({"type": "pong", "data": {}, "timestamp": beijing_timestamp()})
 
     elif msg_type == "read":
         # Mark messages as read
@@ -344,16 +321,13 @@ async def handle_message(user_id: str, data: dict, websocket: WebSocket):
             await mark_messages_read(user_id, group_id, message_id)
 
 
-async def mark_messages_read(user_id: str, group_id: str, last_message_id: str = None):
+async def mark_messages_read(user_id: str, group_id: str, last_message_id: str | None = None):
     """Mark group messages as read"""
     async with AsyncSessionLocal() as db:
         # Update user group settings
         result = await db.execute(
             select(UserGroupSettings).where(
-                and_(
-                    UserGroupSettings.user_id == user_id,
-                    UserGroupSettings.group_id == group_id
-                )
+                and_(UserGroupSettings.user_id == user_id, UserGroupSettings.group_id == group_id)
             )
         )
         settings = result.scalar_one_or_none()
@@ -368,10 +342,11 @@ async def mark_messages_read(user_id: str, group_id: str, last_message_id: str =
 
 async def notify_new_message(group_id: str, message: dict, sender_id: str):
     """Notify the group of a new message - auto-inject sender name and embed quoted message summary"""
-    from app.database import AsyncSessionLocal
-    from app.models import User, Message, Attachment
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
 
     # Fetch sender name
     sender_name = "Unknown"
@@ -390,9 +365,7 @@ async def notify_new_message(group_id: str, message: dict, sender_id: str):
         try:
             async with AsyncSessionLocal() as db:
                 r = await db.execute(
-                    select(Message)
-                    .where(Message.id == reply_to_id)
-                    .options(selectinload(Message.attachments))
+                    select(Message).where(Message.id == reply_to_id).options(selectinload(Message.attachments))
                 )
                 reply_msg = r.scalar_one_or_none()
                 if reply_msg:
@@ -400,10 +373,7 @@ async def notify_new_message(group_id: str, message: dict, sender_id: str):
                     sr = await db.execute(select(User).where(User.id == reply_msg.sender_id))
                     reply_sender = sr.scalar_one_or_none()
                     # Build attachment summary list
-                    att_list = [
-                        {"name": a.name, "type": a.type, "url": a.url}
-                        for a in (reply_msg.attachments or [])
-                    ]
+                    att_list = [{"name": a.name, "type": a.type, "url": a.url} for a in (reply_msg.attachments or [])]
                     message["reply_to_message"] = {
                         "id": reply_msg.id,
                         "sender_name": reply_sender.name if reply_sender else "Unknown",
@@ -415,30 +385,25 @@ async def notify_new_message(group_id: str, message: dict, sender_id: str):
         except Exception as _e:
             pass  # Failure to fetch the quoted summary does not affect the main flow
 
-    await manager.broadcast_to_group(group_id, {
-        "type": "new_message",
-        "data": message,
-        "timestamp": beijing_timestamp()
-    })
+    await manager.broadcast_to_group(
+        group_id, {"type": "new_message", "data": message, "timestamp": beijing_timestamp()}
+    )
 
 
 async def notify_message_update(group_id: str, message: dict):
     """Notify of a message update (edit, delete, pin)"""
-    await manager.broadcast_to_group(group_id, {
-        "type": "message_updated",
-        "data": message,
-        "timestamp": beijing_timestamp()
-    })
+    await manager.broadcast_to_group(
+        group_id, {"type": "message_updated", "data": message, "timestamp": beijing_timestamp()}
+    )
 
 
 async def notify_unread_update(user_id: str, group_id: str, unread_count: int, has_mention: bool):
     """Notify a user of unread message updates"""
-    await manager.send_personal_message(user_id, {
-        "type": "unread_update",
-        "data": {
-            "group_id": group_id,
-            "unread_count": unread_count,
-            "has_unread_mention": has_mention
+    await manager.send_personal_message(
+        user_id,
+        {
+            "type": "unread_update",
+            "data": {"group_id": group_id, "unread_count": unread_count, "has_unread_mention": has_mention},
+            "timestamp": beijing_timestamp(),
         },
-        "timestamp": beijing_timestamp()
-    })
+    )

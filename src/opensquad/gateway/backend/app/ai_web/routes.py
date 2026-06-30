@@ -7,55 +7,73 @@ HTTP APIs for the frontend:
   - Image upload
   - Admin management (proxy to launcher.py)
 """
-import os
-from opensquad.system_config import syscfg
-from typing import Optional, Any, List
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Body, UploadFile, File, Request
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
+
+import ast
 import asyncio
+import base64
+import io
+import json
 import logging
-import httpx
-import uuid
 import os
 import re
-import json
-import io
-import zipfile
-import time
 import shutil
-import ast
-import hashlib
-import base64
-import ssl
+import time
+import uuid
+import zipfile
+
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
+
+from opensquad.system_config import syscfg
 
 # SSL context for GitHub API calls (Windows may lack proper CA certificates)
 # Default to "1" (verify SSL). Set OPENQUAD_SSL_VERIFY="0" to disable in dev/air-gapped environments.
 _SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
-from datetime import timezone, datetime
+from datetime import datetime, timezone
 
 # Import gateway authentication
 from app.api import get_current_user_dep
 from app.models import User
-
-from .registry import registry
-from .sessions import gateway_session_cache
-from .agent_sessions import get_reader as get_agent_session_reader, async_get_reader as async_get_agent_session_reader
-from .audit_routes import router as audit_router
-from .websocket import launcher_handler
-from . import model_preset_service
+from opensquad.collab_board import (
+    append_public_discussion as collab_board_append_public_discussion,
+)
+from opensquad.collab_board import (
+    create_task as collab_board_create_task,
+)
+from opensquad.collab_board import (
+    delete_item as collab_board_delete_item,
+)
+from opensquad.collab_board import (
+    delete_task as collab_board_delete_task,
+)
 from opensquad.collab_board import (
     list_items as collab_board_list_items,
-    list_tasks as collab_board_list_tasks,
-    create_task as collab_board_create_task,
-    update_task as collab_board_update_task,
-    delete_task as collab_board_delete_task,
-    upsert_item as collab_board_upsert_item,
-    append_public_discussion as collab_board_append_public_discussion,
-    delete_item as collab_board_delete_item,
-    save_plan_snapshot as collab_board_save_plan_snapshot,
+)
+from opensquad.collab_board import (
     list_plan_snapshots as collab_board_list_plan_snapshots,
 )
+from opensquad.collab_board import (
+    list_tasks as collab_board_list_tasks,
+)
+from opensquad.collab_board import (
+    save_plan_snapshot as collab_board_save_plan_snapshot,
+)
+from opensquad.collab_board import (
+    update_task as collab_board_update_task,
+)
+from opensquad.collab_board import (
+    upsert_item as collab_board_upsert_item,
+)
+
+from . import model_preset_service
+from .agent_sessions import async_get_reader as async_get_agent_session_reader
+from .audit_routes import router as audit_router
+from .registry import registry
+from .sessions import gateway_session_cache
+from .websocket import launcher_handler
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +104,7 @@ def _normalize_session_message(msg: dict) -> dict:
         out["images"] = [
             (i if isinstance(i, str) else (i.get("url") or i.get("path") or i.get("src") or ""))
             for i in out["images"]
-            if isinstance(i, str) or isinstance(i, dict)
+            if isinstance(i, str | dict)
         ]
         out["images"] = [u for u in out["images"] if isinstance(u, str) and u.strip()]
     if not isinstance(out.get("attachments"), list):
@@ -98,7 +116,7 @@ def _normalize_session_message(msg: dict) -> dict:
         out["images"] = [
             (i if isinstance(i, str) else (i.get("url") or i.get("path") or i.get("src") or ""))
             for i in extra.get("images")
-            if isinstance(i, str) or isinstance(i, dict)
+            if isinstance(i, str | dict)
         ]
         out["images"] = [u for u in out["images"] if isinstance(u, str) and u.strip()]
     if not out["attachments"] and isinstance(extra.get("attachments"), list):
@@ -111,34 +129,38 @@ def _normalize_session_message(msg: dict) -> dict:
     content_text = out.get("content") or ""
     parsed_files = []
     for m in re.finditer(r"\[File:\s*(.*?)\]\((.*?)\)", content_text):
-      name = (m.group(1) or "file").strip()
-      url = (m.group(2) or "").strip()
-      if not url:
-          continue
-      lower = url.lower()
-      is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
-      is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
-      is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
-      parsed_files.append({
-          "original_name": name,
-          "url": url,
-          "is_image": is_image,
-          "is_audio": is_audio,
-          "is_video": is_video,
-      })
+        name = (m.group(1) or "file").strip()
+        url = (m.group(2) or "").strip()
+        if not url:
+            continue
+        lower = url.lower()
+        is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
+        is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
+        is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+        parsed_files.append(
+            {
+                "original_name": name,
+                "url": url,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     # Also parse <image>...</image> markers commonly used by runner/session text.
     for m in re.finditer(r"<image>(.*?)</image>", content_text, flags=re.IGNORECASE | re.DOTALL):
         url = (m.group(1) or "").strip()
         if not url:
             continue
-        parsed_files.append({
-            "original_name": "image",
-            "url": url,
-            "is_image": True,
-            "is_audio": False,
-            "is_video": False,
-        })
+        parsed_files.append(
+            {
+                "original_name": "image",
+                "url": url,
+                "is_image": True,
+                "is_audio": False,
+                "is_video": False,
+            }
+        )
 
     if parsed_files and not out["files"]:
         out["files"] = parsed_files
@@ -146,7 +168,8 @@ def _normalize_session_message(msg: dict) -> dict:
     # Derive image urls from files when needed
     if not out["images"] and out["files"]:
         out["images"] = [
-            (f.get("url") or f.get("path") or f.get("src")) for f in out["files"]
+            (f.get("url") or f.get("path") or f.get("src"))
+            for f in out["files"]
             if isinstance(f, dict)
             and (f.get("url") or f.get("path") or f.get("src"))
             and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/"))
@@ -173,7 +196,7 @@ def _normalize_session_message(msg: dict) -> dict:
     return out
 
 
-def _normalize_session_payload(session: Optional[dict]) -> Optional[dict]:
+def _normalize_session_payload(session: dict | None) -> dict | None:
     """Normalize a session payload so frontend can rely on one schema."""
     if not isinstance(session, dict):
         return session
@@ -191,6 +214,7 @@ def _normalize_session_payload(session: Optional[dict]) -> Optional[dict]:
         out["archived_events"] = []
     return out
 
+
 # Launcher management API address - from system_config.json
 LAUNCHER_URL = syscfg.launcher_url()
 _REPO_ROOT = syscfg.project_root()
@@ -201,24 +225,25 @@ router.include_router(audit_router)
 
 class ConfigUpdateRequest(BaseModel):
     """Configuration update request"""
-    system_prompt: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = None
+
+    system_prompt: str | None = None
+    model: str | None = None
+    temperature: float | None = None
 
 
 @router.get("/agents")
 async def list_agents(
-    category: str = None,
-    status: str = None,
-    search: str = None,
-    current_user: User = Depends(get_current_user_dep)
+    category: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    current_user: User = Depends(get_current_user_dep),
 ):
     """
     Get Agent list
     Returns Agent list categorized by type
     """
     agents = registry.list_agents(status=status, agent_type=category)
-    
+
     # Group by type
     categorized = {}
     for agent in agents:
@@ -227,39 +252,35 @@ async def list_agents(
             categorized[agent_type] = {
                 "name": _get_category_name(agent_type),
                 "icon": _get_category_icon(agent_type),
-                "agents": []
+                "agents": [],
             }
-        
-        categorized[agent_type]["agents"].append({
-            "id": agent.agent_id,
-            "name": agent.agent_name,
-            "type": agent_type,
-            "capabilities": agent.capabilities,
-            "description": agent.description,
-            "status": agent.status,
-            "load_percent": agent.load_percent,
-            "today_chats": agent.today_chats
-        })
-    
+
+        categorized[agent_type]["agents"].append(
+            {
+                "id": agent.agent_id,
+                "name": agent.agent_name,
+                "type": agent_type,
+                "capabilities": agent.capabilities,
+                "description": agent.description,
+                "status": agent.status,
+                "load_percent": agent.load_percent,
+                "today_chats": agent.today_chats,
+            }
+        )
+
     # Get stats
     stats = registry.get_stats()
-    
-    return {
-        "categories": categorized,
-        "stats": stats
-    }
+
+    return {"categories": categorized, "stats": stats}
 
 
 @router.get("/agents/{agent_id}")
-async def get_agent(
-    agent_id: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_agent(agent_id: str, current_user: User = Depends(get_current_user_dep)):
     """Get details for a single Agent"""
     agent = registry.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
-    
+
     return {
         "id": agent.agent_id,
         "name": agent.agent_name,
@@ -270,59 +291,49 @@ async def get_agent(
         "load_percent": agent.load_percent,
         "today_chats": agent.today_chats,
         "total_chats": agent.total_chats,
-        "registered_at": agent.registered_at
+        "registered_at": agent.registered_at,
     }
 
 
 @router.get("/sessions")
-async def get_user_sessions(
-    agent_id: str = None,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_user_sessions(agent_id: str | None = None, current_user: User = Depends(get_current_user_dep)):
     """Get session list for the current user"""
     sessions = await gateway_session_cache.async_get_user_sessions(current_user.id)
-    
+
     result = []
     for session in sessions:
         # Get Agent info
         agent = registry.get_agent(session["agent_id"])
         agent_name = agent.agent_name if agent else "Unknown"
-        
-        result.append({
-            "session_key": session["session_key"],
-            "agent_id": session["agent_id"],
-            "agent_name": agent_name,
-            "message_count": session["message_count"],
-            "last_message": session["last_message"],
-            "updated_at": session["updated_at"],
-            "created_at": session["created_at"]
-        })
-    
+
+        result.append(
+            {
+                "session_key": session["session_key"],
+                "agent_id": session["agent_id"],
+                "agent_name": agent_name,
+                "message_count": session["message_count"],
+                "last_message": session["last_message"],
+                "updated_at": session["updated_at"],
+                "created_at": session["created_at"],
+            }
+        )
+
     return {"sessions": result}
 
 
 @router.get("/sessions/{agent_id}/history")
 async def get_session_history(
-    agent_id: str,
-    limit: int = Query(50, ge=1, le=200),
-    current_user: User = Depends(get_current_user_dep)
+    agent_id: str, limit: int = Query(50, ge=1, le=200), current_user: User = Depends(get_current_user_dep)
 ):
     """Get session history with a specific Agent"""
     # Check permissions (can only view own sessions)
     history = await gateway_session_cache.async_get_history(current_user.id, agent_id, limit)
-    
-    return {
-        "agent_id": agent_id,
-        "history": history,
-        "count": len(history)
-    }
+
+    return {"agent_id": agent_id, "history": history, "count": len(history)}
 
 
 @router.post("/sessions/{agent_id}/clear")
-async def clear_session(
-    agent_id: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def clear_session(agent_id: str, current_user: User = Depends(get_current_user_dep)):
     """Clear session history with a specific Agent"""
     await gateway_session_cache.async_clear_session(current_user.id, agent_id)
     return {"message": "Session cleared"}
@@ -330,9 +341,7 @@ async def clear_session(
 
 @router.post("/agents/{agent_id}/config")
 async def update_agent_config(
-    agent_id: str,
-    config: ConfigUpdateRequest,
-    current_user: User = Depends(get_current_user_dep)
+    agent_id: str, config: ConfigUpdateRequest, current_user: User = Depends(get_current_user_dep)
 ):
     """
     Update Agent config (hot reload)
@@ -342,10 +351,10 @@ async def update_agent_config(
     agent = registry.get_agent(agent_id)
     if not agent:
         raise HTTPException(404, "Agent not found")
-    
+
     if agent.status == "offline":
         raise HTTPException(400, "Agent is offline")
-    
+
     # Build config update command
     update_config = {}
     if config.system_prompt is not None:
@@ -354,17 +363,15 @@ async def update_agent_config(
         update_config["model"] = config.model
     if config.temperature is not None:
         update_config["temperature"] = config.temperature
-    
+
     if not update_config:
         raise HTTPException(400, "No config to update")
-    
+
     # Send command to Agent
-    success = await registry.send_to_agent(agent_id, {
-        "type": "command",
-        "command": "update_config",
-        "config": update_config
-    })
-    
+    success = await registry.send_to_agent(
+        agent_id, {"type": "command", "command": "update_config", "config": update_config}
+    )
+
     if success:
         return {"message": "Config update sent to agent"}
     else:
@@ -372,17 +379,12 @@ async def update_agent_config(
 
 
 @router.get("/stats")
-async def get_stats(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def get_stats(current_user: User = Depends(get_current_user_dep)):
     """Get system statistics"""
     agent_stats = registry.get_stats()
     session_stats = await gateway_session_cache.async_get_stats()
 
-    return {
-        "agents": agent_stats,
-        "sessions": session_stats
-    }
+    return {"agents": agent_stats, "sessions": session_stats}
 
 
 def _get_current_version() -> str:
@@ -408,6 +410,7 @@ def _get_current_version() -> str:
     # 1. importlib.metadata — canonical, post-install source of truth.
     try:
         from importlib.metadata import version as _pkg_version
+
         v = _pkg_version("opensquad")
         if v and v != "0.0.0":
             return v
@@ -416,7 +419,8 @@ def _get_current_version() -> str:
 
     # 2. opensquad.__version__ — dev / source-tree fallback.
     try:
-        from opensquad import __version__ as v  # noqa: F401
+        from opensquad import __version__ as v
+
         if v and v != "unknown":
             return v
     except Exception:
@@ -434,11 +438,13 @@ def _compare_versions(current: str, latest: str) -> bool:
         return False
     try:
         from packaging.version import Version
+
         return Version(latest) > Version(current)
     except Exception:
         # Fallback: compare numeric dot-separated parts
         def _parts(v: str):
             return tuple(int(x) for x in v.split(".") if x.isdigit())
+
         return _parts(latest) > _parts(current)
 
 
@@ -512,20 +518,14 @@ def _get_category_name(agent_type: str) -> str:
         "writer": "Writing & Creation",
         "analyst": "Data Analysis",
         "general": "General Assistant",
-        "translator": "Translation Services"
+        "translator": "Translation Services",
     }
     return names.get(agent_type, "Other")
 
 
 def _get_category_icon(agent_type: str) -> str:
     """Get category icon"""
-    icons = {
-        "coder": "💻",
-        "writer": "✍️",
-        "analyst": "📊",
-        "general": "🤖",
-        "translator": "🌐"
-    }
+    icons = {"coder": "💻", "writer": "✍️", "analyst": "📊", "general": "🤖", "translator": "🌐"}
     return icons.get(agent_type, "🔧")
 
 
@@ -533,7 +533,8 @@ def _get_category_icon(agent_type: str) -> str:
 # Admin Management API — proxy to launcher.py :9600
 # ============================================================
 
-async def _proxy_get(path: str, params: dict = None, launcher_url: str = None) -> dict:
+
+async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | None = None) -> dict:
     """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     # WS tunnel: no inbound port needed on home machine
     if launcher_url is None and launcher_handler.has_connections():
@@ -541,6 +542,7 @@ async def _proxy_get(path: str, params: dict = None, launcher_url: str = None) -
         full_path = path
         if params:
             from urllib.parse import urlencode
+
             full_path = f"{path}?{urlencode(params)}"
         try:
             return await launcher_handler.rpc(node_id, "GET", full_path, timeout=5.0)
@@ -568,7 +570,7 @@ async def _proxy_get(path: str, params: dict = None, launcher_url: str = None) -
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_post(path: str, json: dict = None, launcher_url: str = None) -> dict:
+async def _proxy_post(path: str, json: dict | None = None, launcher_url: str | None = None) -> dict:
     """POST proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     if launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
@@ -596,7 +598,7 @@ async def _proxy_post(path: str, json: dict = None, launcher_url: str = None) ->
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_put(path: str, json_body: dict = None, launcher_url: str = None) -> dict:
+async def _proxy_put(path: str, json_body: dict | None = None, launcher_url: str | None = None) -> dict:
     """PUT proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     if launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
@@ -624,7 +626,7 @@ async def _proxy_put(path: str, json_body: dict = None, launcher_url: str = None
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_delete(path: str, launcher_url: str = None) -> dict:
+async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
     """DELETE proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     if launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
@@ -653,9 +655,7 @@ async def _proxy_delete(path: str, launcher_url: str = None) -> dict:
 
 
 @router.get("/admin/agents")
-async def admin_list_agents(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
     """
     Admin panel - Get all Agent list
     Merge launcher process status + Gateway registry online status
@@ -687,55 +687,57 @@ async def admin_list_agents(
         agent_type = agent.get("agent_type") or agent_config.get("agent_type", "general")
         description = agent.get("description") or agent_config.get("description", "")
 
-        merged.append({
-            # launcher process info
-            "dir_name": agent.get("dir_name", ""),
-            "agent_id": agent_id,
-            "agent_name": agent.get("agent_name", ""),
-            "agent_type": agent_type,
-            "description": description,
-            "process_status": process_status,
-            "pid": agent.get("pid"),
-            "started_at": agent.get("started_at"),
-            "restart_count": agent.get("restart_count", 0),
-            # registry online info
-            "registry_online": reg is not None and reg.status != "offline" if reg else False,
-            "registry_status": reg.status if reg else "offline",
-            "load_percent": reg.load_percent if reg else 0,
-            "today_chats": reg.today_chats if reg else 0,
-            # token consumption stats
-            "token_stats": agent.get("token_stats"),
-            # Group chat account profile (name, avatar)
-            "chat_profile": agent.get("chat_profile"),
-        })
+        merged.append(
+            {
+                # launcher process info
+                "dir_name": agent.get("dir_name", ""),
+                "agent_id": agent_id,
+                "agent_name": agent.get("agent_name", ""),
+                "agent_type": agent_type,
+                "description": description,
+                "process_status": process_status,
+                "pid": agent.get("pid"),
+                "started_at": agent.get("started_at"),
+                "restart_count": agent.get("restart_count", 0),
+                # registry online info
+                "registry_online": reg is not None and reg.status != "offline" if reg else False,
+                "registry_status": reg.status if reg else "offline",
+                "load_percent": reg.load_percent if reg else 0,
+                "today_chats": reg.today_chats if reg else 0,
+                # token consumption stats
+                "token_stats": agent.get("token_stats"),
+                # Group chat account profile (name, avatar)
+                "chat_profile": agent.get("chat_profile"),
+            }
+        )
 
     # If registry has Agents not tracked by launcher (e.g. started directly via boot.py)
     for agent_id, reg in registry_map.items():
-        merged.append({
-            "dir_name": "",
-            "agent_id": reg.agent_id,
-            "agent_name": reg.agent_name,
-            "agent_type": reg.agent_type,
-            "description": reg.description,
-            "process_status": "external",
-            "pid": None,
-            "started_at": reg.registered_at,
-            "restart_count": 0,
-            "registry_online": reg.status != "offline",
-            "registry_status": reg.status,
-            "load_percent": reg.load_percent,
-            "today_chats": reg.today_chats,
-            "token_stats": None,
-            "chat_profile": None,
-        })
+        merged.append(
+            {
+                "dir_name": "",
+                "agent_id": reg.agent_id,
+                "agent_name": reg.agent_name,
+                "agent_type": reg.agent_type,
+                "description": reg.description,
+                "process_status": "external",
+                "pid": None,
+                "started_at": reg.registered_at,
+                "restart_count": 0,
+                "registry_online": reg.status != "offline",
+                "registry_status": reg.status,
+                "load_percent": reg.load_percent,
+                "today_chats": reg.today_chats,
+                "token_stats": None,
+                "chat_profile": None,
+            }
+        )
 
     return {"agents": merged}
 
+
 @router.get("/admin/agents/{name}/config")
-async def admin_get_config(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_config(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get Agent's config.json plus runtime working directory."""
     data = await _proxy_get(f"/api/agents/{name}/config")
     # Runtime working directory used by system tools defaults to workspace root.
@@ -749,11 +751,7 @@ async def admin_get_config(
 
 
 @router.put("/admin/agents/{name}/config")
-async def admin_update_config(
-    name: str,
-    body: dict = Body(...),
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""
     result = await _proxy_put(f"/api/agents/{name}/config", body)
 
@@ -763,9 +761,11 @@ async def admin_update_config(
     new_name = cfg.get("agent_name")
 
     if agent_id and new_name:
+        from sqlalchemy import select
+
         from app.database import AsyncSessionLocal
         from app.models import User as DBUser
-        from sqlalchemy import select
+
         try:
             async with AsyncSessionLocal() as db:
                 res = await db.execute(select(DBUser).where(DBUser.id == str(agent_id)))
@@ -780,72 +780,51 @@ async def admin_update_config(
 
 
 @router.get("/admin/agents/{name}/role")
-async def admin_get_role(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_role(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get Agent's role.md"""
     return await _proxy_get(f"/api/agents/{name}/role")
 
 
 @router.put("/admin/agents/{name}/role")
-async def admin_update_role(
-    name: str,
-    body: dict = Body(...),
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_update_role(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's role.md"""
     return await _proxy_put(f"/api/agents/{name}/role", body)
 
 
 @router.post("/admin/agents/{name}/start")
-async def admin_start_agent(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_start_agent(name: str, current_user: User = Depends(get_current_user_dep)):
     """Start Agent process"""
     return await _proxy_post(f"/api/agents/{name}/start")
 
 
 @router.post("/admin/agents/{name}/stop")
-async def admin_stop_agent(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_stop_agent(name: str, current_user: User = Depends(get_current_user_dep)):
     """Stop Agent process"""
     return await _proxy_post(f"/api/agents/{name}/stop")
 
 
 @router.post("/admin/agents/{name}/restart")
-async def admin_restart_agent(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_restart_agent(name: str, current_user: User = Depends(get_current_user_dep)):
     """Restart Agent process"""
     return await _proxy_post(f"/api/agents/{name}/restart")
 
 
 @router.get("/admin/agents/{name}/logs")
 async def admin_get_logs(
-    name: str,
-    lines: int = Query(200, ge=1, le=1000),
-    current_user: User = Depends(get_current_user_dep)
+    name: str, lines: int = Query(200, ge=1, le=1000), current_user: User = Depends(get_current_user_dep)
 ):
     """Get Agent recent logs"""
     return await _proxy_get(f"/api/agents/{name}/logs", {"lines": lines})
 
 
 @router.post("/admin/agents/create")
-async def admin_create_agent(
-    body: dict = Body(...),
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_create_agent(body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """
     Create a new Agent and bind it to an existing group chat account.
     body: {name, agent_type, description, chat_email, chat_password}
     """
-    from app.database import AsyncSessionLocal
     from app.auth import get_user_by_email
+    from app.database import AsyncSessionLocal
 
     chat_email = body.get("chat_email", "").strip()
     if not chat_email:
@@ -883,7 +862,9 @@ async def admin_create_agent(
 # Gateway log files directory: {project_root}/data/logs/gateway/
 # Matches the write path configured in app/main.py
 from opensquad.system_config import syscfg as _syscfg
+
 _GATEWAY_LOG_DIR = os.path.join(_syscfg.project_root(), "data", "logs", "gateway")
+
 
 def _fill_logging_defaults(data: dict) -> dict:
     """Fill missing logging keys with effective defaults so the UI shows current values."""
@@ -904,25 +885,22 @@ def _fill_logging_defaults(data: dict) -> dict:
 
 
 @router.get("/admin/system/config")
-async def admin_get_system_config(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_system_config(current_user: User = Depends(get_current_user_dep)):
     """Read full contents of system_config.json (with effective logging defaults filled in)."""
     import opensquad.system_config as _sc
+
     config_path = _sc._CONFIG_PATH
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         data = json.load(f)
     data = _fill_logging_defaults(data)
     return data
 
 
 @router.put("/admin/system/config")
-async def admin_update_system_config(
-    body: dict,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_update_system_config(body: dict, current_user: User = Depends(get_current_user_dep)):
     """Write back system_config.json, reload syscfg cache, and dynamically apply new log level"""
     import opensquad.system_config as _sc
+
     config_path = _sc._CONFIG_PATH
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False, indent=2)
@@ -933,9 +911,7 @@ async def admin_update_system_config(
     _SKIP_LOGGERS = {"uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"}
     try:
         new_level_str = (
-            body.get("logging", {}).get("log_level", "INFO")
-            if isinstance(body.get("logging"), dict)
-            else "INFO"
+            body.get("logging", {}).get("log_level", "INFO") if isinstance(body.get("logging"), dict) else "INFO"
         )
         new_level = getattr(logging, new_level_str.upper(), logging.INFO)
         for name, lg in logging.Logger.manager.loggerDict.items():
@@ -964,19 +940,19 @@ _SYSTEM_LOG_FILES = {
 
 
 @router.get("/admin/system/log-files")
-async def admin_list_log_files(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_log_files(current_user: User = Depends(get_current_user_dep)):
     """List available backend log files"""
     files = []
     for key, filename in _SYSTEM_LOG_FILES.items():
         path = os.path.join(_GATEWAY_LOG_DIR, filename)
-        files.append({
-            "key": key,
-            "filename": filename,
-            "exists": os.path.isfile(path),
-            "size": os.path.getsize(path) if os.path.isfile(path) else 0,
-        })
+        files.append(
+            {
+                "key": key,
+                "filename": filename,
+                "exists": os.path.isfile(path),
+                "size": os.path.getsize(path) if os.path.isfile(path) else 0,
+            }
+        )
     # Also discover plugin service logs from {workspace}/data/logs/
     _plugin_log_dir = _syscfg.workspace_data_dir("logs")
     if os.path.isdir(_plugin_log_dir):
@@ -984,13 +960,15 @@ async def admin_list_log_files(
             if fn.endswith("_service.log"):
                 key = f"plugin_{fn.replace('_service.log', '')}"
                 path = os.path.join(_plugin_log_dir, fn)
-                files.append({
-                    "key": key,
-                    "filename": fn,
-                    "exists": True,
-                    "size": os.path.getsize(path) if os.path.isfile(path) else 0,
-                    "dir": "plugin",
-                })
+                files.append(
+                    {
+                        "key": key,
+                        "filename": fn,
+                        "exists": True,
+                        "size": os.path.getsize(path) if os.path.isfile(path) else 0,
+                        "dir": "plugin",
+                    }
+                )
     return {"files": files}
 
 
@@ -998,12 +976,12 @@ async def admin_list_log_files(
 async def admin_get_system_logs(
     file: str = Query("backend", description="Log file key"),
     lines: int = Query(500, ge=1, le=5000),
-    current_user: User = Depends(get_current_user_dep)
+    current_user: User = Depends(get_current_user_dep),
 ):
     """Get backend system logs"""
     # Plugin logs are in a different directory
     if file.startswith("plugin_"):
-        plugin_name = file[len("plugin_"):]
+        plugin_name = file[len("plugin_") :]
         _plugin_log_dir = _syscfg.workspace_data_dir("logs")
         path = os.path.join(_plugin_log_dir, f"{plugin_name}_service.log")
     else:
@@ -1016,7 +994,7 @@ async def admin_get_system_logs(
         return {"file": file, "logs": [], "total": 0}
 
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
         # Return last N lines, skip blank lines
         result = [ln.rstrip("\n\r") for ln in all_lines[-lines:] if ln.strip()]
@@ -1026,9 +1004,7 @@ async def admin_get_system_logs(
 
 
 @router.get("/admin/system/log-level")
-async def admin_get_log_level(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_log_level(current_user: User = Depends(get_current_user_dep)):
     """Get current effective log level for all managed loggers."""
     _SKIP_LOGGERS = {"uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"}
     result = {}
@@ -1039,26 +1015,17 @@ async def admin_get_log_level(
             eff = lg.getEffectiveLevel()
             result[name] = {
                 "level": logging.getLevelName(eff),
-                "handlers": [
-                    {"name": type(h).__name__, "level": logging.getLevelName(h.level)}
-                    for h in lg.handlers
-                ],
+                "handlers": [{"name": type(h).__name__, "level": logging.getLevelName(h.level)} for h in lg.handlers],
             }
     result["<root>"] = {
         "level": logging.getLevelName(logging.root.getEffectiveLevel()),
-        "handlers": [
-            {"name": type(h).__name__, "level": logging.getLevelName(h.level)}
-            for h in logging.root.handlers
-        ],
+        "handlers": [{"name": type(h).__name__, "level": logging.getLevelName(h.level)} for h in logging.root.handlers],
     }
     return {"loggers": result}
 
 
 @router.put("/admin/system/log-level")
-async def admin_set_log_level(
-    body: dict,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_set_log_level(body: dict, current_user: User = Depends(get_current_user_dep)):
     """Dynamically set log level for all managed loggers (takes effect immediately, no restart needed).
 
     Body: {"level": "DEBUG"|"INFO"|"WARNING"|"ERROR"}
@@ -1091,8 +1058,9 @@ async def admin_set_log_level(
 
     try:
         import opensquad.system_config as _sc
+
         cfg_path = _sc._CONFIG_PATH
-        with open(cfg_path, "r", encoding="utf-8") as f:
+        with open(cfg_path, encoding="utf-8") as f:
             cfg = json.load(f)
         cfg.setdefault("logging", {})["log_level"] = level_str
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -1105,10 +1073,7 @@ async def admin_set_log_level(
 
 
 @router.delete("/admin/agents/{name}")
-async def admin_delete_agent(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_delete_agent(name: str, current_user: User = Depends(get_current_user_dep)):
     """
     Delete Agent
     Stop the process first, then delete the directory
@@ -1120,70 +1085,47 @@ async def admin_delete_agent(
 # Plugin Management API
 # ============================================================
 
+
 @router.get("/admin/plugins")
-async def admin_list_plugins(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_plugins(current_user: User = Depends(get_current_user_dep)):
     """Get all plugins list with metadata"""
     return await _proxy_get("/api/plugins")
 
 
-
-
 @router.post("/admin/plugins/report-view-error")
-async def admin_report_plugin_view_error(
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_report_plugin_view_error(request: Request, current_user: User = Depends(get_current_user_dep)):
     """Forward a plugin view runtime error to the launcher so it can be logged for the agent."""
     body = await request.json()
     return await _proxy_post("/api/plugin-view-error", body)
 
 
 @router.put("/admin/plugins/{name}/enable")
-async def admin_enable_plugin(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_enable_plugin(name: str, current_user: User = Depends(get_current_user_dep)):
     """Enable a plugin on the local node"""
     return await _proxy_put(f"/api/plugins/{name}/enable")
 
 
 @router.put("/admin/plugins/{name}/disable")
-async def admin_disable_plugin(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_disable_plugin(name: str, current_user: User = Depends(get_current_user_dep)):
     """Disable a plugin on the local node"""
     return await _proxy_put(f"/api/plugins/{name}/disable")
 
 
 @router.get("/admin/plugins/{name}/config")
-async def admin_get_plugin_config(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_plugin_config(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get plugin config values and schema from the local node"""
     return await _proxy_get(f"/api/plugins/{name}/config")
 
 
 @router.put("/admin/plugins/{name}/config")
-async def admin_put_plugin_config(
-    name: str,
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_put_plugin_config(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Save plugin config values to the local node."""
     body = await request.json()
     return await _proxy_put(f"/api/plugins/{name}/config", json_body=body)
 
 
 @router.get("/admin/plugins/{name}/data")
-async def admin_get_plugin_data(
-    name: str,
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_plugin_data(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Proxy plugin data query to launcher (e.g. token_analytics dashboard)"""
     # Forward all query params
     params = dict(request.query_params)
@@ -1191,11 +1133,7 @@ async def admin_get_plugin_data(
 
 
 @router.post("/admin/plugins/{name}/action")
-async def admin_plugin_action(
-    name: str,
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_plugin_action(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Proxy plugin action to launcher"""
     body = await request.json()
     return await _proxy_post(f"/api/plugins/{name}/action", json=body)
@@ -1210,7 +1148,7 @@ async def admin_uninstall_plugin(
     Uninstall (delete) a plugin. Proxied to Launcher to delete from agent machine.
     """
     # Sanitize: only allow simple directory names (prevent path traversal)
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', name):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", name):
         raise HTTPException(status_code=400, detail="Invalid plugin name")
 
     try:
@@ -1224,55 +1162,41 @@ async def admin_uninstall_plugin(
 # Plugin Services API (plugin embedded HTTP service management)
 # ============================================================
 
+
 @router.get("/admin/services")
-async def admin_list_services_manage(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_services_manage(current_user: User = Depends(get_current_user_dep)):
     """List all discovered services enriched with plugin metadata and runtime status.
     Used by the standalone Service Management page."""
     return await _proxy_get("/api/services/manage")
 
 
 @router.get("/admin/plugin-services")
-async def admin_list_plugin_services(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_plugin_services(current_user: User = Depends(get_current_user_dep)):
     """List all plugin services and their runtime status"""
     return await _proxy_get("/api/plugin-services")
 
 
 @router.post("/admin/plugin-services/{name}/start")
-async def admin_start_plugin_service(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_start_plugin_service(name: str, current_user: User = Depends(get_current_user_dep)):
     """Start a plugin service"""
     return await _proxy_post(f"/api/plugin-services/{name}/start", json={})
 
 
 @router.post("/admin/plugin-services/{name}/stop")
-async def admin_stop_plugin_service(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_stop_plugin_service(name: str, current_user: User = Depends(get_current_user_dep)):
     """Stop a plugin service"""
     return await _proxy_post(f"/api/plugin-services/{name}/stop", json={})
 
 
 @router.post("/admin/plugin-services/{name}/restart")
-async def admin_restart_plugin_service(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_restart_plugin_service(name: str, current_user: User = Depends(get_current_user_dep)):
     """Restart a plugin service"""
     return await _proxy_post(f"/api/plugin-services/{name}/restart", json={})
 
 
 @router.put("/admin/plugin-services/{name}/auto-start")
 async def admin_set_plugin_service_auto_start(
-    name: str,
-    body: dict = Body(...),
-    current_user: User = Depends(get_current_user_dep)
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
 ):
     """Set service auto-start on boot"""
     return await _proxy_put(f"/api/plugin-services/{name}/auto-start", json_body=body)
@@ -1280,9 +1204,7 @@ async def admin_set_plugin_service_auto_start(
 
 @router.get("/admin/plugin-services/{name}/logs")
 async def admin_get_plugin_service_logs(
-    name: str,
-    lines: int = Query(200),
-    current_user: User = Depends(get_current_user_dep)
+    name: str, lines: int = Query(200), current_user: User = Depends(get_current_user_dep)
 ):
     """Get plugin service log buffer"""
     return await _proxy_get(f"/api/plugin-services/{name}/logs", params={"lines": str(lines)})
@@ -1292,66 +1214,47 @@ async def admin_get_plugin_service_logs(
 # MCP Management API
 # ============================================================
 
+
 @router.get("/admin/mcp/config")
-async def admin_get_mcp_central(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_mcp_central(current_user: User = Depends(get_current_user_dep)):
     """Get central (unified) MCP server config"""
     return await _proxy_get("/api/mcp/config")
 
 
 @router.put("/admin/mcp/config")
-async def admin_put_mcp_central(
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_put_mcp_central(request: Request, current_user: User = Depends(get_current_user_dep)):
     """Save central (unified) MCP server config — syncs to all agents"""
     body = await request.json()
     return await _proxy_put("/api/mcp/config", json_body=body)
 
 
 @router.get("/admin/agents/{name}/mcp")
-async def admin_get_mcp(
-    name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_mcp(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get MCP server config for an agent (legacy)"""
     return await _proxy_get(f"/api/agents/{name}/mcp")
 
 
 @router.put("/admin/agents/{name}/mcp")
-async def admin_put_mcp(
-    name: str,
-    request: Request,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_put_mcp(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Save MCP server config for an agent (legacy)"""
     body = await request.json()
     return await _proxy_put(f"/api/agents/{name}/mcp", json_body=body)
 
 
 @router.get("/admin/mcp/global")
-async def admin_get_mcp_global(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_mcp_global(current_user: User = Depends(get_current_user_dep)):
     """Get global per-server MCP enabled state"""
     return await _proxy_get("/api/mcp/global")
 
 
 @router.put("/admin/mcp/global/servers/{server_name}/enable")
-async def admin_enable_mcp_server_global(
-    server_name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_enable_mcp_server_global(server_name: str, current_user: User = Depends(get_current_user_dep)):
     """Globally enable a specific MCP server across all agents"""
     return await _proxy_put(f"/api/mcp/global/servers/{server_name}/enable", json_body={})
 
 
 @router.put("/admin/mcp/global/servers/{server_name}/disable")
-async def admin_disable_mcp_server_global(
-    server_name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_disable_mcp_server_global(server_name: str, current_user: User = Depends(get_current_user_dep)):
     """Globally disable a specific MCP server across all agents"""
     return await _proxy_put(f"/api/mcp/global/servers/{server_name}/disable", json_body={})
 
@@ -1360,53 +1263,41 @@ async def admin_disable_mcp_server_global(
 # Skills API
 # ============================================================
 
+
 @router.get("/admin/skills")
-async def admin_list_skills(
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_list_skills(current_user: User = Depends(get_current_user_dep)):
     """Get all skills list"""
     return await _proxy_get("/api/skills")
 
 
 @router.get("/admin/skills/{skill_name}/source")
-async def admin_get_skill_source(
-    skill_name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_get_skill_source(skill_name: str, current_user: User = Depends(get_current_user_dep)):
     """Get skill source files and SKILL.md content"""
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', skill_name):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", skill_name):
         return JSONResponse({"error": "Invalid skill name"}, status_code=400)
     return await _proxy_get(f"/api/skills/{skill_name}/source")
 
 
 @router.post("/admin/skills/upload")
-async def admin_upload_skill(
-    files: List[UploadFile] = File(...),
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_upload_skill(files: list[UploadFile] = File(...), current_user: User = Depends(get_current_user_dep)):
     """Upload skill folder - proxy to Launcher so it saves locally to the agent machine"""
     import base64
+
     payload_files = []
-    
+
     for upload_file in files:
         if not upload_file.filename:
             continue
         content = await upload_file.read()
-        b64_content = base64.b64encode(content).decode('utf-8')
-        payload_files.append({
-            "filename": upload_file.filename,
-            "content": b64_content
-        })
-        
+        b64_content = base64.b64encode(content).decode("utf-8")
+        payload_files.append({"filename": upload_file.filename, "content": b64_content})
+
     if not payload_files:
         return JSONResponse({"success": False, "error": "No valid files provided"})
 
     try:
         # Proxy to Launcher
-        result = await _proxy_post("/api/resources/upload", json={
-            "resource_type": "skills",
-            "files": payload_files
-        })
+        result = await _proxy_post("/api/resources/upload", json={"resource_type": "skills", "files": payload_files})
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"Skill upload proxy error: {e}")
@@ -1414,33 +1305,25 @@ async def admin_upload_skill(
 
 
 @router.post("/admin/plugins/upload")
-async def admin_upload_plugin(
-    files: List[UploadFile] = File(...),
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_upload_plugin(files: list[UploadFile] = File(...), current_user: User = Depends(get_current_user_dep)):
     """Upload plugin folder - proxy to Launcher so it saves locally to the agent machine"""
     import base64
+
     payload_files = []
-    
+
     for upload_file in files:
         if not upload_file.filename:
             continue
         content = await upload_file.read()
-        b64_content = base64.b64encode(content).decode('utf-8')
-        payload_files.append({
-            "filename": upload_file.filename,
-            "content": b64_content
-        })
-        
+        b64_content = base64.b64encode(content).decode("utf-8")
+        payload_files.append({"filename": upload_file.filename, "content": b64_content})
+
     if not payload_files:
         return JSONResponse({"success": False, "error": "No valid files provided"})
 
     try:
         # Proxy to Launcher
-        result = await _proxy_post("/api/resources/upload", json={
-            "resource_type": "plugins",
-            "files": payload_files
-        })
+        result = await _proxy_post("/api/resources/upload", json={"resource_type": "plugins", "files": payload_files})
         return JSONResponse(result)
     except Exception as e:
         logger.error(f"Plugin upload proxy error: {e}")
@@ -1448,12 +1331,9 @@ async def admin_upload_plugin(
 
 
 @router.delete("/admin/skills/{skill_name}")
-async def admin_delete_skill(
-    skill_name: str,
-    current_user: User = Depends(get_current_user_dep)
-):
+async def admin_delete_skill(skill_name: str, current_user: User = Depends(get_current_user_dep)):
     """Delete a skill by name - proxied to Launcher to delete from agent machine"""
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', skill_name):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", skill_name):
         return JSONResponse({"success": False, "error": "Invalid skill name"})
 
     try:
@@ -1467,25 +1347,31 @@ async def admin_delete_skill(
 # Role Cards API
 # ============================================================
 
+
 @router.get("/admin/role-cards")
 async def admin_list_role_cards(current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get("/api/role-cards")
+
 
 @router.get("/admin/role-cards/{card_name}")
 async def admin_get_role_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get(f"/api/role-cards/{card_name}")
 
+
 @router.put("/admin/role-cards/{card_name}")
 async def admin_put_role_card(card_name: str, body: dict, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_put(f"/api/role-cards/{card_name}", body)
+
 
 @router.delete("/admin/role-cards/{card_name}")
 async def admin_delete_role_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_delete(f"/api/role-cards/{card_name}")
 
+
 @router.put("/admin/agents/{name}/role-prompt")
 async def admin_put_role_prompt(name: str, body: dict, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_put(f"/api/agents/{name}/role-prompt", body)
+
 
 @router.delete("/admin/agents/{name}/role-prompt")
 async def admin_delete_role_prompt(name: str, current_user: User = Depends(get_current_user_dep)):
@@ -1496,26 +1382,32 @@ async def admin_delete_role_prompt(name: str, current_user: User = Depends(get_c
 # Collab Cards API
 # ============================================================
 
+
 @router.get("/admin/collab-cards")
 async def admin_list_collab_cards(current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get("/api/collab-cards")
+
 
 @router.get("/admin/collab-cards/{card_name}")
 async def admin_get_collab_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get(f"/api/collab-cards/{card_name}")
 
+
 @router.put("/admin/collab-cards/{card_name}")
 async def admin_put_collab_card(card_name: str, body: dict, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_put(f"/api/collab-cards/{card_name}", body)
+
 
 @router.delete("/admin/collab-cards/{card_name}")
 async def admin_delete_collab_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_delete(f"/api/collab-cards/{card_name}")
 
+
 # Model Cards
 @router.get("/admin/model-cards")
 async def admin_list_model_cards(current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get("/api/model-cards")
+
 
 # Model Presets (LiteLLM + OpenRouter aggregated, no login required)
 @router.get("/model-presets")
@@ -1536,21 +1428,26 @@ async def refresh_model_presets():
     """
     return await model_preset_service.manual_refresh()
 
+
 @router.get("/admin/model-cards/{card_name}")
 async def admin_get_model_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_get(f"/api/model-cards/{card_name}")
+
 
 @router.put("/admin/model-cards/{card_name}")
 async def admin_put_model_card(card_name: str, body: dict, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_put(f"/api/model-cards/{card_name}", body)
 
+
 @router.delete("/admin/model-cards/{card_name}")
 async def admin_delete_model_card(card_name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_delete(f"/api/model-cards/{card_name}")
 
+
 @router.put("/admin/agents/{name}/model-card")
 async def admin_put_model_card_assign(name: str, body: dict, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_put(f"/api/agents/{name}/model-card", body)
+
 
 @router.delete("/admin/agents/{name}/model-card")
 async def admin_delete_model_card_unassign(name: str, current_user: User = Depends(get_current_user_dep)):
@@ -1655,6 +1552,7 @@ async def agent_current_session(
 # ---- Upload routes MUST be defined BEFORE the {session_id} catch-all ----
 # Otherwise {session_id} matches "upload-file" etc. and returns 405.
 
+
 @router.post("/agent-sessions/{agent_id}/upload-image")
 async def agent_upload_image(
     agent_id: str,
@@ -1712,8 +1610,7 @@ async def agent_upload_file(
     is_video = content_type.startswith("video/")
 
     logger.info(
-        f"File uploaded for {agent_id}: {filepath} "
-        f"({file_size} bytes, type={content_type}, original={original_name})"
+        f"File uploaded for {agent_id}: {filepath} ({file_size} bytes, type={content_type}, original={original_name})"
     )
 
     return {
@@ -1756,17 +1653,19 @@ async def agent_upload_files(
         is_audio = content_type.startswith("audio/")
         is_video = content_type.startswith("video/")
 
-        results.append({
-            "path": filepath,
-            "filename": filename,
-            "original_name": original_name,
-            "url": f"/uploads/{filename}",
-            "size": file_size,
-            "content_type": content_type,
-            "is_image": is_image,
-            "is_audio": is_audio,
-            "is_video": is_video,
-        })
+        results.append(
+            {
+                "path": filepath,
+                "filename": filename,
+                "original_name": original_name,
+                "url": f"/uploads/{filename}",
+                "size": file_size,
+                "content_type": content_type,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     logger.info(f"Batch upload for {agent_id}: {len(results)} files")
 
@@ -1776,6 +1675,7 @@ async def agent_upload_files(
 # ============================================================
 # Collaboration Board API
 # ============================================================
+
 
 def _user_identity_set(current_user: User) -> set[str]:
     vals = {
@@ -1802,23 +1702,23 @@ def _is_pm_for_collab(collab_id: str, current_user: User) -> bool:
 
 class CollabBoardUpsertRequest(BaseModel):
     collab_id: str
-    task_name: Optional[str] = None
+    task_name: str | None = None
     agent_id: str
     item_type: str = "task"
-    item_key: Optional[str] = ""
-    title: Optional[str] = ""
-    content: Optional[str] = ""
+    item_key: str | None = ""
+    title: str | None = ""
+    content: str | None = ""
     status: str = "doing"
     progress: int = 0
     visibility: str = "public"
-    latest_tool_name: Optional[str] = None
-    latest_tool_summary: Optional[str] = None
-    extra: Optional[dict] = None
+    latest_tool_name: str | None = None
+    latest_tool_summary: str | None = None
+    extra: dict | None = None
 
 
 class CollabBoardDiscussionRequest(BaseModel):
     collab_id: str
-    task_name: Optional[str] = None
+    task_name: str | None = None
     agent_id: str
     title: str = "Public discussion"
     content: str = ""
@@ -1830,9 +1730,9 @@ class CollabTaskCreateRequest(BaseModel):
 
 
 class CollabTaskUpdateRequest(BaseModel):
-    task_name: Optional[str] = None
-    progress: Optional[int] = None
-    status: Optional[str] = None
+    task_name: str | None = None
+    progress: int | None = None
+    status: str | None = None
 
 
 @router.get("/collab-board/tasks")
@@ -1920,15 +1820,15 @@ async def upsert_collab_board_item(
         )
         target = next(
             (
-                i for i in existing_items
+                i
+                for i in existing_items
                 if str(i.get("item_type", "")) == str(body.item_type)
                 and str(i.get("item_key", "")) == str(body.item_key or "")
             ),
             None,
         )
-        if isinstance(target, dict):
-            if (body.title or "") and str(body.title) != str(target.get("title", "")):
-                raise HTTPException(403, "Workers cannot change task title; update progress content only")
+        if isinstance(target, dict) and (body.title or "") and str(body.title) != str(target.get("title", "")):
+            raise HTTPException(403, "Workers cannot change task title; update progress content only")
 
     item = collab_board_upsert_item(
         collab_id=body.collab_id,
@@ -1997,6 +1897,7 @@ async def list_plan_snapshots(
 
 
 # ---- Catch-all {session_id} routes AFTER specific routes ----
+
 
 @router.get("/agent-sessions/{agent_id}/{session_id}/paged")
 async def agent_session_history_paged(
@@ -2075,12 +1976,14 @@ async def agent_session_delete(
 # Agent Push API - Agents push files/messages to chat & groups
 # ============================================================
 
+
 class AgentPushRequest(BaseModel):
     """Request body for agent push to AI chat"""
+
     agent_id: str
-    user_id: Optional[str] = None  # if None, broadcast to all connected users
-    message: Optional[str] = None
-    files: Optional[List[dict]] = None  # [{path, original_name, url, size, content_type, is_image}]
+    user_id: str | None = None  # if None, broadcast to all connected users
+    message: str | None = None
+    files: list[dict] | None = None  # [{path, original_name, url, size, content_type, is_image}]
 
 
 def _check_node_secret(request: Request) -> bool:
@@ -2095,6 +1998,7 @@ def _check_node_secret(request: Request) -> bool:
 def _require_agent_auth(request: Request):
     """Auth dependency for agent-invoked endpoints. Uses node_secret."""
     from fastapi import HTTPException, status
+
     if not _check_node_secret(request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2143,28 +2047,41 @@ async def agent_push_to_chat(
         # Broadcast to all users (and all their devices) connected to this agent
         delivered = await user_handler.broadcast_to_agent(agent_id, ws_message)
         sent_count = len(delivered) if delivered else 0
-        for uid in (delivered or []):
+        for uid in delivered or []:
             if uid:
                 delivered_user_ids.add(uid)
 
     # Persist pushed content to session history (so refresh can restore it)
     if sent_count > 0 and (body.message or body.files):
         persisted_text = body.message or ""
-        for f in (body.files or []):
+        for f in body.files or []:
             name = f.get("original_name") or f.get("filename") or "file"
             size = f.get("size", 0)
             ctype = f.get("content_type", "application/octet-stream")
-            media = "image" if str(ctype).startswith("image/") else ("video" if str(ctype).startswith("video/") else ("audio" if str(ctype).startswith("audio/") else "file"))
+            media = (
+                "image"
+                if str(ctype).startswith("image/")
+                else (
+                    "video"
+                    if str(ctype).startswith("video/")
+                    else ("audio" if str(ctype).startswith("audio/") else "file")
+                )
+            )
             url = f.get("url") or ""
-            line = f"[File: {name} ({size} B) type={media}]({url})" if url else f"[File: {name} ({size} B) type={media}]"
+            line = (
+                f"[File: {name} ({size} B) type={media}]({url})" if url else f"[File: {name} ({size} B) type={media}]"
+            )
             persisted_text = f"{persisted_text}\n\n{line}" if persisted_text else line
 
         for uid in delivered_user_ids:
             try:
                 all_files = body.files or []
                 image_urls = [
-                    f.get("url") for f in all_files
-                    if isinstance(f, dict) and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/")) and f.get("url")
+                    f.get("url")
+                    for f in all_files
+                    if isinstance(f, dict)
+                    and (f.get("is_image") or str(f.get("content_type", "")).startswith("image/"))
+                    and f.get("url")
                 ]
                 await gateway_session_cache.async_add_message(
                     uid,
@@ -2194,8 +2111,8 @@ async def agent_push_to_chat(
 @router.post("/agent-push/upload-and-chat")
 async def agent_push_upload_and_chat(
     agent_id: str = Query(...),
-    message: Optional[str] = Query(None),
-    user_id: Optional[str] = Query(None),
+    message: str | None = Query(None),
+    user_id: str | None = Query(None),
     files: list[UploadFile] = File(...),
     request: Request = None,
 ):
@@ -2230,17 +2147,19 @@ async def agent_push_upload_and_chat(
         is_audio = content_type.startswith("audio/")
         is_video = content_type.startswith("video/")
 
-        file_infos.append({
-            "path": filepath,
-            "filename": filename,
-            "original_name": original_name,
-            "url": f"/uploads/{filename}",
-            "size": file_size,
-            "content_type": content_type,
-            "is_image": is_image,
-            "is_audio": is_audio,
-            "is_video": is_video,
-        })
+        file_infos.append(
+            {
+                "path": filepath,
+                "filename": filename,
+                "original_name": original_name,
+                "url": f"/uploads/{filename}",
+                "size": file_size,
+                "content_type": content_type,
+                "is_image": is_image,
+                "is_audio": is_audio,
+                "is_video": is_video,
+            }
+        )
 
     # Build WS message
     file_push_message_id = f"fp_{uuid.uuid4().hex[:12]}"
@@ -2266,7 +2185,7 @@ async def agent_push_upload_and_chat(
     else:
         delivered = await user_handler.broadcast_to_agent(agent_id, ws_message)
         sent_count = len(delivered) if delivered else 0
-        for uid in (delivered or []):
+        for uid in delivered or []:
             if uid:
                 delivered_user_ids.add(uid)
         targeted_conn_keys = [f"{u}:{agent_id}" for u in delivered] or [f"*:{agent_id}"]
@@ -2291,15 +2210,18 @@ async def agent_push_upload_and_chat(
     if sent_count > 0:
         persisted_text = message or ""
         for f in file_infos:
-            media = "image" if f.get("is_image") else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+            media = (
+                "image"
+                if f.get("is_image")
+                else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+            )
             line = f"[File: {f.get('original_name') or f.get('filename')} ({f.get('size', 0)} B) type={media}]({f.get('url')})"
             persisted_text = f"{persisted_text}\n\n{line}" if persisted_text else line
 
         for uid in delivered_user_ids:
             try:
                 image_urls = [
-                    f.get("url") for f in file_infos
-                    if isinstance(f, dict) and f.get("is_image") and f.get("url")
+                    f.get("url") for f in file_infos if isinstance(f, dict) and f.get("is_image") and f.get("url")
                 ]
                 await gateway_session_cache.async_add_message(
                     uid,
@@ -2355,10 +2277,14 @@ async def agent_push_to_group(
     if not agent:
         raise HTTPException(404, f"Agent not found: {agent_id}")
 
-    from app.database import AsyncSessionLocal
-    from app.models import User as DBUser, Message as DBMessage, Attachment as DBAttachment
-    from app.models import group_members, MessageType as DBMessageType, beijing_now
     from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Attachment as DBAttachment
+    from app.models import Message as DBMessage
+    from app.models import MessageType as DBMessageType
+    from app.models import User as DBUser
+    from app.models import beijing_now, group_members
 
     async with AsyncSessionLocal() as db:
         # Find agent's user account
@@ -2383,8 +2309,7 @@ async def agent_push_to_group(
 
         # Check membership
         stmt = select(group_members).where(
-            group_members.c.user_id == agent_user.id,
-            group_members.c.group_id == group_id
+            group_members.c.user_id == agent_user.id, group_members.c.group_id == group_id
         )
         result = await db.execute(stmt)
         membership = result.first()
@@ -2393,7 +2318,7 @@ async def agent_push_to_group(
 
         # Create the message
         now = beijing_now()
-        msg_id = f"m_{now.timestamp()}" if hasattr(now, 'timestamp') else f"m_{datetime.now(timezone.utc).timestamp()}"
+        msg_id = f"m_{now.timestamp()}" if hasattr(now, "timestamp") else f"m_{datetime.now(timezone.utc).timestamp()}"
         db_msg = DBMessage(
             id=msg_id,
             group_id=group_id,
@@ -2409,23 +2334,27 @@ async def agent_push_to_group(
         attachments_for_response = []
         for i, att in enumerate(attach_list):
             att_id = f"a_{datetime.now(timezone.utc).timestamp()}_{i}"
-            db.add(DBAttachment(
-                id=att_id,
-                message_id=msg_id,
-                name=att.get("name", "file"),
-                size=str(att.get("size", "0")),
-                url=att.get("url", ""),
-                type=att.get("type", "file"),
-                duration=att.get("duration"),
-            ))
-            attachments_for_response.append({
-                "id": att_id,
-                "name": att.get("name", "file"),
-                "size": att.get("size", "0"),
-                "url": att.get("url", ""),
-                "type": att.get("type", "file"),
-                "duration": att.get("duration"),
-            })
+            db.add(
+                DBAttachment(
+                    id=att_id,
+                    message_id=msg_id,
+                    name=att.get("name", "file"),
+                    size=str(att.get("size", "0")),
+                    url=att.get("url", ""),
+                    type=att.get("type", "file"),
+                    duration=att.get("duration"),
+                )
+            )
+            attachments_for_response.append(
+                {
+                    "id": att_id,
+                    "name": att.get("name", "file"),
+                    "size": att.get("size", "0"),
+                    "url": att.get("url", ""),
+                    "type": att.get("type", "file"),
+                    "duration": att.get("duration"),
+                }
+            )
 
         # Build response BEFORE commit (async SQLAlchemy golden rule)
         response_data = {
@@ -2436,7 +2365,7 @@ async def agent_push_to_group(
             "sender_name": agent_user.name,
             "content": content,
             "attachments": attachments_for_response,
-            "timestamp": now.isoformat() if hasattr(now, 'isoformat') else str(now),
+            "timestamp": now.isoformat() if hasattr(now, "isoformat") else str(now),
         }
 
         await db.commit()
@@ -2444,10 +2373,14 @@ async def agent_push_to_group(
     # Notify group chat WebSocket subscribers
     try:
         from app.websocket import manager as ws_manager
-        await ws_manager.broadcast_to_group(group_id, {
-            "type": "new_message",
-            "message": response_data,
-        })
+
+        await ws_manager.broadcast_to_group(
+            group_id,
+            {
+                "type": "new_message",
+                "message": response_data,
+            },
+        )
     except Exception as e:
         logger.warning(f"Failed to broadcast group message: {e}")
 
@@ -2460,15 +2393,15 @@ async def agent_push_to_group(
 
 # GitHub registry URLs
 PLUGIN_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-plugins/main/index.json"
-SKILL_REGISTRY_URL  = "https://raw.githubusercontent.com/opensquad-ai/opensquad-skills/main/index.json"
-ROLE_REGISTRY_URL   = "https://raw.githubusercontent.com/opensquad-ai/opensquad-roles/main/index.json"
+SKILL_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-skills/main/index.json"
+ROLE_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-roles/main/index.json"
 COLLAB_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-collabs/main/index.json"
 
 # Local install/storage directories — 使用 builtin root（项目安装目录），与 launcher 读取目录保持一致
 _BUILTIN_ROOT = syscfg.get_builtin_root()
-PLUGINS_DIR      = os.path.join(_BUILTIN_ROOT, "plugins")
-_SKILLS_DIR      = os.path.join(_BUILTIN_ROOT, "skills")
-_ROLE_CARDS_DIR  = os.path.join(_BUILTIN_ROOT, "role_cards")
+PLUGINS_DIR = os.path.join(_BUILTIN_ROOT, "plugins")
+_SKILLS_DIR = os.path.join(_BUILTIN_ROOT, "skills")
+_ROLE_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "role_cards")
 _COLLAB_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "collab_cards")
 _MODEL_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "model_cards")
 
@@ -2480,7 +2413,7 @@ _LIKED_ITEMS_PATH = os.path.join(_REPO_ROOT, "data", "liked_items.json")
 def _read_local_liked() -> dict:
     """Read local liked_items.json; return empty dict on failure."""
     try:
-        with open(_LIKED_ITEMS_PATH, "r", encoding="utf-8") as f:
+        with open(_LIKED_ITEMS_PATH, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -2526,8 +2459,8 @@ async def market_serve_icon(
 # GitHub Contents API — likes.json for each repo (internal key is always "plugins")
 _LIKES_REPOS = {
     "plugins": "opensquad-ai/opensquad-plugins",
-    "skills":  "opensquad-ai/opensquad-skills",
-    "roles":   "opensquad-ai/opensquad-roles",
+    "skills": "opensquad-ai/opensquad-skills",
+    "roles": "opensquad-ai/opensquad-roles",
     "collabs": "opensquad-ai/opensquad-collabs",
 }
 
@@ -2705,7 +2638,8 @@ async def market_list_plugins(
         if search:
             q = search.lower()
             all_plugins = [
-                p for p in all_plugins
+                p
+                for p in all_plugins
                 if q in p.get("name", "").lower()
                 or q in p.get("description", "").lower()
                 or q in p.get("id", "").lower()
@@ -2720,7 +2654,7 @@ async def market_list_plugins(
             all_plugins = [p for p in all_plugins if p.get("category") == plugin_category]
 
         # 3. Sort
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             all_plugins.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -2742,11 +2676,12 @@ async def market_list_plugins(
             "page": page,
             "size": size,
             "pages": (total + size - 1) // size,
-            "plugins": paged_plugins
+            "plugins": paged_plugins,
         }
     except Exception as e:
         logger.error(f"Failed to fetch registry from GitHub: {e}")
         raise HTTPException(status_code=503, detail=f"Plugin registry unavailable: {e}")
+
 
 @router.get("/market/installed")
 async def market_list_installed(
@@ -2767,15 +2702,13 @@ async def market_list_installed(
                 continue
             plugin_id = p.get("id") or p.get("name")
             if plugin_id:
-                result[plugin_id] = {
-                    "version": p.get("version", "0.0.0"),
-                    "enabled": p.get("enabled", True)
-                }
+                result[plugin_id] = {"version": p.get("version", "0.0.0"), "enabled": p.get("enabled", True)}
         return {"installed": result}
     except Exception as e:
         logger.error(f"Failed to get installed plugins: {e}")
         # Return empty map on error to prevent frontend crash
         return {"installed": {}}
+
 
 @router.get("/market/plugins/{plugin_id}")
 async def market_get_plugin(
@@ -2811,28 +2744,32 @@ async def market_like_plugin(
 
 from app.ai_web.builder import builder
 
+
 @router.get("/market/build/env")
 async def market_check_build_env():
     """Check if Node/NPM are ready for local builds."""
     return await builder.check_env()
+
 
 @router.post("/market/plugins/{plugin_id}/build")
 async def market_trigger_plugin_build(plugin_id: str):
     """Trigger a local build for a plugin's UI."""
     return builder.start_build(plugin_id)
 
+
 @router.get("/market/plugins/{plugin_id}/build/log")
 async def market_get_plugin_build_log(plugin_id: str):
     """Return the current build log for a plugin."""
     log_path = builder.get_log_path(plugin_id)
     status = builder.active_builds.get(plugin_id, "idle")
-    
+
     content = ""
     if os.path.exists(log_path):
-        with open(log_path, "r", encoding="utf-8") as f:
+        with open(log_path, encoding="utf-8") as f:
             content = f.read()
-            
+
     return {"status": status, "log": content}
+
 
 @router.post("/market/plugins/{plugin_id}/install")
 async def market_install_plugin(
@@ -2885,11 +2822,11 @@ async def market_install_plugin(
     existing_manifest = os.path.join(plugin_dest, "plugin.json")
     existing_plugin_py_path = os.path.join(plugin_dest, "plugin.py")
     # Preserve the real plugin.py content if it already exists on disk.
-    existing_plugin_py: Optional[bytes] = None
+    existing_plugin_py: bytes | None = None
     existing_category = None
     if os.path.isfile(existing_manifest):
         try:
-            with open(existing_manifest, "r", encoding="utf-8") as f:
+            with open(existing_manifest, encoding="utf-8") as f:
                 existing_data = json.load(f)
             existing_enabled = existing_data.get("enabled", True)
             existing_version = existing_data.get("version")
@@ -2952,7 +2889,7 @@ async def market_install_plugin(
     # 5b. Restore preserved 'enabled' state and 'category' into the extracted plugin.json
     if os.path.isfile(existing_manifest):
         try:
-            with open(existing_manifest, "r", encoding="utf-8") as f:
+            with open(existing_manifest, encoding="utf-8") as f:
                 new_manifest_data = json.load(f)
             new_manifest_data["enabled"] = existing_enabled
             # Restore category only if the new zip doesn't carry one
@@ -2983,7 +2920,9 @@ async def market_install_plugin(
             pass
 
     action = "updated" if existing_version and existing_version != registry_version else "installed"
-    logger.info(f"Plugin '{plugin_id}' {action} (v{existing_version} -> v{registry_version}), {file_count} files, {zip_size_kb:.1f} KB")
+    logger.info(
+        f"Plugin '{plugin_id}' {action} (v{existing_version} -> v{registry_version}), {file_count} files, {zip_size_kb:.1f} KB"
+    )
 
     return {
         "ok": True,
@@ -2997,7 +2936,6 @@ async def market_install_plugin(
     }
 
 
-
 @router.post("/market/plugins/upload")
 async def market_upload_plugin(
     body: dict = Body(...),
@@ -3005,8 +2943,7 @@ async def market_upload_plugin(
 ):
     """Plugin submission stub (registry is a static GitHub file; use PR workflow)."""
     raise HTTPException(
-        status_code=501,
-        detail="Direct upload not supported. Submit a Pull Request to the GitHub registry instead."
+        status_code=501, detail="Direct upload not supported. Submit a Pull Request to the GitHub registry instead."
     )
 
 
@@ -3020,7 +2957,7 @@ async def market_uninstall_plugin(
     Triggers hot-reload after removal.
     """
     # Sanitize plugin_id: must be a simple directory name (no path traversal)
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', plugin_id):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", plugin_id):
         raise HTTPException(status_code=400, detail="Invalid plugin id")
 
     plugin_dest = os.path.join(PLUGINS_DIR, plugin_id)
@@ -3032,9 +2969,11 @@ async def market_uninstall_plugin(
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' is not installed")
 
     try:
+
         def _remove_readonly(func, path, exc_info):
             """Windows: files inside .git directory are often read-only; chmod then retry"""
             import stat
+
             os.chmod(path, stat.S_IWRITE)
             func(path)
 
@@ -3056,20 +2995,24 @@ async def market_uninstall_plugin(
 
 class GitInstallRequest(BaseModel):
     """Git plugin install request"""
+
     git_url: str
-    plugin_id: Optional[str] = None
+    plugin_id: str | None = None
     mode: str = "smart"  # "smart" | "build"
+
 
 # ---- Background Git install job state storage ----
 # key: job_id, value: {"status": "pending|running|done|failed", "plugin_id", "started_at", ...}
 _git_install_jobs: dict = {}
 
-def _resolve_plugin_id(git_url: str, plugin_id: Optional[str]) -> str:
+
+def _resolve_plugin_id(git_url: str, plugin_id: str | None) -> str:
     """Infer plugin_id from git_url, or use the provided value directly"""
     if plugin_id:
         return plugin_id
     # e.g., https://github.com/user/opensquad-plugin-websearch -> websearch
-    return git_url.split('/')[-1].replace('.git', '').replace('opensquad-plugin-', '')
+    return git_url.split("/")[-1].replace(".git", "").replace("opensquad-plugin-", "")
+
 
 async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str = "smart") -> None:
     """Execute git clone/pull in a thread pool, build if needed based on mode, update job status.
@@ -3089,10 +3032,7 @@ async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str =
         else:
             cmd = ["git", "clone", git_url, target_dir]
             cwd = None
-        result = _subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace"
-        )
+        result = _subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         return result.returncode, result.stdout, result.stderr
 
     try:
@@ -3119,47 +3059,57 @@ async def _run_git_install_job(job_id: str, p_id: str, git_url: str, mode: str =
 
         if not os.path.exists(ui_dir):
             # Pure Python plugin, no build needed, complete immediately
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": False,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": False,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (no UI dir)")
             return
 
         # Has UI directory: decide whether to build based on mode
         if mode == "smart" and os.path.exists(dist_index):
             # smart mode and pre-built file exists, complete immediately
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": True,
-                "dist_found": True,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": True,
+                    "dist_found": True,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (smart mode, dist found)")
             return
 
         # Phase 3: Build required (build mode, or smart mode but no pre-built file)
-        _git_install_jobs[job_id].update({
-            "status": "building",
-            "build_log_path": builder.get_log_path(p_id),
-        })
+        _git_install_jobs[job_id].update(
+            {
+                "status": "building",
+                "build_log_path": builder.get_log_path(p_id),
+            }
+        )
         logger.info(f"Git job {job_id} starting build for {p_id} (mode={mode})")
         await builder.run_build_task(p_id)
 
         build_result = builder.active_builds.get(p_id, "error")
         if build_result == "success":
-            _git_install_jobs[job_id].update({
-                "status": "done",
-                "has_ui": True,
-                "finished_at": time.time(),
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "done",
+                    "has_ui": True,
+                    "finished_at": time.time(),
+                }
+            )
             logger.info(f"Git job {job_id} completed for {p_id} (build success)")
         else:
-            _git_install_jobs[job_id].update({
-                "status": "failed",
-                "error": f"Build failed: {build_result}",
-            })
+            _git_install_jobs[job_id].update(
+                {
+                    "status": "failed",
+                    "error": f"Build failed: {build_result}",
+                }
+            )
             logger.error(f"Git job {job_id} build failed for {p_id}: {build_result}")
 
     except Exception as e:
@@ -3181,10 +3131,11 @@ async def market_install_plugin_from_git(
 
     p_id = _resolve_plugin_id(body.git_url, body.plugin_id)
 
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', p_id):
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", p_id):
         raise HTTPException(status_code=400, detail="Invalid plugin id")
 
     import uuid
+
     job_id = uuid.uuid4().hex[:12]
     _git_install_jobs[job_id] = {
         "job_id": job_id,
@@ -3224,6 +3175,7 @@ async def get_git_install_job(
 # Market Routes — Skills
 # ============================================================
 
+
 @router.get("/market/skills")
 async def market_list_skills(
     page: int = Query(1, ge=1),
@@ -3251,12 +3203,18 @@ async def market_list_skills(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -3264,7 +3222,7 @@ async def market_list_skills(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -3325,7 +3283,7 @@ async def market_install_skill(
             prefix = members[0] if len(members) > 0 and members[0].endswith("/") else ""
             os.makedirs(dest, exist_ok=True)
             for member in members:
-                rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+                rel = member[len(prefix) :] if prefix and member.startswith(prefix) else member
                 if not rel:
                     continue
                 target = os.path.join(dest, rel)
@@ -3339,7 +3297,9 @@ async def market_install_skill(
                         installed_files.append(rel)
                         total_size += len(data)
         total_size_kb = total_size / 1024
-        logger.info(f"[Install] Skill '{item_id}': {zip_size_kb:.1f} KB zip → {len(installed_files)} files ({total_size_kb:.1f} KB) → {dest}")
+        logger.info(
+            f"[Install] Skill '{item_id}': {zip_size_kb:.1f} KB zip → {len(installed_files)} files ({total_size_kb:.1f} KB) → {dest}"
+        )
         return {
             "ok": True,
             "message": f"Skill '{item_id}' installed: {len(installed_files)} files ({total_size_kb:.1f} KB)",
@@ -3356,6 +3316,7 @@ async def market_install_skill(
 # ============================================================
 # Market Routes — Roles
 # ============================================================
+
 
 @router.get("/market/roles")
 async def market_list_roles(
@@ -3384,12 +3345,18 @@ async def market_list_roles(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -3397,7 +3364,7 @@ async def market_list_roles(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -3479,7 +3446,9 @@ async def market_install_role(
                     logger.warning(f"Role icon download failed for '{item_id}': {icon_err}")
 
         total_size_kb = total_size / 1024
-        logger.info(f"[Install] Role '{item_id}': {len(installed_files)} md files ({total_size_kb:.1f} KB) → {_ROLE_CARDS_DIR}")
+        logger.info(
+            f"[Install] Role '{item_id}': {len(installed_files)} md files ({total_size_kb:.1f} KB) → {_ROLE_CARDS_DIR}"
+        )
         return {
             "ok": True,
             "message": f"Role '{item_id}' installed: {len(installed_files)} file(s) ({total_size_kb:.1f} KB)",
@@ -3499,6 +3468,7 @@ async def market_install_role(
 # ============================================================
 # Market Routes — Collabs
 # ============================================================
+
 
 @router.get("/market/collabs")
 async def market_list_collabs(
@@ -3527,12 +3497,18 @@ async def market_list_collabs(
 
         if search:
             q = search.lower()
-            items = [p for p in items if q in p.get("name", "").lower() or q in p.get("description", "").lower() or q in p.get("id", "").lower()]
+            items = [
+                p
+                for p in items
+                if q in p.get("name", "").lower()
+                or q in p.get("description", "").lower()
+                or q in p.get("id", "").lower()
+            ]
 
         if category and category != "all":
             items = [p for p in items if p.get("category") == category]
 
-        reverse = (order == "desc")
+        reverse = order == "desc"
         if sort == "likes":
             items.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
         elif sort == "name":
@@ -3540,7 +3516,7 @@ async def market_list_collabs(
 
         total = len(items)
         start = (page - 1) * size
-        paged = items[start:start + size]
+        paged = items[start : start + size]
         for p in paged:
             if "tags" not in p or p["tags"] is None:
                 p["tags"] = []
@@ -3636,13 +3612,13 @@ REVIEW_TOKEN = os.environ.get("OPENSQUAD_REVIEW_TOKEN", "")
 
 # Dangerous builtins / modules that should not appear in plugin code
 _SECURITY_PATTERNS = [
-    r'\bsubprocess\b',
-    r'\beval\s*\(',
-    r'\bexec\s*\(',
-    r'\b__import__\s*\(',
-    r'\bos\.system\s*\(',
-    r'\bos\.popen\s*\(',
-    r'\bshutil\.rmtree\s*\(',
+    r"\bsubprocess\b",
+    r"\beval\s*\(",
+    r"\bexec\s*\(",
+    r"\b__import__\s*\(",
+    r"\bos\.system\s*\(",
+    r"\bos\.popen\s*\(",
+    r"\bshutil\.rmtree\s*\(",
     r'\bopen\s*\(.*["\']w["\']',
 ]
 
@@ -3650,12 +3626,12 @@ _SECURITY_PATTERNS = [
 class PRReviewRequest(BaseModel):
     admin_key: str
     pr_number: int
-    repo: str               # "owner/repo"
+    repo: str  # "owner/repo"
     plugin_id: str
-    plugin_py: str          # file content (plain text)
-    plugin_json: str        # file content (plain text)
-    readme: Optional[str] = None
-    github_token: Optional[str] = None   # for posting PR comment
+    plugin_py: str  # file content (plain text)
+    plugin_json: str  # file content (plain text)
+    readme: str | None = None
+    github_token: str | None = None  # for posting PR comment
 
 
 def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
@@ -3689,14 +3665,17 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
 
     # Check @register decorator present
     has_register = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         and any(
             (isinstance(d, ast.Name) and d.id == "register")
             or (isinstance(d, ast.Attribute) and d.attr == "register")
-            or (isinstance(d, ast.Call) and (
-                (isinstance(d.func, ast.Name) and d.func.id == "register")
-                or (isinstance(d.func, ast.Attribute) and d.func.attr == "register")
-            ))
+            or (
+                isinstance(d, ast.Call)
+                and (
+                    (isinstance(d.func, ast.Name) and d.func.id == "register")
+                    or (isinstance(d.func, ast.Attribute) and d.func.attr == "register")
+                )
+            )
             for d in node.decorator_list
         )
         for node in ast.walk(tree)
@@ -3708,8 +3687,7 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
     has_plugin_class = any(
         isinstance(node, ast.ClassDef)
         and any(
-            (isinstance(b, ast.Name) and b.id == "Plugin")
-            or (isinstance(b, ast.Attribute) and b.attr == "Plugin")
+            (isinstance(b, ast.Name) and b.id == "Plugin") or (isinstance(b, ast.Attribute) and b.attr == "Plugin")
             for b in node.bases
         )
         for node in ast.walk(tree)
@@ -3725,14 +3703,14 @@ def _static_check_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str):
     return issues
 
 
-async def _ai_review_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str, readme: Optional[str]) -> str:
+async def _ai_review_plugin(plugin_id: str, plugin_py: str, plugin_json_str: str, readme: str | None) -> str:
     """
     Call DeepSeek via OpenAI-compatible API to review the plugin.
     Returns the AI review text.
     """
     card_path = os.path.join(_MODEL_CARDS_DIR, "deepseek_chat.json")
     try:
-        with open(card_path, "r", encoding="utf-8") as f:
+        with open(card_path, encoding="utf-8") as f:
             card = json.load(f)
     except Exception as e:
         return f"[AI review skipped: unable to load model config — {e}]"
@@ -3772,6 +3750,7 @@ Finally provide an overall verdict: **PASS** (recommend merge), **WARN** (recomm
 
     try:
         import openai
+
         client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         response = await client.chat.completions.create(
             model=model_name,
@@ -3821,9 +3800,7 @@ async def market_review_pr(body: PRReviewRequest):
     ai_review = await _ai_review_plugin(body.plugin_id, body.plugin_py, body.plugin_json, body.readme)
 
     # 4. Determine verdict
-    if issues:
-        verdict = "fail"
-    elif "FAIL" in ai_review.upper():
+    if issues or "FAIL" in ai_review.upper():
         verdict = "fail"
     elif "WARN" in ai_review.upper():
         verdict = "warn"
@@ -3833,7 +3810,11 @@ async def market_review_pr(body: PRReviewRequest):
     # 5. Post GitHub PR comment
     if body.github_token:
         verdict_emoji = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(verdict, "")
-        verdict_label = {"pass": "PASS — Recommend merge", "warn": "WARN — Recommend merge after fixes", "fail": "FAIL — Recommend reject"}.get(verdict, verdict)
+        verdict_label = {
+            "pass": "PASS — Recommend merge",
+            "warn": "WARN — Recommend merge after fixes",
+            "fail": "FAIL — Recommend reject",
+        }.get(verdict, verdict)
         issues_md = "\n".join(f"- {i}" for i in issues) if issues else "No static check issues"
         comment_body = (
             f"## OpenSquad Plugin Auto Review Report {verdict_emoji}\n\n"
@@ -3865,17 +3846,17 @@ _node_registry: dict = {}  # node_id -> {node_id, node_label, launcher_url, last
 async def register_node(request: Request):
     """POST /api/ai-web/nodes/register — called by Launcher on startup."""
     data = await request.json()
-    node_id      = data.get("node_id", "")
-    node_label   = data.get("node_label", node_id)
+    node_id = data.get("node_id", "")
+    node_label = data.get("node_label", node_id)
     launcher_url = data.get("launcher_url", "")
     if not node_id:
         raise HTTPException(status_code=400, detail="node_id is required")
     _node_registry[node_id] = {
-        "node_id":      node_id,
-        "node_label":   node_label,
+        "node_id": node_id,
+        "node_label": node_label,
         "launcher_url": launcher_url,
-        "last_seen":    time.time(),
-        "agent_count":  0,
+        "last_seen": time.time(),
+        "agent_count": 0,
     }
     logger.info(f"Node registered: {node_id} ({node_label}) launcher={launcher_url}")
     return {"ok": True}
@@ -3886,16 +3867,16 @@ async def node_heartbeat(node_id: str, request: Request):
     """PUT /api/ai-web/nodes/{node_id}/heartbeat — periodic keepalive from Launcher."""
     data = await request.json()
     if node_id in _node_registry:
-        _node_registry[node_id]["last_seen"]   = time.time()
+        _node_registry[node_id]["last_seen"] = time.time()
         _node_registry[node_id]["agent_count"] = data.get("agent_count", 0)
     else:
         # Auto-register on heartbeat if not yet in registry
         _node_registry[node_id] = {
-            "node_id":      node_id,
-            "node_label":   data.get("node_label", node_id),
+            "node_id": node_id,
+            "node_label": data.get("node_label", node_id),
             "launcher_url": data.get("launcher_url", ""),
-            "last_seen":    time.time(),
-            "agent_count":  data.get("agent_count", 0),
+            "last_seen": time.time(),
+            "agent_count": data.get("agent_count", 0),
         }
     return {"ok": True}
 
@@ -3906,8 +3887,10 @@ async def list_nodes(current_user: User = Depends(get_current_user_dep)):
     now = time.time()
     nodes = []
     for n in _node_registry.values():
-        nodes.append({
-            **n,
-            "online": (now - n["last_seen"]) < 120,  # consider offline after 2 min
-        })
+        nodes.append(
+            {
+                **n,
+                "online": (now - n["last_seen"]) < 120,  # consider offline after 2 min
+            }
+        )
     return {"nodes": nodes}

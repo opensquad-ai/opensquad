@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 E2E tests for Gateway session persistence and WebSocket communication.
 Covers the critical path bugs found in production:
@@ -6,16 +5,13 @@ Covers the critical path bugs found in production:
 - In-memory cache behavior
 - Cache invalidation on current_session events
 """
-import json
-import os
-import sys
-import time
+
 import ast
 import importlib.util
-from unittest.mock import patch, MagicMock
+import os
+import time
 
 import pytest
-
 
 # ── Direct import of sessions.py (bypass __init__.py chain) ──
 # The gateway backend __init__.py eagerly imports routes which triggers
@@ -178,8 +174,12 @@ class TestGatewaySessionCache:
         images = [{"path": "/tmp/img.png", "original_name": "img.png"}]
         attachments = [{"path": "/tmp/doc.pdf", "original_name": "doc.pdf"}]
         sm.add_message(
-            "user1", "agent1", "user", "Check these",
-            images=images, attachments=attachments,
+            "user1",
+            "agent1",
+            "user",
+            "Check these",
+            images=images,
+            attachments=attachments,
         )
         msg = sm.get_history("user1", "agent1")[0]
         assert msg["images"] == images
@@ -188,7 +188,7 @@ class TestGatewaySessionCache:
     def test_session_key_consistency(self, gateway_session_manager):
         """gateway_session_key should be consistent and always available."""
         sm = gateway_session_manager
-        session = sm.get_or_create_session("user1", "agent1")
+        sm.get_or_create_session("user1", "agent1")
         assert sm._get_session_key("user1", "agent1") == "user1:agent1"
 
     def test_get_user_sessions_returns_sorted(self, gateway_session_manager):
@@ -229,7 +229,6 @@ class TestGatewayWebSocketSessionFlow:
         any function body in sessions.py. Python scoping rules cause
         UnboundLocalError when a conditional branch doesn't execute the import.
         """
-        import ast
         import os
 
         sessions_path = os.path.join(
@@ -247,9 +246,9 @@ class TestGatewayWebSocketSessionFlow:
             tree = ast.parse(f.read())
 
         for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 for child in ast.walk(node):
-                    if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    if isinstance(child, ast.Import | ast.ImportFrom):
                         for alias in child.names:
                             if alias.name == "datetime":
                                 pytest.fail(
@@ -262,7 +261,6 @@ class TestGatewayWebSocketSessionFlow:
         The connected event must always include a gateway_session_key.
         This was the root cause of the 'can't have continuous conversation' bug.
         """
-        import ast
         import os
 
         ws_path = os.path.join(
@@ -286,7 +284,6 @@ class TestGatewayWebSocketSessionFlow:
 
     def test_no_deprecated_apis_in_session_modules(self):
         """Session-related modules must not use deprecated datetime APIs."""
-        import ast
         import os
 
         files = [

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad Feishu Bot Adapter (Multi-bot)
 
@@ -29,16 +28,15 @@ Usage:
   scripts/start_feishu.bat
 """
 
+import datetime
 import json
 import logging
-import sys
 import os
 import subprocess
+import sys
 import threading
 import time
-import datetime
 import warnings
-from typing import Optional
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -49,27 +47,31 @@ import requests
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT_DIR)
 
+import contextlib
+
 from plugins.feishu.config import (
-    FeishuBotConfig,
-    load_bot_configs,
-    load_bot_configs_fresh,
-    is_service_enabled,
     EXTERNAL_ADAPTER_URL,
     EXTERNAL_API_KEY,
     FEISHU_LOG_LEVEL,
-    bot_config_to_json,
+    FeishuBotConfig,
     bot_config_from_env,
+    bot_config_to_json,
+    is_service_enabled,
+    load_bot_configs,
+    load_bot_configs_fresh,
 )
+
 # Debug: write config info to file for diagnosis
 try:
     _dbg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_config.txt")
     from opensquad.system_config import _CONFIG_PATH, _WORKSPACE_ROOT
+
     with open(_dbg_path, "w", encoding="utf-8") as _f:
-        _f.write(f"OPENSQUAD_WORKSPACE={os.environ.get('OPENSQUAD_WORKSPACE','NOT SET')}\n")
-        _f.write(f"EXTERNAL_API_KEY={repr(EXTERNAL_API_KEY)}\n")
-        _f.write(f"EXTERNAL_ADAPTER_URL={repr(EXTERNAL_ADAPTER_URL)}\n")
-        _f.write(f"_WORKSPACE_ROOT={repr(_WORKSPACE_ROOT)}\n")
-        _f.write(f"_CONFIG_PATH={repr(_CONFIG_PATH)}\n")
+        _f.write(f"OPENSQUAD_WORKSPACE={os.environ.get('OPENSQUAD_WORKSPACE', 'NOT SET')}\n")
+        _f.write(f"EXTERNAL_API_KEY={EXTERNAL_API_KEY!r}\n")
+        _f.write(f"EXTERNAL_ADAPTER_URL={EXTERNAL_ADAPTER_URL!r}\n")
+        _f.write(f"_WORKSPACE_ROOT={_WORKSPACE_ROOT!r}\n")
+        _f.write(f"_CONFIG_PATH={_CONFIG_PATH!r}\n")
 except Exception as _e:
     print(f"[DEBUG ERROR] {_e}")
 
@@ -88,8 +90,8 @@ logger = logging.getLogger("feishu_adapter")
 try:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
-        P2ImMessageReceiveV1,
         P2ImChatAccessEventBotP2pChatEnteredV1,
+        P2ImMessageReceiveV1,
         ReplyMessageRequest,
         ReplyMessageRequestBody,
         ReplyMessageResponse,
@@ -104,6 +106,7 @@ except ImportError:
 # ══════════════════════════════════════════════
 #  Single Bot Runner
 # ══════════════════════════════════════════════
+
 
 class FeishuBotRunner:
     """
@@ -139,10 +142,14 @@ class FeishuBotRunner:
         """Fetch bot's own open_id for @mention detection."""
         try:
             token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-            token_resp = requests.post(token_url, json={
-                "app_id": self.cfg.app_id,
-                "app_secret": self.cfg.app_secret,
-            }, timeout=10)
+            token_resp = requests.post(
+                token_url,
+                json={
+                    "app_id": self.cfg.app_id,
+                    "app_secret": self.cfg.app_secret,
+                },
+                timeout=10,
+            )
             token_data = token_resp.json()
             if token_data.get("code") != 0:
                 self._log.warning(f"Failed to get tenant_access_token: {token_data}")
@@ -150,9 +157,13 @@ class FeishuBotRunner:
 
             access_token = token_data["tenant_access_token"]
             info_url = "https://open.feishu.cn/open-apis/bot/v3/info/"
-            info_resp = requests.get(info_url, headers={
-                "Authorization": f"Bearer {access_token}",
-            }, timeout=10)
+            info_resp = requests.get(
+                info_url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                },
+                timeout=10,
+            )
             info_data = info_resp.json()
             if info_data.get("code") == 0:
                 self.bot_open_id = info_data.get("bot", {}).get("open_id", "")
@@ -170,7 +181,9 @@ class FeishuBotRunner:
             diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             with open(diag_path, "a", encoding="utf-8") as f:
-                f.write(f"[{ts}] RECEIVED: type={type(data).__name__}, has_event={bool(data.event)}, has_msg={bool(data.event and data.event.message)}\n")
+                f.write(
+                    f"[{ts}] RECEIVED: type={type(data).__name__}, has_event={bool(data.event)}, has_msg={bool(data.event and data.event.message)}\n"
+                )
         except Exception:
             pass
         try:
@@ -210,19 +223,16 @@ class FeishuBotRunner:
                 return
 
             # Group chat: check @bot
-            if chat_type == "group":
-                if not self._is_mentioned_bot(message.mentions):
-                    self._log.debug(f"[{self.cfg.name}] Group msg without @bot, skip")
-                    return
+            if chat_type == "group" and not self._is_mentioned_bot(message.mentions):
+                self._log.debug(f"[{self.cfg.name}] Group msg without @bot, skip")
+                return
 
             # Get group name (cached)
             chat_name = ""
             if chat_type == "group" and chat_id:
                 chat_name = self._get_chat_name(chat_id)
 
-            self._log.info(
-                f"[{self.cfg.name}] Processing: \"{text[:60]}{'...' if len(text) > 60 else ''}\""
-            )
+            self._log.info(f'[{self.cfg.name}] Processing: "{text[:60]}{"..." if len(text) > 60 else ""}"')
 
             # ── Status tracking (P1.4) ──
             self.message_count += 1
@@ -231,8 +241,7 @@ class FeishuBotRunner:
             # Process in thread to avoid blocking SDK event loop
             thread = threading.Thread(
                 target=self._process_and_reply,
-                args=(message_id, chat_id, sender_open_id, text, chat_type,
-                      sender_name, chat_name, chat_id),
+                args=(message_id, chat_id, sender_open_id, text, chat_type, sender_name, chat_name, chat_id),
                 daemon=True,
             )
             thread.start()
@@ -261,6 +270,7 @@ class FeishuBotRunner:
             if not self.lark_client:
                 return ""
             from lark_oapi.api.im.v1 import GetChatRequest
+
             req = GetChatRequest.builder().chat_id(chat_id).build()
             resp = self.lark_client.im.v1.chat.get(req)
             if resp.success() and resp.data and resp.data.name:
@@ -283,6 +293,7 @@ class FeishuBotRunner:
             text = str(content)
 
         import re
+
         text = re.sub(r"@_user_\d+", "", text).strip()
         return text
 
@@ -296,21 +307,28 @@ class FeishuBotRunner:
                 if open_id and self.bot_open_id and open_id == self.bot_open_id:
                     return True
         # Fallback: if bot_open_id unknown but mentions exist, assume @bot
-        if not self.bot_open_id and mentions:
-            return True
-        return False
+        return bool(not self.bot_open_id and mentions)
 
-    def _process_and_reply(self, message_id: str, chat_id: str,
-                              sender_id: str, text: str, chat_type: str,
-                              sender_name: str = "", chat_name: str = "",
-                              source_chat_id: str = ""):
+    def _process_and_reply(
+        self,
+        message_id: str,
+        chat_id: str,
+        sender_id: str,
+        text: str,
+        chat_type: str,
+        sender_name: str = "",
+        chat_name: str = "",
+        source_chat_id: str = "",
+    ):
         """Call External Adapter and reply (runs in worker thread)."""
         diag_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
+
         def _diag(msg: str):
             timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             with open(diag_log_path, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {msg}\n")
             print(f"[Feishu] {msg}", flush=True)
+
         try:
             url = f"{EXTERNAL_ADAPTER_URL}/api/chat"
             headers = {"Content-Type": "application/json"}
@@ -331,14 +349,16 @@ class FeishuBotRunner:
                 "source_chat_id": source_chat_id,
             }
 
-            _diag(f"=== Request to External API ===")
+            _diag("=== Request to External API ===")
             _diag(f"URL: {url}")
-            _diag(f"API Key: {EXTERNAL_API_KEY[:12]}...{EXTERNAL_API_KEY[-4:] if len(EXTERNAL_API_KEY)>4 else ''}")
+            _diag(f"API Key: {EXTERNAL_API_KEY[:12]}...{EXTERNAL_API_KEY[-4:] if len(EXTERNAL_API_KEY) > 4 else ''}")
             _diag(f"Payload: {json.dumps(payload, ensure_ascii=False)[:500]}")
             _diag(f"Timeout: {self.cfg.request_timeout + 10}s")
 
             resp = requests.post(
-                url, json=payload, headers=headers,
+                url,
+                json=payload,
+                headers=headers,
                 timeout=self.cfg.request_timeout + 10,
             )
 
@@ -352,10 +372,8 @@ class FeishuBotRunner:
                     self._reply(message_id, "Agent did not return a valid reply.")
             else:
                 detail = ""
-                try:
+                with contextlib.suppress(Exception):
                     detail = resp.json().get("detail", "")
-                except Exception:
-                    pass
                 self._log.error(f"Adapter error: {resp.status_code}, detail={detail}")
                 _diag(f"ERROR: status={resp.status_code}, detail={detail}")
                 self._record_error(f"HTTP {resp.status_code}: {detail[:100]}" if detail else f"HTTP {resp.status_code}")
@@ -396,19 +414,12 @@ class FeishuBotRunner:
             request = (
                 ReplyMessageRequest.builder()
                 .message_id(message_id)
-                .request_body(
-                    ReplyMessageRequestBody.builder()
-                    .content(content)
-                    .msg_type("text")
-                    .build()
-                )
+                .request_body(ReplyMessageRequestBody.builder().content(content).msg_type("text").build())
                 .build()
             )
             response: ReplyMessageResponse = self.lark_client.im.v1.message.reply(request)
             if not response.success():
-                self._log.error(
-                    f"Reply failed: code={response.code}, msg={response.msg}"
-                )
+                self._log.error(f"Reply failed: code={response.code}, msg={response.msg}")
         except Exception as e:
             self._log.error(f"Reply error: {e}", exc_info=True)
 
@@ -418,9 +429,7 @@ class FeishuBotRunner:
     def build_ws_client(self) -> FeishuWSClient:
         """Build the WebSocket event client for this bot."""
         event_handler = (
-            EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(self.on_message_receive)
-            .build()
+            EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self.on_message_receive).build()
         )
 
         ws_client = FeishuWSClient(
@@ -436,13 +445,23 @@ class FeishuBotRunner:
 #  Entry point
 # ══════════════════════════════════════════════
 
+
 def _validate_bot_configs(bot_configs: list) -> bool:
     """Check for placeholder/template values that indicate incomplete config."""
     placeholders = {
-        "your_app_id_here", "your_app_secret_here", "your-agent-id",
-        "cli_xxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        "app_id", "app_secret", "agent_id", "your_app_id", "your_app_secret",
-        "replace_me", "TODO", "changeme",
+        "your_app_id_here",
+        "your_app_secret_here",
+        "your-agent-id",
+        "cli_xxxxxxxxxxxxxxxxxxxx",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "app_id",
+        "app_secret",
+        "agent_id",
+        "your_app_id",
+        "your_app_secret",
+        "replace_me",
+        "TODO",
+        "changeme",
     }
     ok = True
     for cfg in bot_configs:
@@ -480,16 +499,18 @@ def _run_single_bot(bot_index: int = -1, cfg: FeishuBotConfig = None):
     """
     # ── Startup diagnostic: write to file immediately ──
     diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
+
     def _diag(msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         with open(diag_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {msg}\n")
         # Also write to stdout so messages appear in launcher's PIPE log (containers, nohup, etc.)
         print(f"[Feishu] {msg}", flush=True)
+
     _diag("=== Feishu Adapter STARTING ===")
     _diag(f"PID: {os.getpid()}")
     _diag(f"Python: {sys.executable}")
-    _diag(f"OPENSQUAD_WORKSPACE: {os.environ.get('OPENSQUAD_WORKSPACE','NOT SET')}")
+    _diag(f"OPENSQUAD_WORKSPACE: {os.environ.get('OPENSQUAD_WORKSPACE', 'NOT SET')}")
     _diag(f"CWD: {os.getcwd()}")
 
     # Check service enabled in subprocess too (config may have changed)
@@ -558,10 +579,7 @@ def _run_single_bot(bot_index: int = -1, cfg: FeishuBotConfig = None):
             except Exception as e:
                 err_str = f"WebSocket: {type(e).__name__}: {e}"[:200]
                 runner._record_error(err_str)
-                bot_log.error(
-                    f"[{runner.cfg.name}] WebSocket error: {e}, "
-                    f"reconnecting in {backoff}s..."
-                )
+                bot_log.error(f"[{runner.cfg.name}] WebSocket error: {e}, reconnecting in {backoff}s...")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 120)
     finally:
@@ -571,10 +589,10 @@ def _run_single_bot(bot_index: int = -1, cfg: FeishuBotConfig = None):
 def _pipe_subprocess_output(proc: subprocess.Popen, bot_name: str):
     """Read subprocess stdout/stderr and forward to main process logger."""
     try:
-        for line in iter(proc.stdout.readline, ''):
+        for line in iter(proc.stdout.readline, ""):
             if line:
                 # Print directly so log format from subprocess is preserved
-                print(line, end='', flush=True)
+                print(line, end="", flush=True)
     except Exception:
         pass
 
@@ -600,7 +618,7 @@ def main():
     print("  OpenSquad Feishu Adapter (Orchestrator)")
     print("=" * 60)
     print(f"  Adapter URL:  {EXTERNAL_ADAPTER_URL}")
-    print(f"  Workspace:    {os.environ.get('OPENSQUAD_WORKSPACE','NOT SET')}")
+    print(f"  Workspace:    {os.environ.get('OPENSQUAD_WORKSPACE', 'NOT SET')}")
     print("=" * 60)
 
     # Initial load
@@ -615,12 +633,9 @@ def main():
 
     # bot_processes: app_id -> BotProcess
     bot_processes: dict = {}
-    config_mtime: float = 0.0
     if os.path.isfile(_CONFIG_PATH):
-        try:
-            config_mtime = os.path.getmtime(_CONFIG_PATH)
-        except Exception:
-            config_mtime = 0.0
+        with contextlib.suppress(Exception):
+            os.path.getmtime(_CONFIG_PATH)
 
     # Initial spawn
     for cfg in bot_configs:
@@ -705,14 +720,14 @@ def main():
 #  Orchestrator: per-bot process management
 # ══════════════════════════════════════════════
 
+
 # Per-bot sidecar status file path. The orchestrator reads these to
 # aggregate per-bot stats into its own status.json. The naming uses
 # app_id (sanitized) to keep the file name filesystem-safe.
 def _bot_sidecar_path(app_id: str) -> str:
     safe = "".join(c if c.isalnum() else "_" for c in app_id)
     base_dir = os.path.join(
-        os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(),
-        "data", "plugins", "feishu", "bot_status"
+        os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(), "data", "plugins", "feishu", "bot_status"
     )
     return os.path.join(base_dir, f"{safe}.json")
 
@@ -725,25 +740,23 @@ def _bot_sidecar_status_loop(runner: "FeishuBotRunner", stop_event: threading.Ev
     into its status.json.
     """
     path = _bot_sidecar_path(runner.cfg.app_id)
-    try:
+    with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-    except Exception:
-        pass
 
     while not stop_event.is_set():
         stop_event.wait(2.0)
         try:
             payload = {
-                "app_id":   runner.cfg.app_id,
-                "name":     runner.cfg.name,
+                "app_id": runner.cfg.app_id,
+                "name": runner.cfg.name,
                 "agent_id": runner.cfg.agent_id,
-                "pid":      os.getpid(),
+                "pid": os.getpid(),
                 "message_count": runner.message_count,
-                "error_count":   runner.error_count,
-                "last_error":    runner.last_error,
+                "error_count": runner.error_count,
+                "last_error": runner.last_error,
                 "last_error_at": runner.last_error_at,
                 "last_message_at": runner.last_message_at,
-                "updated_at":    datetime.datetime.now().isoformat(timespec="seconds"),
+                "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
             }
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -755,9 +768,20 @@ def _bot_sidecar_status_loop(runner: "FeishuBotRunner", stop_event: threading.Ev
 
 class BotProcess:
     """Tracks a single bot subprocess and its stats."""
-    __slots__ = ("cfg", "proc", "pipe_thread", "restart_count",
-                 "last_restart_time", "restart_delay", "started_at",
-                 "message_count", "error_count", "last_error", "last_message_at")
+
+    __slots__ = (
+        "cfg",
+        "error_count",
+        "last_error",
+        "last_message_at",
+        "last_restart_time",
+        "message_count",
+        "pipe_thread",
+        "proc",
+        "restart_count",
+        "restart_delay",
+        "started_at",
+    )
 
     def __init__(self, cfg: FeishuBotConfig):
         self.cfg = cfg
@@ -793,7 +817,7 @@ class BotProcess:
         }
 
 
-def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> Optional[subprocess.Popen]:
+def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> subprocess.Popen | None:
     """Spawn a subprocess running a single Feishu bot.
 
     The bot config is passed via the FEISHU_BOT_CONFIG_JSON env var so the
@@ -819,7 +843,7 @@ def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> Optional[subprocess.Popen]:
         return None
 
 
-def _start_bot(cfg: FeishuBotConfig) -> Optional[BotProcess]:
+def _start_bot(cfg: FeishuBotConfig) -> BotProcess | None:
     """Validate config, spawn subprocess, register BotProcess."""
     if not _validate_bot_configs([cfg]):
         logger.error(f"Bot [{cfg.name}] has invalid config, skipping.")
@@ -873,9 +897,7 @@ def _config_needs_restart(old: FeishuBotConfig, new: FeishuBotConfig) -> bool:
         return True
     if old.encrypt_key != new.encrypt_key:
         return True
-    if old.verification_token != new.verification_token:
-        return True
-    return False
+    return old.verification_token != new.verification_token
 
 
 def _apply_bot_diff(old_bots: dict, new_bots: dict, bot_processes: dict):
@@ -904,10 +926,7 @@ def _apply_bot_diff(old_bots: dict, new_bots: dict, bot_processes: dict):
         old_cfg = old_bots[app_id]
         new_cfg = new_bots[app_id]
         if _config_needs_restart(old_cfg, new_cfg):
-            logger.info(
-                f"[diff] Bot config changed: {new_cfg.name} ({app_id[:8]}...), "
-                f"reconnecting..."
-            )
+            logger.info(f"[diff] Bot config changed: {new_cfg.name} ({app_id[:8]}...), reconnecting...")
             if app_id in bot_processes:
                 _stop_bot(bot_processes[app_id])
             bp = _start_bot(new_cfg)
@@ -922,15 +941,11 @@ def _config_watcher_loop(bot_processes: dict, stop_event: threading.Event):
     """
     last_mtime = 0.0
     if os.path.isfile(_CONFIG_PATH):
-        try:
+        with contextlib.suppress(Exception):
             last_mtime = os.path.getmtime(_CONFIG_PATH)
-        except Exception:
-            pass
 
     # Cache current bot dicts (app_id -> FeishuBotConfig) for diff
-    current_bots: dict = {
-        b.cfg.app_id: b.cfg for b in bot_processes.values() if b.cfg
-    }
+    current_bots: dict = {b.cfg.app_id: b.cfg for b in bot_processes.values() if b.cfg}
 
     while not stop_event.is_set():
         stop_event.wait(1.0)
@@ -956,8 +971,7 @@ def _config_watcher_loop(bot_processes: dict, stop_event: threading.Event):
 # ══════════════════════════════════════════════
 
 _STATUS_PATH = os.path.join(
-    os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(),
-    "data", "plugins", "feishu", "status.json"
+    os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(), "data", "plugins", "feishu", "status.json"
 )
 
 
@@ -980,14 +994,14 @@ def _status_writer_loop(bot_processes: dict, stop_event: threading.Event):
                 sidecar = _bot_sidecar_path(app_id)
                 if os.path.isfile(sidecar):
                     try:
-                        with open(sidecar, "r", encoding="utf-8") as f:
+                        with open(sidecar, encoding="utf-8") as f:
                             stats = json.load(f)
                         # Only update stats fields, not pid/alive (those are
                         # the orchestrator's view of the subprocess)
-                        status["message_count"]   = stats.get("message_count", 0)
-                        status["error_count"]     = stats.get("error_count", 0)
-                        status["last_error"]      = stats.get("last_error", "")
-                        status["last_error_at"]   = stats.get("last_error_at", "")
+                        status["message_count"] = stats.get("message_count", 0)
+                        status["error_count"] = stats.get("error_count", 0)
+                        status["last_error"] = stats.get("last_error", "")
+                        status["last_error_at"] = stats.get("last_error_at", "")
                         status["last_message_at"] = stats.get("last_message_at", "")
                     except Exception:
                         pass

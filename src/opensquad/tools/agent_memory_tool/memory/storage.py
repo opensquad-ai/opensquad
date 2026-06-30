@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 """
 Memory entry storage engine (SQLite version)
 - All fields are optional (topic/keywords/summary/body); at least one must be non-empty
@@ -12,14 +12,15 @@ Memory entry storage engine (SQLite version)
                 importance, supersedes
 """
 
-import json
-import time
-import re
-import os
-import sqlite3
+import calendar
+import contextlib
 import datetime
 import functools
-import calendar
+import json
+import os
+import re
+import sqlite3
+import time
 from collections import defaultdict
 
 # ========================
@@ -27,10 +28,12 @@ from collections import defaultdict
 # ========================
 _jieba = None
 
+
 def _ensure_jieba():
     global _jieba
     if _jieba is None:
         import jieba
+
         _jieba = jieba
     return _jieba
 
@@ -38,26 +41,99 @@ def _ensure_jieba():
 # Stopword set (kept in sync with main_v2.py)
 # Chinese stopwords stored as unicode escapes to keep source file ASCII-clean.
 STOPWORDS = {
-    "\u8868\u793a", "\u8fdb\u884c", "\u6ca1\u6709", "\u53ef\u4ee5", "\u5df2\u7ecf", "\u5176\u4e2d", "\u4e0d\u662f",
-    "\u5c31\u662f", "\u8fd9\u4e2a", "\u90a3\u4e2a", "\u4ec0\u4e48", "\u4ed6\u4eec", "\u6211\u4eec", "\u81ea\u5df1",
-    "\u5e94\u8be5", "\u76ee\u524d", "\u5982\u679c", "\u901a\u8fc7", "\u4e4b\u540e", "\u4ee5\u53ca", "\u4ee5\u6765",
-    "\u56e0\u4e3a", "\u6240\u4ee5", "\u4f46\u662f", "\u800c\u4e14", "\u6216\u8005", "\u5bf9\u4e8e",
-    "\u5173\u4e8e", "\u6839\u636e", "\u6309\u7167", "\u7531\u4e8e", "\u867d\u7136", "\u4e0d\u8fc7", "\u7136\u800c",
-    "\u8fd8\u662f", "\u4ecd\u7136", "\u53ea\u662f", "\u4e5f\u662f", "\u5e76\u4e14", "\u540c\u65f6", "\u8fd9\u6837",
-    "\u90a3\u6837", "\u5982\u4f55", "\u600e\u4e48", "\u4e3a\u4ec0\u4e48", "\u600e\u6837", "\u54ea\u4e9b", "\u90a3\u4e9b",
-    "\u8fd9\u4e9b", "\u4e00\u4e9b", "\u5f88\u591a", "\u975e\u5e38", "\u6bd4\u8f83", "\u76f8\u5173", "\u5176\u4ed6",
-    "\u9700\u8981", "\u6210\u4e3a", "\u8ba4\u4e3a", "\u5305\u62ec", "\u6765\u770b", "\u770b\u6765", "\u8fd9\u662f",
-    "\u8bb0\u8005", "\u62a5\u9053", "\u636e\u6089", "\u4e86\u89e3", "\u4ecb\u7ecd", "\u65b9\u9762", "\u60c5\u51b5",
-    "\u95ee\u9898", "\u5de5\u4f5c", "\u53d1\u5c55", "\u5efa\u8bbe", "\u6d3b\u52a8", "\u5730\u533a", "\u56fd\u5bb6",
-    "\u4e0a\u5348", "\u4e0b\u5348", "\u6628\u5929", "\u4eca\u5929", "\u660e\u5929", "\u53bb\u5e74", "\u4eca\u5e74",
-    "\u660e\u5e74", "\u4e0a\u534a\u5e74", "\u4e0b\u534a\u5e74",
+    "\u8868\u793a",
+    "\u8fdb\u884c",
+    "\u6ca1\u6709",
+    "\u53ef\u4ee5",
+    "\u5df2\u7ecf",
+    "\u5176\u4e2d",
+    "\u4e0d\u662f",
+    "\u5c31\u662f",
+    "\u8fd9\u4e2a",
+    "\u90a3\u4e2a",
+    "\u4ec0\u4e48",
+    "\u4ed6\u4eec",
+    "\u6211\u4eec",
+    "\u81ea\u5df1",
+    "\u5e94\u8be5",
+    "\u76ee\u524d",
+    "\u5982\u679c",
+    "\u901a\u8fc7",
+    "\u4e4b\u540e",
+    "\u4ee5\u53ca",
+    "\u4ee5\u6765",
+    "\u56e0\u4e3a",
+    "\u6240\u4ee5",
+    "\u4f46\u662f",
+    "\u800c\u4e14",
+    "\u6216\u8005",
+    "\u5bf9\u4e8e",
+    "\u5173\u4e8e",
+    "\u6839\u636e",
+    "\u6309\u7167",
+    "\u7531\u4e8e",
+    "\u867d\u7136",
+    "\u4e0d\u8fc7",
+    "\u7136\u800c",
+    "\u8fd8\u662f",
+    "\u4ecd\u7136",
+    "\u53ea\u662f",
+    "\u4e5f\u662f",
+    "\u5e76\u4e14",
+    "\u540c\u65f6",
+    "\u8fd9\u6837",
+    "\u90a3\u6837",
+    "\u5982\u4f55",
+    "\u600e\u4e48",
+    "\u4e3a\u4ec0\u4e48",
+    "\u600e\u6837",
+    "\u54ea\u4e9b",
+    "\u90a3\u4e9b",
+    "\u8fd9\u4e9b",
+    "\u4e00\u4e9b",
+    "\u5f88\u591a",
+    "\u975e\u5e38",
+    "\u6bd4\u8f83",
+    "\u76f8\u5173",
+    "\u5176\u4ed6",
+    "\u9700\u8981",
+    "\u6210\u4e3a",
+    "\u8ba4\u4e3a",
+    "\u5305\u62ec",
+    "\u6765\u770b",
+    "\u770b\u6765",
+    "\u8fd9\u662f",
+    "\u8bb0\u8005",
+    "\u62a5\u9053",
+    "\u636e\u6089",
+    "\u4e86\u89e3",
+    "\u4ecb\u7ecd",
+    "\u65b9\u9762",
+    "\u60c5\u51b5",
+    "\u95ee\u9898",
+    "\u5de5\u4f5c",
+    "\u53d1\u5c55",
+    "\u5efa\u8bbe",
+    "\u6d3b\u52a8",
+    "\u5730\u533a",
+    "\u56fd\u5bb6",
+    "\u4e0a\u5348",
+    "\u4e0b\u5348",
+    "\u6628\u5929",
+    "\u4eca\u5929",
+    "\u660e\u5929",
+    "\u53bb\u5e74",
+    "\u4eca\u5e74",
+    "\u660e\u5e74",
+    "\u4e0a\u534a\u5e74",
+    "\u4e0b\u534a\u5e74",
 }
 
 RE_NOISE = re.compile(
-    r'^(\d+\.?\d*%?|'
-    r'\d{4}\u5e74?\d{0,2}\u6708?\d{0,2}\u65e5?|'
-    r'[a-zA-Z]|'
-    r'[\u3000\xa0\s]+)$'
+    r"^(\d+\.?\d*%?|"
+    r"\d{4}\u5e74?\d{0,2}\u6708?\d{0,2}\u65e5?|"
+    r"[a-zA-Z]|"
+    r"[\u3000\xa0\s]+)$"
 )
 
 
@@ -97,8 +173,7 @@ def extract_keywords_jieba(text, min_len=2):
 # n=common noun, ns=place name, nt=org name, nz=other proper noun, nrt=transliterated person name
 # nr=person name, eng=English word (e.g. Transformer), vn=verbal noun (e.g. "computation")
 # l=common phrase (e.g. "natural language"), i=idiom/set phrase, j=abbreviation
-_NOUN_POS_ALLOW = ('n', 'ns', 'nt', 'nz', 'nr', 'nrt',
-                   'eng', 'vn', 'l', 'i', 'j')
+_NOUN_POS_ALLOW = ("n", "ns", "nt", "nz", "nr", "nrt", "eng", "vn", "l", "i", "j")
 
 
 def extract_nouns_jieba(text, top_k=20, min_len=2):
@@ -125,8 +200,7 @@ def extract_nouns_jieba(text, top_k=20, min_len=2):
     analyse = _ensure_jieba_analyse()
 
     # TF-IDF extraction + POS whitelist filtering (extract more, then filter stopwords and noise)
-    raw_tags = analyse.extract_tags(
-        text, topK=top_k * 2, withWeight=True, allowPOS=_NOUN_POS_ALLOW)
+    raw_tags = analyse.extract_tags(text, topK=top_k * 2, withWeight=True, allowPOS=_NOUN_POS_ALLOW)
 
     # Secondary filtering: stopwords + noise regex + min word length
     filtered = []
@@ -161,6 +235,7 @@ def _ensure_jieba_analyse():
     global _jieba_analyse
     if _jieba_analyse is None:
         import jieba.analyse
+
         _jieba_analyse = jieba.analyse
     return _jieba_analyse
 
@@ -221,6 +296,7 @@ def extract_keywords_weighted(text, top_k=25, long_threshold=80, min_len=2):
 # Time expression auto-parser
 # ========================
 
+
 def _parse_cn_num(s):
     """
     Convert Chinese/Arabic numerals to int (supports 0~99).
@@ -238,10 +314,29 @@ def _parse_cn_num(s):
         return int(s)
 
     cn_map = {
-        "\u96f6": 0, "\u4e00": 1, "\u4e8c": 2, "\u4e24": 2, "\u4e09": 3, "\u56db": 4,
-        "\u4e94": 5, "\u516d": 6, "\u4e03": 7, "\u516b": 8, "\u4e5d": 9, "\u5341": 10,
-        "\u3007": 0, "\u58f9": 1, "\u8d30": 2, "\u53c1": 3, "\u8086": 4,
-        "\u4f0d": 5, "\u9646": 6, "\u67d2": 7, "\u634c": 8, "\u7396": 9, "\u62fe": 10,
+        "\u96f6": 0,
+        "\u4e00": 1,
+        "\u4e8c": 2,
+        "\u4e24": 2,
+        "\u4e09": 3,
+        "\u56db": 4,
+        "\u4e94": 5,
+        "\u516d": 6,
+        "\u4e03": 7,
+        "\u516b": 8,
+        "\u4e5d": 9,
+        "\u5341": 10,
+        "\u3007": 0,
+        "\u58f9": 1,
+        "\u8d30": 2,
+        "\u53c1": 3,
+        "\u8086": 4,
+        "\u4f0d": 5,
+        "\u9646": 6,
+        "\u67d2": 7,
+        "\u634c": 8,
+        "\u7396": 9,
+        "\u62fe": 10,
     }
 
     # Single character: look up table
@@ -262,7 +357,7 @@ def _parse_cn_num(s):
     for i, ch in enumerate(s):
         if ch in ("\u5341", "\u62fe") and i > 0:
             tens_ch = s[:i]
-            units_part = s[i + 1:]
+            units_part = s[i + 1 :]
             if tens_ch in cn_map:
                 tens = cn_map[tens_ch] * 10
                 if not units_part:
@@ -408,23 +503,29 @@ def _calc_simple_time(today, expr, now_dt=None):
         this_monday = today_dt - datetime.timedelta(days=days_since_monday)
         last_monday = this_monday - datetime.timedelta(weeks=1)
         last_sunday = last_monday + datetime.timedelta(days=6)
-        return (last_monday.replace(hour=0, minute=0, second=0).timestamp(),
-                last_sunday.replace(hour=23, minute=59, second=59).timestamp())
+        return (
+            last_monday.replace(hour=0, minute=0, second=0).timestamp(),
+            last_sunday.replace(hour=23, minute=59, second=59).timestamp(),
+        )
 
     if expr == "\u4e0a\u4e0a\u5468":
         days_since_monday = today.weekday()
         this_monday = today_dt - datetime.timedelta(days=days_since_monday)
         target_monday = this_monday - datetime.timedelta(weeks=2)
         target_sunday = target_monday + datetime.timedelta(days=6)
-        return (target_monday.replace(hour=0, minute=0, second=0).timestamp(),
-                target_sunday.replace(hour=23, minute=59, second=59).timestamp())
+        return (
+            target_monday.replace(hour=0, minute=0, second=0).timestamp(),
+            target_sunday.replace(hour=23, minute=59, second=59).timestamp(),
+        )
 
     if expr == "\u672c\u5468":
         days_since_monday = today.weekday()
         this_monday = today_dt - datetime.timedelta(days=days_since_monday)
         this_sunday = this_monday + datetime.timedelta(days=6)
-        return (this_monday.replace(hour=0, minute=0, second=0).timestamp(),
-                this_sunday.replace(hour=23, minute=59, second=59).timestamp())
+        return (
+            this_monday.replace(hour=0, minute=0, second=0).timestamp(),
+            this_sunday.replace(hour=23, minute=59, second=59).timestamp(),
+        )
 
     if expr in ("\u4e0a\u4e2a\u6708", "\u4e0a\u6708"):
         year = today.year
@@ -470,25 +571,35 @@ def _calc_simple_time(today, expr, now_dt=None):
 
 # Relative time expressions -- naturally lean toward query intent
 _RELATIVE_TIME_EXPRS = {
-    "\u4eca\u5929", "\u6628\u5929", "\u524d\u5929", "\u5927\u524d\u5929",
-    "\u4e0a\u5468", "\u4e0a\u4e0a\u5468", "\u672c\u5468",
-    "\u4e0a\u4e2a\u6708", "\u4e0a\u4e0a\u4e2a\u6708", "\u4e0a\u6708", "\u672c\u6708",
-    "\u4eca\u5e74", "\u53bb\u5e74", "\u524d\u5e74",
+    "\u4eca\u5929",
+    "\u6628\u5929",
+    "\u524d\u5929",
+    "\u5927\u524d\u5929",
+    "\u4e0a\u5468",
+    "\u4e0a\u4e0a\u5468",
+    "\u672c\u5468",
+    "\u4e0a\u4e2a\u6708",
+    "\u4e0a\u4e0a\u4e2a\u6708",
+    "\u4e0a\u6708",
+    "\u672c\u6708",
+    "\u4eca\u5e74",
+    "\u53bb\u5e74",
+    "\u524d\u5e74",
     "\u6700\u8fd1",
 }
 
 # Query-intent verbs
 _RE_QUERY_VERB = re.compile(
-    r'(\u627e|\u641c|\u67e5|\u770b\u770b|\u5e2e\u6211|\u56de\u5fc6|\u60f3\u60f3|\u56de\u987e|\u641c\u7d22|\u67e5\u627e|\u67e5\u770b|\u67e5\u8be2|\u68c0\u7d22)\s*$'
+    r"(\u627e|\u641c|\u67e5|\u770b\u770b|\u5e2e\u6211|\u56de\u5fc6|\u60f3\u60f3|\u56de\u987e|\u641c\u7d22|\u67e5\u627e|\u67e5\u770b|\u67e5\u8be2|\u68c0\u7d22)\s*$"
 )
 
 # Descriptive verbs (these before a time word -> likely content description)
 _RE_DESC_VERB = re.compile(
-    r'(\u63d0\u5230|\u8bf4\u4e86|\u5199\u4e86|\u8bb0\u5f55\u4e86|\u63cf\u8ff0|\u8bb2\u8ff0|\u8ba8\u8bba|\u8c08\u5230|\u4ecb\u7ecd|\u5206\u6790\u4e86|\u5f15\u7528\u4e86|\u5217\u4e3e\u4e86|\u7edf\u8ba1\u4e86|\u9884\u6d4b)\s*$'
+    r"(\u63d0\u5230|\u8bf4\u4e86|\u5199\u4e86|\u8bb0\u5f55\u4e86|\u63cf\u8ff0|\u8bb2\u8ff0|\u8ba8\u8bba|\u8c08\u5230|\u4ecb\u7ecd|\u5206\u6790\u4e86|\u5f15\u7528\u4e86|\u5217\u4e3e\u4e86|\u7edf\u8ba1\u4e86|\u9884\u6d4b)\s*$"
 )
 
 # Container pattern (nearby "inside/in/within" -> likely quoting a document; time word is content)
-_RE_CONTAINER_NEARBY = re.compile(r'[\u91cc\u4e2d\u5185]')
+_RE_CONTAINER_NEARBY = re.compile(r"[\u91cc\u4e2d\u5185]")
 
 
 def _is_in_quotes(text, start, end):
@@ -500,13 +611,13 @@ def _is_in_quotes(text, start, end):
         English quotes:  "" ''
     """
     quote_pairs = [
-        ('\u201c', '\u201d'),   # Chinese double quotes
-        ('\u2018', '\u2019'),   # Chinese single quotes
-        ('\u300a', '\u300b'),   # book title marks
-        ('\u3008', '\u3009'),   # angle brackets
-        ('\u300c', '\u300d'),   # corner brackets
-        ('"', '"'),             # English double quotes
-        ("'", "'"),             # English single quotes
+        ("\u201c", "\u201d"),  # Chinese double quotes
+        ("\u2018", "\u2019"),  # Chinese single quotes
+        ("\u300a", "\u300b"),  # book title marks
+        ("\u3008", "\u3009"),  # angle brackets
+        ("\u300c", "\u300d"),  # corner brackets
+        ('"', '"'),  # English double quotes
+        ("'", "'"),  # English single quotes
     ]
     for open_q, close_q in quote_pairs:
         open_pos = text.rfind(open_q, 0, start)
@@ -536,15 +647,15 @@ def _compute_time_confidence(text, match, time_expr):
     signals = []
 
     pos = match.start()
-    before = text[:pos]          # text before the time word
-    after = text[match.end():]   # text after the time word
+    before = text[:pos]  # text before the time word
+    after = text[match.end() :]  # text after the time word
 
     before_stripped = before.rstrip()
 
     # ============ Positive signals ============
 
     # 1. At sentence start (nothing before, or only punctuation/whitespace)
-    if len(before_stripped) == 0 or re.match(r'^[\uff0c\u3002\uff01\uff1f\u3001\uff1b\uff1a\s]*$', before_stripped):
+    if len(before_stripped) == 0 or re.match(r"^[\uff0c\u3002\uff01\uff1f\u3001\uff1b\uff1a\s]*$", before_stripped):
         score += 0.3
         signals.append("+sentence_start")
 
@@ -564,8 +675,7 @@ def _compute_time_confidence(text, match, time_expr):
         signals.append("+short_text")
 
     # 5. Relative time expression (today/yesterday/last week etc. naturally lean toward query)
-    is_relative = (time_expr in _RELATIVE_TIME_EXPRS or
-                   time_expr.startswith("\u6700\u8fd1"))
+    is_relative = time_expr in _RELATIVE_TIME_EXPRS or time_expr.startswith("\u6700\u8fd1")
     if is_relative:
         score += 0.1
         signals.append("+relative_time")
@@ -601,49 +711,47 @@ def _compute_time_confidence(text, match, time_expr):
 
 # Month range: "this year May to August" / "2024 March~June"
 _RE_MONTH_RANGE = re.compile(
-    r'(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74?'
-    r'(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?'
-    r'[\u5230\u81f3~\-]'
-    r'(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?'
+    r"(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74?"
+    r"(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?"
+    r"[\u5230\u81f3~\-]"
+    r"(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?"
 )
 
 # Year + month: "this year May" / "last year December" / "2024 March"
 _RE_YEAR_MONTH = re.compile(
-    r'(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74'
-    r'(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?'
+    r"(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74"
+    r"(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708\u4efd?"
 )
 
 # Year + month + day: "this year May 3rd" / "2024 March 15th"
 _RE_YEAR_MONTH_DAY = re.compile(
-    r'(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74'
-    r'(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708'
-    r'(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)[\u65e5\u53f7]'
+    r"(\u4eca|\u53bb|\u524d|\u5927\u524d|\d{4})\u5e74"
+    r"(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\u6708"
+    r"(\d{1,2}|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)[\u65e5\u53f7]"
 )
 
 # "previous N days/weeks/months/years": "previous two months" / "previous 3 days"
 _RE_BEFORE_N = re.compile(
-    r'\u524d(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)'
+    r"\u524d(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)"
 )
 
 # "N days/weeks/months/years ago": "two months ago" / "3 days ago"
 _RE_N_AGO = re.compile(
-    r'(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)\u524d'
+    r"(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)\u524d"
 )
 
 # "recent N days/weeks/months/years": "recent three days" / "recent 2 months"
 _RE_RECENT_N = re.compile(
-    r'\u6700\u8fd1(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)'
+    r"\u6700\u8fd1(\d+|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e]+)\u4e2a?(\u5929|\u65e5|\u5468|\u661f\u671f|\u6708|\u5e74)"
 )
 
 # Simple time: today/yesterday/day-before-yesterday/3-days-ago/last-week/...
 _RE_SIMPLE = re.compile(
-    r'(\u5927\u524d\u5929|\u524d\u5929|\u6628\u5929|\u4eca\u5929|\u4e0a\u4e0a\u5468|\u4e0a\u5468|\u672c\u5468|\u4e0a\u4e0a\u4e2a\u6708|\u4e0a\u4e2a\u6708|\u4e0a\u6708|\u672c\u6708|\u4eca\u5e74|\u53bb\u5e74|\u524d\u5e74)'
+    r"(\u5927\u524d\u5929|\u524d\u5929|\u6628\u5929|\u4eca\u5929|\u4e0a\u4e0a\u5468|\u4e0a\u5468|\u672c\u5468|\u4e0a\u4e0a\u4e2a\u6708|\u4e0a\u4e2a\u6708|\u4e0a\u6708|\u672c\u6708|\u4eca\u5e74|\u53bb\u5e74|\u524d\u5e74)"
 )
 
 # 4-digit year: "2024" (standalone, represents the whole year)
-_RE_SPEC_YEAR = re.compile(
-    r'(\d{4})\u5e74'
-)
+_RE_SPEC_YEAR = re.compile(r"(\d{4})\u5e74")
 
 
 def parse_time_expression(text, now=None, confidence_threshold=0.45):
@@ -700,7 +808,7 @@ def parse_time_expression(text, now=None, confidence_threshold=0.45):
     time_range = None
     time_expr = None
     matched_span = None  # (start, end) in text
-    matched_obj = None   # re.Match object, for confidence calculation
+    matched_obj = None  # re.Match object, for confidence calculation
 
     # ---- Try patterns in priority order ----
 
@@ -728,8 +836,7 @@ def parse_time_expression(text, now=None, confidence_threshold=0.45):
             year = _resolve_year_prefix(m.group(1), today)
             month_start = _parse_cn_num(m.group(2))
             month_end = _parse_cn_num(m.group(3))
-            if (month_start and month_end and
-                    1 <= month_start <= 12 and 1 <= month_end <= 12):
+            if month_start and month_end and 1 <= month_start <= 12 and 1 <= month_end <= 12:
                 start_ts, _ = _month_ts_range(year, month_start)
                 _, end_ts = _month_ts_range(year, month_end)
                 time_range = (start_ts, end_ts)
@@ -820,22 +927,20 @@ def parse_time_expression(text, now=None, confidence_threshold=0.45):
     confidence_signals = None
 
     if matched_obj is not None and time_range is not None:
-        confidence, confidence_signals = _compute_time_confidence(
-            text, matched_obj, time_expr
-        )
+        confidence, confidence_signals = _compute_time_confidence(text, matched_obj, time_expr)
         # Below threshold -> do not use as search constraint
         if confidence < confidence_threshold:
             time_range = None
-            matched_span = None   # do not strip from cleaned_text
+            matched_span = None  # do not strip from cleaned_text
 
     # ---- Build cleaned_text (remove matched time expression) ----
     if matched_span:
-        cleaned = text[:matched_span[0]] + text[matched_span[1]:]
+        cleaned = text[: matched_span[0]] + text[matched_span[1] :]
         # Clean up any residual connectives/punctuation
-        cleaned = re.sub(r'^[\u7684\uff0c,\s]+', '', cleaned)
-        cleaned = re.sub(r'[\u7684\uff0c,\s]+$', '', cleaned)
+        cleaned = re.sub(r"^[\u7684\uff0c,\s]+", "", cleaned)
+        cleaned = re.sub(r"[\u7684\uff0c,\s]+$", "", cleaned)
         # Clean up extra internal whitespace
-        cleaned = re.sub(r'\s{2,}', ' ', cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
         cleaned = cleaned.strip()
     else:
         cleaned = text.strip()
@@ -971,9 +1076,7 @@ class MemoryStore:
         if row:
             return int(row[0])
         # Infer from existing entries
-        row = cur.execute(
-            "SELECT id FROM entries ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
+        row = cur.execute("SELECT id FROM entries ORDER BY rowid DESC LIMIT 1").fetchone()
         if row:
             last_id = row[0]
             try:
@@ -985,10 +1088,7 @@ class MemoryStore:
 
     def _save_next_id(self):
         """Save next_id to meta table."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('next_id', ?)",
-            (str(self._next_id),)
-        )
+        self._conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('next_id', ?)", (str(self._next_id),))
 
     def _generate_id(self):
         self._next_id += 1
@@ -998,10 +1098,21 @@ class MemoryStore:
     # Write
     # ========================
 
-    def add(self, topic=None, keywords=None, summary=None, body=None,
-            source=None, auto_extract_keywords=False, timestamp=None,
-            entry_type="knowledge", category=None, date_str=None,
-            importance=3, supersedes=None):
+    def add(
+        self,
+        topic=None,
+        keywords=None,
+        summary=None,
+        body=None,
+        source=None,
+        auto_extract_keywords=False,
+        timestamp=None,
+        entry_type="knowledge",
+        category=None,
+        date_str=None,
+        importance=3,
+        supersedes=None,
+    ):
         """
         Write a memory entry.
 
@@ -1054,14 +1165,28 @@ class MemoryStore:
             self._handle_supersedes(supersedes)
 
         # Insert into entries table
-        self._conn.execute("""
+        self._conn.execute(
+            """
             INSERT INTO entries (id, entry_type, topic, summary, body, source,
                                  category, timestamp, date_str, keywords_json,
                                  access_count, last_accessed, importance, supersedes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
-        """, (entry_id, entry_type, topic, summary, body, source,
-              category, ts, date_str, keywords_json,
-              importance, supersedes))
+        """,
+            (
+                entry_id,
+                entry_type,
+                topic,
+                summary,
+                body,
+                source,
+                category,
+                ts,
+                date_str,
+                keywords_json,
+                importance,
+                supersedes,
+            ),
+        )
 
         # Build inverted index
         self._index_entry_sql(entry_id, final_keywords, topic)
@@ -1074,28 +1199,20 @@ class MemoryStore:
 
     def _handle_supersedes(self, old_entry_id):
         """Handle memory reconsolidation: decrease importance of superseded entry by 1."""
-        row = self._conn.execute(
-            "SELECT importance FROM entries WHERE id=?", (old_entry_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT importance FROM entries WHERE id=?", (old_entry_id,)).fetchone()
         if row:
             old_importance = max(1, row[0] - 1)
-            self._conn.execute(
-                "UPDATE entries SET importance=? WHERE id=?",
-                (old_importance, old_entry_id)
-            )
+            self._conn.execute("UPDATE entries SET importance=? WHERE id=?", (old_importance, old_entry_id))
 
     def _index_entry_sql(self, entry_id, keywords, topic):
         """Build keyword_index inverted index for a memory entry."""
         pairs = []
-        for kw in (keywords or []):
+        for kw in keywords or []:
             pairs.append((kw, entry_id))
         if topic:
             pairs.append((topic, entry_id))
         if pairs:
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO keyword_index (keyword, entry_id) VALUES (?, ?)",
-                pairs
-            )
+            self._conn.executemany("INSERT OR IGNORE INTO keyword_index (keyword, entry_id) VALUES (?, ?)", pairs)
 
     # ========================
     # Read / Delete
@@ -1103,25 +1220,19 @@ class MemoryStore:
 
     def get(self, entry_id):
         """Get a memory entry by ID; returns None if not found. Returns dict compatible with old version."""
-        row = self._conn.execute(
-            "SELECT * FROM entries WHERE id=?", (entry_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_dict(row)
 
     def remove(self, entry_id):
         """Delete a memory entry; returns whether it succeeded."""
-        row = self._conn.execute(
-            "SELECT id FROM entries WHERE id=?", (entry_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT id FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is None:
             return False
 
         # Delete inverted index
-        self._conn.execute(
-            "DELETE FROM keyword_index WHERE entry_id=?", (entry_id,)
-        )
+        self._conn.execute("DELETE FROM keyword_index WHERE entry_id=?", (entry_id,))
         # Delete entry
         self._conn.execute("DELETE FROM entries WHERE id=?", (entry_id,))
         self._conn.commit()
@@ -1143,9 +1254,7 @@ class MemoryStore:
 
         hits = defaultdict(int)
         for kw in keywords:
-            rows = self._conn.execute(
-                "SELECT entry_id FROM keyword_index WHERE keyword=?", (kw,)
-            ).fetchall()
+            rows = self._conn.execute("SELECT entry_id FROM keyword_index WHERE keyword=?", (kw,)).fetchall()
             for row in rows:
                 hits[row[0]] += 1
 
@@ -1165,17 +1274,14 @@ class MemoryStore:
             return {}
 
         # Get all indexed keywords (for fuzzy matching)
-        all_index_keys = [row[0] for row in
-                          self._conn.execute(
-                              "SELECT DISTINCT keyword FROM keyword_index"
-                          ).fetchall()]
+        all_index_keys = [row[0] for row in self._conn.execute("SELECT DISTINCT keyword FROM keyword_index").fetchall()]
 
         hits = defaultdict(float)
 
         for query_kw in keywords:
             for idx_kw in all_index_keys:
                 if query_kw == idx_kw:
-                    continue    # exact match handled by search_exact
+                    continue  # exact match handled by search_exact
 
                 score = 0.0
 
@@ -1188,8 +1294,7 @@ class MemoryStore:
 
                 if score > 0:
                     rows = self._conn.execute(
-                        "SELECT entry_id FROM keyword_index WHERE keyword=?",
-                        (idx_kw,)
+                        "SELECT entry_id FROM keyword_index WHERE keyword=?", (idx_kw,)
                     ).fetchall()
                     for row in rows:
                         hits[row[0]] = max(hits[row[0]], score)
@@ -1225,12 +1330,11 @@ class MemoryStore:
         result = []
         batch_size = 500
         for i in range(0, len(entry_id_list), batch_size):
-            batch = entry_id_list[i:i + batch_size]
+            batch = entry_id_list[i : i + batch_size]
             placeholders = ",".join(["?"] * len(batch))
             rows = self._conn.execute(
-                f"SELECT id FROM entries WHERE id IN ({placeholders}) "
-                f"AND timestamp >= ? AND timestamp <= ?",
-                batch + [start_ts, end_ts]
+                f"SELECT id FROM entries WHERE id IN ({placeholders}) AND timestamp >= ? AND timestamp <= ?",
+                [*batch, start_ts, end_ts],
             ).fetchall()
             result.extend(row[0] for row in rows)
 
@@ -1238,9 +1342,7 @@ class MemoryStore:
 
     def search_by_source(self, source):
         """Filter by source agent; returns list of entry_ids."""
-        rows = self._conn.execute(
-            "SELECT id FROM entries WHERE source=?", (source,)
-        ).fetchall()
+        rows = self._conn.execute("SELECT id FROM entries WHERE source=?", (source,)).fetchall()
         return [row[0] for row in rows]
 
     # ========================
@@ -1248,8 +1350,7 @@ class MemoryStore:
     # ========================
 
     @staticmethod
-    def compute_time_weight(entry_timestamp, decay_lambda=0.1, now=None,
-                            importance=3):
+    def compute_time_weight(entry_timestamp, decay_lambda=0.1, now=None, importance=3):
         """
         Inverse-function time decay weight (importance-aware).
 
@@ -1301,9 +1402,7 @@ class MemoryStore:
         now = time.time()
         for eid in entry_ids:
             self._conn.execute(
-                "UPDATE entries SET access_count = access_count + 1, "
-                "last_accessed = ? WHERE id = ?",
-                (now, eid)
+                "UPDATE entries SET access_count = access_count + 1, last_accessed = ? WHERE id = ?", (now, eid)
             )
         self._conn.commit()
 
@@ -1322,10 +1421,7 @@ class MemoryStore:
             bool -- whether it succeeded (whether the entry exists)
         """
         level = max(1, min(5, int(level)))
-        result = self._conn.execute(
-            "UPDATE entries SET importance=? WHERE id=?",
-            (level, entry_id)
-        )
+        result = self._conn.execute("UPDATE entries SET importance=? WHERE id=?", (level, entry_id))
         self._conn.commit()
         return result.rowcount > 0
 
@@ -1358,20 +1454,14 @@ class MemoryStore:
 
     def get_all_keywords(self):
         """Return all keywords in the inverted index."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT keyword FROM keyword_index"
-        ).fetchall()
+        rows = self._conn.execute("SELECT DISTINCT keyword FROM keyword_index").fetchall()
         return [row[0] for row in rows]
 
     def get_stats(self):
         """Return storage statistics."""
         total = self._conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-        total_keys = self._conn.execute(
-            "SELECT COUNT(DISTINCT keyword) FROM keyword_index"
-        ).fetchone()[0]
-        sources_rows = self._conn.execute(
-            "SELECT DISTINCT source FROM entries WHERE source IS NOT NULL"
-        ).fetchall()
+        total_keys = self._conn.execute("SELECT COUNT(DISTINCT keyword) FROM keyword_index").fetchone()[0]
+        sources_rows = self._conn.execute("SELECT DISTINCT source FROM entries WHERE source IS NOT NULL").fetchall()
         sources = sorted(row[0] for row in sources_rows)
 
         return {
@@ -1389,8 +1479,7 @@ class MemoryStore:
         Returns: list[dict]
         """
         rows = self._conn.execute(
-            "SELECT * FROM entries WHERE timestamp >= ? ORDER BY timestamp",
-            (since_timestamp,)
+            "SELECT * FROM entries WHERE timestamp >= ? ORDER BY timestamp", (since_timestamp,)
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
@@ -1432,7 +1521,7 @@ class MemoryStore:
         if not os.path.exists(path):
             return False
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         entries = data.get("entries", {})
@@ -1447,28 +1536,31 @@ class MemoryStore:
             keywords = entry.get("keywords") or []
             keywords_json = json.dumps(keywords, ensure_ascii=False) if keywords else None
 
-            self._conn.execute("""
+            self._conn.execute(
+                """
                 INSERT OR REPLACE INTO entries
                 (id, entry_type, topic, summary, body, source, category,
                  timestamp, date_str, keywords_json,
                  access_count, last_accessed, importance, supersedes)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                entry_id,
-                entry.get("entry_type", "knowledge"),
-                entry.get("topic"),
-                entry.get("summary"),
-                entry.get("body"),
-                entry.get("source"),
-                entry.get("category"),
-                entry.get("timestamp", time.time()),
-                entry.get("date_str"),
-                keywords_json,
-                entry.get("access_count", 0),
-                entry.get("last_accessed"),
-                entry.get("importance", 3),
-                entry.get("supersedes"),
-            ))
+            """,
+                (
+                    entry_id,
+                    entry.get("entry_type", "knowledge"),
+                    entry.get("topic"),
+                    entry.get("summary"),
+                    entry.get("body"),
+                    entry.get("source"),
+                    entry.get("category"),
+                    entry.get("timestamp", time.time()),
+                    entry.get("date_str"),
+                    keywords_json,
+                    entry.get("access_count", 0),
+                    entry.get("last_accessed"),
+                    entry.get("importance", 3),
+                    entry.get("supersedes"),
+                ),
+            )
 
             self._index_entry_sql(entry_id, keywords, entry.get("topic"))
 
@@ -1522,9 +1614,7 @@ class MemoryStore:
         Backward-compatible property: returns a dict view of the inverted index.
         Warning: use only for legacy code compatibility.
         """
-        rows = self._conn.execute(
-            "SELECT keyword, entry_id FROM keyword_index"
-        ).fetchall()
+        rows = self._conn.execute("SELECT keyword, entry_id FROM keyword_index").fetchall()
         idx = defaultdict(set)
         for row in rows:
             idx[row[0]].add(row[1])
@@ -1538,7 +1628,5 @@ class MemoryStore:
 
     def __del__(self):
         """Auto-close connection on destruction."""
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass

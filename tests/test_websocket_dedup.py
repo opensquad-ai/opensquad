@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for WebSocket message sequencing and deduplication (P2-2).
 
 Validates:
@@ -7,7 +6,7 @@ Validates:
 3. Out-of-order messages are detected
 4. Deduplication window evicts old entries
 """
-import json
+
 import pytest
 
 # Skip all tests if websockets is not installed
@@ -17,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 try:
-    from opensquad.sdk import BaseAgent, AgentConfig
+    from opensquad.sdk import AgentConfig, BaseAgent
 except ImportError:
     BaseAgent = None
     AgentConfig = None

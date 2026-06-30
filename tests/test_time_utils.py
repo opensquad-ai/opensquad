@@ -1,19 +1,17 @@
-# -*- coding: utf-8 -*-
 """Tests for time_utils — UTC timezone standardization."""
-import time
-from datetime import datetime, timezone, timedelta
 
-import pytest
+import time
+from datetime import datetime, timedelta, timezone
 
 from opensquad.time_utils import (
+    format_beijing_iso,
+    format_iso,
+    monotonic_ms,
+    utc_from_iso,
+    utc_from_timestamp,
     utc_now,
     utc_now_iso,
     utc_now_ms,
-    utc_from_iso,
-    utc_from_timestamp,
-    format_iso,
-    format_beijing_iso,
-    monotonic_ms,
 )
 
 

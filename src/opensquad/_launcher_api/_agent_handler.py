@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Agent Handler Mixin — agent management HTTP handler methods.
 
@@ -6,12 +5,12 @@ Extracted from _launcher_api/__init__.py to reduce its size.
 This mixin provides all agent-related handler methods for the
 ManagementHandler class.
 """
+
 from __future__ import annotations
 
-import os
 import json
 import logging
-from typing import Any, Dict
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -42,19 +41,21 @@ class AgentHandlerMixin:
                         "_config_error": f"Invalid config type: {type(info.get('config')).__name__}",
                         "_raw_config": str(info.get("config")),
                     }
-                result.append({
-                    "dir_name": info["name"],
-                    "agent_id": cfg.get("agent_id", info["name"]),
-                    "agent_name": cfg.get("agent_name", info["name"]),
-                    "alive": False,
-                    "pid": None,
-                    "should_run": False,
-                    "restart_count": 0,
-                    "started_at": None,
-                    "config": cfg,
-                    "token_stats": None,
-                    "chat_profile": self._read_chat_profile(info["name"]),
-                })
+                result.append(
+                    {
+                        "dir_name": info["name"],
+                        "agent_id": cfg.get("agent_id", info["name"]),
+                        "agent_name": cfg.get("agent_name", info["name"]),
+                        "alive": False,
+                        "pid": None,
+                        "should_run": False,
+                        "restart_count": 0,
+                        "started_at": None,
+                        "config": cfg,
+                        "token_stats": None,
+                        "chat_profile": self._read_chat_profile(info["name"]),
+                    }
+                )
         for item in result:
             cfg = item.get("config") or {}
             prompt_cfg = cfg.get("prompt", {})
@@ -81,7 +82,9 @@ class AgentHandlerMixin:
             errs = self.state.val_cfg(ap.config)
             if errs:
                 detail = "\n".join(f"- {e}" for e in errs)
-                self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                self._send_json(
+                    {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400
+                )
                 return
             port_err = self.state.chk_port(ap.config)
             if port_err:
@@ -102,7 +105,9 @@ class AgentHandlerMixin:
         errs = self.state.val_cfg(config)
         if errs:
             detail = "\n".join(f"- {e}" for e in errs)
-            self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+            self._send_json(
+                {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400
+            )
             return
         port_err = self.state.chk_port(config)
         if port_err:
@@ -144,7 +149,7 @@ class AgentHandlerMixin:
             self._send_json({"logs": ""})
             return
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
             self._send_json({"logs": "".join(all_lines[-lines:])})
         except Exception as e:
@@ -170,6 +175,7 @@ class AgentHandlerMixin:
             return
         try:
             import json as _json
+
             new_cfg = body.get("config", body)
             with open(config_path, "w", encoding="utf-8") as f:
                 _json.dump(new_cfg, f, ensure_ascii=False, indent=2)
@@ -197,7 +203,8 @@ class AgentHandlerMixin:
             return
         try:
             import json as _json
-            with open(config_path, "r", encoding="utf-8") as f:
+
+            with open(config_path, encoding="utf-8") as f:
                 cfg = _json.load(f)
             cfg["prompt"] = body.get("prompt", body)
             with open(config_path, "w", encoding="utf-8") as f:
@@ -221,6 +228,7 @@ class AgentHandlerMixin:
         config_path = os.path.join(agent_dir, "config.json")
         try:
             import json as _json
+
             with open(config_path, "w", encoding="utf-8") as f:
                 _json.dump(config, f, ensure_ascii=False, indent=2)
             self._send_json({"message": f"Agent '{name}' created"})
@@ -235,6 +243,7 @@ class AgentHandlerMixin:
     def _handle_delete(self, name: str) -> None:
         """DELETE /api/agents/{name} — delete an agent."""
         import shutil
+
         agent_dir = os.path.join(self.state.agents_dir, name)
         if not os.path.isdir(agent_dir):
             self._send_json({"error": f"Agent '{name}' not found"}, 404)
@@ -267,7 +276,7 @@ class AgentHandlerMixin:
         for path in candidates:
             if os.path.isfile(path):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         return json.load(f)
                 except Exception:
                     pass
@@ -278,7 +287,7 @@ class AgentHandlerMixin:
         profile_path = os.path.join(self.state.agents_dir, agent_name, "data", "profile.json")
         if os.path.isfile(profile_path):
             try:
-                with open(profile_path, "r", encoding="utf-8") as f:
+                with open(profile_path, encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 pass

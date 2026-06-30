@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Reminder Plugin - Scheduled notification plugin
 
@@ -26,6 +25,7 @@ Usage examples (agent calls):
 weekdays convention (matches Python datetime.weekday()):
   0=Mon  1=Tue  2=Wed  3=Thu  4=Fri  5=Sat  6=Sun
 """
+
 import asyncio
 import json
 import logging
@@ -33,15 +33,16 @@ import os
 import threading
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from opensquad.plugin_api import register, tool, Plugin, Context
 from opensquad.input_hub import input_hub
+from opensquad.plugin_api import Context, Plugin, register, tool
 
 logger = logging.getLogger("plugins.reminder")
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
+
 
 def _parse_hhmm(time_str: str):
     """Parse 'HH:MM' or 'HH:MM:SS' into (hour, minute); returns (9, 0) on failure."""
@@ -80,13 +81,13 @@ class ReminderPlugin(Plugin):
         #   {"type": "daily",    "time": "09:00"}
         #   {"type": "weekly",   "time": "09:30", "weekdays": "0,2,4"}
         #   {"type": "interval", "total_seconds": 3600}
-        self._reminders: Dict[str, Dict[str, Any]] = {}
+        self._reminders: dict[str, dict[str, Any]] = {}
         # {reminder_id: threading.Timer}
-        self._timers: Dict[str, threading.Timer] = {}
+        self._timers: dict[str, threading.Timer] = {}
         # Pending restart tasks: messages delivered once after agent restart, then cleared
-        self._pending_restart_tasks: List[Dict[str, Any]] = []
+        self._pending_restart_tasks: list[dict[str, Any]] = []
         self._lock = threading.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._data_file: str = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -108,8 +109,7 @@ class ReminderPlugin(Plugin):
         # Restore unfired reminders
         self._load_persisted()
         logger.info(
-            f"[ReminderPlugin] Loaded: agent={agent_id}, "
-            f"pending={len(self._reminders)}, data={self._data_file}"
+            f"[ReminderPlugin] Loaded: agent={agent_id}, pending={len(self._reminders)}, data={self._data_file}"
         )
 
     def on_unload(self) -> None:
@@ -122,7 +122,7 @@ class ReminderPlugin(Plugin):
 
     # ── Recurrence calculation ─────────────────────────────────────────────────
 
-    def _compute_next_ts(self, recurrence: Dict[str, Any]) -> Optional[float]:
+    def _compute_next_ts(self, recurrence: dict[str, Any]) -> float | None:
         """
         Compute the next Unix timestamp for a given recurrence rule.
         Returns None if the rule is invalid and the time cannot be computed.
@@ -141,7 +141,7 @@ class ReminderPlugin(Plugin):
             h, m = _parse_hhmm(recurrence.get("time", "09:00"))
             raw = recurrence.get("weekdays", "0,1,2,3,4,5,6")
             try:
-                weekdays: List[int] = [int(d.strip()) for d in raw.split(",")]
+                weekdays: list[int] = [int(d.strip()) for d in raw.split(",")]
             except ValueError:
                 weekdays = list(range(7))
             # Search up to 7 days ahead from today to find the first matching time
@@ -168,7 +168,7 @@ class ReminderPlugin(Plugin):
         if not self._data_file or not os.path.isfile(self._data_file):
             return
         try:
-            with open(self._data_file, "r", encoding="utf-8") as f:
+            with open(self._data_file, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
             logger.error(f"[ReminderPlugin] Failed to read data file: {e}")
@@ -215,10 +215,15 @@ class ReminderPlugin(Plugin):
                 snapshot = dict(self._reminders)
                 restart_snapshot = list(self._pending_restart_tasks)
             with open(self._data_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "reminders": snapshot,
-                    "next_restart": restart_snapshot,
-                }, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    {
+                        "reminders": snapshot,
+                        "next_restart": restart_snapshot,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
         except Exception as e:
             logger.error(f"[ReminderPlugin] Failed to save reminders: {e}")
 
@@ -256,14 +261,10 @@ class ReminderPlugin(Plugin):
                 timer.start()
                 with self._lock:
                     self._timers[reminder_id] = timer
-                logger.info(
-                    f"[ReminderPlugin] Recurring {reminder_id} rescheduled: "
-                    f"next={next_str}"
-                )
+                logger.info(f"[ReminderPlugin] Recurring {reminder_id} rescheduled: next={next_str}")
             else:
                 logger.warning(
-                    f"[ReminderPlugin] Recurring {reminder_id} could not compute "
-                    f"next fire time, stopping recurrence"
+                    f"[ReminderPlugin] Recurring {reminder_id} could not compute next fire time, stopping recurrence"
                 )
         # Persist (next occurrence written for recurring; one-shot has been removed)
         self._save_persisted()
@@ -272,8 +273,7 @@ class ReminderPlugin(Plugin):
         target_type = r.get("target_type", "agent")
         target_id = r.get("target_id", "")
         logger.info(
-            f"[ReminderPlugin] Firing {reminder_id}: "
-            f"target={target_type}/{target_id or 'agent'}, msg={message[:50]}"
+            f"[ReminderPlugin] Firing {reminder_id}: target={target_type}/{target_id or 'agent'}, msg={message[:50]}"
         )
         self._deliver(message, target_type, target_id)
 
@@ -294,6 +294,7 @@ class ReminderPlugin(Plugin):
             async def _im_task():
                 try:
                     from opensquad.tools import im as im_module
+
                     im_module.send_message(
                         content=f"[Reminder] {message}",
                         target_id=target_id,
@@ -331,7 +332,7 @@ class ReminderPlugin(Plugin):
         delay_days: int = 0,
         target_type: str = "agent",
         target_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a delayed reminder. Multiple delay_* parameters can be combined.
 
@@ -355,12 +356,7 @@ class ReminderPlugin(Plugin):
               "delay_total_seconds": 1800
             }
         """
-        total = (
-            delay_days * 86400
-            + delay_hours * 3600
-            + delay_minutes * 60
-            + delay_seconds
-        )
+        total = delay_days * 86400 + delay_hours * 3600 + delay_minutes * 60 + delay_seconds
         if total <= 0:
             return {
                 "success": False,
@@ -412,7 +408,7 @@ class ReminderPlugin(Plugin):
         datetime_str: str,
         target_type: str = "agent",
         target_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a reminder that fires at a specific absolute time.
 
@@ -451,10 +447,7 @@ class ReminderPlugin(Plugin):
         if fire_dt is None:
             return {
                 "success": False,
-                "error": (
-                    f"Cannot parse time '{datetime_str}'; "
-                    "please use the format 'YYYY-MM-DD HH:MM:SS'"
-                ),
+                "error": (f"Cannot parse time '{datetime_str}'; please use the format 'YYYY-MM-DD HH:MM:SS'"),
             }
 
         now = datetime.now()
@@ -519,7 +512,7 @@ class ReminderPlugin(Plugin):
         interval_days: int = 0,
         target_type: str = "agent",
         target_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a recurring reminder that reschedules itself automatically after firing.
 
@@ -558,7 +551,7 @@ class ReminderPlugin(Plugin):
         """
         # ── Build recurrence rule ─────────────────────────────────────────────
         if recur_type == "daily":
-            recurrence: Dict[str, Any] = {"type": "daily", "time": time}
+            recurrence: dict[str, Any] = {"type": "daily", "time": time}
 
         elif recur_type == "weekly":
             # Validate weekdays format
@@ -574,12 +567,7 @@ class ReminderPlugin(Plugin):
             recurrence = {"type": "weekly", "time": time, "weekdays": weekdays}
 
         elif recur_type == "interval":
-            total = (
-                interval_days * 86400
-                + interval_hours * 3600
-                + interval_minutes * 60
-                + interval_seconds
-            )
+            total = interval_days * 86400 + interval_hours * 3600 + interval_minutes * 60 + interval_seconds
             if total <= 0:
                 return {
                     "success": False,
@@ -613,7 +601,7 @@ class ReminderPlugin(Plugin):
         first_delay = max(first_ts - datetime.now().timestamp(), 0.1)
 
         rid = uuid.uuid4().hex[:8]
-        r: Dict[str, Any] = {
+        r: dict[str, Any] = {
             "message": message,
             "fire_at_ts": first_ts,
             "fire_at_str": first_str,
@@ -644,7 +632,7 @@ class ReminderPlugin(Plugin):
         }
 
     @tool(name="reminder", level="extended", auto_register=True)
-    def cancel(self, reminder_id: str) -> Dict[str, Any]:
+    def cancel(self, reminder_id: str) -> dict[str, Any]:
         """
         Cancel a pending reminder.
 
@@ -676,7 +664,7 @@ class ReminderPlugin(Plugin):
         }
 
     @tool(name="reminder", level="extended", auto_register=True)
-    def list_reminders(self) -> Dict[str, Any]:
+    def list_reminders(self) -> dict[str, Any]:
         """
         List all pending reminders (sorted by fire time, ascending).
 
@@ -714,7 +702,7 @@ class ReminderPlugin(Plugin):
         items = []
         for rid, r in snapshot:
             recurrence = r.get("recurrence")
-            item: Dict[str, Any] = {
+            item: dict[str, Any] = {
                 "id": rid,
                 "message": r.get("message", ""),
                 "next_fire_at": r.get("fire_at_str", ""),
@@ -733,15 +721,11 @@ class ReminderPlugin(Plugin):
                     raw = recurrence.get("weekdays", "0,1,2,3,4,5,6")
                     try:
                         days_str = "/".join(
-                            day_names[int(d.strip())]
-                            for d in raw.split(",")
-                            if 0 <= int(d.strip()) <= 6
+                            day_names[int(d.strip())] for d in raw.split(",") if 0 <= int(d.strip()) <= 6
                         )
                     except (ValueError, IndexError):
                         days_str = raw
-                    item["recur_detail"] = (
-                        f"Every week on {days_str} at {recurrence.get('time', '09:00')}"
-                    )
+                    item["recur_detail"] = f"Every week on {days_str} at {recurrence.get('time', '09:00')}"
                 elif rtype == "interval":
                     total = recurrence.get("total_seconds", 0)
                     if total >= 86400 and total % 86400 == 0:
@@ -766,7 +750,7 @@ class ReminderPlugin(Plugin):
         message: str = "Continue the previous task.",
         target_type: str = "agent",
         target_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Schedule a reminder that fires ONCE immediately after the next agent restart.
         Unlike set()/set_at() which use wall-clock timers, this guarantee survives

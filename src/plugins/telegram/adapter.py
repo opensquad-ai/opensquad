@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad Telegram Bot Adapter (Multi-bot)
 
@@ -27,9 +26,9 @@ Usage:
 
 import asyncio
 import logging
+import os
 import re
 import sys
-import os
 
 import requests
 
@@ -38,12 +37,12 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, ROOT_DIR)
 
 from plugins.telegram.config import (
-    TelegramBotConfig,
-    load_bot_configs,
-    is_service_enabled,
     EXTERNAL_ADAPTER_URL,
     EXTERNAL_API_KEY,
     TELEGRAM_LOG_LEVEL,
+    TelegramBotConfig,
+    is_service_enabled,
+    load_bot_configs,
 )
 
 # ── Logging ──
@@ -63,26 +62,24 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 try:
     from telegram import Update
+    from telegram.error import NetworkError, TimedOut
     from telegram.ext import (
         Application,
         CommandHandler,
+        ContextTypes,
         MessageHandler,
         filters,
-        ContextTypes,
     )
     from telegram.request import HTTPXRequest
-    from telegram.error import NetworkError, TimedOut
 except ImportError:
-    logger.error(
-        "Missing python-telegram-bot library. Install with:\n"
-        "  pip install python-telegram-bot"
-    )
+    logger.error("Missing python-telegram-bot library. Install with:\n  pip install python-telegram-bot")
     sys.exit(1)
 
 
 # ══════════════════════════════════════════════
 #  Single Bot Runner
 # ══════════════════════════════════════════════
+
 
 class TelegramBotRunner:
     """
@@ -145,19 +142,13 @@ class TelegramBotRunner:
         """Initialize and start polling (non-blocking)."""
         request = self._build_http_request()
         self.application = (
-            Application.builder()
-            .token(self.cfg.bot_token)
-            .request(request)
-            .get_updates_request(request)
-            .build()
+            Application.builder().token(self.cfg.bot_token).request(request).get_updates_request(request).build()
         )
 
         # Register handlers
         self.application.add_handler(CommandHandler("start", self._cmd_start))
         self.application.add_handler(CommandHandler("help", self._cmd_help))
-        self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
-        )
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
         # Initialize bot (get_me) and start polling.
         # _initialize_with_retry handles cold-start network slowness; the
@@ -168,16 +159,14 @@ class TelegramBotRunner:
             bot = self.application.bot
             self.bot_username = bot.username or ""
             self.bot_id = bot.id
-            self._log.info(
-                f"Bot ready: @{self.bot_username} (id={self.bot_id}) -> agent={self.cfg.agent_id}"
-            )
+            self._log.info(f"Bot ready: @{self.bot_username} (id={self.bot_id}) -> agent={self.cfg.agent_id}")
         except (TimedOut, NetworkError) as e:
             proxy_hint = self.cfg.proxy or "(not set)"
             self._log.error(
                 f"Cannot reach Telegram API after retries: {e}. "
                 f"If you are behind a firewall, configure proxy in "
                 f"system_config.json -> telegram.proxy (current: {proxy_hint}). "
-                f"Example: \"http://127.0.0.1:7890\""
+                f'Example: "http://127.0.0.1:7890"'
             )
             raise
 
@@ -241,8 +230,7 @@ class TelegramBotRunner:
             return
 
         self._log.info(
-            f"[{self.cfg.name}] msg from {user.username or user.id}: "
-            f"\"{text[:60]}{'...' if len(text) > 60 else ''}\""
+            f'[{self.cfg.name}] msg from {user.username or user.id}: "{text[:60]}{"..." if len(text) > 60 else ""}"'
         )
 
         # Determine channel
@@ -286,7 +274,7 @@ class TelegramBotRunner:
         if message.entities:
             for entity in message.entities:
                 if entity.type == "mention":
-                    mentioned = message.text[entity.offset:entity.offset + entity.length]
+                    mentioned = message.text[entity.offset : entity.offset + entity.length]
                     if self.bot_username and mentioned.lower() == f"@{self.bot_username.lower()}":
                         return True
                 elif entity.type == "text_mention":
@@ -297,14 +285,19 @@ class TelegramBotRunner:
     def _extract_text(self, raw_text: str) -> str:
         text = raw_text.strip()
         if self.bot_username:
-            text = re.sub(
-                rf"@{re.escape(self.bot_username)}\b", "", text, flags=re.IGNORECASE
-            ).strip()
+            text = re.sub(rf"@{re.escape(self.bot_username)}\b", "", text, flags=re.IGNORECASE).strip()
         return text
 
-    def _call_adapter(self, chat_id: int, user_id: int, text: str,
-                      channel: str, sender_name: str = "", chat_name: str = "",
-                      source_chat_id: str = "") -> str:
+    def _call_adapter(
+        self,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        channel: str,
+        sender_name: str = "",
+        chat_name: str = "",
+        source_chat_id: str = "",
+    ) -> str:
         try:
             url = f"{EXTERNAL_ADAPTER_URL}/api/chat"
             headers = {"Content-Type": "application/json"}
@@ -325,7 +318,9 @@ class TelegramBotRunner:
             self._log.info(f"-> adapter: agent={self.cfg.agent_id}, channel={channel}")
 
             resp = requests.post(
-                url, json=payload, headers=headers,
+                url,
+                json=payload,
+                headers=headers,
                 timeout=self.cfg.request_timeout + 10,
             )
 
@@ -349,6 +344,7 @@ class TelegramBotRunner:
 # ══════════════════════════════════════════════
 #  Utilities
 # ══════════════════════════════════════════════
+
 
 def _split_message(text: str, max_len: int = 4000) -> list:
     if len(text) <= max_len:
@@ -377,8 +373,13 @@ TELEGRAM_BOT_TOKEN_PLACEHOLDERS = {
     "YOUR_TELEGRAM_BOT_TOKEN",
     "your-telegram-bot-token",
     "your_telegram_bot_token",
-    "TODO", "todo", "changeme", "replace_me", "replace-me",
-    "0", "000000000:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "TODO",
+    "todo",
+    "changeme",
+    "replace_me",
+    "replace-me",
+    "0",
+    "000000000:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 }
 
 # A real Telegram bot_token looks like "<digits>:<35+ chars>". We use a
@@ -422,7 +423,11 @@ def _validate_bot_configs(bot_configs) -> bool:
                 f"If the bot fails to start, regenerate the token via @BotFather."
             )
         if not cfg.agent_id or cfg.agent_id.lower() in {
-            "default-001", "your-agent-id", "your_agent_id", "TODO", "changeme",
+            "default-001",
+            "your-agent-id",
+            "your_agent_id",
+            "TODO",
+            "changeme",
         }:
             logger.error(
                 f"Bot [{cfg.name}] agent_id is unset or uses a placeholder: '{cfg.agent_id}'. "
@@ -450,10 +455,8 @@ def _preflight_network(bot_configs) -> bool:
             try:
                 with socket.create_connection((host, port), timeout=5):
                     pass
-                logger.info(
-                    f"Bot [{cfg.name}] proxy reachable: {host}:{port}"
-                )
-            except (OSError, socket.timeout) as e:
+                logger.info(f"Bot [{cfg.name}] proxy reachable: {host}:{port}")
+            except (TimeoutError, OSError) as e:
                 logger.error(
                     f"Bot [{cfg.name}] proxy {host}:{port} is NOT reachable ({e!r}). "
                     f"Check telegram.bots[].proxy / TELEGRAM_PROXY env / system_config.json -> telegram.proxy. "
@@ -464,10 +467,8 @@ def _preflight_network(bot_configs) -> bool:
             try:
                 with socket.create_connection(("api.telegram.org", 443), timeout=5):
                     pass
-                logger.info(
-                    f"Bot [{cfg.name}] direct path to api.telegram.org:443 reachable"
-                )
-            except (OSError, socket.timeout) as e:
+                logger.info(f"Bot [{cfg.name}] direct path to api.telegram.org:443 reachable")
+            except (TimeoutError, OSError) as e:
                 # Direct path failure is a WARNING, not an ERROR: the user may
                 # legitimately run in an environment that requires a proxy, and
                 # we don't want to block startup in that case. _validate_bot_configs
@@ -522,7 +523,9 @@ async def run_all_bots():
     print(f"  Bots:         {len(bot_configs)}")
     for i, cfg in enumerate(bot_configs):
         proxy_info = cfg.proxy or "(direct)"
-        print(f"    [{i+1}] {cfg.name}: token={cfg.bot_token[:8]}...{cfg.bot_token[-4:]} -> agent={cfg.agent_id} proxy={proxy_info}")
+        print(
+            f"    [{i + 1}] {cfg.name}: token={cfg.bot_token[:8]}...{cfg.bot_token[-4:]} -> agent={cfg.agent_id} proxy={proxy_info}"
+        )
     print("=" * 60)
 
     runners: list[TelegramBotRunner] = []

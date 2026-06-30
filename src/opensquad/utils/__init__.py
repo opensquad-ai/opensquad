@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
-import sys
 import re
+import sys
 
 
 def extract_and_remove_first_tag(text):
@@ -9,10 +8,12 @@ def extract_and_remove_first_tag(text):
     Used for identifying Task IDs and similar scenarios.
     """
     extracted_content = None
+
     def replacement(match):
         nonlocal extracted_content
         extracted_content = match.group(1)
         return ""
+
     # Replace only the first match
     cleaned_text = re.sub(r"<([^>]+)>", replacement, text, count=1)
     return extracted_content, cleaned_text
@@ -33,11 +34,11 @@ class CharPrinter:
     def _is_ansi(self, char):
         # Only ESC (\x1b) starts an ANSI escape sequence.
         # The old range check \x1b..\x1f incorrectly flagged all C0 controls.
-        return char == '\x1b'
+        return char == "\x1b"
 
     def add_char(self, char):
         try:
-            if char in ('\n', '\r'):
+            if char in ("\n", "\r"):
                 self.flush()
                 self.buffer.append(char)
                 return
@@ -56,7 +57,7 @@ class CharPrinter:
     def flush(self):
         if self.buffer:
             try:
-                sys.stdout.write(''.join(self.buffer))
+                sys.stdout.write("".join(self.buffer))
                 sys.stdout.flush()
             except UnicodeEncodeError:
                 pass

@@ -1,20 +1,18 @@
-# -*- coding: utf-8 -*-
 """
 System Handler Mixin — system/service/session/MCP/skill/card/workspace HTTP handler methods.
 
 Extracted from _launcher_api/__init__.py to reduce its size.
 This mixin provides all system-level handler methods for the ManagementHandler class.
 """
+
 from __future__ import annotations
 
-import os
 import json
-import re
-import time
-import shutil
 import logging
+import os
+import re
 import subprocess
-from typing import Any, Dict
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -99,34 +97,40 @@ class SystemHandlerMixin:
         cleanup_result = self.state.cln_reg(force_kill=False)
         managed_agents = []
         for ap in list(self.state.procesos.values()):
-            managed_agents.append({
-                "agent_id": ap.agent_id,
-                "agent_name": ap.agent_name,
-                "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
-                "port": ap.actual_port,
-                "alive": ap.is_alive(),
-                "should_run": ap.should_run,
-            })
+            managed_agents.append(
+                {
+                    "agent_id": ap.agent_id,
+                    "agent_name": ap.agent_name,
+                    "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
+                    "port": ap.actual_port,
+                    "alive": ap.is_alive(),
+                    "should_run": ap.should_run,
+                }
+            )
         managed_plugins = []
         for psp in list(self.state.plug_svcs.values()):
-            managed_plugins.append({
-                "plugin_id": psp.plugin_id,
-                "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
-                "port": psp.port,
-                "alive": psp.is_alive(),
-                "should_run": psp.should_run,
-            })
-        return self._send_json({
-            "runtime_registry": cleanup_result.get("remaining", []),
-            "cleanup": {
-                "cleaned": cleanup_result.get("cleaned", 0),
-                "killed": cleanup_result.get("killed", 0),
-            },
-            "managed": {
-                "agents": managed_agents,
-                "plugins": managed_plugins,
-            },
-        })
+            managed_plugins.append(
+                {
+                    "plugin_id": psp.plugin_id,
+                    "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
+                    "port": psp.port,
+                    "alive": psp.is_alive(),
+                    "should_run": psp.should_run,
+                }
+            )
+        return self._send_json(
+            {
+                "runtime_registry": cleanup_result.get("remaining", []),
+                "cleanup": {
+                    "cleaned": cleanup_result.get("cleaned", 0),
+                    "killed": cleanup_result.get("killed", 0),
+                },
+                "managed": {
+                    "agents": managed_agents,
+                    "plugins": managed_plugins,
+                },
+            }
+        )
 
     def _handle_plugin_service_start(self, plugin_id: str):
         """POST /api/plugin-services/{id}/start — start a plugin service."""
@@ -164,7 +168,7 @@ class SystemHandlerMixin:
         """Persist plugin service enabled state to system_config.json."""
         try:
             sys_cfg_path = self.state.syscfg.workspace_config_path()
-            with open(sys_cfg_path, "r", encoding="utf-8") as f:
+            with open(sys_cfg_path, encoding="utf-8") as f:
                 full_cfg = json.load(f)
             if "services" not in full_cfg:
                 full_cfg["services"] = {}
@@ -174,6 +178,7 @@ class SystemHandlerMixin:
             with open(sys_cfg_path, "w", encoding="utf-8") as f:
                 json.dump(full_cfg, f, indent=2, ensure_ascii=False)
             from opensquad import system_config as _syscfg_mod
+
             _syscfg_mod._cache = None
         except Exception as e:
             self.state.logger.warning(f"[Launcher] Failed to sync services.{plugin_id}.enabled: {e}", exc_info=True)
@@ -182,7 +187,7 @@ class SystemHandlerMixin:
         """POST /api/shutdown — gracefully shutdown all managed processes."""
         timeout = body.get("timeout", 10) if isinstance(body, dict) else 10
         stopped = 0
-        for name, ap in list(self.state.procesos.items()):
+        for _name, ap in list(self.state.procesos.items()):
             if ap.is_alive():
                 try:
                     ap.should_run = False
@@ -195,7 +200,7 @@ class SystemHandlerMixin:
                         stopped += 1
                 except (OSError, ValueError):
                     pass
-        for pid, psp in list(self.state.plug_svcs.items()):
+        for _pid, psp in list(self.state.plug_svcs.items()):
             if psp.is_alive():
                 try:
                     psp.stop()
@@ -240,14 +245,17 @@ class SystemHandlerMixin:
         """Get a session reader for the given agent."""
         try:
             import importlib.util as _ilu
+
             # __file__ is in _launcher_api/, go up to opensquad/ then into gateway/
             _mod_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "gateway", "backend", "app", "ai_web", "agent_sessions.py"
+                "gateway",
+                "backend",
+                "app",
+                "ai_web",
+                "agent_sessions.py",
             )
-            _spec = _ilu.spec_from_file_location(
-                "opensquad._agent_sessions_standalone", _mod_path
-            )
+            _spec = _ilu.spec_from_file_location("opensquad._agent_sessions_standalone", _mod_path)
             _mod = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_mod)
             return _mod.get_reader(agent_id)
@@ -265,9 +273,12 @@ class SystemHandlerMixin:
             current_id = reader.get_current_session_id()
         except Exception as e:
             import httpx
+
             if isinstance(e, httpx.TimeoutException):
-                return self._send_json({"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504)
-            return self._send_json({"error": f"Failed to get sessions: {str(e)}"}, 500)
+                return self._send_json(
+                    {"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504
+                )
+            return self._send_json({"error": f"Failed to get sessions: {e!s}"}, 500)
         return self._send_json({"sessions": sessions, "current_session_id": current_id})
 
     def _handle_session_current(self, agent_id: str, offset: int = 0, limit: int = 50):
@@ -280,9 +291,10 @@ class SystemHandlerMixin:
             session = reader.get_session_history_paged(current_id, offset, limit)
         except Exception as e:
             import httpx
+
             if isinstance(e, httpx.TimeoutException):
                 return self._send_json({"error": "Agent session request timed out"}, 504)
-            return self._send_json({"error": f"Failed to get current session: {str(e)}"}, 500)
+            return self._send_json({"error": f"Failed to get current session: {e!s}"}, 500)
         return self._send_json({"current_session_id": current_id, "session": session})
 
     def _handle_session_paged(self, agent_id: str, session_id: str, offset: int = 0, limit: int = 50):
@@ -294,9 +306,10 @@ class SystemHandlerMixin:
             session = reader.get_session_history_paged(session_id, offset, limit)
         except Exception as e:
             import httpx
+
             if isinstance(e, httpx.TimeoutException):
                 return self._send_json({"error": "Agent session request timed out"}, 504)
-            return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+            return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
         if session is None:
             return self._send_json({"error": f"Session not found: {session_id}"}, 404)
         return self._send_json({"session": session})
@@ -310,9 +323,10 @@ class SystemHandlerMixin:
             session = reader.get_session_history(session_id)
         except Exception as e:
             import httpx
+
             if isinstance(e, httpx.TimeoutException):
                 return self._send_json({"error": "Agent session request timed out"}, 504)
-            return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+            return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
         if session is None:
             return self._send_json({"error": f"Session not found: {session_id}"}, 404)
         return self._send_json({"session": session})
@@ -337,7 +351,7 @@ class SystemHandlerMixin:
                     agent_mcp = os.path.join(self.state.agents_dir, dname, "mcp_config.json")
                     if os.path.isfile(agent_mcp):
                         try:
-                            with open(agent_mcp, "r", encoding="utf-8-sig") as f:
+                            with open(agent_mcp, encoding="utf-8-sig") as f:
                                 data = json.load(f)
                             for k, v in (data.get("mcpServers") or {}).items():
                                 if k not in merged:
@@ -351,7 +365,7 @@ class SystemHandlerMixin:
                     json.dump({"mcpServers": merged}, f, ensure_ascii=False, indent=2)
             return self._send_json({"mcpServers": merged})
         try:
-            with open(central_path, "r", encoding="utf-8-sig") as f:
+            with open(central_path, encoding="utf-8-sig") as f:
                 data = json.load(f)
             return self._send_json({"mcpServers": data.get("mcpServers", {})})
         except (OSError, ValueError) as e:
@@ -388,12 +402,14 @@ class SystemHandlerMixin:
                         restarted.append(name)
                     except (OSError, ValueError):
                         pass
-            return self._send_json({
-                "ok": True,
-                "message": f"Central MCP config saved, synced to {len(synced)} agents",
-                "synced_agents": synced,
-                "restarted_agents": restarted,
-            })
+            return self._send_json(
+                {
+                    "ok": True,
+                    "message": f"Central MCP config saved, synced to {len(synced)} agents",
+                    "synced_agents": synced,
+                    "restarted_agents": restarted,
+                }
+            )
         except Exception as e:
             return self._send_json({"error": f"Failed to write central mcp_config.json: {e}"}, 500)
 
@@ -406,7 +422,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(mcp_path):
             return self._send_json({"agent": name, "mcpServers": {}})
         try:
-            with open(mcp_path, "r", encoding="utf-8-sig") as f:
+            with open(mcp_path, encoding="utf-8-sig") as f:
                 data = json.load(f)
             return self._send_json({"agent": name, "mcpServers": data.get("mcpServers", {})})
         except Exception as e:
@@ -439,7 +455,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(global_path):
             return self._send_json({"mcpServers": {}})
         try:
-            with open(global_path, "r", encoding="utf-8-sig") as f:
+            with open(global_path, encoding="utf-8-sig") as f:
                 data = json.load(f)
             return self._send_json({"mcpServers": data.get("mcpServers", {})})
         except (OSError, ValueError) as e:
@@ -451,7 +467,7 @@ class SystemHandlerMixin:
         data = {}
         if os.path.isfile(global_path):
             try:
-                with open(global_path, "r", encoding="utf-8-sig") as f:
+                with open(global_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
             except (OSError, ValueError):
                 pass
@@ -484,28 +500,30 @@ class SystemHandlerMixin:
             skill_md_path = os.path.join(skill_dir, "SKILL.md")
             if os.path.isfile(skill_json_path):
                 try:
-                    with open(skill_json_path, "r", encoding="utf-8") as f:
+                    with open(skill_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                 except (OSError, ValueError):
                     meta = {}
-                skills.append({
-                    "name": meta.get("name", skill_name),
-                    "display_name": meta.get("name", skill_name),
-                    "version": meta.get("version", ""),
-                    "description": meta.get("description", ""),
-                    "author": meta.get("author", ""),
-                    "license": meta.get("license", ""),
-                    "keywords": meta.get("keywords", []),
-                    "requires": meta.get("requires", {}),
-                    "install": meta.get("install", []),
-                    "entry": meta.get("entry", {}),
-                    "has_skill_json": True,
-                    "dir": skill_name,
-                })
+                skills.append(
+                    {
+                        "name": meta.get("name", skill_name),
+                        "display_name": meta.get("name", skill_name),
+                        "version": meta.get("version", ""),
+                        "description": meta.get("description", ""),
+                        "author": meta.get("author", ""),
+                        "license": meta.get("license", ""),
+                        "keywords": meta.get("keywords", []),
+                        "requires": meta.get("requires", {}),
+                        "install": meta.get("install", []),
+                        "entry": meta.get("entry", {}),
+                        "has_skill_json": True,
+                        "dir": skill_name,
+                    }
+                )
             elif os.path.isfile(skill_md_path):
                 fm = {}
                 try:
-                    with open(skill_md_path, "r", encoding="utf-8") as f:
+                    with open(skill_md_path, encoding="utf-8") as f:
                         content = f.read()
                     if content.startswith("---"):
                         end = content.find("\n---", 3)
@@ -517,20 +535,22 @@ class SystemHandlerMixin:
                                     fm[k.strip()] = v.strip()
                 except (OSError, ValueError):
                     pass
-                skills.append({
-                    "name": fm.get("name", skill_name),
-                    "display_name": fm.get("name", skill_name),
-                    "version": "",
-                    "description": fm.get("description", ""),
-                    "author": "",
-                    "license": "",
-                    "keywords": [],
-                    "requires": {},
-                    "install": [],
-                    "entry": {},
-                    "has_skill_json": False,
-                    "dir": skill_name,
-                })
+                skills.append(
+                    {
+                        "name": fm.get("name", skill_name),
+                        "display_name": fm.get("name", skill_name),
+                        "version": "",
+                        "description": fm.get("description", ""),
+                        "author": "",
+                        "license": "",
+                        "keywords": [],
+                        "requires": {},
+                        "install": [],
+                        "entry": {},
+                        "has_skill_json": False,
+                        "dir": skill_name,
+                    }
+                )
         return self._send_json({"skills": skills})
 
     def _handle_get_skill_source(self, name: str):
@@ -549,7 +569,7 @@ class SystemHandlerMixin:
         skill_md_path = os.path.join(skill_dir, "SKILL.md")
         if os.path.isfile(skill_md_path):
             try:
-                with open(skill_md_path, "r", encoding="utf-8") as f:
+                with open(skill_md_path, encoding="utf-8") as f:
                     skill_md = f.read()
             except (OSError, ValueError):
                 skill_md = "(Failed to read SKILL.md)"
@@ -557,7 +577,7 @@ class SystemHandlerMixin:
         skill_json_path = os.path.join(skill_dir, "skill.json")
         if os.path.isfile(skill_json_path):
             try:
-                with open(skill_json_path, "r", encoding="utf-8") as f:
+                with open(skill_json_path, encoding="utf-8") as f:
                     skill_json_data = json.load(f)
             except (OSError, ValueError):
                 pass
@@ -571,30 +591,32 @@ class SystemHandlerMixin:
                 continue
             if ext == ".py":
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         py_sources[fi["name"]] = f.read()
                 except (OSError, ValueError):
                     py_sources[fi["name"]] = "(Failed to read)"
             elif ext in _TEXT_EXTS:
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         other_sources[fi["name"]] = f.read()
                 except (OSError, ValueError):
                     other_sources[fi["name"]] = "(Failed to read)"
-        return self._send_json({
-            "name": name,
-            "files": files_info,
-            "skill_md": skill_md,
-            "skill_json": skill_json_data,
-            "py_sources": py_sources,
-            "other_sources": other_sources,
-        })
+        return self._send_json(
+            {
+                "name": name,
+                "files": files_info,
+                "skill_md": skill_md,
+                "skill_json": skill_json_data,
+                "py_sources": py_sources,
+                "other_sources": other_sources,
+            }
+        )
 
     # ── Role/Collab/Model card handlers ────────────────────────────────
 
     def _list_cards(self, dir_path: str) -> list:
         """List card files in a directory, returning name and metadata.
-        
+
         Supports both .json (model cards) and .md (role/collab cards with YAML frontmatter).
         """
         cards = []
@@ -607,26 +629,28 @@ class SystemHandlerMixin:
             if fname.endswith(".json"):
                 # Model cards: JSON format
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         data = json.load(f)
-                    cards.append({
-                        "name": data.get("name", fname[:-5]),
-                        "filename": fname,
-                        "title": data.get("title", data.get("name", fname[:-5])),
-                        "description": data.get("description", ""),
-                        "api_protocol": data.get("api_protocol", ""),
-                        "provider": data.get("provider", ""),
-                        "model_name": data.get("model_name", ""),
-                        "size": os.path.getsize(fpath),
-                        "updated": os.path.getmtime(fpath),
-                    })
+                    cards.append(
+                        {
+                            "name": data.get("name", fname[:-5]),
+                            "filename": fname,
+                            "title": data.get("title", data.get("name", fname[:-5])),
+                            "description": data.get("description", ""),
+                            "api_protocol": data.get("api_protocol", ""),
+                            "provider": data.get("provider", ""),
+                            "model_name": data.get("model_name", ""),
+                            "size": os.path.getsize(fpath),
+                            "updated": os.path.getmtime(fpath),
+                        }
+                    )
                 except (OSError, ValueError):
                     pass
             elif fname.endswith(".md"):
                 # Role/Collab cards: Markdown with optional YAML frontmatter
                 card_name = fname[:-3]
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         content = f.read()
                 except Exception:
                     content = ""
@@ -645,14 +669,16 @@ class SystemHandlerMixin:
                                     title = v
                                 elif k == "description":
                                     description = v
-                cards.append({
-                    "name": card_name,
-                    "filename": fname,
-                    "title": title,
-                    "description": description,
-                    "size": os.path.getsize(fpath),
-                    "updated": os.path.getmtime(fpath),
-                })
+                cards.append(
+                    {
+                        "name": card_name,
+                        "filename": fname,
+                        "title": title,
+                        "description": description,
+                        "size": os.path.getsize(fpath),
+                        "updated": os.path.getmtime(fpath),
+                    }
+                )
         return cards
 
     def _handle_list_role_cards(self):
@@ -666,7 +692,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(fpath):
             return self._send_json({"error": f"Role card '{card_name}' not found"}, 404)
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
         except (OSError, ValueError) as e:
@@ -706,7 +732,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(fpath):
             return self._send_json({"error": f"Collab card '{card_name}' not found"}, 404)
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
         except (OSError, ValueError) as e:
@@ -741,7 +767,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(config_path):
             return self._send_json({"error": f"Agent '{name}' config not found"}, 404)
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             cfg.setdefault("prompt", {})["cards"] = body.get("cards", [])
             with open(config_path, "w", encoding="utf-8") as f:
@@ -756,7 +782,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(config_path):
             return self._send_json({"error": f"Agent '{name}' config not found"}, 404)
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             cfg.setdefault("prompt", {})["cards"] = []
             with open(config_path, "w", encoding="utf-8") as f:
@@ -776,7 +802,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(fpath):
             return self._send_json({"error": f"Model card '{card_name}' not found"}, 404)
         try:
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
             return self._send_json({"name": card_name, "card": data})
         except (OSError, ValueError) as e:
@@ -810,7 +836,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(config_path):
             return self._send_json({"error": f"Agent '{name}' config not found"}, 404)
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             card_name = body.get("card_name", "")
             if card_name:
@@ -829,7 +855,7 @@ class SystemHandlerMixin:
         if not os.path.isfile(config_path):
             return self._send_json({"error": f"Agent '{name}' config not found"}, 404)
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             cfg.get("model", {}).pop("_card", None)
             with open(config_path, "w", encoding="utf-8") as f:
@@ -848,11 +874,13 @@ class SystemHandlerMixin:
             for entry in sorted(os.listdir(base)):
                 wpath = os.path.join(base, entry)
                 if os.path.isdir(wpath) and not entry.startswith("."):
-                    workspaces.append({
-                        "name": entry,
-                        "path": wpath,
-                        "has_agents": os.path.isdir(os.path.join(wpath, "agents")),
-                    })
+                    workspaces.append(
+                        {
+                            "name": entry,
+                            "path": wpath,
+                            "has_agents": os.path.isdir(os.path.join(wpath, "agents")),
+                        }
+                    )
         return self._send_json({"workspaces": workspaces, "current": self.state.syscfg.get_workspace()})
 
     def _handle_workspace_create(self, body: dict):
@@ -907,10 +935,12 @@ class SystemHandlerMixin:
         task = self.state.ws_mig.get(task_id)
         if not task:
             return self._send_json({"error": f"Migration task '{task_id}' not found"}, 404)
-        return self._send_json({
-            "task_id": task_id,
-            "status": task.get("status", "unknown"),
-            "progress": task.get("progress", 0),
-            "error": task.get("error"),
-            "report": task.get("report"),
-        })
+        return self._send_json(
+            {
+                "task_id": task_id,
+                "status": task.get("status", "unknown"),
+                "progress": task.get("progress", 0),
+                "error": task.get("error"),
+                "report": task.get("report"),
+            }
+        )

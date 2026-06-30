@@ -1,33 +1,34 @@
-# -*- coding: utf-8 -*-
 """
 System Tools v2.1
 Provides system information, control functions, and a powerful background job management system.
 Allows agents to execute time-consuming commands in a "non-blocking" manner and poll for results.
 """
-import time
-import os
+
 import asyncio
+import contextlib
+import os
 import platform
-import psutil
+import queue
 import subprocess
 import threading
+import time
 import uuid
-import queue
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any
+
+import psutil
 
 try:
-    from ..tool import logger
     from ..sleep_controller import sleep_controller
+    from ..tool import logger
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
     sleep_controller = None
 
 # Project root (derived from __file__: opensquad/system.py -> project root)
-_PROJECT_ROOT = os.path.normcase(os.path.abspath(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-))
+_PROJECT_ROOT = os.path.normcase(os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def _is_path_safe(path: str) -> bool:
@@ -44,13 +45,15 @@ def _is_path_safe(path: str) -> bool:
     except Exception:
         return False
 
+
 # --- Background job management core ---
+
 
 class Job:
     def __init__(self, job_id: str, command: str, shell: bool = True):
         self.id = job_id
         self.command = command
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.stdout_queue = queue.Queue()
         self.start_time = None
         self.end_time = None
@@ -62,22 +65,22 @@ class Job:
         try:
             # Subprocess environment: force Python subprocesses to output UTF-8
             env = os.environ.copy()
-            if platform.system() == 'Windows':
-                env.setdefault('PYTHONUTF8', '1')
-                env.setdefault('PYTHONIOENCODING', 'utf-8')
+            if platform.system() == "Windows":
+                env.setdefault("PYTHONUTF8", "1")
+                env.setdefault("PYTHONIOENCODING", "utf-8")
 
             # Start process with redirected output
             self.process = subprocess.Popen(
                 self.command,
                 shell=self.shell,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Merge stderr into stdout
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 stdin=subprocess.PIPE,
-                bufsize=0, # Unbuffered for real-time reading
-                text=False, # Binary read to prevent encoding crashes
+                bufsize=0,  # Unbuffered for real-time reading
+                text=False,  # Binary read to prevent encoding crashes
                 env=env,
             )
-            
+
             # Start listener thread
             t = threading.Thread(target=self._read_output, daemon=True)
             t.start()
@@ -88,8 +91,9 @@ class Job:
 
     def _read_output(self):
         """Background thread: read output stream in real-time."""
-        if not self.process: return
-        
+        if not self.process:
+            return
+
         while True:
             # Blocking read one byte (or one line) until stream closes
             line = self.process.stdout.readline()
@@ -97,12 +101,12 @@ class Job:
                 break
             try:
                 # Prefer UTF-8 (Python scripts, npm, git, and other UTF-8 programs)
-                decoded = line.decode('utf-8').rstrip()
+                decoded = line.decode("utf-8").rstrip()
             except UnicodeDecodeError:
                 # Fall back to GBK (Windows system commands like dir/type with native GBK output)
-                decoded = line.decode('gbk', errors='replace').rstrip()
+                decoded = line.decode("gbk", errors="replace").rstrip()
             self.stdout_queue.put(decoded)
-        
+
         # Wait for process to fully exit
         self.return_code = self.process.wait()
         self.end_time = datetime.now()
@@ -118,7 +122,8 @@ class Job:
         return "\n".join(lines)
 
     def is_running(self) -> bool:
-        if self.process is None: return False
+        if self.process is None:
+            return False
         return self.process.poll() is None
 
     def stop(self):
@@ -127,21 +132,26 @@ class Job:
                 # Attempt graceful termination
                 self.process.terminate()
                 # terminate() may not be sufficient on Windows; kill is more direct
-                if platform.system() == 'Windows':
+                if platform.system() == "Windows":
                     # Use taskkill to force-kill including child processes
-                    subprocess.run(f"taskkill /F /T /PID {self.process.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        f"taskkill /F /T /PID {self.process.pid}",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 else:
                     self.process.wait(timeout=1)
             except (subprocess.TimeoutExpired, OSError):
-                try:
+                with contextlib.suppress(OSError):
                     self.process.kill()
-                except OSError:
-                    pass
+
 
 # Global job store
-_JOBS: Dict[str, Job] = {}
+_JOBS: dict[str, Job] = {}
 
 _CLEANUP_INTERVAL_MINUTES = 30
+
 
 def _cleanup_old_jobs():
     """Clean up jobs that have been finished for more than 30 minutes to prevent memory leaks."""
@@ -157,9 +167,11 @@ def _cleanup_old_jobs():
     if to_remove:
         logger.info(f"Cleaned up {len(to_remove)} old jobs: {to_remove}")
 
+
 # --- Tool functions exposed to the agent ---
 
-def start_job(command: str, wait_seconds: float = 3.0) -> Dict[str, Any]:
+
+def start_job(command: str, wait_seconds: float = 3.0) -> dict[str, Any]:
     """
     Start a background command job.
     Suitable for time-consuming tasks (e.g. npm install, running a server, long scripts, large compilations).
@@ -194,9 +206,11 @@ def start_job(command: str, wait_seconds: float = 3.0) -> Dict[str, Any]:
             if not job.is_running():
                 # Task completed within the wait window; collect all output and return directly
                 output = job.get_new_output(max_lines=500)
-                elapsed = round(
-                    (job.end_time - job.start_time).total_seconds(), 2
-                ) if job.end_time and job.start_time else None
+                elapsed = (
+                    round((job.end_time - job.start_time).total_seconds(), 2)
+                    if job.end_time and job.start_time
+                    else None
+                )
                 return {
                     "status": "success",
                     "completed": True,
@@ -211,77 +225,80 @@ def start_job(command: str, wait_seconds: float = 3.0) -> Dict[str, Any]:
     return {
         "status": "success",
         "completed": False,
-        "message": (
-            f"Job is still running after {wait_seconds}s. "
-            f"Use check_job('{job_id}') to poll for results."
-        ),
+        "message": (f"Job is still running after {wait_seconds}s. Use check_job('{job_id}') to poll for results."),
         "job_id": job_id,
         "command": command,
     }
 
-def check_job(job_id: str) -> Dict[str, Any]:
+
+def check_job(job_id: str) -> dict[str, Any]:
     """
     Check the status of a background job and get the **latest** output.
     Note: Only returns new logs since the last check; does not return full history.
-    
+
     Args:
         job_id: ID returned by start_job.
     """
     job = _JOBS.get(job_id)
     if not job:
         return {"status": "error", "message": f"Job ID {job_id} not found."}
-    
+
     is_running = job.is_running()
     new_output = job.get_new_output()
-    
-    status_str = "RUNNING" if is_running else (f"FINISHED (Code: {job.return_code})" if job.return_code is not None else "UNKNOWN")
-    
+
+    status_str = (
+        "RUNNING"
+        if is_running
+        else (f"FINISHED (Code: {job.return_code})" if job.return_code is not None else "UNKNOWN")
+    )
+
     return {
         "status": "success",
         "data": {
             "job_id": job_id,
             "state": status_str,
             "new_output": new_output or "(No new output)",
-            "return_code": job.return_code
-        }
+            "return_code": job.return_code,
+        },
     }
 
-def stop_job(job_id: str) -> Dict[str, Any]:
+
+def stop_job(job_id: str) -> dict[str, Any]:
     """
     Force-terminate a background job.
     """
     job = _JOBS.get(job_id)
     if not job:
         return {"status": "error", "message": f"Job ID {job_id} not found."}
-    
+
     job.stop()
     return {"status": "success", "message": f"Job {job_id} terminated."}
 
-def list_jobs() -> Dict[str, Any]:
+
+def list_jobs() -> dict[str, Any]:
     """
     List all active or recently finished background jobs.
     """
     data = []
-    
+
     for jid, job in _JOBS.items():
         state = "RUNNING" if job.is_running() else "FINISHED"
-        data.append({
-            "id": jid,
-            "command": job.command[:50] + "..." if len(job.command)>50 else job.command,
-            "state": state,
-            "start_time": job.start_time.strftime("%H:%M:%S") if job.start_time else "-"
-        })
-    
-    return {
-        "status": "success",
-        "count": len(data),
-        "jobs": data
-    }
+        data.append(
+            {
+                "id": jid,
+                "command": job.command[:50] + "..." if len(job.command) > 50 else job.command,
+                "state": state,
+                "start_time": job.start_time.strftime("%H:%M:%S") if job.start_time else "-",
+            }
+        )
 
-def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
+    return {"status": "success", "count": len(data), "jobs": data}
+
+
+def write_binary_file(path: str, data_base64: str) -> dict[str, Any]:
     """
     Write a base64 string to the specified file.
-    
+
     Args:
         path: Target file path (safe path within the project).
         data_base64: Base64-encoded file content (without data: prefix).
@@ -290,6 +307,7 @@ def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
         return {"status": "error", "message": "Security Denied: Path outside project."}
     try:
         import base64
+
         if not data_base64:
             return {"status": "error", "message": "No data provided."}
         data = base64.b64decode(data_base64)
@@ -300,9 +318,11 @@ def write_binary_file(path: str, data_base64: str) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 # --- Original system functions ---
 
-def get_system_info() -> Dict[str, Any]:
+
+def get_system_info() -> dict[str, Any]:
     """Get core information about the current system, such as OS, CPU, memory, etc."""
     try:
         mem = psutil.virtual_memory()
@@ -315,13 +335,14 @@ def get_system_info() -> Dict[str, Any]:
                 "memory_total_gb": round(mem.total / (1024**3), 2),
                 "memory_available_gb": round(mem.available / (1024**3), 2),
                 "current_path": os.getcwd(),
-                "python_version": platform.python_version()
-            }
+                "python_version": platform.python_version(),
+            },
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def get_time() -> Dict[str, Any]:
+
+def get_time() -> dict[str, Any]:
     """Get the current system time."""
     now = datetime.now()
     return {
@@ -329,26 +350,27 @@ def get_time() -> Dict[str, Any]:
         "data": {
             "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
             "timestamp": int(time.time()),
-            "timezone": time.tzname[0]
-        }
+            "timezone": time.tzname[0],
+        },
     }
 
-async def wait(seconds: float, interruptible: bool = True) -> Dict[str, Any]:
+
+async def wait(seconds: float, interruptible: bool = True) -> dict[str, Any]:
     """
     Pause agent execution for a specified number of seconds.
-    
+
     Args:
         seconds: Seconds to wait (must be positive).
         interruptible: Whether wakeup by external events is allowed (default True).
             - True: use interruptible sleep; can be woken by group messages or other external events
                     (suitable for waiting on user replies)
             - False: use fixed wait; cannot be interrupted (suitable for API rate limiting, retry intervals, etc.)
-    
+
     Returns:
         Non-interruptible mode:
             Success: {"status": "success", "message": "Wait completed for {seconds}s."}
             Failure: {"status": "error", "message": "error message"}
-        
+
         Interruptible mode:
             Returns {
                 "status": "success",
@@ -358,43 +380,42 @@ async def wait(seconds: float, interruptible: bool = True) -> Dict[str, Any]:
                 "wake_reason": str,
                 "wake_time": str
             }
-    
+
     Usage tips:
         - Fixed delay, no interruption needed: wait(5, interruptible=False)
         - Waiting for group chat reply, can be woken: wait(300, interruptible=True)
     """
     try:
         sec = float(seconds)
-        if sec < 0: 
+        if sec < 0:
             raise ValueError("Seconds must be positive")
-        
+
         # Interruptible mode: use sleep_controller
         if interruptible:
             if sleep_controller is None:
                 return {
-                    "status": "error", 
-                    "message": "Interruptible sleep not available (sleep_controller not imported)"
+                    "status": "error",
+                    "message": "Interruptible sleep not available (sleep_controller not imported)",
                 }
             try:
                 from ..state_manager import state_manager
+
                 await state_manager.set_state("sleeping")
             except Exception:
                 pass
             wake_info = await sleep_controller.sleep(int(sec))
             try:
                 from ..state_manager import state_manager
+
                 await state_manager.set_state("idle")
             except Exception:
                 pass
-            return {
-                "status": "success",
-                **wake_info
-            }
-        
+            return {"status": "success", **wake_info}
+
         # Non-interruptible mode: use asyncio.sleep
         else:
             await asyncio.sleep(sec)
             return {"status": "success", "message": f"Wait completed for {sec}s."}
-            
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
