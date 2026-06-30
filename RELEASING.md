@@ -338,6 +338,11 @@ GitHub Release.
 After the final tag is pushed and `release.yml` completes:
 
 - [ ] **GitHub Release looks right** — notes render, artifacts attached, pre-release flag correct.
+- [ ] **Desktop installers attached** — `build-desktop.yml` finishes its
+  `attach-to-release` job (~10–15 min after the tag). Check Actions →
+  **Build Desktop App** → **Attach desktop artifacts to Release**. Six files
+  expected: Windows NSIS + portable, Linux AppImage + `.deb`, macOS x64 +
+  arm64 DMG (see [desktop_build.md](doc_en/desktop_build.md)).
 - [ ] **Docker image is on `ghcr.io/opensquad-ai/opensquad:0.X.Y` and `:latest`** (final release only).
 - [ ] **PyPI shows the new version** at https://pypi.org/project/opensquad/#history.
 - [ ] **npm package published** (`@opensquad-ai/opensquad` on the public registry).
@@ -345,6 +350,77 @@ After the final tag is pushed and `release.yml` completes:
 - [ ] **`[Unreleased]` section in `CHANGELOG.md` is open on dev** for the next cycle.
 - [ ] **Release branch deleted** locally and on remote.
 - [ ] **Monitor Dependabot / GitHub Security Advisories** in the days after.
+
+## Desktop installers on GitHub Releases
+
+Desktop builds are **not** produced by `release.yml`. They come from
+`.github/workflows/build-desktop.yml`, which runs in parallel on every `v*`
+tag push:
+
+1. **build-backend** — PyInstaller on Windows / macOS / Linux (matrix).
+2. **build-electron** — electron-builder installers per OS.
+3. **attach-to-release** — uploads `.exe` / `.dmg` / `.AppImage` / `.deb` to
+   the GitHub Release with the same tag name (`overwrite_files: true` replaces
+   same-named assets).
+
+`release.yml` creates the Release page and notes first; `build-desktop.yml`
+only **adds/replaces** binary assets (~10–15 minutes later). Do not panic if
+the Release page appears before the installers show up.
+
+### Cut a release with fresh desktop Assets (normal flow)
+
+Follow the usual tag flow in this file. After `git push origin v0.X.Y`:
+
+```bash
+# Watch the desktop pipeline
+gh run list --workflow=build-desktop.yml --limit 3
+gh run watch   # pick the run id for the tag you just pushed
+```
+
+When `attach-to-release` is green, verify:
+
+```bash
+gh release view v0.X.Y --json assets --jq '.assets[].name'
+```
+
+### Refresh Assets on an **existing** release tag (no new tag)
+
+Use when desktop fixes landed on `dev`/`main` but you do not want a full
+PyPI/Docker/npm bump yet, or when you need to replace broken installers on
+`v0.4.0`:
+
+1. GitHub → **Actions** → **Build Desktop App** → **Run workflow**.
+2. Choose the **branch** to build from (usually `dev` or `main`).
+3. Set **release_tag** to the existing tag, e.g. `v0.4.0`.
+4. Run. When `attach-to-release` succeeds, same-named Assets on that Release
+   are overwritten.
+
+CLI equivalent:
+
+```bash
+gh workflow run build-desktop.yml \
+  --ref dev \
+  -f release_tag=v0.4.0
+```
+
+**Caveat:** the binaries are built from the branch you select, but the Release
+tag name stays the same — document in the Release notes if the semver tag no
+longer matches the exact commit. For user-facing semver, prefer cutting
+`v0.X.(Y+1)` instead.
+
+### Re-tag (last resort)
+
+GitHub does not re-fire tag workflows on an existing tag. To rebuild from a
+specific commit **and** move the tag:
+
+```bash
+git checkout main && git pull
+git tag -d v0.X.Y && git push origin :refs/tags/v0.X.Y   # delete remote tag
+git tag -a v0.X.Y -m "v0.X.Y" && git push origin v0.X.Y  # re-create on current HEAD
+```
+
+This re-triggers both `release.yml` and `build-desktop.yml`. Only do this if
+no one has pinned the old tag hash; prefer a patch tag when in doubt.
 
 ## What this file does NOT cover
 
