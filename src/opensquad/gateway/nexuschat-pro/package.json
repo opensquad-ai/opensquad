@@ -55,7 +55,7 @@
     "copyright": "Copyright © 2025-present OpenSquad",
     "directories": {
       "buildResources": "assets",
-      "output": "../../../build/release"
+      "output": "../../../../build/release"
     },
     "files": [
       "dist/**",
