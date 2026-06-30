@@ -64,21 +64,21 @@
     ],
     "extraResources": [
       {
-        "from": "../../../build/backend-win",
+        "from": "../../../../build/backend-win",
         "to": "backend-win",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../../../build/backend-mac",
+        "from": "../../../../build/backend-mac",
         "to": "backend-mac",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../../../build/backend-linux",
+        "from": "../../../../build/backend-linux",
         "to": "backend-linux",
         "filter": [
           "**/*"

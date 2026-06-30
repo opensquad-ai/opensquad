@@ -62,10 +62,13 @@ function getBackendExe(): string {
     ? process.resourcesPath
     : path.join(__dirname, '..', 'resources')
 
+  // PyInstaller with `exclude_binaries=True` + COLLECT produces a *folder*
+  // `run/` containing the executable plus its bundled `_internal/` deps
+  // (see opensquad_backend.spec). Spawn the binary inside that folder.
   const map: Record<string, string> = {
-    win32:  path.join(resourcesDir, 'backend-win',   'run.exe'),
-    darwin: path.join(resourcesDir, 'backend-mac',   'run'),
-    linux:  path.join(resourcesDir, 'backend-linux', 'run'),
+    win32:  path.join(resourcesDir, 'backend-win',   'run', 'run.exe'),
+    darwin: path.join(resourcesDir, 'backend-mac',   'run', 'run'),
+    linux:  path.join(resourcesDir, 'backend-linux', 'run', 'run'),
   }
   return map[process.platform] ?? map['linux']
 }
