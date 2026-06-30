@@ -127,6 +127,7 @@ interface WorkspaceListResponse {
 
 export default function WorkspaceManager() {
   const { t } = useTranslation();
+  const isDesktop = Boolean(window.electronEnv?.isElectron);
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -229,23 +230,38 @@ export default function WorkspaceManager() {
         throw new Error(data.detail || t('workspace.errors.switchFailed'));
       }
 
-      // 记录待生效工作区，UI 给出明确提示
+      const data = await response.json();
       setPendingWorkspace(path);
       await loadWorkspaces();
+
+      if (data.desktop_restart && window.electronEnv?.restartApp) {
+        if (confirm(t('workspace.restartAppConfirm'))) {
+          await window.electronEnv.restartApp();
+        }
+      }
     } catch (err: any) {
       setError(err.message || t('workspace.errors.switchWorkspaceFailed'));
     }
   };
 
-  // 打开文件选择器（使用 HTML5 File API）
+  const handleRestartApp = async () => {
+    if (window.electronEnv?.restartApp) {
+      await window.electronEnv.restartApp();
+    }
+  };
+
+  // 打开文件夹选择器（Electron 原生 / 浏览器回退）
   const handleBrowse = async () => {
     try {
-      // 使用 showDirectoryPicker API（需要用户交互触发）
+      if (window.electronEnv?.pickWorkspaceFolder) {
+        const picked = await window.electronEnv.pickWorkspaceFolder();
+        if (picked) setNewWorkspacePath(picked);
+        return;
+      }
       if ('showDirectoryPicker' in window) {
         const dirHandle = await (window as any).showDirectoryPicker();
         setNewWorkspacePath(dirHandle.name ? await getFullPath(dirHandle) : dirHandle.name);
       } else {
-        // 回退方案：提示用户手动输入
         alert(t('workspace.errors.browserNotSupported'));
       }
     } catch (err: any) {
@@ -333,8 +349,10 @@ export default function WorkspaceManager() {
         if (data.status === 'running' || data.status === 'pending') {
           setTimeout(poll, 1000);
         } else if (data.status === 'completed') {
-          // 迁移完成，刷新工作区列表
           await loadWorkspaces();
+          if (migrationTarget) {
+            setPendingWorkspace(migrationTarget);
+          }
         }
       } catch (err: any) {
         setMigrationStatus({ status: 'failed', progress: 0, message: err.message || t('workspace.errors.getStatusFailed') });
@@ -396,8 +414,18 @@ export default function WorkspaceManager() {
           <div className="mt-3 flex items-start gap-3 p-3 rounded-lg bg-amber-50 border border-amber-300">
             <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-amber-800">{t('workspace.savedRestart')}</p>
+              <p className="text-xs font-semibold text-amber-800">
+                {isDesktop ? t('workspace.savedRestartDesktop') : t('workspace.savedRestart')}
+              </p>
               <p className="text-xs text-amber-700 mt-0.5 break-all">{t('workspace.pendingSwitch', { path: pendingWorkspace })}</p>
+              {isDesktop && (
+                <button
+                  onClick={handleRestartApp}
+                  className="mt-2 px-3 py-1.5 bg-amber-600 text-white text-xs rounded-lg hover:bg-amber-700 transition-colors"
+                >
+                  {t('workspace.restartApp')}
+                </button>
+              )}
             </div>
             <button onClick={() => setPendingWorkspace(null)} className="text-amber-600 hover:text-amber-800 shrink-0">
               <X size={14} />

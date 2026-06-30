@@ -60,6 +60,17 @@ def _is_runtime_data(src):
     norm = src.replace("\\", "/")
     if any(p in norm for p in _BUILD_ARTIFACT_PATTERNS):
         return False
+    # nexuschat-pro/resources/ is the electron-builder extraResources staging
+    # area (PyInstaller backend binaries copied here for local electron:dev:fast
+    # runs). It is NOT runtime data and must never be bundled — doing so pulls
+    # the entire backend bundle (hundreds of MB) into _internal/.
+    if "/nexuschat-pro/resources/" in norm:
+        return False
+    # nexuschat-pro source (.ts/.tsx/components/electron) is dev-only; only the
+    # built dist/ is served at runtime. Exclude the rest of the frontend tree
+    # except dist/ (which the spec adds explicitly above).
+    if "/nexuschat-pro/" in norm and "/nexuschat-pro/dist/" not in norm:
+        return False
     base = os.path.basename(src)
     if any(base.endswith(sfx) for sfx in _BUILD_METADATA_SUFFIXES):
         return False
@@ -69,6 +80,15 @@ def _is_runtime_data(src):
 
 datas += [pair for pair in collect_data_files("opensquad") if _is_runtime_data(pair[0])]
 print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build metadata excluded)")
+
+# launcher.py — the standalone launcher module (opensquad/launcher.py, ~3.4k
+# lines, holds main()). It is shadowed by the opensquad/launcher/ PACKAGE, so
+# PyInstaller's collect_submodules("opensquad") picks up the package but NOT
+# this .py file. The frozen run.py --service launcher loads it by file path
+# (importlib.util.spec_from_file_location) to reach main(), so it must ship as
+# a data file at _internal/opensquad/launcher.py. Source lives at
+# GATEWAY_DIR.parent = src/opensquad/ (same dir as the opensquad package root).
+datas += [(str(GATEWAY_DIR.parent / "launcher.py"), "opensquad")]
 
 # alembic 迁移脚本
 alembic_dir = BACKEND_DIR / "alembic"
@@ -168,11 +188,69 @@ hiddenimports += ["watchfiles"]
 # httpx
 hiddenimports += collect_submodules("httpx")
 
+# Launcher dependencies (lazy-imported inside opensquad/launcher.py and
+# opensquad/launcher/process_manager.py). PyInstaller can't see lazy imports,
+# so list them explicitly. The launcher's management server is stdlib
+# http.server, but the node-registration WS tunnel uses `websockets` and the
+# port-owner lookup uses `psutil`.
+hiddenimports += collect_submodules("websockets")
+hiddenimports += ["psutil"]
+
 # ── 收集完整包数据 ─────────────────────────────────────────────────────────────
 for pkg in ("uvicorn", "fastapi", "starlette", "sqlalchemy", "httpx", "h11"):
     _datas, _binaries, _hidden = collect_all(pkg)
     datas     += _datas
     hiddenimports += _hidden
+
+# ── Builtin resource packages: plugins, skills ───────────────────────────────
+# These live at src/ top-level (NOT inside the opensquad package), so
+# collect_submodules("opensquad") never reaches them. The launcher/gateway load
+# plugin code via `import plugins.<name>.plugin` (importlib.import_module), so
+# the .py must be importable in the bundle — collect_submodules puts them in the
+# PYZ. The non-.py runtime data (plugin.json, role prompts, etc.) ships as data
+# files. CRITICAL: filter out node_modules + ui/ build dirs — plugins/ contains
+# 10k+ files of UI build tooling (task_watch/ui, token_analytics/ui = ~140MB)
+# that is useless at runtime and would bloat the installer tenfold.
+def _is_plugin_runtime_data(src: str) -> bool:
+    norm = src.replace("\\", "/")
+    if "node_modules" in norm or "/ui/" in norm or "/__pycache__/" in norm:
+        return False
+    base = os.path.basename(src)
+    if base.endswith((".map", ".d.ts", ".ts")):
+        return False
+    if base in ("package.json", "package-lock.json", "tsconfig.json"):
+        return False
+    return True
+
+for _res_pkg in ("plugins", "skills"):
+    hiddenimports += collect_submodules(_res_pkg)
+    _res_datas, _res_bins, _res_hidden = collect_all(_res_pkg)
+    datas += [pair for pair in _res_datas if _is_plugin_runtime_data(pair[0])]
+    print(f"[spec] {_res_pkg}: {len([p for p in _res_datas if _is_plugin_runtime_data(p[0])])} runtime data files (node_modules/ui excluded)")
+
+# ── Builtin resource DIRECTORIES (not importable packages): cards/agents/pymcp ─
+# role_cards / model_cards / collab_cards / agents / pymcp are plain data dirs
+# (JSON manifests, markdown, seed agent configs). They sit under src/ top-level
+# too. Frozen mode _DEFAULT_ROOT = _internal/, so builtin_resources_dir() and
+# _copy_default_resources() look for them at _internal/<name>. Ship each dir as
+# a data tree rooted at _internal/<name>.
+_builtin_root = GATEWAY_DIR.parent.parent  # = src/ (PROJECT_ROOT is also src/)
+for _res_dir in ("role_cards", "model_cards", "collab_cards", "agents", "pymcp"):
+    _src = _builtin_root / _res_dir
+    if _src.exists():
+        datas += [(str(_src), _res_dir)]
+        print(f"[spec] bundling {_res_dir}/ → _internal/{_res_dir}/")
+    else:
+        print(f"[spec] WARNING: {_src} not found, skipping")
+
+# init_workspace() copies system_config.{template,json,example}.json from
+# _DEFAULT_ROOT into a fresh workspace. Bundle the example so a first-run
+# desktop workspace gets a real config.
+for _cfg_name in ("system_config.example.json", "system_config.json"):
+    _cfg_src = _builtin_root / _cfg_name
+    if _cfg_src.exists():
+        datas += [(str(_cfg_src), ".")]
+        print(f"[spec] bundling {_cfg_name} → _internal/")
 
 # ── 分析 ──────────────────────────────────────────────────────────────────────
 a = Analysis(

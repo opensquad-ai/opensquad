@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 launcher.py - Multi-Agent Process Manager + HTTP Management API
 
@@ -21,26 +20,22 @@ Features:
     - Console log aggregation (with agent name prefix)
     - HTTP management API (:9600): list/start/stop/restart/logs/config read-write
 """
-import os
-import sys
-import json
-import time
-import signal
+
 import argparse
-import subprocess
-import threading
 import asyncio
-import socket
 import base64
 import io
-import zipfile
-from collections import deque
-from datetime import datetime
-from typing import Dict, List, Optional
-
-import shutil
-import re
+import json
 import logging
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import zipfile
 
 _log = logging.getLogger("launcher")
 
@@ -78,7 +73,7 @@ _BUILTIN_PLUGINS: dict = {}  # name -> {"default_enabled": bool}
 _builtin_plugins_path = os.path.join(PLUGINS_DIR, "builtin_plugins.json")
 if os.path.isfile(_builtin_plugins_path):
     try:
-        with open(_builtin_plugins_path, "r", encoding="utf-8") as _bf:
+        with open(_builtin_plugins_path, encoding="utf-8") as _bf:
             _bp_data = json.load(_bf)
             _BUILTIN_PLUGINS = _bp_data.get("plugins", {})
     except Exception:
@@ -90,51 +85,37 @@ MODEL_CARDS_DIR = syscfg.builtin_resources_dir("model_cards")
 
 # BOOT_SCRIPT is now inside the package
 import opensquad
+
 BOOT_SCRIPT_DIR = os.path.dirname(os.path.abspath(opensquad.__file__))
 BOOT_MODULE = "opensquad.agents_boot"
 
 # ── Process management (extracted to opensquad.launcher.process_manager) ──
 from opensquad.launcher.process_manager import (
+    MANAGEMENT_PORT,
+    MAX_RESTART_ATTEMPTS,
+    PROJECT_ROOT,
+    RUNTIME_REGISTRY_DIR,
+    STABLE_RESET_SECONDS,
     AgentProcess,
     PluginServiceProcess,
-    _read_json,
-    is_port_in_use,
-    check_port_conflict,
-    find_available_port,
-    _ensure_runtime_registry_dir,
-    _registry_path,
-    _write_runtime_registry,
-    _remove_runtime_registry,
-    _terminate_pid_tree,
-    _kill_port_owner,
-    _pid_exists,
-    _read_runtime_registry,
     _cleanup_runtime_registry,
-    _resolve_discovery_port,
-    _ensure_pip_and_install,
     _install_builtin_plugin_deps,
-    set_process_tables,
-    MAX_RESTART_ATTEMPTS,
-    RESTART_COOLDOWN,
-    RESTART_BACKOFF_SCHEDULE,
-    STABLE_RESET_SECONDS,
-    LOG_BUFFER_SIZE,
-    MANAGEMENT_PORT,
-    RUNTIME_REGISTRY_DIR,
-    BOOT_MODULE,
-    PROJECT_ROOT,
-    _processes,
+    _kill_port_owner,
     _plugin_services,
+    _processes,
+    _read_json,
+    _resolve_discovery_port,
+    check_port_conflict,
 )
 
 # Workspace migration background task status table (shared across requests)
 _workspace_migration_tasks: dict = {}
 
 
-from opensquad.agent_config_schema import validate_agent_config, apply_config_defaults
+from opensquad.agent_config_schema import apply_config_defaults, validate_agent_config
 
 
-def discover_plugin_services(plugins_dir: str) -> List[dict]:
+def discover_plugin_services(plugins_dir: str) -> list[dict]:
     """
     Scan the plugins/ directory, return info for all plugins that have a service field.
     Returns [{plugin_id, plugin_dir, service_cfg, plugin_enabled, display_name, plugin_type, dependencies}, ...]
@@ -148,26 +129,28 @@ def discover_plugin_services(plugins_dir: str) -> List[dict]:
         if not os.path.isdir(plugin_dir) or not os.path.isfile(plugin_json_path):
             continue
         try:
-            with open(plugin_json_path, "r", encoding="utf-8") as f:
+            with open(plugin_json_path, encoding="utf-8") as f:
                 meta = json.load(f)
         except Exception:
             continue
         service_cfg = meta.get("service")
         if not service_cfg:
             continue
-        result.append({
-            "plugin_id": name,
-            "plugin_dir": plugin_dir,
-            "service_cfg": service_cfg,
-            "plugin_enabled": meta.get("enabled", True),
-            "display_name": meta.get("display_name", name),
-            "plugin_type": meta.get("type", "tool"),
-            "dependencies": meta.get("dependencies", {}),
-        })
+        result.append(
+            {
+                "plugin_id": name,
+                "plugin_dir": plugin_dir,
+                "service_cfg": service_cfg,
+                "plugin_enabled": meta.get("enabled", True),
+                "display_name": meta.get("display_name", name),
+                "plugin_type": meta.get("type", "tool"),
+                "dependencies": meta.get("dependencies", {}),
+            }
+        )
     return result
 
 
-def discover_agents(agents_dir: str, only: List[str] = None, exclude: List[str] = None) -> List[dict]:
+def discover_agents(agents_dir: str, only: list[str] = None, exclude: list[str] = None) -> list[dict]:
     """
     Scan the agents/ directory for all subdirectories with config.json.
     Returns [{dir, name, config}, ...]
@@ -196,16 +179,14 @@ def discover_agents(agents_dir: str, only: List[str] = None, exclude: List[str] 
             continue
 
         try:
-            with open(config_path, "r", encoding="utf-8-sig") as f:
+            with open(config_path, encoding="utf-8-sig") as f:
                 config = json.load(f)
             if not isinstance(config, dict):
-                _log.info(f"[Launcher] Invalid config type in {config_path}: expected object, got {type(config).__name__}. Skipping this agent.")
+                _log.info(
+                    f"[Launcher] Invalid config type in {config_path}: expected object, got {type(config).__name__}. Skipping this agent."
+                )
                 continue
-            agents.append({
-                "dir": entry_path,
-                "name": entry,
-                "config": config
-            })
+            agents.append({"dir": entry_path, "name": entry, "config": config})
         except Exception as e:
             _log.error(f"[Launcher] Error loading {config_path}: {e}")
 
@@ -217,18 +198,23 @@ def discover_agents(agents_dir: str, only: List[str] = None, exclude: List[str] 
 # ═══════════════════════════════════════════════════════════
 
 # Global process table, populated by main(), accessible to HTTP handler
-_processes: Dict[str, AgentProcess] = {}
+_processes: dict[str, AgentProcess] = {}
 
 # Plugin service process table, populated by main(), accessible to HTTP handler
-_plugin_services: Dict[str, "PluginServiceProcess"] = {}
+_plugin_services: dict[str, "PluginServiceProcess"] = {}
 
 # Task watch heartbeats from agent processes (agent_id -> last heartbeat info)
 # Format: {"agent_id": {"description": "...", "last_update": 1234567890, "event": "start"|"update"|"complete"}}
-_task_watch_heartbeats: Dict[str, Dict] = {}
+_task_watch_heartbeats: dict[str, dict] = {}
 _task_watch_stalled_notified: set = set()  # agent IDs already notified to avoid flooding
 
 # Global shutdown event — set by signal handler so all daemon threads exit promptly
 _shutdown_event = threading.Event()
+
+# Parsed CLI args (set by _parse_args_and_discover_agents). Phase functions that
+# take no args read flags off this (e.g. _init_and_start_plugin_services checks
+# _ARGS.no_services to skip plugin auto-start in frozen-bundle safe mode).
+_ARGS = None
 
 
 def _start_node_registration_thread(mgmt_port: int):
@@ -239,24 +225,23 @@ def _start_node_registration_thread(mgmt_port: int):
     Gateway address: syscfg.gateway_http()
     This node's launcher_url: http://{externally-reachable IP}:{mgmt_port}
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
-    node_id    = syscfg.node_id()
+    node_id = syscfg.node_id()
     node_label = syscfg.node_label()
-    gateway    = syscfg.gateway_http()
-    token      = syscfg.auth("gateway_token")
+    gateway = syscfg.gateway_http()
+    token = syscfg.auth("gateway_token")
 
     # If system_config.json has node.launcher_url configured, use it directly; otherwise build from local IP
     launcher_url = syscfg.launcher_url()
 
     def _post(path: str, payload: dict):
         data = json.dumps(payload).encode("utf-8")
-        req  = urllib.request.Request(
+        req = urllib.request.Request(
             f"{gateway}/api/ai-web{path}",
             data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {token}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -264,11 +249,10 @@ def _start_node_registration_thread(mgmt_port: int):
 
     def _put(path: str, payload: dict):
         data = json.dumps(payload).encode("utf-8")
-        req  = urllib.request.Request(
+        req = urllib.request.Request(
             f"{gateway}/api/ai-web{path}",
             data=data,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {token}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
             method="PUT",
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
@@ -281,11 +265,14 @@ def _start_node_registration_thread(mgmt_port: int):
         while not _shutdown_event.is_set():
             try:
                 if not registered:
-                    _post("/nodes/register", {
-                        "node_id":     node_id,
-                        "node_label":  node_label,
-                        "launcher_url": launcher_url,
-                    })
+                    _post(
+                        "/nodes/register",
+                        {
+                            "node_id": node_id,
+                            "node_label": node_label,
+                            "launcher_url": launcher_url,
+                        },
+                    )
                     _log.info(f"[Launcher] Registered node {node_id!r} to Gateway at {gateway}")
                     registered = True
                 else:
@@ -312,17 +299,17 @@ def _start_launcher_ws_tunnel(management_port: int):
 
     This allows the cloud Web UI to manage on-premise Agents with no port forwarding or frp needed.
     """
-    import urllib.request as _ureq
     import urllib.error as _uerr
+    import urllib.request as _ureq
 
-    node_id    = syscfg.node_id()
+    node_id = syscfg.node_id()
     node_label = syscfg.node_label()
     local_base = f"http://127.0.0.1:{management_port}"
 
     async def _ws_rpc_loop():
         import websockets  # pip install websockets (already in backend requirements)
 
-        gateway_ws = syscfg.gateway_ws()   # e.g. ws://cloud:9555
+        gateway_ws = syscfg.gateway_ws()  # e.g. ws://cloud:9555
         url = f"{gateway_ws}/ai-ws/launcher"
 
         while not _shutdown_event.is_set():
@@ -335,12 +322,16 @@ def _start_launcher_ws_tunnel(management_port: int):
                     proxy=None,
                 ) as ws:
                     # Register this node
-                    await ws.send(json.dumps({
-                        "type": "launcher_register",
-                        "node_id": node_id,
-                        "node_label": node_label,
-                        "node_secret": syscfg.node_secret(),
-                    }))
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "launcher_register",
+                                "node_id": node_id,
+                                "node_label": node_label,
+                                "node_secret": syscfg.node_secret(),
+                            }
+                        )
+                    )
                     _log.info(f"[Launcher] WS admin tunnel connected → {url} (node={node_id!r})")
 
                     # ── Keepalive task: send a lightweight heartbeat every 12s ──
@@ -349,6 +340,7 @@ def _start_launcher_ws_tunnel(management_port: int):
                     # sits idle and may be dropped. Our keepalive ensures there is
                     # *always* application-level traffic well inside that window.
                     _keepalive_interval = 12
+
                     async def _keepalive():
                         while True:
                             await asyncio.sleep(_keepalive_interval)
@@ -356,6 +348,7 @@ def _start_launcher_ws_tunnel(management_port: int):
                                 await ws.send(json.dumps({"type": "keepalive"}))
                             except Exception:
                                 break
+
                     _ka_task = asyncio.create_task(_keepalive())
 
                     try:
@@ -373,8 +366,8 @@ def _start_launcher_ws_tunnel(management_port: int):
 
                             req_id = msg.get("req_id", "")
                             method = msg.get("method", "GET").upper()
-                            path   = msg.get("path", "/")
-                            body   = msg.get("body")
+                            path = msg.get("path", "/")
+                            body = msg.get("body")
 
                             # Relay to local HTTP management server
                             try:
@@ -388,31 +381,43 @@ def _start_launcher_ws_tunnel(management_port: int):
                                 )
                                 with _ureq.urlopen(req, timeout=15) as resp:
                                     resp_body = json.loads(resp.read())
-                                await ws.send(json.dumps({
-                                    "type": "admin_response",
-                                    "req_id": req_id,
-                                    "status": 200,
-                                    "body": resp_body,
-                                }))
+                                await ws.send(
+                                    json.dumps(
+                                        {
+                                            "type": "admin_response",
+                                            "req_id": req_id,
+                                            "status": 200,
+                                            "body": resp_body,
+                                        }
+                                    )
+                                )
                             except _uerr.HTTPError as e:
                                 err_body = {}
                                 try:
                                     err_body = json.loads(e.read())
                                 except Exception:
                                     pass
-                                await ws.send(json.dumps({
-                                    "type": "admin_response",
-                                    "req_id": req_id,
-                                    "status": e.code,
-                                    "body": err_body,
-                                }))
+                                await ws.send(
+                                    json.dumps(
+                                        {
+                                            "type": "admin_response",
+                                            "req_id": req_id,
+                                            "status": e.code,
+                                            "body": err_body,
+                                        }
+                                    )
+                                )
                             except Exception as e:
-                                await ws.send(json.dumps({
-                                    "type": "admin_response",
-                                    "req_id": req_id,
-                                    "status": 502,
-                                    "body": {"error": str(e)},
-                                }))
+                                await ws.send(
+                                    json.dumps(
+                                        {
+                                            "type": "admin_response",
+                                            "req_id": req_id,
+                                            "status": 502,
+                                            "body": {"error": str(e)},
+                                        }
+                                    )
+                                )
                     finally:
                         _ka_task.cancel()
                         try:
@@ -440,11 +445,11 @@ def _start_launcher_ws_tunnel(management_port: int):
 
 def _start_management_server(port: int = MANAGEMENT_PORT):
     """Start the HTTP management server in a dedicated thread"""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
-    import urllib.parse
     import hashlib
     import secrets
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
 
     class ManagementHandler(BaseHTTPRequestHandler):
         """Lightweight HTTP handler — no FastAPI/uvicorn dependency, minimal external deps"""
@@ -529,7 +534,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     pass
                 except Exception as e:
                     try:
-                        self._send_json({"error": f"Internal server error: {str(e)}"}, 500)
+                        self._send_json({"error": f"Internal server error: {e!s}"}, 500)
                     except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
                         pass
 
@@ -579,17 +584,17 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path == "/api/role-cards":
                 return self._handle_list_role_cards()
             elif path.startswith("/api/role-cards/"):
-                card_name = path[len("/api/role-cards/"):]
+                card_name = path[len("/api/role-cards/") :]
                 return self._handle_get_role_card(card_name)
             elif path == "/api/collab-cards":
                 return self._handle_list_collab_cards()
             elif path.startswith("/api/collab-cards/"):
-                card_name = path[len("/api/collab-cards/"):]
+                card_name = path[len("/api/collab-cards/") :]
                 return self._handle_get_collab_card(card_name)
             elif path == "/api/model-cards":
                 return self._handle_list_model_cards()
             elif path.startswith("/api/model-cards/"):
-                card_name = path[len("/api/model-cards/"):]
+                card_name = path[len("/api/model-cards/") :]
                 return self._handle_get_model_card(card_name)
             elif path.startswith("/api/agents/") and path.endswith("/mcp"):
                 name = path.split("/")[3]
@@ -613,16 +618,18 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path == "/api/ping":
                 return self._send_json({"status": "ok", "service": "launcher"})
             elif path == "/api/workspace":
-                return self._send_json({
-                    "workspace": syscfg.get_workspace(),
-                    "agents_dir": syscfg.workspace_agents_dir(),
-                })
+                return self._send_json(
+                    {
+                        "workspace": syscfg.get_workspace(),
+                        "agents_dir": syscfg.workspace_agents_dir(),
+                    }
+                )
             elif path == "/api/workspace/list":
                 return self._handle_workspace_list()
             elif path == "/api/workspace/detect-legacy":
                 return self._handle_workspace_detect_legacy()
             elif path.startswith("/api/workspace/migrate/status/"):
-                task_id = path[len("/api/workspace/migrate/status/"):]
+                task_id = path[len("/api/workspace/migrate/status/") :]
                 return self._handle_workspace_migrate_status(task_id)
             elif path == "/api/services/manage":
                 return self._handle_services_manage()
@@ -644,15 +651,15 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/sessions/") and path.endswith("/current"):
                 agent_id = path.split("/")[3]
                 offset = int(qs.get("offset", ["0"])[0])
-                limit  = int(qs.get("limit",  ["50"])[0])
+                limit = int(qs.get("limit", ["50"])[0])
                 return self._handle_session_current(agent_id, offset, limit)
-            elif re.search(r'^/api/sessions/[^/]+/[^/]+/paged$', path):
+            elif re.search(r"^/api/sessions/[^/]+/[^/]+/paged$", path):
                 parts = path.split("/")
                 agent_id, session_id = parts[3], parts[4]
                 offset = int(qs.get("offset", ["0"])[0])
-                limit  = int(qs.get("limit",  ["50"])[0])
+                limit = int(qs.get("limit", ["50"])[0])
                 return self._handle_session_paged(agent_id, session_id, offset, limit)
-            elif re.search(r'^/api/sessions/[^/]+/[^/]+$', path):
+            elif re.search(r"^/api/sessions/[^/]+/[^/]+$", path):
                 parts = path.split("/")
                 agent_id, session_id = parts[3], parts[4]
                 return self._handle_session_get(agent_id, session_id)
@@ -709,7 +716,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 pid = path.split("/")[3]
                 return self._handle_plugin_service_stop(pid)
             # ── Agent session delete ──
-            elif re.search(r'^/api/sessions/[^/]+/[^/]+/delete$', path):
+            elif re.search(r"^/api/sessions/[^/]+/[^/]+/delete$", path):
                 parts = path.split("/")
                 agent_id, session_id = parts[3], parts[4]
                 return self._handle_session_delete(agent_id, session_id)
@@ -733,6 +740,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             try:
                 body = self._read_body()
                 import json
+
                 data = json.loads(body)
                 agent_id = data.get("agent_id", "")
                 if not agent_id:
@@ -794,15 +802,15 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 srv = path.split("/")[5]
                 return self._handle_put_mcp_server_global(srv, False)
             elif path.startswith("/api/role-cards/"):
-                card_name = path[len("/api/role-cards/"):]
+                card_name = path[len("/api/role-cards/") :]
                 body = self._read_body()
                 return self._handle_put_role_card(card_name, body)
             elif path.startswith("/api/collab-cards/"):
-                card_name = path[len("/api/collab-cards/"):]
+                card_name = path[len("/api/collab-cards/") :]
                 body = self._read_body()
                 return self._handle_put_collab_card(card_name, body)
             elif path.startswith("/api/model-cards/"):
-                card_name = path[len("/api/model-cards/"):]
+                card_name = path[len("/api/model-cards/") :]
                 body = self._read_body()
                 return self._handle_put_model_card(card_name, body)
             elif path.startswith("/api/agents/") and path.endswith("/model-card"):
@@ -875,19 +883,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "_config_error": f"Invalid config type: {type(info.get('config')).__name__}",
                             "_raw_config": str(info.get("config")),
                         }
-                    result.append({
-                        "dir_name": info["name"],
-                        "agent_id": cfg.get("agent_id", info["name"]),
-                        "agent_name": cfg.get("agent_name", info["name"]),
-                        "alive": False,
-                        "pid": None,
-                        "should_run": False,
-                        "restart_count": 0,
-                        "started_at": None,
-                        "config": cfg,
-                        "token_stats": None,
-                        "chat_profile": self._read_chat_profile(info["name"]),
-                    })
+                    result.append(
+                        {
+                            "dir_name": info["name"],
+                            "agent_id": cfg.get("agent_id", info["name"]),
+                            "agent_name": cfg.get("agent_name", info["name"]),
+                            "alive": False,
+                            "pid": None,
+                            "should_run": False,
+                            "restart_count": 0,
+                            "started_at": None,
+                            "config": cfg,
+                            "token_stats": None,
+                            "chat_profile": self._read_chat_profile(info["name"]),
+                        }
+                    )
 
             # Inject current role card name and model card name for each agent
             for item in result:
@@ -898,7 +908,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     item["role_card"] = prompt_cfg.get("role_card")
                 else:
                     item["role_card"] = None
-                
+
                 # Safely get model_card
                 model_cfg = cfg.get("model", {})
                 if isinstance(model_cfg, dict):
@@ -919,7 +929,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 errs = validate_agent_config(ap.config)
                 if errs:
                     detail = "\n".join(f"- {e}" for e in errs)
-                    return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                    return self._send_json(
+                        {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                        400,
+                    )
                 port_err = check_port_conflict(ap.config)
                 if port_err:
                     return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -939,7 +952,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             errs = validate_agent_config(config)
             if errs:
                 detail = "\n".join(f"- {e}" for e in errs)
-                return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                return self._send_json(
+                    {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400
+                )
             port_err = check_port_conflict(config)
             if port_err:
                 return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -973,7 +988,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 errs = validate_agent_config(config)
                 if errs:
                     detail = "\n".join(f"- {e}" for e in errs)
-                    return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                    return self._send_json(
+                        {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                        400,
+                    )
                 port_err = check_port_conflict(config)
                 if port_err:
                     return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -992,7 +1010,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             errs = validate_agent_config(ap.config)
             if errs:
                 detail = "\n".join(f"- {e}" for e in errs)
-                return self._send_json({"error": f"Restart failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                return self._send_json(
+                    {"error": f"Restart failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                    400,
+                )
             port_err = check_port_conflict(ap.config)
             if port_err:
                 return self._send_json({"error": f"Restart failed: {port_err}"}, 400)
@@ -1094,7 +1115,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             config_path = os.path.join(agent_dir, "config.json")
             if os.path.isfile(config_path):
                 try:
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     role_filename = cfg.get("prompt", {}).get("role", "role.md") or "role.md"
                 except Exception:
@@ -1105,7 +1126,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 role_path = os.path.join(agent_dir, "role.md")
             if not os.path.isfile(role_path):
                 return self._send_json({"agent": name, "content": ""})
-            with open(role_path, "r", encoding="utf-8") as f:
+            with open(role_path, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"agent": name, "content": content})
 
@@ -1120,7 +1141,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             config_path = os.path.join(agent_dir, "config.json")
             if os.path.isfile(config_path):
                 try:
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     role_filename = cfg.get("prompt", {}).get("role", "role.md") or "role.md"
                 except Exception:
@@ -1136,7 +1157,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if not name:
                 return self._send_json({"error": "Missing 'name'"}, 400)
             # Security check: only allow alphanumeric and underscore
-            if not all(c.isalnum() or c == '_' for c in name):
+            if not all(c.isalnum() or c == "_" for c in name):
                 return self._send_json({"error": "Name must be alphanumeric/underscore"}, 400)
             agent_dir = os.path.join(AGENTS_DIR, name)
             if os.path.exists(agent_dir):
@@ -1163,12 +1184,22 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     "base_url": "",
                     "model_name": "",
                     "tool_call_mode": "auto",  # Default: auto-detect (recommended) — use Native FC if supported, otherwise fall back to XML
-                    "tool_filter": "high"      # Default: load common tools (97) — balance between features and performance
+                    "tool_filter": "high",  # Default: load common tools (97) — balance between features and performance
                 },
                 "tools": [
-                    "system", "filesystem", "agent_setup", "im",
-                    "collaboration", "delegate_task", "workspace", "task_watch",
-                    "websearch", "reminder", "vision", "mcp_query", "plugin_admin",
+                    "system",
+                    "filesystem",
+                    "agent_setup",
+                    "im",
+                    "collaboration",
+                    "delegate_task",
+                    "workspace",
+                    "task_watch",
+                    "websearch",
+                    "reminder",
+                    "vision",
+                    "mcp_query",
+                    "plugin_admin",
                 ],
                 "group_chat": {
                     "enabled": True,
@@ -1180,16 +1211,19 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 "gateway": {"enabled": True, "url": syscfg.gateway_register_url()},
                 "prompt": {"role": "role.md"},
                 "mcp": {"enabled": True},  # Default: MCP enabled; specific services are controlled in mcp_config.json
-                "skills": {"enabled": True, "active": []}  # Default: skills enabled; public skill library auto-discovered
+                "skills": {
+                    "enabled": True,
+                    "active": [],
+                },  # Default: skills enabled; public skill library auto-discovered
             }
             with open(os.path.join(agent_dir, "config.json"), "w", encoding="utf-8") as f:
                 json.dump(default_config, f, ensure_ascii=False, indent=2)
-            
+
             # Create Agent-specific MCP config — copy from central config if it exists
             central_mcp_path = syscfg.workspace_data_dir("mcp_config.json")
             if os.path.isfile(central_mcp_path):
                 try:
-                    with open(central_mcp_path, "r", encoding="utf-8") as f:
+                    with open(central_mcp_path, encoding="utf-8") as f:
                         default_mcp_config = json.load(f)
                 except Exception:
                     default_mcp_config = None
@@ -1202,67 +1236,64 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "enabled": True,
                             "command": "npx",
                             "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
-                            "timeout": 30
+                            "timeout": 30,
                         },
                         "sequential-thinking": {
                             "enabled": True,
                             "command": "npx",
                             "args": ["-y", "@langgpt/sequential-thinking-mcp"],
-                            "timeout": 30
+                            "timeout": 30,
                         },
                         "windows-cli": {
                             "enabled": True,
                             "command": "npx",
                             "args": ["-y", "@simonb97/server-win-cli"],
                             "timeout": 30,
-                            "autoApprove": ["execute_command"]
+                            "autoApprove": ["execute_command"],
                         },
                         "playwright": {
                             "enabled": True,
                             "command": "npx",
                             "args": ["-y", "@playwright/mcp"],
-                            "timeout": 30
+                            "timeout": 30,
                         },
                         "chrome-devtools": {
                             "enabled": False,
                             "command": "npx",
                             "args": ["chrome-devtools-mcp@latest"],
                             "timeout": 30,
-                            "autoApprove": ["start_browser"]
+                            "autoApprove": ["start_browser"],
                         },
                         "github": {
                             "enabled": False,
                             "command": "npx",
                             "args": ["-y", "@modelcontextprotocol/server-github"],
                             "timeout": 30,
-                            "env": {
-                                "GITHUB_PERSONAL_ACCESS_TOKEN": ""
-                            }
+                            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": ""},
                         },
                         "zai-mcp-server": {
                             "enabled": False,
                             "command": "npx",
                             "args": ["-y", "@z_ai/mcp-server"],
                             "timeout": 60,
-                            "env": {
-                                "Z_AI_API_KEY": "",
-                                "Z_AI_MODE": "ZHIPU"
-                            }
-                        }
+                            "env": {"Z_AI_API_KEY": "", "Z_AI_MODE": "ZHIPU"},
+                        },
                     }
                 }
             with open(os.path.join(agent_dir, "mcp_config.json"), "w", encoding="utf-8") as f:
                 json.dump(default_mcp_config, f, ensure_ascii=False, indent=2)
-            
+
             # Create empty role.md
             with open(os.path.join(agent_dir, "role.md"), "w", encoding="utf-8") as f:
                 f.write(f"# {body.get('agent_name', name)}\n\nWrite the role definition here.\n")
 
-            return self._send_json({
-                "message": f"Agent '{name}' created", 
-                "dir": name,
-                "mcp_config": "Created with lightweight services enabled (filesystem, sequential-thinking, windows-cli)"
-            })
+            return self._send_json(
+                {
+                    "message": f"Agent '{name}' created",
+                    "dir": name,
+                    "mcp_config": "Created with lightweight services enabled (filesystem, sequential-thinking, windows-cli)",
+                }
+            )
 
         def _handle_rescan(self):
             """Re-scan the agents/ directory to discover new agents"""
@@ -1278,7 +1309,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
         def _handle_delete(self, name: str):
             """Delete agent: stop process first, then delete directory and remove from process table"""
             # Security check: only allow alphanumeric and underscore
-            if not all(c.isalnum() or c == '_' for c in name):
+            if not all(c.isalnum() or c == "_" for c in name):
                 return self._send_json({"error": "Invalid agent name"}, 400)
 
             agent_dir = os.path.join(AGENTS_DIR, name)
@@ -1326,10 +1357,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             existing_enabled = True
             existing_version = None
             existing_category = None
-            existing_plugin_py: Optional[bytes] = None
+            existing_plugin_py: bytes | None = None
             if os.path.isfile(existing_manifest):
                 try:
-                    with open(existing_manifest, "r", encoding="utf-8") as f:
+                    with open(existing_manifest, encoding="utf-8") as f:
                         existing_data = json.load(f)
                     existing_enabled = existing_data.get("enabled", True)
                     existing_version = existing_data.get("version")
@@ -1376,7 +1407,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             # Restore enabled state and category
             if os.path.isfile(existing_manifest):
                 try:
-                    with open(existing_manifest, "r", encoding="utf-8") as f:
+                    with open(existing_manifest, encoding="utf-8") as f:
                         new_manifest = json.load(f)
                     new_manifest["enabled"] = existing_enabled
                     # Restore category only if the new zip does not carry one
@@ -1425,7 +1456,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     manifest = os.path.join(plugin_dir, "plugin.json")
                     if os.path.isfile(manifest):
                         try:
-                            with open(manifest, "r", encoding="utf-8") as f:
+                            with open(manifest, encoding="utf-8") as f:
                                 meta = json.load(f)
                             if meta.get("name") == name:
                                 return plugin_dir, entry
@@ -1455,7 +1486,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 plugin_json_path = os.path.join(plugin_dir, "plugin.json")
                 if os.path.isfile(plugin_json_path):
                     try:
-                        with open(plugin_json_path, "r", encoding="utf-8") as f:
+                        with open(plugin_json_path, encoding="utf-8") as f:
                             meta = json.load(f)
                     except Exception:
                         meta = {}
@@ -1469,28 +1500,30 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     bp_cfg = _BUILTIN_PLUGINS[name]
                     meta["enabled"] = bp_cfg.get("default_enabled", True)
 
-                plugins.append({
-                    "name": meta.get("name", name),
-                    "dir_name": name,
-                    "display_name": meta.get("display_name", name),
-                    "version": meta.get("version", "0.0.0"),
-                    "type": meta.get("type", "tool"),
-                    "enabled": meta.get("enabled", True),
-                    "description": meta.get("description", ""),
-                    "author": meta.get("author", ""),
-                    "tags": meta.get("tags", []),
-                    "category": meta.get("category", ""),
-                    "tools": meta.get("tools", []),
-                    "hooks": meta.get("hooks", []),
-                    "config": meta.get("config", {}),
-                    "config_schema": meta.get("config_schema", {}),
-                    "contributes": meta.get("contributes", {}),
-                    "dependencies": meta.get("dependencies", {}),
-                    "service": meta.get("service"),
-                    "service_only": meta.get("service_only", False),
-                    "service_toggle": meta.get("service_toggle", False),
-                    "builtin": is_builtin,
-                })
+                plugins.append(
+                    {
+                        "name": meta.get("name", name),
+                        "dir_name": name,
+                        "display_name": meta.get("display_name", name),
+                        "version": meta.get("version", "0.0.0"),
+                        "type": meta.get("type", "tool"),
+                        "enabled": meta.get("enabled", True),
+                        "description": meta.get("description", ""),
+                        "author": meta.get("author", ""),
+                        "tags": meta.get("tags", []),
+                        "category": meta.get("category", ""),
+                        "tools": meta.get("tools", []),
+                        "hooks": meta.get("hooks", []),
+                        "config": meta.get("config", {}),
+                        "config_schema": meta.get("config_schema", {}),
+                        "contributes": meta.get("contributes", {}),
+                        "dependencies": meta.get("dependencies", {}),
+                        "service": meta.get("service"),
+                        "service_only": meta.get("service_only", False),
+                        "service_toggle": meta.get("service_toggle", False),
+                        "builtin": is_builtin,
+                    }
+                )
 
             return self._send_json({"plugins": plugins})
 
@@ -1503,7 +1536,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                 except Exception:
                     meta = {}
@@ -1526,7 +1559,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if meta.get("service_toggle"):
                 try:
                     sys_cfg_path = syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     if "services" not in full_cfg:
                         full_cfg["services"] = {}
@@ -1537,6 +1570,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                     # Invalidate system_config cache
                     from opensquad import system_config as _syscfg_mod
+
                     _syscfg_mod._cache = None
                     _log.info(f"[Launcher] Synced services.{name}.enabled = {enabled}")
                 except Exception as e:
@@ -1582,7 +1616,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugin_type = "tool"
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                     schema = meta.get("config_schema", {})
                     section = meta.get("config", {}).get("section")
@@ -1595,7 +1629,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if section and plugin_type == "platform":
                 try:
                     sys_cfg_path = syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     sec_data = full_cfg.get(section, {})
                     values = {
@@ -1610,7 +1644,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 values = {}
                 if os.path.isfile(config_path):
                     try:
-                        with open(config_path, "r", encoding="utf-8") as f:
+                        with open(config_path, encoding="utf-8") as f:
                             values = json.load(f)
                     except Exception:
                         pass
@@ -1628,11 +1662,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 else:
                     merged[key] = values.get(key)
 
-            return self._send_json({
-                "name": name,
-                "config_schema": schema,
-                "config": merged,
-            })
+            return self._send_json(
+                {
+                    "name": name,
+                    "config_schema": schema,
+                    "config": merged,
+                }
+            )
 
         def _handle_put_plugin_config(self, name: str, body: dict):
             """PUT /api/plugins/{name}/config - Save config values."""
@@ -1648,7 +1684,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugin_type = "tool"
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                     section = meta.get("config", {}).get("section")
                     plugin_type = meta.get("type", "tool")
@@ -1658,7 +1694,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if section and plugin_type == "platform":
                 try:
                     sys_cfg_path = syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     # Update bots list under the section key
                     if section not in full_cfg:
@@ -1684,6 +1720,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                     # Invalidate system_config module cache so other code sees new values
                     from opensquad import system_config as _syscfg_mod
+
                     _syscfg_mod._cache = None
                 except Exception as e:
                     return self._send_json({"error": f"Failed to write system config: {e}"}, 500)
@@ -1724,12 +1761,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             # Check for query module
             query_module_path = os.path.join(plugin_dir, "query.py")
             if not os.path.isfile(query_module_path):
-                return self._send_json(
-                    {"error": f"Plugin '{name}' has no data query module (query.py)"}, 404
-                )
+                return self._send_json({"error": f"Plugin '{name}' has no data query module (query.py)"}, 404)
 
             # Dynamic import
             import importlib
+
             module_name = f"plugins.{name}.query"
             try:
                 # Reload if already imported (supports hot-reload of query logic)
@@ -1738,18 +1774,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 else:
                     mod = importlib.import_module(module_name)
             except Exception as e:
-                return self._send_json(
-                    {"error": f"Failed to import {module_name}: {e}"}, 500
-                )
+                return self._send_json({"error": f"Failed to import {module_name}: {e}"}, 500)
 
             if not hasattr(mod, "query_data"):
-                return self._send_json(
-                    {"error": f"Plugin '{name}' query.py missing query_data() function"}, 400
-                )
+                return self._send_json({"error": f"Plugin '{name}' query.py missing query_data() function"}, 400)
 
             # Flatten query-string params: {k: [v1]} -> {k: v1}
-            params = {k: v[0] if isinstance(v, list) and v else v
-                      for k, v in qs.items()}
+            params = {k: v[0] if isinstance(v, list) and v else v for k, v in qs.items()}
 
             try:
                 result = mod.query_data(PROJECT_ROOT, params)
@@ -1764,21 +1795,17 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugins/{name}/view_errors.log so the agent can read it.
             """
             import datetime as _dt
+
             plugin_name = body.get("plugin_name", "unknown")
-            view_key    = body.get("view_key", "")
-            error_msg   = body.get("error", "")
-            stack       = body.get("stack", "")
+            view_key = body.get("view_key", "")
+            error_msg = body.get("error", "")
+            stack = body.get("stack", "")
 
             log_path = os.path.join(PLUGINS_DIR, plugin_name, "view_errors.log")
             try:
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                entry = (
-                    f"[{ts}] view={view_key}\n"
-                    f"  error: {error_msg}\n"
-                    f"  stack: {stack[:800]}\n"
-                    f"{'─' * 60}\n"
-                )
+                entry = f"[{ts}] view={view_key}\n  error: {error_msg}\n  stack: {stack[:800]}\n{'─' * 60}\n"
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(entry)
                 return self._send_json({"ok": True, "log": log_path})
@@ -1792,49 +1819,51 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             resource_type = body.get("resource_type")
             files = body.get("files", [])
-            
+
             if resource_type == "skills":
                 base_dir = SKILLS_DIR
             elif resource_type == "plugins":
                 base_dir = PLUGINS_DIR
             else:
                 return self._send_json({"error": "Invalid resource type"}, 400)
-                
+
             if not files:
                 return self._send_json({"error": "No files provided"}, 400)
-                
+
             try:
                 os.makedirs(base_dir, exist_ok=True)
                 # Group files by their top-level directory name to identify the resource name
                 resource_names = set()
-                
+
                 for f in files:
                     file_path = f.get("filename", "")
                     content_b64 = f.get("content", "")
                     if not file_path or not content_b64:
                         continue
-                        
+
                     parts = file_path.replace("\\", "/").split("/")
                     if len(parts) > 1:
                         resource_names.add(parts[0])
-                        
+
                     target_path = os.path.join(base_dir, file_path)
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                    
+
                     with open(target_path, "wb") as out_f:
                         out_f.write(base64.b64decode(content_b64))
-                        
+
                 # Trigger reload for plugins
                 if resource_type == "plugins" and resource_names:
                     reload_ts_path = os.path.join(base_dir, ".reload_ts")
                     with open(reload_ts_path, "w") as rf:
                         rf.write(str(time.time()))
-                        
-                return self._send_json({
-                    "success": True, 
-                    "message": f"Successfully uploaded {len(files)} files to {resource_type}",
-                    "resources": list(resource_names)
-                })
+
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": f"Successfully uploaded {len(files)} files to {resource_type}",
+                        "resources": list(resource_names),
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": str(e)}, 500)
 
@@ -1852,21 +1881,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             # Validate name to prevent path traversal
             # Allow alphanumeric, underscore, hyphen, dot
-            if not re.match(r'^[a-zA-Z0-9_\-\.]+$', name):
-                 return self._send_json({"error": "Invalid resource name"}, 400)
-            
+            if not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
+                return self._send_json({"error": "Invalid resource name"}, 400)
+
             target_dir = os.path.join(base_dir, name)
-            
+
             # Double check that we are staying within base_dir
             if not os.path.abspath(target_dir).startswith(os.path.abspath(base_dir)):
                 return self._send_json({"error": "Path traversal detected"}, 400)
-                
+
             if not os.path.isdir(target_dir):
                 return self._send_json({"error": f"{resource_type[:-1].capitalize()} '{name}' not found"}, 404)
 
             try:
                 shutil.rmtree(target_dir)
-                
+
                 # Trigger reload for plugins
                 if resource_type == "plugins":
                     reload_ts_path = os.path.join(base_dir, ".reload_ts")
@@ -1874,17 +1903,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         with open(reload_ts_path, "w") as rf:
                             rf.write(str(time.time()))
                     except Exception:
-                        pass # Ignore reload signal failure
-                        
+                        pass  # Ignore reload signal failure
+
                 return self._send_json({"ok": True, "message": f"{resource_type[:-1].capitalize()} '{name}' deleted"})
             except Exception as e:
                 return self._send_json({"error": f"Failed to delete {resource_type}: {e}"}, 500)
 
-
         def _handle_plugin_action(self, name: str, body: dict):
             """
             POST /api/plugins/{name}/action - Execute plugin action.
-            
+
             Convention: if plugins/{name}/query.py exports
             ``handle_action(project_root: str, action: str, data: dict) -> dict``,
             it will be called automatically.
@@ -1893,27 +1921,22 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugin_dir, _dir_name = self._find_plugin_dir(name)
             if not plugin_dir:
                 return self._send_json({"error": f"Plugin '{name}' not found"}, 404)
-            
+
             # Check for query module with handle_action
             query_module_path = os.path.join(plugin_dir, "query.py")
             if not os.path.isfile(query_module_path):
-                return self._send_json(
-                    {"error": f"Plugin '{name}' does not support actions"},
-                    400
-                )
-            
+                return self._send_json({"error": f"Plugin '{name}' does not support actions"}, 400)
+
             try:
                 import importlib.util as _ilu
+
                 spec = _ilu.spec_from_file_location(f"plugins.{name}.query", query_module_path)
                 mod = _ilu.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                
+
                 if not hasattr(mod, "handle_action"):
-                    return self._send_json(
-                        {"error": f"Plugin '{name}' does not support actions"},
-                        400
-                    )
-                
+                    return self._send_json({"error": f"Plugin '{name}' does not support actions"}, 400)
+
                 action = body.get("action", "")
                 data = body.get("data", {})
                 result = mod.handle_action(PROJECT_ROOT, action, data)
@@ -1969,34 +1992,40 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             cleanup = _cleanup_runtime_registry(force_kill=False)
             managed_agents = []
             for ap in _processes.values():
-                managed_agents.append({
-                    "agent_id": ap.agent_id,
-                    "agent_name": ap.agent_name,
-                    "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
-                    "port": ap.actual_port,
-                    "alive": ap.is_alive(),
-                    "should_run": ap.should_run,
-                })
+                managed_agents.append(
+                    {
+                        "agent_id": ap.agent_id,
+                        "agent_name": ap.agent_name,
+                        "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
+                        "port": ap.actual_port,
+                        "alive": ap.is_alive(),
+                        "should_run": ap.should_run,
+                    }
+                )
             managed_plugins = []
             for psp in _plugin_services.values():
-                managed_plugins.append({
-                    "plugin_id": psp.plugin_id,
-                    "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
-                    "port": psp.port,
-                    "alive": psp.is_alive(),
-                    "should_run": psp.should_run,
-                })
-            return self._send_json({
-                "runtime_registry": cleanup.get("remaining", []),
-                "cleanup": {
-                    "cleaned": cleanup.get("cleaned", 0),
-                    "killed": cleanup.get("killed", 0),
-                },
-                "managed": {
-                    "agents": managed_agents,
-                    "plugins": managed_plugins,
-                },
-            })
+                managed_plugins.append(
+                    {
+                        "plugin_id": psp.plugin_id,
+                        "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
+                        "port": psp.port,
+                        "alive": psp.is_alive(),
+                        "should_run": psp.should_run,
+                    }
+                )
+            return self._send_json(
+                {
+                    "runtime_registry": cleanup.get("remaining", []),
+                    "cleanup": {
+                        "cleaned": cleanup.get("cleaned", 0),
+                        "killed": cleanup.get("killed", 0),
+                    },
+                    "managed": {
+                        "agents": managed_agents,
+                        "plugins": managed_plugins,
+                    },
+                }
+            )
 
         def _handle_plugin_service_start(self, plugin_id: str):
             """POST /api/plugin-services/{id}/start — Start a plugin service"""
@@ -2035,11 +2064,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             enabled = body.get("enabled", True) if isinstance(body, dict) else True
             self._set_service_enabled_in_config(plugin_id, enabled)
-            return self._send_json({
-                "ok": True,
-                "plugin_id": plugin_id,
-                "auto_start": enabled,
-            })
+            return self._send_json(
+                {
+                    "ok": True,
+                    "plugin_id": plugin_id,
+                    "auto_start": enabled,
+                }
+            )
 
         def _set_service_enabled_in_config(self, plugin_id: str, enabled: bool):
             """Update system_config.json services.{plugin_id}.enabled and invalidate cache.
@@ -2049,7 +2080,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             try:
                 sys_cfg_path = syscfg.workspace_config_path()
-                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                with open(sys_cfg_path, encoding="utf-8") as f:
                     full_cfg = json.load(f)
                 if "services" not in full_cfg:
                     full_cfg["services"] = {}
@@ -2060,6 +2091,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                 # Invalidate system_config cache
                 from opensquad import system_config as _syscfg_mod
+
                 _syscfg_mod._cache = None
                 _log.info(f"[Launcher] Synced services.{plugin_id}.enabled = {enabled}")
             except Exception as e:
@@ -2126,13 +2158,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """Get an AgentSessionReader for the given agent_id, or None."""
             try:
                 import importlib.util as _ilu
+
                 _mod_path = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
-                    "gateway", "backend", "app", "ai_web", "agent_sessions.py"
+                    "gateway",
+                    "backend",
+                    "app",
+                    "ai_web",
+                    "agent_sessions.py",
                 )
-                _spec = _ilu.spec_from_file_location(
-                    "opensquad._agent_sessions_standalone", _mod_path
-                )
+                _spec = _ilu.spec_from_file_location("opensquad._agent_sessions_standalone", _mod_path)
                 _mod = _ilu.module_from_spec(_spec)
                 _spec.loader.exec_module(_mod)
                 return _mod.get_reader(agent_id)
@@ -2150,9 +2185,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 current_id = reader.get_current_session_id()
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
-                    return self._send_json({"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504)
-                return self._send_json({"error": f"Failed to get sessions: {str(e)}"}, 500)
+                    return self._send_json(
+                        {"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504
+                    )
+                return self._send_json({"error": f"Failed to get sessions: {e!s}"}, 500)
             return self._send_json({"sessions": sessions, "current_session_id": current_id})
 
         def _handle_session_current(self, agent_id: str, offset: int, limit: int):
@@ -2165,9 +2203,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 session = reader.get_session_history_paged(current_id, offset, limit)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get current session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get current session: {e!s}"}, 500)
             return self._send_json({"current_session_id": current_id, "session": session})
 
         def _handle_session_paged(self, agent_id: str, session_id: str, offset: int, limit: int):
@@ -2179,9 +2218,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 session = reader.get_session_history_paged(session_id, offset, limit)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
             if session is None:
                 return self._send_json({"error": f"Session not found: {session_id}"}, 404)
             return self._send_json({"session": session})
@@ -2195,9 +2235,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 session = reader.get_session_history(session_id)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
             if session is None:
                 return self._send_json({"error": f"Session not found: {session_id}"}, 404)
             return self._send_json({"session": session})
@@ -2210,7 +2251,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             ok = reader.delete_session(session_id)
             return self._send_json({"ok": ok})
 
-        def _read_token_stats(self, name: str) -> Optional[dict]:
+        def _read_token_stats(self, name: str) -> dict | None:
             """Read the agent's token_stats.json file"""
             # Try multiple possible paths
             candidates = [
@@ -2220,18 +2261,18 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             for path in candidates:
                 if os.path.isfile(path):
                     try:
-                        with open(path, "r", encoding="utf-8") as f:
+                        with open(path, encoding="utf-8") as f:
                             return json.load(f)
                     except Exception:
                         pass
             return None
 
-        def _read_chat_profile(self, name: str) -> Optional[dict]:
+        def _read_chat_profile(self, name: str) -> dict | None:
             """Read the agent's profile.json (group chat account name and avatar)"""
             path = os.path.join(AGENTS_DIR, name, "data", "profile.json")
             if os.path.isfile(path):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         return json.load(f)
                 except Exception:
                     pass
@@ -2252,7 +2293,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if not os.path.isfile(central_path):
                 # Migration: if central config doesn't exist yet, try to build it from the first agent
                 agents_dir_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agents")
-                if hasattr(self, '_find_agents_dir'):
+                if hasattr(self, "_find_agents_dir"):
                     agents_dir_path = AGENTS_DIR
                 merged = {}
                 if os.path.isdir(AGENTS_DIR):
@@ -2260,7 +2301,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         agent_mcp = os.path.join(AGENTS_DIR, dname, "mcp_config.json")
                         if os.path.isfile(agent_mcp):
                             try:
-                                with open(agent_mcp, "r", encoding="utf-8-sig") as f:
+                                with open(agent_mcp, encoding="utf-8-sig") as f:
                                     data = json.load(f)
                                 for k, v in (data.get("mcpServers") or {}).items():
                                     if k not in merged:
@@ -2275,7 +2316,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         json.dump({"mcpServers": merged}, f, ensure_ascii=False, indent=2)
                 return self._send_json({"mcpServers": merged})
             try:
-                with open(central_path, "r", encoding="utf-8-sig") as f:
+                with open(central_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"mcpServers": data.get("mcpServers", {})})
             except Exception as e:
@@ -2315,8 +2356,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             restarted.append(name)
                         except Exception:
                             pass
-                return self._send_json({"ok": True, "message": f"Central MCP config saved, synced to {len(synced)} agents",
-                                        "synced_agents": synced, "restarted_agents": restarted})
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "message": f"Central MCP config saved, synced to {len(synced)} agents",
+                        "synced_agents": synced,
+                        "restarted_agents": restarted,
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to write central mcp_config.json: {e}"}, 500)
 
@@ -2331,7 +2378,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if not os.path.isfile(mcp_path):
                 return self._send_json({"agent": name, "mcpServers": {}})
             try:
-                with open(mcp_path, "r", encoding="utf-8-sig") as f:
+                with open(mcp_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"agent": name, "mcpServers": data.get("mcpServers", {})})
             except Exception as e:
@@ -2357,7 +2404,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         restarted = True
                     except Exception:
                         pass
-                return self._send_json({"ok": True, "message": f"MCP config saved for '{name}'", "restarted": restarted})
+                return self._send_json(
+                    {"ok": True, "message": f"MCP config saved for '{name}'", "restarted": restarted}
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to write mcp_config.json: {e}"}, 500)
 
@@ -2367,7 +2416,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if not os.path.isfile(global_path):
                 return self._send_json({"servers": {}})
             try:
-                with open(global_path, "r", encoding="utf-8-sig") as f:
+                with open(global_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"servers": data.get("servers", {})})
             except Exception as e:
@@ -2380,7 +2429,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             global_path = os.path.join(data_dir, "mcp_global.json")
             try:
                 if os.path.isfile(global_path):
-                    with open(global_path, "r", encoding="utf-8-sig") as f:
+                    with open(global_path, encoding="utf-8-sig") as f:
                         data = json.load(f)
                 else:
                     data = {}
@@ -2390,8 +2439,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 with open(global_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
                 action = "enabled" if enabled else "disabled"
-                return self._send_json({"ok": True, "server": server_name, "enabled": enabled,
-                                        "message": f"MCP server '{server_name}' globally {action}"})
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "server": server_name,
+                        "enabled": enabled,
+                        "message": f"MCP server '{server_name}' globally {action}",
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to write mcp_global.json: {e}"}, 500)
 
@@ -2413,29 +2468,31 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
                 if os.path.isfile(skill_json_path):
                     try:
-                        with open(skill_json_path, "r", encoding="utf-8") as f:
+                        with open(skill_json_path, encoding="utf-8") as f:
                             meta = json.load(f)
                     except Exception:
                         meta = {}
-                    skills.append({
-                        "name": meta.get("name", skill_name),
-                        "display_name": meta.get("name", skill_name),
-                        "version": meta.get("version", ""),
-                        "description": meta.get("description", ""),
-                        "author": meta.get("author", ""),
-                        "license": meta.get("license", ""),
-                        "keywords": meta.get("keywords", []),
-                        "requires": meta.get("requires", {}),
-                        "install": meta.get("install", []),
-                        "entry": meta.get("entry", {}),
-                        "has_skill_json": True,
-                        "dir": skill_name,
-                    })
+                    skills.append(
+                        {
+                            "name": meta.get("name", skill_name),
+                            "display_name": meta.get("name", skill_name),
+                            "version": meta.get("version", ""),
+                            "description": meta.get("description", ""),
+                            "author": meta.get("author", ""),
+                            "license": meta.get("license", ""),
+                            "keywords": meta.get("keywords", []),
+                            "requires": meta.get("requires", {}),
+                            "install": meta.get("install", []),
+                            "entry": meta.get("entry", {}),
+                            "has_skill_json": True,
+                            "dir": skill_name,
+                        }
+                    )
                 elif os.path.isfile(skill_md_path):
                     # Fallback: parse SKILL.md frontmatter (--- ... --- block)
                     fm = {}
                     try:
-                        with open(skill_md_path, "r", encoding="utf-8") as f:
+                        with open(skill_md_path, encoding="utf-8") as f:
                             content = f.read()
                         if content.startswith("---"):
                             end = content.find("\n---", 3)
@@ -2447,28 +2504,29 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                                         fm[k.strip()] = v.strip()
                     except Exception:
                         pass
-                    skills.append({
-                        "name": fm.get("name", skill_name),
-                        "display_name": fm.get("name", skill_name),
-                        "version": "",
-                        "description": fm.get("description", ""),
-                        "author": "",
-                        "license": "",
-                        "keywords": [],
-                        "requires": {},
-                        "install": [],
-                        "entry": {},
-                        "has_skill_json": False,
-                        "dir": skill_name,
-                    })
+                    skills.append(
+                        {
+                            "name": fm.get("name", skill_name),
+                            "display_name": fm.get("name", skill_name),
+                            "version": "",
+                            "description": fm.get("description", ""),
+                            "author": "",
+                            "license": "",
+                            "keywords": [],
+                            "requires": {},
+                            "install": [],
+                            "entry": {},
+                            "has_skill_json": False,
+                            "dir": skill_name,
+                        }
+                    )
 
             return self._send_json({"skills": skills})
-
 
         def _handle_get_skill_source(self, name: str):
             """GET /api/skills/{name}/source — Return file list and SKILL.md content"""
             # Sanitize name
-            if not re.match(r'^[a-zA-Z0-9_\-]+$', name):
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", name):
                 return self._send_json({"error": "Invalid skill name"}, 400)
             skill_dir = os.path.join(SKILLS_DIR, name)
             if not os.path.isdir(skill_dir):
@@ -2478,16 +2536,18 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             for fname in sorted(os.listdir(skill_dir)):
                 fpath = os.path.join(skill_dir, fname)
                 if os.path.isfile(fpath):
-                    files_info.append({
-                        "name": fname,
-                        "size": os.path.getsize(fpath),
-                    })
+                    files_info.append(
+                        {
+                            "name": fname,
+                            "size": os.path.getsize(fpath),
+                        }
+                    )
             # Read SKILL.md content
             skill_md = ""
             skill_md_path = os.path.join(skill_dir, "SKILL.md")
             if os.path.isfile(skill_md_path):
                 try:
-                    with open(skill_md_path, "r", encoding="utf-8") as f:
+                    with open(skill_md_path, encoding="utf-8") as f:
                         skill_md = f.read()
                 except Exception:
                     skill_md = "(Failed to read SKILL.md)"
@@ -2496,7 +2556,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             skill_json_path = os.path.join(skill_dir, "skill.json")
             if os.path.isfile(skill_json_path):
                 try:
-                    with open(skill_json_path, "r", encoding="utf-8") as f:
+                    with open(skill_json_path, encoding="utf-8") as f:
                         skill_json_data = json.load(f)
                 except Exception:
                     pass
@@ -2504,33 +2564,48 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             py_sources = {}
             # Read other text files (README.md, .txt, .yaml, etc.)
             other_sources = {}
-            _TEXT_EXTS = {'.py', '.md', '.txt', '.yaml', '.yml', '.json', '.toml', '.cfg', '.ini', '.sh', '.bat', '.ps1'}
+            _TEXT_EXTS = {
+                ".py",
+                ".md",
+                ".txt",
+                ".yaml",
+                ".yml",
+                ".json",
+                ".toml",
+                ".cfg",
+                ".ini",
+                ".sh",
+                ".bat",
+                ".ps1",
+            }
             for fi in files_info:
                 ext = os.path.splitext(fi["name"])[1].lower()
                 fpath = os.path.join(skill_dir, fi["name"])
                 # Skip files already handled separately
                 if fi["name"] in ("SKILL.md", "skill.json"):
                     continue
-                if ext == '.py':
+                if ext == ".py":
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
+                        with open(fpath, encoding="utf-8") as f:
                             py_sources[fi["name"]] = f.read()
                     except Exception:
                         py_sources[fi["name"]] = "(Failed to read)"
                 elif ext in _TEXT_EXTS:
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
+                        with open(fpath, encoding="utf-8") as f:
                             other_sources[fi["name"]] = f.read()
                     except Exception:
                         other_sources[fi["name"]] = "(Failed to read)"
-            return self._send_json({
-                "name": name,
-                "files": files_info,
-                "skill_md": skill_md,
-                "skill_json": skill_json_data,
-                "py_sources": py_sources,
-                "other_sources": other_sources,
-            })
+            return self._send_json(
+                {
+                    "name": name,
+                    "files": files_info,
+                    "skill_md": skill_md,
+                    "skill_json": skill_json_data,
+                    "py_sources": py_sources,
+                    "other_sources": other_sources,
+                }
+            )
 
         # ── Role Cards handlers ──
 
@@ -2545,7 +2620,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 card_name = fname[:-3]
                 fpath = os.path.join(cards_dir, fname)
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         content = f.read()
                 except Exception:
                     content = ""
@@ -2560,7 +2635,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             if ":" in line:
                                 k, _, v = line.partition(":")
                                 fm[k.strip()] = v.strip()
-                        body = content[end + 4:].lstrip("\n")
+                        body = content[end + 4 :].lstrip("\n")
                 # Extract title (frontmatter name > first # heading in body > card_name)
                 title = fm.get("name", card_name)
                 for line in body.splitlines():
@@ -2573,13 +2648,15 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
                 # description: prefer frontmatter value; otherwise use first 100 chars of body
                 description = fm.get("description", "") or " ".join(body.split())[:100]
-                cards.append({
-                    "name": card_name,
-                    "title": title,
-                    "description": description,
-                    "tags": tags,
-                    "char_count": len(content),
-                })
+                cards.append(
+                    {
+                        "name": card_name,
+                        "title": title,
+                        "description": description,
+                        "tags": tags,
+                        "char_count": len(content),
+                    }
+                )
             return cards
 
         def _handle_list_role_cards(self):
@@ -2589,7 +2666,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             fpath = os.path.join(ROLE_CARDS_DIR, f"{card_name}.md")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
 
@@ -2617,7 +2694,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             fpath = os.path.join(COLLAB_CARDS_DIR, f"{card_name}.md")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
 
@@ -2686,39 +2763,41 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     continue
                 fpath = os.path.join(MODEL_CARDS_DIR, fname)
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception:
                     data = {}
                 card_name = fname[:-5]
-                cards.append({
-                    "name": card_name,
-                    "title": data.get("title", card_name),
-                    "api_protocol": data.get("api_protocol", ""),
-                    "provider": data.get("provider", ""),
-                    "model_name": data.get("model_name", ""),
-                    "base_url": data.get("base_url", ""),
-                    "token_max": data.get("token_max", 0),
-                    "temperature": data.get("temperature", 0),
-                    "frequency_penalty": data.get("frequency_penalty", 0.0),
-                    "presence_penalty": data.get("presence_penalty", 0.0),
-                    "top_k": data.get("top_k", 0),
-                    "is_think": data.get("is_think", False),
-                    "is_image": data.get("is_image", False),
-                    "is_audio": data.get("is_audio", False),
-                    "is_video": data.get("is_video", False),
-                    "is_audio_output": data.get("is_audio_output", False),
-                    "is_image_output": data.get("is_image_output", False),
-                    "audio_output_voice": data.get("audio_output_voice", "alloy"),
-                    "render_mode": data.get("render_mode", "strict"),  # full | strict (Default: strict)
-                })
+                cards.append(
+                    {
+                        "name": card_name,
+                        "title": data.get("title", card_name),
+                        "api_protocol": data.get("api_protocol", ""),
+                        "provider": data.get("provider", ""),
+                        "model_name": data.get("model_name", ""),
+                        "base_url": data.get("base_url", ""),
+                        "token_max": data.get("token_max", 0),
+                        "temperature": data.get("temperature", 0),
+                        "frequency_penalty": data.get("frequency_penalty", 0.0),
+                        "presence_penalty": data.get("presence_penalty", 0.0),
+                        "top_k": data.get("top_k", 0),
+                        "is_think": data.get("is_think", False),
+                        "is_image": data.get("is_image", False),
+                        "is_audio": data.get("is_audio", False),
+                        "is_video": data.get("is_video", False),
+                        "is_audio_output": data.get("is_audio_output", False),
+                        "is_image_output": data.get("is_image_output", False),
+                        "audio_output_voice": data.get("audio_output_voice", "alloy"),
+                        "render_mode": data.get("render_mode", "strict"),  # full | strict (Default: strict)
+                    }
+                )
             return self._send_json({"cards": cards})
 
         def _handle_get_model_card(self, card_name: str):
             fpath = os.path.join(MODEL_CARDS_DIR, f"{card_name}.json")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
             # Ensure render_mode exists in response
             if "render_mode" not in data:
@@ -2818,16 +2897,17 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """List all known workspaces on the Launcher server"""
             current = syscfg.get_workspace()
             from opensquad.workspace_utils import get_default_workspace_path
+
             default_path = get_default_workspace_path()
 
             record_file = os.path.expanduser("~/.opensquad/last_workspace.json")
             recent_paths: list = []
             if os.path.exists(record_file):
                 try:
-                    with open(record_file, "r", encoding="utf-8") as f:
+                    with open(record_file, encoding="utf-8") as f:
                         data = json.load(f)
                     rw = data.get("recent_workspaces", [])
-                    r  = data.get("recent", [])
+                    r = data.get("recent", [])
                     if rw and isinstance(rw[0], dict):
                         recent_paths = [ws["path"] for ws in rw]
                     elif r:
@@ -2844,31 +2924,36 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 meta_file = os.path.join(p, ".opensquad", "workspace.json")
                 if os.path.exists(meta_file):
                     try:
-                        with open(meta_file, "r", encoding="utf-8") as f:
+                        with open(meta_file, encoding="utf-8") as f:
                             meta = json.load(f)
                     except Exception:
                         pass
-                workspaces.append({
-                    "path":       p,
-                    "name":       os.path.basename(p),
-                    "is_current": os.path.normpath(p) == os.path.normpath(current),
-                    "exists":     os.path.exists(p),
-                    "created_at": meta.get("created_at"),
-                    "last_used":  meta.get("last_used"),
-                })
-            return self._send_json({
-                "workspaces":   workspaces,
-                "current":      current,
-                "default_path": default_path,
-            })
+                workspaces.append(
+                    {
+                        "path": p,
+                        "name": os.path.basename(p),
+                        "is_current": os.path.normpath(p) == os.path.normpath(current),
+                        "exists": os.path.exists(p),
+                        "created_at": meta.get("created_at"),
+                        "last_used": meta.get("last_used"),
+                    }
+                )
+            return self._send_json(
+                {
+                    "workspaces": workspaces,
+                    "current": current,
+                    "default_path": default_path,
+                }
+            )
 
         def _handle_workspace_create(self, body: dict):
             """Create or register a workspace on the Launcher server (does not auto-switch)"""
-            from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace
             from datetime import datetime as _dt
 
+            from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace, _copy_default_resources
+
             raw_path = (body.get("path") or "").strip()
-            name     = (body.get("name") or "").strip()
+            name = (body.get("name") or "").strip()
 
             if raw_path:
                 workspace_path = os.path.abspath(raw_path)
@@ -2881,40 +2966,49 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 meta_dir = os.path.join(workspace_path, ".opensquad")
                 if os.path.exists(meta_dir):
                     save_last_workspace(workspace_path, set_as_current=False)
-                    return self._send_json({
-                        "success": True,
-                        "message": "Existing workspace added",
-                        "path":    workspace_path,
-                        "action":  "added",
-                    })
+                    return self._send_json(
+                        {
+                            "success": True,
+                            "message": "Existing workspace added",
+                            "path": workspace_path,
+                            "action": "added",
+                        }
+                    )
                 try:
                     syscfg.init_workspace(workspace_path, copy_config=True)
+                    _copy_default_resources(workspace_path, syscfg.get_builtin_root())
                     save_last_workspace(workspace_path, set_as_current=False)
-                    return self._send_json({
-                        "success": True,
-                        "message": "Existing directory initialized as workspace",
-                        "path":    workspace_path,
-                        "action":  "initialized",
-                    })
+                    return self._send_json(
+                        {
+                            "success": True,
+                            "message": "Existing directory initialized as workspace",
+                            "path": workspace_path,
+                            "action": "initialized",
+                        }
+                    )
                 except Exception as e:
                     return self._send_json({"error": f"Failed to initialize workspace: {e}"}, 500)
 
             try:
                 syscfg.init_workspace(workspace_path, copy_config=True)
+                _copy_default_resources(workspace_path, syscfg.get_builtin_root())
                 save_last_workspace(workspace_path, set_as_current=False)
-                return self._send_json({
-                    "success": True,
-                    "message": "Workspace created successfully",
-                    "path":    workspace_path,
-                    "action":  "created",
-                })
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": "Workspace created successfully",
+                        "path": workspace_path,
+                        "action": "created",
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to create workspace: {e}"}, 500)
 
         def _handle_workspace_switch(self, body: dict):
             """Switch the current workspace (recorded to config; requires Launcher restart to fully take effect)"""
-            from opensquad.workspace_utils import save_last_workspace
             from datetime import datetime as _dt
+
+            from opensquad.workspace_utils import save_last_workspace, persist_desktop_workspace_switch
 
             raw_path = (body.get("path") or "").strip()
             if not raw_path:
@@ -2934,62 +3028,76 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 ws_json = os.path.join(meta_dir, "workspace.json")
                 if not os.path.exists(ws_json):
                     with open(ws_json, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "name":       os.path.basename(workspace_path),
-                            "created_at": _dt.utcnow().isoformat() + "Z",
-                            "last_used":  _dt.utcnow().isoformat() + "Z",
-                        }, f, indent=2, ensure_ascii=False)
+                        json.dump(
+                            {
+                                "name": os.path.basename(workspace_path),
+                                "created_at": _dt.utcnow().isoformat() + "Z",
+                                "last_used": _dt.utcnow().isoformat() + "Z",
+                            },
+                            f,
+                            indent=2,
+                            ensure_ascii=False,
+                        )
                 save_last_workspace(workspace_path)
-                return self._send_json({
-                    "success":          True,
-                    "message":          "Workspace switched; please restart the Launcher for the change to take effect",
-                    "path":             workspace_path,
-                    "requires_restart": True,
-                })
+                persist_desktop_workspace_switch(workspace_path)
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": "Workspace switched; please restart the app for the change to take effect",
+                        "path": workspace_path,
+                        "requires_restart": True,
+                        "desktop_restart": bool(os.environ.get("OPENSQUAD_APP_DATA")),
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to switch workspace: {e}"}, 500)
 
         def _handle_workspace_detect_legacy(self):
             """Detect legacy data in the installation directory"""
-            install_dir      = syscfg.get_builtin_root()
+            install_dir = syscfg.get_builtin_root()
             current_workspace = syscfg.get_workspace()
 
-            if current_workspace and \
-               os.path.normpath(current_workspace) == os.path.normpath(install_dir):
-                return self._send_json({
-                    "has_legacy_data": False,
-                    "legacy_location": install_dir,
-                    "detected_items":  {
-                        "database": False, "agents": False,
-                        "uploads":  False, "sessions": False, "logs": False,
-                    },
-                })
+            if current_workspace and os.path.normpath(current_workspace) == os.path.normpath(install_dir):
+                return self._send_json(
+                    {
+                        "has_legacy_data": False,
+                        "legacy_location": install_dir,
+                        "detected_items": {
+                            "database": False,
+                            "agents": False,
+                            "uploads": False,
+                            "sessions": False,
+                            "logs": False,
+                        },
+                    }
+                )
 
             def _has(p):
                 return os.path.exists(p) and bool(os.listdir(p))
 
             detected = {
-                "database": os.path.exists(
-                    os.path.join(install_dir, "gateway", "backend", "chat.db")),
-                "agents":   _has(os.path.join(install_dir, "agents")),
-                "uploads":  _has(os.path.join(install_dir, "data", "uploads")),
+                "database": os.path.exists(os.path.join(install_dir, "gateway", "backend", "chat.db")),
+                "agents": _has(os.path.join(install_dir, "agents")),
+                "uploads": _has(os.path.join(install_dir, "data", "uploads")),
                 "sessions": _has(os.path.join(install_dir, "data", "sessions")),
-                "logs":     _has(os.path.join(install_dir, "data", "logs")),
+                "logs": _has(os.path.join(install_dir, "data", "logs")),
             }
-            return self._send_json({
-                "has_legacy_data": any(detected.values()),
-                "legacy_location": install_dir,
-                "detected_items":  detected,
-            })
+            return self._send_json(
+                {
+                    "has_legacy_data": any(detected.values()),
+                    "legacy_location": install_dir,
+                    "detected_items": detected,
+                }
+            )
 
         def _handle_workspace_migrate(self, body: dict):
             """Start a background workspace migration task (copy=keep source / move=delete source after migration)"""
-            import uuid
             import threading as _threading
+            import uuid
 
-            source   = (body.get("source") or "").strip()
-            target   = (body.get("target") or "").strip()
-            mode     = body.get("mode", "copy")      # "copy" | "move"
+            source = (body.get("source") or "").strip()
+            target = (body.get("target") or "").strip()
+            mode = body.get("mode", "copy")  # "copy" | "move"
             conflict = body.get("conflict", "skip")  # "skip" | "overwrite"
 
             if not source or not target:
@@ -2997,28 +3105,28 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             task_id = str(uuid.uuid4())
             _workspace_migration_tasks[task_id] = {
-                "status":   "pending",
+                "status": "pending",
                 "progress": 0.0,
-                "message":  "Waiting to start...",
-                "report":   None,
+                "message": "Waiting to start...",
+                "report": None,
             }
 
             def _run():
                 import re as _re
+
                 try:
-                    _workspace_migration_tasks[task_id]["status"]  = "running"
+                    _workspace_migration_tasks[task_id]["status"] = "running"
                     _workspace_migration_tasks[task_id]["message"] = "Migrating data..."
 
                     def _progress(msg: str):
-                        m = _re.search(r'\[(\d+)/(\d+)\]', msg)
+                        m = _re.search(r"\[(\d+)/(\d+)\]", msg)
                         if m:
                             cur, tot = int(m.group(1)), int(m.group(2))
-                            _workspace_migration_tasks[task_id]["progress"] = (
-                                round(cur / tot, 2) if tot else 0.0
-                            )
+                            _workspace_migration_tasks[task_id]["progress"] = round(cur / tot, 2) if tot else 0.0
                         _workspace_migration_tasks[task_id]["message"] = msg
 
                     from opensquad.migration_tool import LegacyDataMigrator
+
                     migrator = LegacyDataMigrator(
                         install_dir=source,
                         target_workspace=target,
@@ -3026,39 +3134,40 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         overwrite=(conflict == "overwrite"),
                     )
                     report = migrator.migrate(progress_callback=_progress)
-                    _workspace_migration_tasks[task_id]["status"]   = "completed"
+                    _workspace_migration_tasks[task_id]["status"] = "completed"
                     _workspace_migration_tasks[task_id]["progress"] = 1.0
-                    _workspace_migration_tasks[task_id]["message"]  = (
+                    _workspace_migration_tasks[task_id]["message"] = (
                         f"Migration complete: {len(report.success)} item(s) succeeded"
                     )
                     _workspace_migration_tasks[task_id]["report"] = report.to_dict()
                 except Exception as e:
-                    _workspace_migration_tasks[task_id]["status"]  = "failed"
+                    _workspace_migration_tasks[task_id]["status"] = "failed"
                     _workspace_migration_tasks[task_id]["message"] = f"Migration failed: {e}"
 
-            _threading.Thread(
-                target=_run, daemon=True,
-                name=f"ws-migrate-{task_id[:8]}"
-            ).start()
+            _threading.Thread(target=_run, daemon=True, name=f"ws-migrate-{task_id[:8]}").start()
 
-            return self._send_json({
-                "success": True,
-                "task_id": task_id,
-                "message": "Migration task started",
-            })
+            return self._send_json(
+                {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": "Migration task started",
+                }
+            )
 
         def _handle_workspace_migrate_status(self, task_id: str):
             """Query migration task progress"""
             task = _workspace_migration_tasks.get(task_id)
             if task is None:
                 return self._send_json({"error": f"Task not found: {task_id}"}, 404)
-            return self._send_json({
-                "task_id":  task_id,
-                "status":   task["status"],
-                "progress": task["progress"],
-                "message":  task["message"],
-                "report":   task.get("report"),
-            })
+            return self._send_json(
+                {
+                    "task_id": task_id,
+                    "status": task["status"],
+                    "progress": task["progress"],
+                    "message": task["message"],
+                    "report": task.get("report"),
+                }
+            )
 
     server = _ThreadingHTTPServer(("0.0.0.0", port), ManagementHandler)
     _log.info(f"[Launcher] Management API started on http://0.0.0.0:{port}")
@@ -3072,9 +3181,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 STALL_THRESHOLD = 300  # seconds before a worker is considered stalled
 SUPERVISOR_INTERVAL = 30  # seconds between scan cycles
 
+
 def _collab_supervisor_loop():
     """Daemon thread: scan task_watch heartbeats, notify PM on worker stalls."""
-    import json, urllib.request
     while not _shutdown_event.is_set():
         time.sleep(SUPERVISOR_INTERVAL)
         now = time.time()
@@ -3114,11 +3223,13 @@ def _send_system_message_to_agent(agent_dir: str, msg: str):
     """Write a system notification message to the agent's input hub."""
     try:
         import os
+
         hub_path = os.path.join(AGENTS_DIR, agent_dir, "data", "hub_inbox")
         if os.path.isdir(hub_path):
             fname = f"supervisor_{int(time.time())}.json"
             with open(os.path.join(hub_path, fname), "w", encoding="utf-8") as f:
                 import json
+
                 json.dump({"type": "system_notification", "content": msg, "timestamp": time.time()}, f)
     except Exception:
         pass
@@ -3127,6 +3238,7 @@ def _send_system_message_to_agent(agent_dir: str, msg: str):
 def _init_workspace():
     """Phase 1: Bootstrap workspace and refresh AGENTS_DIR."""
     from opensquad.workspace_utils import bootstrap_workspace
+
     try:
         workspace_path = bootstrap_workspace()
         _log.info(f"[Workspace] Active workspace: {workspace_path}\n")
@@ -3145,6 +3257,7 @@ def _setup_launcher_logging():
     _log.setLevel(logging.DEBUG)
     _log.propagate = False
     from opensquad.safe_rotating_handler import SafeRotatingFileHandler
+
     _lh = SafeRotatingFileHandler(
         _launcher_log_path,
         maxBytes=syscfg.log_max_size_mb() * 1024 * 1024,
@@ -3162,23 +3275,27 @@ def _setup_launcher_logging():
 
     class _TeeStream:
         """Wraps a stream to also write to a logging.Logger."""
+
         def __init__(self, original_stream, logger, level=logging.INFO):
             self._original = original_stream
             self._logger = logger
             self._level = level
             self._buf = ""
+
         def write(self, text):
             self._original.write(text)
             self._buf += text
-            while '\n' in self._buf:
-                line, self._buf = self._buf.split('\n', 1)
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
                 if line.strip():
-                    self._logger.log(self._level, line.rstrip('\r'))
+                    self._logger.log(self._level, line.rstrip("\r"))
+
         def flush(self):
             self._original.flush()
             if self._buf.strip():
-                self._logger.log(self._level, self._buf.rstrip('\r'))
+                self._logger.log(self._level, self._buf.rstrip("\r"))
                 self._buf = ""
+
         def __getattr__(self, name):
             return getattr(self._original, name)
 
@@ -3190,9 +3307,22 @@ def _parse_args_and_discover_agents():
     """Phase 3: Parse CLI args, discover agents, return (args, agents_info)."""
     parser = argparse.ArgumentParser(description="Multi-Agent Process Launcher")
     parser.add_argument("--exclude", nargs="+", help="Exclude these agents (directory names)")
-    parser.add_argument("--no-auto-start", action="store_true", help="Don't auto-start agents, only open management port")
-    parser.add_argument("--mgmt-port", type=int, default=MANAGEMENT_PORT, help=f"Management API port (default: {MANAGEMENT_PORT})")
+    parser.add_argument(
+        "--no-auto-start", action="store_true", help="Don't auto-start agents, only open management port"
+    )
+    parser.add_argument(
+        "--no-services",
+        action="store_true",
+        help="Don't auto-start plugin services (frozen-bundle safe mode; spawns would re-enter the frozen EXE)",
+    )
+    parser.add_argument(
+        "--mgmt-port", type=int, default=MANAGEMENT_PORT, help=f"Management API port (default: {MANAGEMENT_PORT})"
+    )
     args = parser.parse_args()
+    # Stash parsed args at module level so phase functions (which take no args,
+    # e.g. _init_and_start_plugin_services) can read flags like --no-services.
+    global _ARGS
+    _ARGS = args
 
     _log.info("=" * 60)
     _log.info("  NexusChat Pro - Multi-Agent Launcher")
@@ -3231,18 +3361,9 @@ def _register_process_table(agents_info):
 
 def _start_background_services(mgmt_port):
     """Phase 5: Start management server and supervisor threads."""
-    mgmt_thread = threading.Thread(
-        target=_start_management_server,
-        args=(mgmt_port,),
-        daemon=True,
-        name="mgmt-server"
-    )
+    mgmt_thread = threading.Thread(target=_start_management_server, args=(mgmt_port,), daemon=True, name="mgmt-server")
     mgmt_thread.start()
-    supervisor_thread = threading.Thread(
-        target=_collab_supervisor_loop,
-        daemon=True,
-        name="collab-supervisor"
-    )
+    supervisor_thread = threading.Thread(target=_collab_supervisor_loop, daemon=True, name="collab-supervisor")
     supervisor_thread.start()
 
 
@@ -3255,6 +3376,17 @@ def _start_node_registration_if_needed(mgmt_port):
 
 def _init_and_start_plugin_services():
     """Phase 7: Discover plugin services, install deps in background, auto-start enabled ones."""
+    # Frozen-bundle safe mode: plugin service spawns use `sys.executable` to run
+    # the plugin's entry script, but in a PyInstaller bundle sys.executable IS
+    # the frozen launcher EXE — spawning it would re-enter the launcher and
+    # either crash or fight for ports. --no-services (set by the desktop app)
+    # skips auto-start entirely; services can still be started manually later
+    # once a real Python interpreter is available.
+    if getattr(_ARGS, "no_services", False):
+        _log.info(
+            "[Launcher] --no-services set, skipping plugin service discovery & auto-start (frozen-bundle safe mode)"
+        )
+        return
     syscfg.ensure_external_api_key()
     _log.info("\n[Launcher] Discovering plugin services...")
     plugin_svc_infos = discover_plugin_services(PLUGINS_DIR)
@@ -3272,11 +3404,16 @@ def _init_and_start_plugin_services():
             _log.info(f"  - {info['plugin_id']} (auto_start={auto})")
 
     _plugin_deps_thread = threading.Thread(
-        target=_install_builtin_plugin_deps, args=(plugin_svc_infos,), daemon=True,
+        target=_install_builtin_plugin_deps,
+        args=(plugin_svc_infos,),
+        daemon=True,
         name="plugin-deps-install",
     )
     _plugin_deps_thread.start()
-    _log.info("[Launcher] Plugin dependency installation started in background thread (PID: %s)", _plugin_deps_thread.native_id)
+    _log.info(
+        "[Launcher] Plugin dependency installation started in background thread (PID: %s)",
+        _plugin_deps_thread.native_id,
+    )
 
     for info in plugin_svc_infos:
         pid = info["plugin_id"]
@@ -3308,11 +3445,13 @@ def _auto_start_agents(args, agents_info):
 def _setup_signal_handler():
     """Phase 9: Register graceful shutdown signal handler."""
     global _shutdown_event
+
     def signal_handler(sig, frame):
         if _shutdown_event.is_set():
             return
         _log.info("\n[Launcher] Received shutdown signal, stopping all agents...")
         _shutdown_event.set()
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -3331,7 +3470,9 @@ def _monitor_loop():
                     if ap.restart_count > 0 and ap._last_stable_time > 0:
                         stable_duration = time.time() - ap._last_stable_time
                         if stable_duration > STABLE_RESET_SECONDS:
-                            _log.info(f"[Launcher] {ap.agent_name} stable for {stable_duration:.0f}s, resetting restart_count ({ap.restart_count} -> 0)")
+                            _log.info(
+                                f"[Launcher] {ap.agent_name} stable for {stable_duration:.0f}s, resetting restart_count ({ap.restart_count} -> 0)"
+                            )
                             ap.restart_count = 0
             for pid, psp in list(_plugin_services.items()):
                 if not psp.is_alive() and psp.should_run:

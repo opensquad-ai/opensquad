@@ -18,6 +18,10 @@ else:
 
 LAST_WORKSPACE_FILE = GLOBAL_CONFIG_DIR / "last_workspace.json"
 
+# Desktop (Electron) app stores its workspace preference under Electron
+# userData (OPENSQUAD_APP_DATA). The workspace itself may live elsewhere.
+DESKTOP_WORKSPACE_CONFIG = "desktop-workspace.json"
+
 # In-process cache: avoid repeated file reads for workspace metadata
 _last_workspace_cache: dict = {}
 _last_workspace_cache_loaded: bool = False
@@ -135,6 +139,108 @@ def detect_legacy_data(install_dir: str) -> bool:
     return False
 
 
+def get_desktop_app_data_dir() -> Optional[str]:
+    """Return Electron's fixed app config dir (OPENSQUAD_APP_DATA), if set."""
+    raw = os.environ.get("OPENSQUAD_APP_DATA", "").strip()
+    return os.path.abspath(raw) if raw else None
+
+
+def load_desktop_workspace_path(app_data_dir: str) -> Optional[str]:
+    """Read the user-chosen workspace path from desktop-workspace.json."""
+    cfg_path = os.path.join(app_data_dir, DESKTOP_WORKSPACE_CONFIG)
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    raw = (data.get("workspace_path") or "").strip()
+    return os.path.abspath(raw) if raw else None
+
+
+def save_desktop_workspace_path(app_data_dir: str, workspace_path: str) -> None:
+    """Persist the active desktop workspace path for the next app launch."""
+    from datetime import datetime, timezone
+
+    os.makedirs(app_data_dir, exist_ok=True)
+    cfg_path = os.path.join(app_data_dir, DESKTOP_WORKSPACE_CONFIG)
+    payload = {
+        "workspace_path": os.path.abspath(workspace_path),
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _is_valid_workspace_dir(workspace_path: str) -> bool:
+    return os.path.isdir(workspace_path) and os.path.isdir(
+        os.path.join(workspace_path, ".opensquad")
+    )
+
+
+def resolve_desktop_workspace() -> tuple[str, str]:
+    """
+    Resolve (app_data_dir, workspace_path) for the packaged desktop app.
+
+    app_data_dir is Electron userData — always writable, holds app prefs.
+    workspace_path is where chat.db / uploads / agents live; defaults to
+    app_data_dir on first run but can be changed in System Settings.
+    """
+    app_data = get_desktop_app_data_dir() or os.environ.get("OPENSQUAD_USER_DATA", "").strip()
+    if not app_data:
+        raise RuntimeError("Desktop app requires OPENSQUAD_APP_DATA or OPENSQUAD_USER_DATA")
+    app_data = os.path.abspath(app_data)
+    os.makedirs(app_data, exist_ok=True)
+
+    configured = load_desktop_workspace_path(app_data)
+    if configured and _is_valid_workspace_dir(configured):
+        return app_data, configured
+
+    if configured and not _is_valid_workspace_dir(configured):
+        print(
+            f"[Workspace] Configured desktop workspace missing or invalid: {configured}\n"
+            f"[Workspace] Falling back to app data dir: {app_data}"
+        )
+        save_desktop_workspace_path(app_data, app_data)
+
+    return app_data, app_data
+
+
+def bootstrap_desktop_workspace() -> str:
+    """
+    Initialize or reuse the desktop workspace on frozen (packaged) startup.
+    Called from both the gateway (main.py) and the launcher.
+    """
+    import sys as _sys
+    from opensquad import system_config as syscfg
+
+    if not getattr(_sys, "frozen", False):
+        raise RuntimeError("bootstrap_desktop_workspace() is for frozen/desktop mode only")
+
+    _app_data, workspace_path = resolve_desktop_workspace()
+    os.makedirs(workspace_path, exist_ok=True)
+    syscfg.set_workspace(workspace_path)
+
+    meta = os.path.join(workspace_path, ".opensquad", "workspace.json")
+    if not os.path.exists(meta):
+        print(f"[Workspace] First run — initializing desktop workspace: {workspace_path}")
+        syscfg.init_workspace(workspace_path, copy_config=True)
+        _copy_default_resources(workspace_path, syscfg.get_builtin_root())
+    else:
+        print(f"[Workspace] Reusing desktop workspace: {workspace_path}")
+
+    save_last_workspace(workspace_path)
+    return workspace_path
+
+
+def persist_desktop_workspace_switch(workspace_path: str) -> None:
+    """Record a workspace switch so Electron picks it up on next launch."""
+    app_data = get_desktop_app_data_dir()
+    if app_data:
+        save_desktop_workspace_path(app_data, workspace_path)
+
+
 def _copy_default_resources(workspace_path: str, install_dir: str):
     """Copy default model cards, MCP config and agent to a new workspace."""
     import shutil
@@ -181,7 +287,16 @@ def bootstrap_workspace() -> str:
     Workspace initialization flow at startup.
     Returns the finalized workspace path.
     """
+    import sys as _sys
     from opensquad import system_config as syscfg
+
+    # ── Frozen (desktop app): workspace path comes from Electron via
+    # OPENSQUAD_USER_DATA; the fixed app config dir is OPENSQUAD_APP_DATA.
+    # Users can point the workspace elsewhere via System Settings → Workspace.
+    if getattr(_sys, "frozen", False) and (
+        os.environ.get("OPENSQUAD_APP_DATA") or os.environ.get("OPENSQUAD_USER_DATA")
+    ):
+        return bootstrap_desktop_workspace()
 
     # 1. Try to load the last-used workspace
     last_workspace = load_last_workspace()

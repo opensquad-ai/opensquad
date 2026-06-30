@@ -42,15 +42,31 @@ if not _console_log.handlers:
 # !! Important change: workspace is no longer auto-initialized !!
 # On startup, attempt to load the last-used workspace; if none exists, use the install directory
 # (user selects/creates workspace via the UI)
-last_workspace = load_last_workspace()
-if last_workspace and os.path.exists(last_workspace):
-    _syscfg.set_workspace(last_workspace)
-    _console_log.info("[Workspace] Loaded from last session: %s", last_workspace)
+#
+# Frozen (desktop app): resolve workspace via Electron env vars.
+# OPENSQUAD_APP_DATA = fixed Electron userData (app prefs).
+# OPENSQUAD_USER_DATA = active workspace path (may differ after user switch).
+if _IS_FROZEN and (
+    os.environ.get("OPENSQUAD_APP_DATA") or os.environ.get("OPENSQUAD_USER_DATA")
+):
+    from opensquad.workspace_utils import bootstrap_desktop_workspace
+
+    try:
+        _ws_path = bootstrap_desktop_workspace()
+        _console_log.info("[Workspace] Desktop workspace ready: %s", _ws_path)
+    except Exception as _ws_err:
+        _console_log.error("[Workspace] Failed to initialize desktop workspace: %s", _ws_err)
+        raise
 else:
-    # Use install directory as a temporary workspace until user selects/creates one in the UI
-    _syscfg.set_workspace(_root)
-    _console_log.info("[Workspace] No workspace configured, using install directory: %s", _root)
-    _console_log.info("[Workspace] Please configure workspace in Web UI: Settings -> Workspace")
+    last_workspace = load_last_workspace()
+    if last_workspace and os.path.exists(last_workspace):
+        _syscfg.set_workspace(last_workspace)
+        _console_log.info("[Workspace] Loaded from last session: %s", last_workspace)
+    else:
+        # Use install directory as a temporary workspace until user selects/creates one in the UI
+        _syscfg.set_workspace(_root)
+        _console_log.info("[Workspace] No workspace configured, using install directory: %s", _root)
+        _console_log.info("[Workspace] Please configure workspace in Web UI: Settings -> Workspace")
 
 from app.ai_web.agent_sessions import set_ws_handler as _set_ws_handler
 from app.ai_web.routes import router as ai_web_router
@@ -456,12 +472,14 @@ else:
     FRONTEND_DIST = os.path.normpath(os.path.join(_pkg_gateway, "nexuschat-pro", "dist"))
 
 # ── Phase 2.5: Runtime resources use workspace path ──
-# In frozen (packaged) mode, prefer the userData directory passed in by Electron
-if _IS_FROZEN:
-    _user_data = os.environ.get("OPENSQUAD_USER_DATA", os.path.dirname(sys.executable))
-    UPLOAD_DIR = os.path.join(_user_data, "uploads")
-else:
-    UPLOAD_DIR = syscfg.workspace_uploads_dir()
+# Uploads live at <workspace>/data/uploads in BOTH dev and frozen modes. In the
+# desktop app the workspace IS Electron's userData dir (set above), so uploads
+# persist per-user alongside chat.db and are served consistently. (Previously
+# frozen mode used <userData>/uploads directly, which diverged from the
+# workspace layout and left historical dev uploads unreachable.) The directory
+# is also created by ensure_workspace_structure(), but we makedirs here too so
+# the StaticFiles mount below never points at a missing dir.
+UPLOAD_DIR = syscfg.workspace_uploads_dir()
 # Plugins code is in the installation directory (read-only resources)
 PLUGINS_ROOT = syscfg.builtin_resources_dir("plugins")
 

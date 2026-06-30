@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.4.1] | 2026-06-30 | [0.4.0 → 0.4.1](https://github.com/opensquad-ai/opensquad/compare/v0.4.0...v0.4.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1) |
 | [0.4.0] | 2026-06-29 | (initial release) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0) |
 
 > This is the first public release of OpenSquad on the recreated
@@ -19,9 +20,66 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.0]. Will be folded into the next release section when cut.
+> Changes since [0.4.1]. Will be folded into the next release section when cut.
 
-_No unreleased changes yet._
+---
+
+## [0.4.1] — 2026-06-30
+
+> Desktop-focused patch: Launcher spawn, bundled resources, workspace paths,
+> and configurable workspace directory in the packaged app.
+
+### Fixed
+
+- **desktop: Launcher not running in the packaged app.** The Electron app
+  only spawned the Gateway (`run.exe`, port 9555); the Launcher (port 9600)
+  was a separate process the desktop bundle never started, so the Agent
+  Workstation showed "Launcher is not running (cannot connect to
+  http://127.0.0.1:9600)". `run.py` now dispatches on `--service` and the
+  Electron `main.ts` spawns a second `run.exe --service launcher` instance
+  (management-port-only, `--no-auto-start --no-services` to stay safe inside
+  a frozen bundle). The PyInstaller spec now ships the standalone
+  `opensquad/launcher.py` as a data file so the launcher's `main()` is
+  reachable — it was previously shadowed by the `opensquad/launcher/`
+  package and dropped from the bundle.
+- **desktop: builtin resources (plugins, skills, role/model/collab cards,
+  agents, pymcp) were missing from the bundle.** They live at `src/` top
+  level (not inside the `opensquad` package), so `collect_submodules` never
+  reached them and the desktop app showed empty plugin/skill/card pages.
+  The spec now collects `plugins`/`skills` (with node_modules + UI build
+  dirs filtered out) and bundles the card/agent/pymcp directories plus the
+  `system_config.example.json` template under `_internal/`, where frozen
+  mode resolves builtin resources.
+- **desktop: frozen workspace now uses Electron's userData dir.** Previously
+  the packaged app reused the dev workspace from `last_workspace.json`,
+  which only exists on a developer's machine — on any other PC it fell back
+  to the read-only install dir. `bootstrap_workspace()` and the gateway
+  startup now branch on frozen mode: use `OPENSQUAD_USER_DATA` as an
+  independent workspace, init it on first run (structure + config + seed
+  resources), and reuse it afterwards.
+- **desktop: uploads path aligned with the workspace.** Frozen mode stored
+  uploads at `<userData>/uploads/`, diverging from the workspace layout
+  (`<workspace>/data/uploads/`) used in dev, so images appeared torn. Both
+  modes now use `workspace_uploads_dir()`; since the desktop workspace IS
+  userData, uploads persist per-user and are served consistently.
+- **desktop: configurable workspace path in System Settings.** The desktop app
+  now separates Electron app data (`OPENSQUAD_APP_DATA`, fixed userData dir)
+  from the active workspace (`OPENSQUAD_USER_DATA`). Users can create, switch,
+  or migrate workspace data to a custom directory; the choice is persisted in
+  `desktop-workspace.json` and applied after restarting the app.
+
+### Known limitations (desktop)
+
+- Agent **start** from the Agent Workstation UI is not yet supported in the
+  packaged app (a frozen EXE cannot `sys.executable -m` an agent). Listing
+  and configuring agents works. See
+  [docs/desktop-known-issues.md](docs/desktop-known-issues.md).
+
+### Changed
+
+- **CI: desktop Release Assets can be refreshed via workflow_dispatch.**
+  `build-desktop.yml` accepts a `release_tag` input to rebuild installers
+  from any branch and overwrite Assets on an existing GitHub Release.
 
 ---
 
@@ -87,4 +145,5 @@ _No unreleased changes yet._
 - The pre-commit hook chain (ruff, ruff-format, commitlint,
   detect-secrets) is recommended for contributors.
 
+[0.4.1]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1
 [0.4.0]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0

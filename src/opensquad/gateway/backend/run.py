@@ -1,8 +1,14 @@
 """
 Backend service startup script
 Supports both normal Python execution and PyInstaller frozen bundles.
+
+Single binary, multiple services: the desktop app spawns this same executable
+once per service via ``--service <name>``. Without the flag (or with
+``--service gateway``) it runs the FastAPI gateway as before, so all existing
+launch paths (``python run.py``, ``run.exe``) keep working unchanged.
 """
 
+import importlib.util
 import json
 import os
 import sys
@@ -63,6 +69,88 @@ def load_config():
         return json.load(f)
 
 
+def _parse_service_arg():
+    """Read ``--service <name>`` from argv.
+
+    Returns ``(service, argv_without_service)``. ``service`` defaults to
+    ``"gateway"`` when the flag is absent so plain ``run.exe`` keeps launching
+    the gateway exactly as before. The returned argv has the ``--service`` pair
+    removed so the remaining flags can be forwarded to the chosen service
+    (e.g. the launcher reads ``--mgmt-port`` / ``--no-auto-start`` off argv).
+    """
+    argv = list(sys.argv)
+    service = "gateway"
+    if "--service" in argv:
+        i = argv.index("--service")
+        if i + 1 < len(argv):
+            service = argv[i + 1]
+            del argv[i : i + 2]  # drop "--service" and its value
+        else:
+            del argv[i]  # trailing "--service" with no value
+    return service, argv
+
+
+def run_launcher():
+    """Run the agent launcher (management API on port 9600).
+
+    The launcher lives in ``opensquad/launcher.py`` — a single 3k-line module
+    whose ``main()`` is the entry point. It is **shadowed** by the
+    ``opensquad/launcher/`` package (which only re-exports process_manager),
+    so ``import opensquad.launcher`` resolves to the package and never reaches
+    ``main()``. We therefore load launcher.py directly by file path with
+    importlib, which executes the module body (it is safe to import — no
+    sockets/subprocesses fire at import time) and call its ``main()``.
+
+    Frozen: launcher.py is bundled as a data file at
+    ``<exe-dir>/_internal/opensquad/launcher.py`` (see opensquad_backend.spec).
+    Non-frozen: it sits next to the opensquad package at
+    ``<project-root>/opensquad/launcher.py``.
+
+    ``main()`` parses ``sys.argv`` itself, so we strip the ``--service`` pair
+    (already done by _parse_service_arg) and let the rest through. The desktop
+    app passes ``--no-auto-start --no-services`` so the launcher only opens its
+    management port without spawning child processes (a frozen EXE cannot
+    ``sys.executable -m`` an agent or run a plugin's adapter.py).
+    """
+    if IS_FROZEN:
+        launcher_path = os.path.join(BACKEND_DIR, "_internal", "opensquad", "launcher.py")
+    else:
+        # Non-frozen: PROJECT_ROOT is the opensquad package dir (src/opensquad),
+        # so launcher.py is right inside it.
+        launcher_path = os.path.join(PROJECT_ROOT, "launcher.py")
+
+    if not os.path.isfile(launcher_path):
+        print(f"[run] Launcher module not found at {launcher_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[run] Loading launcher from {launcher_path}")
+    # Load under a unique name so it never collides with the opensquad.launcher
+    # package (which would shadow the real module if imported normally).
+    spec = importlib.util.spec_from_file_location(
+        "_opensquad_launcher_entry",
+        launcher_path,
+    )
+    if spec is None or spec.loader is None:
+        print(f"[run] Failed to create import spec for {launcher_path}", file=sys.stderr)
+        sys.exit(1)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    if not hasattr(mod, "main"):
+        print(f"[run] {launcher_path} has no main() — not a valid launcher entry", file=sys.stderr)
+        sys.exit(1)
+
+    # Re-export the module so code that does `from opensquad import launcher`-
+    # style lookups (none currently, but keeps the runtime sane) can find it.
+    sys.modules["_opensquad_launcher_entry"] = mod
+
+    print("==========================================")
+    print("   OpenSquad Launcher Starting...")
+    print(f"   Frozen: {IS_FROZEN}")
+    print("==========================================")
+    mod.main()
+
+
 if __name__ == "__main__":
     # ── Force UTF-8 for stdout/stderr on Windows before any output ──
     # Without this, uvicorn / Python error messages containing Chinese
@@ -84,6 +172,20 @@ if __name__ == "__main__":
                     _s.reconfigure(encoding="utf-8", errors="replace")
                 except Exception:
                     pass
+
+    # ── Dispatch on --service ──────────────────────────────────────────────
+    # Single frozen binary serves multiple processes: the desktop app spawns
+    # `run.exe --service launcher ...` alongside the plain `run.exe` gateway.
+    # Strip the --service pair from argv so the chosen service sees only its
+    # own flags, then hand off. Anything below this block is gateway-only.
+    service, _forward_argv = _parse_service_arg()
+    # Make sure the launcher's argparse (which reads sys.argv) doesn't see the
+    # --service flag we already consumed.
+    sys.argv = _forward_argv
+    if service == "launcher":
+        run_launcher()
+        sys.exit(0)
+    # service == "gateway" (or anything else) → fall through to gateway startup
 
     try:
         config = load_config()
