@@ -31,26 +31,27 @@ app as before; `launcher` loads the standalone `opensquad/launcher.py` by file
 path (it is shadowed by the `opensquad/launcher/` package, so a normal
 `import opensquad.launcher` cannot reach `main()`) and calls its `main()`.
 
+## Where the desktop app stores data (workspace)
+
+The desktop app uses Electron's **userData directory** as an independent
+workspace — e.g. `%APPDATA%\nexuschat-pro\` on Windows. This is intentionally
+separate from any dev workspace (`opensquad start` records its workspace in
+`~/.opensquad/last_workspace.json`, but the desktop app ignores that file).
+On first launch the gateway/launcher init the userData workspace: create the
+directory structure (`data/uploads`, `data/logs`, `agents/`, …), copy a
+`system_config.json` from the bundled template, and seed default model cards
+and the pm/coder/qa agents.
+
+Builtin resources (plugins, skills, role/model/collab cards, agents, pymcp)
+ship inside the bundle at `_internal/<name>/` and are read-only; the desktop
+app serves them from there. User data (chat.db, uploads, agent configs the
+user edits) lives in the writable userData workspace. Uploads go to
+`<userData>/data/uploads/` and are served at `/uploads/…`, so images sent in
+the desktop app display correctly.
+
 ## Known issues
 
-### 1. Images uploaded in dev mode don't appear in the desktop app
-
-**Symptom:** chat messages sent during `opensquad start` (dev mode) show a
-broken/torn image placeholder in the desktop app.
-
-**Cause:** the two modes store uploads in different directories:
-- Dev mode: `<workspace>/data/uploads/`
-- Packaged mode: `<userData>/uploads/` (e.g.
-  `%APPDATA%\NexusChat Pro\uploads\` on Windows)
-
-The packaged app reads only from its `userData/uploads/` directory, so files
-uploaded during dev runs are not visible.
-
-**Workaround:** re-upload the image inside the desktop app. New uploads work
-correctly — the directory is created on startup and served at `/uploads/`.
-There is no data-loss bug; only the path differs between modes.
-
-### 2. Agents cannot be started from the Agent Workstation UI (packaged mode)
+### 1. Agents cannot be started from the Agent Workstation UI (packaged mode)
 
 **Symptom:** the Agent Workstation page now loads and **lists** agents
 configurations correctly (the "Launcher is not running" error is gone), but
@@ -71,7 +72,7 @@ the packaged app. To run agents, use `opensquad start` from a Python
 environment (the dev/source layout). A frozen agent entry-point is planned for
 a future release.
 
-### 3. Sidebar icons are not OpenSquad-specific (by design)
+### 2. Sidebar icons are not OpenSquad-specific (by design)
 
 The sidebar uses the [Lucide](https://lucide.dev) icon set (an open-source
 Feather-style icon library). The OpenSquad logo is used for the app icon

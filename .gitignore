@@ -26,6 +26,10 @@ src/opensquad/gateway/nexuschat-pro/dist/
 src/plugins/*/ui/index.js
 # Electron compiled TypeScript output
 src/opensquad/gateway/nexuschat-pro/dist-electron/
+# Electron backend binaries (PyInstaller output copied here for local
+# electron:dev:fast runs and bundled by electron-builder as extraResources).
+# See nexuschat-pro/resources/README.md.
+src/opensquad/gateway/nexuschat-pro/resources/backend-*/
 # VitePress built output
 docs-site/.vitepress/dist/
 docs-site-en/.vitepress/dist/

@@ -34,6 +34,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `opensquad/launcher.py` as a data file so the launcher's `main()` is
   reachable — it was previously shadowed by the `opensquad/launcher/`
   package and dropped from the bundle.
+- **desktop: builtin resources (plugins, skills, role/model/collab cards,
+  agents, pymcp) were missing from the bundle.** They live at `src/` top
+  level (not inside the `opensquad` package), so `collect_submodules` never
+  reached them and the desktop app showed empty plugin/skill/card pages.
+  The spec now collects `plugins`/`skills` (with node_modules + UI build
+  dirs filtered out) and bundles the card/agent/pymcp directories plus the
+  `system_config.example.json` template under `_internal/`, where frozen
+  mode resolves builtin resources.
+- **desktop: frozen workspace now uses Electron's userData dir.** Previously
+  the packaged app reused the dev workspace from `last_workspace.json`,
+  which only exists on a developer's machine — on any other PC it fell back
+  to the read-only install dir. `bootstrap_workspace()` and the gateway
+  startup now branch on frozen mode: use `OPENSQUAD_USER_DATA` as an
+  independent workspace, init it on first run (structure + config + seed
+  resources), and reuse it afterwards.
+- **desktop: uploads path aligned with the workspace.** Frozen mode stored
+  uploads at `<userData>/uploads/`, diverging from the workspace layout
+  (`<workspace>/data/uploads/`) used in dev, so images appeared torn. Both
+  modes now use `workspace_uploads_dir()`; since the desktop workspace IS
+  userData, uploads persist per-user and are served consistently.
 
 ### Known limitations (desktop)
 
@@ -41,9 +61,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   packaged app (a frozen EXE cannot `sys.executable -m` an agent). Listing
   and configuring agents works. See
   [docs/desktop-known-issues.md](docs/desktop-known-issues.md).
-- Images uploaded in dev mode (`opensquad start`) are stored under the
-  workspace and are not visible in the desktop app (which uses
-  `userData/uploads/`). Re-upload inside the desktop app.
+- The desktop app uses a fresh, independent workspace (Electron userData).
+  Data from a dev workspace (`opensquad start`) is **not** migrated — the
+  desktop app starts clean. This is by design.
 
 ---
 

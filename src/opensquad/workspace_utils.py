@@ -181,7 +181,30 @@ def bootstrap_workspace() -> str:
     Workspace initialization flow at startup.
     Returns the finalized workspace path.
     """
+    import sys as _sys
     from opensquad import system_config as syscfg
+
+    # ── Frozen (desktop app): use Electron's userData dir as an independent
+    # workspace. The desktop app is a clean entry point — it does NOT reuse the
+    # dev workspace recorded in last_workspace.json (that path only exists on a
+    # developer's machine; on any other PC load_last_workspace() would either
+    # return None or point at a missing dir). OPENSQUAD_USER_DATA is set by
+    # Electron's main.ts. On first run we init the workspace (structure +
+    # config + seed resources); afterwards we just reuse it.
+    if getattr(_sys, "frozen", False):
+        user_data = os.environ.get("OPENSQUAD_USER_DATA")
+        if user_data:
+            os.makedirs(user_data, exist_ok=True)
+            syscfg.set_workspace(user_data)
+            meta = os.path.join(user_data, ".opensquad", "workspace.json")
+            if not os.path.exists(meta):
+                print(f"[Workspace] First run — initializing desktop workspace: {user_data}")
+                syscfg.init_workspace(user_data, copy_config=True)
+                _copy_default_resources(user_data, syscfg.get_builtin_root())
+            else:
+                print(f"[Workspace] Reusing desktop workspace: {user_data}")
+            save_last_workspace(user_data)
+            return user_data
 
     # 1. Try to load the last-used workspace
     last_workspace = load_last_workspace()
