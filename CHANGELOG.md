@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.4.3] | 2026-07-01 | [0.4.2 → 0.4.3](https://github.com/opensquad-ai/opensquad/compare/v0.4.2...v0.4.3) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.3) |
 | [0.4.2] | 2026-06-30 | [0.4.1 → 0.4.2](https://github.com/opensquad-ai/opensquad/compare/v0.4.1...v0.4.2) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.2) |
 | [0.4.1] | 2026-06-30 | [0.4.0 → 0.4.1](https://github.com/opensquad-ai/opensquad/compare/v0.4.0...v0.4.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1) |
 | [0.4.0] | 2026-06-29 | (initial release) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0) |
@@ -21,7 +22,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.2]. Will be folded into the next release section when cut.
+> Changes since [0.4.3]. Will be folded into the next release section when cut.
+
+---
+
+## [0.4.3] — 2026-07-01
+
+> Desktop UX: clearer Release asset names and visible update progress.
+
+### Added
+
+- **desktop: full-screen update progress overlay.** In-app updates now show
+  phased feedback (downloading → verifying → launching installer → closing
+  app) so the long pause after the `.exe` download no longer feels like a
+  freeze.
+- **desktop: OS/arch suffixes on installer filenames.** Release assets are
+  named like `OpenSquad-0.4.3-win-x64-Setup.exe` and
+  `OpenSquad-0.4.3-mac-arm64.dmg` so users can pick the right platform at a
+  glance. Auto-update selects the matching asset (including Mac CPU arch).
 
 ---
 
@@ -177,6 +195,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The pre-commit hook chain (ruff, ruff-format, commitlint,
   detect-secrets) is recommended for contributors.
 
+[0.4.3]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.3
 [0.4.2]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.2
 [0.4.1]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1
 [0.4.0]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0
