@@ -152,13 +152,20 @@ src/agents/*/data/images/
 # ── Temp / test artifacts ──────────────────────────────────────
 .spec-workflow/
 .pytest_cache/
+.coverage
+htmlcov/
 img_path.txt
 nul
-pytest_out.txt
+/pytest*.txt
 fuzhou_weather.png
 WORKSPACE_PROGRESS.md
 _write_mb.py
 /main.py
+
+# ── Local audit / doc-check reports (generated on demand, not shipped) ──
+/opensquad-audit-report/
+/opensquad-doc-staleness-report.html
+/opensquad-*-report.html
 
 # ── Test screenshot artifacts ──────────────────────────────────
 src/backtest_*.png
