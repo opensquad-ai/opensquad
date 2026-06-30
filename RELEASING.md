@@ -8,7 +8,7 @@
 ## TL;DR
 
 1. `git checkout dev && git checkout -b release/0.X.Y && git push -u origin release/0.X.Y`
-2. Bump `pyproject.toml` (`0.X.0.dev0` → `0.X.0`) and `__init__.py` together.
+2. Bump **`pyproject.toml` only** (`0.X.0.dev0` → `0.X.0`), then run `python scripts/sync_version.py` to update `__init__.py` and `package.json`.
 3. Move the `[Unreleased]` section in `CHANGELOG.md` into `## [0.X.0] — YYYY-MM-DD`.
 4. `chore(release): prepare v0.X.0` on `release/0.X.Y`, **PR to `main`**.
 5. Wait for `ci.yml` (the full gate) to go green. Merge.
@@ -22,7 +22,17 @@ The whole flow normally takes 30–60 minutes if the gates are green.
 ## Versioning
 
 - Follow [Semantic Versioning](https://semver.org/).
-- Single source of truth: `pyproject.toml` → `[project].version`. Mirror it in `src/opensquad/__init__.py::__version__` (see the front-end build notes in `BRANCHING.md` for why the mirror is needed).
+- **Single source of truth:** `pyproject.toml` → `[project].version`.
+- After changing `pyproject.toml`, run:
+
+  ```bash
+  python scripts/sync_version.py
+  ```
+
+  This updates `src/opensquad/__init__.py::__version__` (same PEP 440 string)
+  and root `package.json` (npm semver, e.g. `0.4.2.dev0` → `0.4.2-dev.0`).
+  CI runs `python scripts/sync_version.py --check` on every push to `dev`/`main`.
+  Pre-commit auto-syncs when `pyproject.toml` is staged.
 - See [BRANCHING.md](BRANCHING.md) → "When to bump minor vs patch" for the cheat sheet (SemVer rule 4 for `0.x.y`, PEP 440 markers, deployer-effort heuristic).
 - Update `CHANGELOG.md` **before** each release. Move `[Unreleased]` items into a dated `## [X.Y.Z] — YYYY-MM-DD` section; open a fresh `[Unreleased]` afterwards.
 
@@ -52,15 +62,15 @@ git checkout dev && git pull --ff-only
 git checkout -b release/0.X.Y
 git push -u origin release/0.X.Y
 
-# 2. Bump version: 0.X.0.dev0  →  0.X.0
-#    Edit pyproject.toml and src/opensquad/__init__.py together.
+# 2. Bump version in pyproject.toml only (0.X.0.dev0 → 0.X.0), then:
+#    python scripts/sync_version.py
 #    See the cheat sheet in BRANCHING.md for the right bump level.
 
 # 3. CHANGELOG.md: rename the [Unreleased] section to [0.X.0] — YYYY-MM-DD.
 #    Add a fresh [Unreleased] below it for the next cycle.
 
 # 4. Commit + PR
-git add pyproject.toml src/opensquad/__init__.py CHANGELOG.md
+git add pyproject.toml src/opensquad/__init__.py package.json CHANGELOG.md
 git commit -m "chore(release): prepare v0.X.0"
 git push -u origin release/0.X.Y
 # Open PR: release/0.X.Y  →  main
@@ -91,8 +101,8 @@ git merge --no-ff origin/main -m "Merge branch 'main' into dev (absorb v0.X.0 re
 # 8. Bump dev to the next .dev0
 #    See BRANCHING.md cheat sheet. PATCH next → 0.X.1.dev0.
 #    MINOR next → 0.(X+1).0.dev0.
-#    Edit pyproject.toml and src/opensquad/__init__.py together.
-git add pyproject.toml src/opensquad/__init__.py
+#    Bump pyproject.toml only, then: python scripts/sync_version.py
+git add pyproject.toml src/opensquad/__init__.py package.json
 git commit -m "chore(dev): bump to 0.X.(Y+1).dev0 after v0.X.Y release"
 git push origin dev
 
@@ -103,9 +113,9 @@ git branch -d release/0.X.Y
 
 **Common gotchas** (full list in [BRANCHING.md](BRANCHING.md) → "Common pitfalls"):
 
-- The `validate` job in `release.yml` will **fail loudly** if `pyproject.toml` version doesn't match the tag. Always bump `pyproject.toml` **and** `__init__.py` together (they're mirrored — see BRANCHING.md for the front-end build reason).
+- The `validate` job in `release.yml` will **fail loudly** if `pyproject.toml` version doesn't match the tag. Bump **`pyproject.toml` only**, then run `python scripts/sync_version.py` before committing. CI also runs `sync_version.py --check`.
 - Don't `git push --tags` indiscriminately. Push the **one** tag you just made.
-- Don't merge the release PR with the dev version still in `__init__.py` — that's the bug that caused the original `v0.1.1`-stuck-in-the-frontend incident.
+- Don't merge the release PR without running `sync_version.py` — stale `__init__.py` / `package.json` caused the original `v0.1.1`-stuck-in-the-frontend incident.
 
 ## Hotfix (patch from an old tag)
 
@@ -273,8 +283,7 @@ and on PyPI:
    ```bash
    git checkout release/0.X.Y
    ```
-2. Bump `pyproject.toml` (and `__init__.py`) to the pre-release version
-   (e.g. `0.X.Yb1`).
+2. Bump `pyproject.toml` to the pre-release version (e.g. `0.X.Yb1`), then `python scripts/sync_version.py`.
 3. Commit: `chore(release): prepare v0.X.Y-beta.1`.
 4. Tag and push:
    ```bash
@@ -299,7 +308,7 @@ git push origin release/0.X.Y --tags
 
 When pre-releases are stable:
 
-1. Bump `pyproject.toml` (and `__init__.py`) back to plain `0.X.Y`.
+1. Bump `pyproject.toml` back to plain `0.X.Y`, then `python scripts/sync_version.py`.
 2. Commit: `chore(release): finalize v0.X.Y`.
 3. PR to `main` (or merge the existing release branch), tag, push — same
    as the regular "Cut a release" flow above. The release.yml validate

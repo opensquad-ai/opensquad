@@ -239,7 +239,7 @@ for _res_dir in ("role_cards", "model_cards", "collab_cards", "agents", "pymcp")
     _src = _builtin_root / _res_dir
     if _src.exists():
         datas += [(str(_src), _res_dir)]
-        print(f"[spec] bundling {_res_dir}/ → _internal/{_res_dir}/")
+        print(f"[spec] bundling {_res_dir}/ -> _internal/{_res_dir}/")
     else:
         print(f"[spec] WARNING: {_src} not found, skipping")
 
@@ -250,7 +250,7 @@ for _cfg_name in ("system_config.example.json", "system_config.json"):
     _cfg_src = _builtin_root / _cfg_name
     if _cfg_src.exists():
         datas += [(str(_cfg_src), ".")]
-        print(f"[spec] bundling {_cfg_name} → _internal/")
+        print(f"[spec] bundling {_cfg_name} -> _internal/")
 
 # ── 分析 ──────────────────────────────────────────────────────────────────────
 a = Analysis(
