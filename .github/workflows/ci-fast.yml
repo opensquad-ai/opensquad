@@ -84,7 +84,15 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: src
-        run: uv run --python 3.11 pytest tests/ -v --tb=short -q --override-ini "addopts="
+        run: |
+          uv run --python 3.11 pytest \
+            tests/test_smoke.py \
+            tests/test_sync_version.py \
+            tests/test_protocol_version.py \
+            tests/test_version_display.py \
+            tests/test_version_channel.py \
+            tests/test_system_config.py \
+            -v --tb=short -q --override-ini "addopts="
 
   frontend-smoke:
     name: frontend build smoke
