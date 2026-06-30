@@ -4,6 +4,16 @@
   "version": "1.0.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
+  "description": "OpenSquad desktop app — local-first multi-agent collaboration gateway",
+  "author": {
+    "name": "OpenSquad Contributors",
+    "email": "maintainers@opensquad.ai"
+  },
+  "homepage": "https://github.com/opensquad-ai/opensquad#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opensquad-ai/opensquad.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -134,7 +144,8 @@
         }
       ],
       "icon": "assets/icon.png",
-      "category": "Office"
+      "category": "Office",
+      "maintainer": "OpenSquad Contributors <maintainers@opensquad.ai>"
     }
   }
 }
