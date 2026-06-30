@@ -427,6 +427,43 @@ def ensure_node_secret() -> str:
 # Cross-cutting workspace functions (moved here to avoid circular import with system_config)
 
 
+def ensure_workspace_config_file() -> str:
+    """Ensure ``system_config.json`` exists in the active workspace.
+
+    Desktop/fresh workspaces sometimes have ``.opensquad/`` metadata but no
+    copied config (e.g. partial init or legacy path). Admin settings reads
+    the file directly — missing file caused HTTP 500 and empty UI tabs.
+    """
+    cfg_path = _ws.get_config_path()
+    if os.path.isfile(cfg_path):
+        return cfg_path
+
+    ensure_workspace_structure()
+    import shutil as _shutil
+
+    for suffix in ("system_config.template.json", "system_config.json", "system_config.example.json"):
+        src = os.path.join(_ws._DEFAULT_ROOT, suffix)
+        if os.path.isfile(src):
+            _shutil.copy2(src, cfg_path)
+            logger.info("[syscfg] Materialized workspace config from: %s", src)
+            _auto_generate_secrets(cfg_path)
+            global _cache, _cache_mtime, _cache_path_at_load
+            _cache = None
+            _cache_mtime = 0.0
+            return cfg_path
+
+    # Minimal fallback so the settings UI always has ports/hosts to edit.
+    minimal = {
+        "ports": {"gateway": 9555, "launcher": 9600, "websearch": 9001, "whisper": 9002},
+        "hosts": {"gateway": "0.0.0.0", "launcher": "127.0.0.1"},
+        "logging": {"log_level": "INFO"},
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(minimal, f, indent=2, ensure_ascii=False)
+    logger.warning("[syscfg] Created minimal system_config.json at: %s", cfg_path)
+    return cfg_path
+
+
 def ensure_workspace_structure() -> None:
     """Ensure the workspace directory structure exists."""
     dirs = [

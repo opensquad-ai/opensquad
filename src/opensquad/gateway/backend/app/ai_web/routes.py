@@ -888,20 +888,23 @@ def _fill_logging_defaults(data: dict) -> dict:
 async def admin_get_system_config(current_user: User = Depends(get_current_user_dep)):
     """Read full contents of system_config.json (with effective logging defaults filled in)."""
     import opensquad.system_config as _sc
+    from opensquad._syscfg._config import ensure_workspace_config_file
 
-    config_path = _sc._CONFIG_PATH
-    with open(config_path, encoding="utf-8") as f:
-        data = json.load(f)
-    data = _fill_logging_defaults(data)
-    return data
+    ensure_workspace_config_file()
+    data = _sc.raw()
+    if not data:
+        with open(_sc._CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    return _fill_logging_defaults(data)
 
 
 @router.put("/admin/system/config")
 async def admin_update_system_config(body: dict, current_user: User = Depends(get_current_user_dep)):
     """Write back system_config.json, reload syscfg cache, and dynamically apply new log level"""
     import opensquad.system_config as _sc
+    from opensquad._syscfg._config import ensure_workspace_config_file
 
-    config_path = _sc._CONFIG_PATH
+    config_path = ensure_workspace_config_file()
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False, indent=2)
     _sc._cache = None  # Clear cache, force reload on next access

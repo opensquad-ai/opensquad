@@ -23,8 +23,9 @@ the gateway, and the Plugin Registry is not yet wired into the desktop bundle).
 Electron's `main.ts` spawns **two** instances of the same `run.exe`:
 
 1. `run.exe` — the Gateway (default mode, no `--service` flag).
-2. `run.exe --service launcher --mgmt-port 9600 --no-auto-start --no-services` —
-   the Launcher.
+2. `run.exe --service launcher --mgmt-port 9600 --no-auto-start` — the Launcher
+   (auto-starts plugin services that declare `service.auto_start`; agents stay
+   manual until a frozen agent entry exists).
 
 `run.py` dispatches on `--service`: `gateway` (the default) runs the FastAPI
 app as before; `launcher` loads the standalone `opensquad/launcher.py` by file
@@ -67,13 +68,16 @@ clicking *Start* on an agent does not launch an agent process.
 
 **Cause:** the launcher starts agents with `sys.executable -m
 opensquad.agents_boot …`. In a PyInstaller bundle `sys.executable` **is** the
-frozen `run.exe`, which does not honor `-m <module>`. The same applies to
-plugin services (e.g. `external_api`, `feishu`), which is why the desktop app
-launches the launcher with `--no-services` to suppress their auto-start.
+frozen `run.exe`, which does not honor `-m <module>`.
+
+Plugin services (e.g. websearch, whisper) use `service/main.py` and are
+auto-started on desktop launch when `auto_start` is true. The launcher prefers
+a **system Python** (`python` / `py` on PATH) to run those scripts inside the
+frozen app; if Python is not installed, plugin services may fail to start.
 
 **What works today:** listing agents, reading/writing agent configs, role
-cards, model cards, and MCP configs — everything the management API exposes
-without spawning a child process.
+cards, model cards, MCP configs, and plugin services **when system Python is
+available** (or when the plugin uses a `cmd` such as `node`/`npx`).
 
 **What doesn't:** starting an agent process or a plugin service from inside
 the packaged app. To run agents, use `opensquad start` from a Python
