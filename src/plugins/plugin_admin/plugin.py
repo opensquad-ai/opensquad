@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Plugin Admin Plugin
 
@@ -15,15 +14,16 @@ Constraints (enforced throughout):
   - All paths via context.project_root (never hardcoded)
   - All exceptions caught; tools return {"error": "..."} instead of raising
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from opensquad.plugin_api import register, tool, Context, Plugin
+from opensquad.plugin_api import Context, Plugin, register, tool
 
 logger = logging.getLogger("plugins.plugin_admin")
 
@@ -32,16 +32,17 @@ logger = logging.getLogger("plugins.plugin_admin")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _read_json(path: str) -> Optional[Dict]:
+
+def _read_json(path: str) -> dict | None:
     """Read a JSON file; return None on any error."""
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
 
 
-def _write_json(path: str, data: Dict) -> bool:
+def _write_json(path: str, data: dict) -> bool:
     """Atomically write data as JSON; return True on success."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -69,6 +70,7 @@ def _touch_reload_ts(plugins_dir: str) -> None:
 # Plugin class
 # ---------------------------------------------------------------------------
 
+
 @register(
     name="plugin_admin",
     author="lihua179",
@@ -85,7 +87,6 @@ def _touch_reload_ts(plugins_dir: str) -> None:
     tags=["admin", "plugins", "management"],
 )
 class PluginAdminPlugin(Plugin):
-
     def __init__(self, context: Context):
         super().__init__(context)
 
@@ -105,7 +106,7 @@ class PluginAdminPlugin(Plugin):
     def _config_path(self, name: str) -> str:
         return os.path.join(self._plugin_data_root, name, "config.json")
 
-    def _iter_plugin_dirs(self) -> List[str]:
+    def _iter_plugin_dirs(self) -> list[str]:
         """Return directory names that have a plugin.py inside."""
         result = []
         try:
@@ -113,9 +114,7 @@ class PluginAdminPlugin(Plugin):
                 if entry.startswith("_") or entry.startswith("."):
                     continue
                 plugin_dir = os.path.join(self._plugins_dir, entry)
-                if os.path.isdir(plugin_dir) and os.path.isfile(
-                    os.path.join(plugin_dir, "plugin.py")
-                ):
+                if os.path.isdir(plugin_dir) and os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
                     result.append(entry)
         except Exception as e:
             logger.error(f"[PluginAdmin] _iter_plugin_dirs: {e}")
@@ -131,23 +130,25 @@ class PluginAdminPlugin(Plugin):
             "enabled (bool), description, and tags for every plugin found on disk."
         ),
     )
-    def list_plugins(self) -> Dict:
+    def list_plugins(self) -> dict:
         """List all plugins discovered on disk."""
         try:
             plugins = []
             for dir_name in self._iter_plugin_dirs():
                 manifest = _read_json(self._manifest_path(dir_name)) or {}
-                plugins.append({
-                    "name": manifest.get("name", dir_name),
-                    "dir_name": dir_name,
-                    "display_name": manifest.get("display_name", dir_name),
-                    "version": manifest.get("version", "?"),
-                    "type": manifest.get("type", "?"),
-                    "enabled": manifest.get("enabled", True),
-                    "description": manifest.get("description", ""),
-                    "tags": manifest.get("tags", []),
-                    "node_scope": manifest.get("node_scope", "all"),
-                })
+                plugins.append(
+                    {
+                        "name": manifest.get("name", dir_name),
+                        "dir_name": dir_name,
+                        "display_name": manifest.get("display_name", dir_name),
+                        "version": manifest.get("version", "?"),
+                        "type": manifest.get("type", "?"),
+                        "enabled": manifest.get("enabled", True),
+                        "description": manifest.get("description", ""),
+                        "tags": manifest.get("tags", []),
+                        "node_scope": manifest.get("node_scope", "all"),
+                    }
+                )
             return {"plugins": plugins, "count": len(plugins)}
         except Exception as e:
             logger.error(f"[PluginAdmin] list_plugins error: {e}")
@@ -162,7 +163,7 @@ class PluginAdminPlugin(Plugin):
             "Parameter: name (str) — the plugin's directory/name, e.g. 'websearch'."
         ),
     )
-    def enable_plugin(self, name: str) -> Dict:
+    def enable_plugin(self, name: str) -> dict:
         """Enable a plugin."""
         try:
             manifest_path = self._manifest_path(name)
@@ -194,7 +195,7 @@ class PluginAdminPlugin(Plugin):
             "Parameter: name (str) — the plugin's directory/name, e.g. 'websearch'."
         ),
     )
-    def disable_plugin(self, name: str) -> Dict:
+    def disable_plugin(self, name: str) -> dict:
         """Disable a plugin."""
         try:
             if name == "plugin_admin":
@@ -229,7 +230,7 @@ class PluginAdminPlugin(Plugin):
             "Parameter: name (str) — the plugin's directory/name."
         ),
     )
-    def get_plugin_config(self, name: str) -> Dict:
+    def get_plugin_config(self, name: str) -> dict:
         """Get a plugin's current configuration."""
         try:
             manifest_path = self._manifest_path(name)
@@ -237,10 +238,10 @@ class PluginAdminPlugin(Plugin):
                 return {"error": f"Plugin '{name}' not found (no plugin.json)"}
 
             manifest = _read_json(manifest_path) or {}
-            schema: Dict[str, Any] = manifest.get("config_schema") or {}
+            schema: dict[str, Any] = manifest.get("config_schema") or {}
 
             # Start with schema defaults
-            config_values: Dict[str, Any] = {}
+            config_values: dict[str, Any] = {}
             for key, field in schema.items():
                 if isinstance(field, dict) and "default" in field:
                     config_values[key] = field["default"]
@@ -279,7 +280,7 @@ class PluginAdminPlugin(Plugin):
             "Example: set_plugin_config('websearch', {'max_results': 20})"
         ),
     )
-    def set_plugin_config(self, name: str, config: Dict[str, Any]) -> Dict:
+    def set_plugin_config(self, name: str, config: dict[str, Any]) -> dict:
         """Set one or more config values for a plugin."""
         try:
             manifest_path = self._manifest_path(name)
@@ -318,12 +319,15 @@ class PluginAdminPlugin(Plugin):
             "No parameters required."
         ),
     )
-    def reload_plugins(self) -> Dict:
+    def reload_plugins(self) -> dict:
         """Trigger a hot-reload of all plugins."""
         try:
             _touch_reload_ts(self._plugins_dir)
             logger.info("[PluginAdmin] Hot-reload triggered by agent")
-            return {"ok": True, "message": "Hot-reload triggered. Changes will take effect within the next runner loop tick."}
+            return {
+                "ok": True,
+                "message": "Hot-reload triggered. Changes will take effect within the next runner loop tick.",
+            }
         except Exception as e:
             logger.error(f"[PluginAdmin] reload_plugins error: {e}")
             return {"error": str(e)}
@@ -337,7 +341,7 @@ class PluginAdminPlugin(Plugin):
             "Parameter: name (str) — the plugin's directory/name."
         ),
     )
-    def get_plugin_info(self, name: str) -> Dict:
+    def get_plugin_info(self, name: str) -> dict:
         """Get detailed metadata for a single plugin."""
         try:
             manifest_path = self._manifest_path(name)

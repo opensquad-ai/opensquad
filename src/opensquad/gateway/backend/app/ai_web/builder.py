@@ -1,9 +1,9 @@
+import asyncio
+import datetime
+import logging
 import os
 import subprocess
-import asyncio
-import logging
-import datetime
-from typing import Dict
+
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger("plugin_builder")
@@ -45,7 +45,7 @@ def _run_cmd(cmd: list[str], cwd: str, log_file) -> int:
 class PluginBuilder:
     def __init__(self, workspace_root: str):
         self.workspace_root = workspace_root
-        self.active_builds: Dict[str, str] = {}  # plugin_id -> status
+        self.active_builds: dict[str, str] = {}  # plugin_id -> status
 
     def get_log_path(self, plugin_id: str) -> str:
         log_dir = os.path.join(self.workspace_root, "data", "logs", "builds")
@@ -54,14 +54,13 @@ class PluginBuilder:
 
     async def check_env(self) -> dict:
         """Check if node and npm are available."""
+
         def _check():
             results = {}
             for tool in ["node", "pnpm"]:
                 try:
                     r = subprocess.run(
-                        [tool, "--version"],
-                        capture_output=True, text=True,
-                        shell=_IS_WINDOWS, timeout=10
+                        [tool, "--version"], capture_output=True, text=True, shell=_IS_WINDOWS, timeout=10
                     )
                     results[tool] = r.returncode == 0
                     results[f"{tool}_version"] = r.stdout.strip() if r.returncode == 0 else None

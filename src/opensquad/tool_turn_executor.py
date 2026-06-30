@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
@@ -8,11 +7,10 @@ from datetime import datetime
 from typing import Any
 
 from opensquad.event_pipeline import get_event_pipeline
-from opensquad.parser import ResponseParser
 from opensquad.log_setup import get_tool_call_debug_logger
+from opensquad.parser import ResponseParser
 from opensquad.task_logger import task_logger
 from opensquad.task_supervisor import task_supervisor
-from opensquad.tool import logger
 
 
 @dataclass
@@ -29,6 +27,7 @@ class ToolTurnExecutor:
 
     async def execute(self, full_response: str, tool_data_from_api: Any, saved_msg: str | None) -> ToolExecutionResult:
         from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         tc_log = get_tool_call_debug_logger()
         tc_log.debug("[runner] full_response len=%d, first 500 chars: %s", len(full_response), full_response[:500])
@@ -61,24 +60,34 @@ class ToolTurnExecutor:
                 "[Runner] FIX-ACTIVE: Deferring assistant message persistence (tool calls in progress, saved_msg_len=%d)",
                 len(saved_msg),
             )
-        perf_event("runner", "tool_batch_complete", agent_id=getattr(self.runner, "_agent_id", ""), tool_count=len(tool_results), elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000))
+        perf_event(
+            "runner",
+            "tool_batch_complete",
+            agent_id=getattr(self.runner, "_agent_id", ""),
+            tool_count=len(tool_results),
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+        )
         return ToolExecutionResult(handled=True, return_value=(False, "", False))
 
-    def _resolve_tool_calls(self, full_response: str, tool_data_from_api: Any, tc_log: Any) -> list[tuple[str, dict[str, Any]]]:
+    def _resolve_tool_calls(
+        self, full_response: str, tool_data_from_api: Any, tc_log: Any
+    ) -> list[tuple[str, dict[str, Any]]]:
         if tool_data_from_api:
             tool_calls = tool_data_from_api
             tc_log.info("[runner] [OK] Using tool_data from Native FC strategy: %d tool(s)", len(tool_calls))
             return tool_calls
 
-        from opensquad.parser import ResponseParser
         tool_calls = ResponseParser.parse_tool_calls(full_response)
         if tool_calls:
             tc_log.info("[runner] [OK] Using tool_data from XML parser: %d tool(s)", len(tool_calls))
             return tool_calls
         return []
 
-    async def _execute_single_tool(self, call_index: int, tool_name: str, tool_args_dict: dict[str, Any], tc_log: Any) -> dict[str, Any]:
+    async def _execute_single_tool(
+        self, call_index: int, tool_name: str, tool_args_dict: dict[str, Any], tc_log: Any
+    ) -> dict[str, Any]:
         from opensquad.structured_log import perf_event
+
         t_tool = __import__("time").perf_counter()
         tc_log.info("[runner] [tool] #%d: name=%r, args=%r", call_index, tool_name, tool_args_dict)
         call_id = f"call_{datetime.now().strftime('%M%S')}_{tool_name}_{call_index}"
@@ -107,7 +116,13 @@ class ToolTurnExecutor:
             result = await self.runner.tool_registry.call(tool_name, tool_args_dict)
             task_supervisor.report_activity()
 
-        perf_event("runner", "tool_executed", agent_id=getattr(self.runner, "_agent_id", ""), tool_name=tool_name, elapsed_ms=int((__import__("time").perf_counter() - t_tool) * 1000))
+        perf_event(
+            "runner",
+            "tool_executed",
+            agent_id=getattr(self.runner, "_agent_id", ""),
+            tool_name=tool_name,
+            elapsed_ms=int((__import__("time").perf_counter() - t_tool) * 1000),
+        )
 
         self._sync_collaboration_board(tool_name, result)
         result = await self._run_after_tool_hooks(tool_name, tool_args_dict, result)
@@ -133,7 +148,14 @@ class ToolTurnExecutor:
         await self._handle_set_state_side_effect(tool_name, result)
 
         from opensquad.structured_log import perf_event
-        perf_event("runner", "tool_executed", agent_id=getattr(self.runner, "_agent_id", ""), tool_name=tool_name, elapsed_ms=int((__import__("time").perf_counter() - t_tool) * 1000))
+
+        perf_event(
+            "runner",
+            "tool_executed",
+            agent_id=getattr(self.runner, "_agent_id", ""),
+            tool_name=tool_name,
+            elapsed_ms=int((__import__("time").perf_counter() - t_tool) * 1000),
+        )
 
         return {
             "name": tool_name,
@@ -144,7 +166,9 @@ class ToolTurnExecutor:
             "pipeline_events": pipeline_events,
         }
 
-    async def _run_before_tool_hook(self, tool_name: str, tool_args_dict: dict[str, Any]) -> tuple[str, dict[str, Any], bool, dict[str, Any]]:
+    async def _run_before_tool_hook(
+        self, tool_name: str, tool_args_dict: dict[str, Any]
+    ) -> tuple[str, dict[str, Any], bool, dict[str, Any]]:
         skip_tool = False
         hook_ctx: dict[str, Any] = {}
         if self.runner._plugin_manager:
@@ -262,7 +286,11 @@ class ToolTurnExecutor:
                     if new_img_paths:
                         self.runner._current_images.extend(new_img_paths)
                     try:
-                        img_path_file = os.path.join(self.runner._agent_dir, "img_path.txt") if self.runner._agent_dir else "img_path.txt"
+                        img_path_file = (
+                            os.path.join(self.runner._agent_dir, "img_path.txt")
+                            if self.runner._agent_dir
+                            else "img_path.txt"
+                        )
                         with open(img_path_file, "w", encoding="utf-8") as handle:
                             handle.write(str(img_paths))
                     except Exception:
@@ -324,7 +352,9 @@ class ToolTurnExecutor:
             turn_id=self.runner._current_turn,
             round_id=self.runner._current_round,
         )
-        await self.runner._emit("tool_result", {"id": call_id, "name": tool_name, "args": args_json, "result": wake_msg})
+        await self.runner._emit(
+            "tool_result", {"id": call_id, "name": tool_name, "args": args_json, "result": wake_msg}
+        )
         return False, wake_msg, False
 
     async def _handle_set_state_side_effect(self, tool_name: str, result: Any) -> None:

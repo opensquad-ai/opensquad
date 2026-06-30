@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """opensquad init -- Initialize a new workspace."""
+
 import os
 import sys
 
@@ -25,21 +25,28 @@ def run_init(args):
         print(f"[init] Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[init] Workspace initialized successfully.")
+    print("[init] Workspace initialized successfully.")
 
     # Save workspace path so start/launcher can find it
     from opensquad.workspace_utils import save_last_workspace
+
     save_last_workspace(workspace)
 
     # Copy default model cards and agent to workspace
     from opensquad.workspace_utils import _copy_default_resources
+
     _copy_default_resources(workspace, os.path.join(_root, "src"))
 
     # Print directory structure
-    print(f"\n[init] Directory structure:")
+    print("\n[init] Directory structure:")
     for d in [
-        "agents/pm/", "model_cards/", "data/uploads/", "data/logs/gateway/",
-        "data/sessions/", "data/plugins/", "data/audit/",
+        "agents/pm/",
+        "model_cards/",
+        "data/uploads/",
+        "data/logs/gateway/",
+        "data/sessions/",
+        "data/plugins/",
+        "data/audit/",
     ]:
         full = os.path.join(workspace, d)
         exists = os.path.isdir(full)
@@ -49,7 +56,7 @@ def run_init(args):
     if os.path.isfile(config_path):
         print(f"\n[init] Config: {config_path}")
 
-    print(f"\n[init] Next steps:")
-    print(f"  1. Edit model_cards/deepseek-v4-flash.json, fill in your api_key")
-    print(f"     Get your key at: https://platform.deepseek.com")
-    print(f"  2. Run: opensquad start")
+    print("\n[init] Next steps:")
+    print("  1. Edit model_cards/deepseek-v4-flash.json, fill in your api_key")
+    print("     Get your key at: https://platform.deepseek.com")
+    print("  2. Run: opensquad start")

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 MCP Adapter -- based on the official MCP SDK (mcp>=1.0)
 Replaces custom pymcp; uses stdio_client + ClientSession for long-lived connections.
@@ -16,16 +15,16 @@ External interface (fully backward-compatible; registry.py / boot.py require zer
   - init_mcp_adapter(config_path?) -> MCPAdapter  (async init, replaces old sync get_mcp_adapter())
 """
 
-import os
-import sys
+import asyncio
 import json
 import logging
-import asyncio
-from contextlib import AsyncExitStack
+import os
+import sys
+from contextlib import AsyncExitStack, suppress
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import Any
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 try:
@@ -43,7 +42,7 @@ _project_root = os.path.dirname(os.path.dirname(_current_dir))
 DEFAULT_CONFIG_PATH = os.path.join(_project_root, "pymcp", "config_basic.json")
 
 
-def _load_mcp_config(config_path: str, agent_dir: str = None) -> Dict[str, Any]:
+def _load_mcp_config(config_path: str, agent_dir: str | None = None) -> dict[str, Any]:
     """
     Load MCP configuration with unified central config support.
 
@@ -58,6 +57,7 @@ def _load_mcp_config(config_path: str, agent_dir: str = None) -> Dict[str, Any]:
     # Try central config first (unified across all agents)
     try:
         from opensquad import system_config as syscfg
+
         central_path = syscfg.workspace_data_dir("mcp_config.json")
         if os.path.exists(central_path):
             config_file = central_path
@@ -85,6 +85,7 @@ def _load_mcp_config(config_path: str, agent_dir: str = None) -> Dict[str, Any]:
 
     # Use json_cache with mtime-based staleness detection (avoids re-reading unchanged files)
     from opensquad.json_cache import load_json_cached
+
     data = load_json_cached(config_file, default={})
 
     # Support both 'mcpServers' and 'mcp_servers' keys
@@ -101,7 +102,7 @@ def _load_mcp_config(config_path: str, agent_dir: str = None) -> Dict[str, Any]:
     return enabled_servers
 
 
-def _mcp_tool_to_openai(tool, server_name: str) -> Dict[str, Any]:
+def _mcp_tool_to_openai(tool, server_name: str) -> dict[str, Any]:
     """Convert an official SDK Tool object to OpenAI function-calling format with a server prefix."""
     input_schema = tool.inputSchema if tool.inputSchema else {"type": "object", "properties": {}}
     return {
@@ -110,7 +111,7 @@ def _mcp_tool_to_openai(tool, server_name: str) -> Dict[str, Any]:
             "name": f"mcp__{server_name}__{tool.name}",
             "description": f"[MCP Server: {server_name}] {tool.description or ''}",
             "parameters": input_schema,
-        }
+        },
     }
 
 
@@ -127,28 +128,29 @@ class MCPAdapter:
     """
 
     # P2-2: Auto-reconnect config
-    HEALTH_CHECK_INTERVAL = 30      # seconds between health probes
-    HEALTH_CHECK_TIMEOUT = 5        # seconds before probe is considered failed
-    RECONNECT_BACKOFF_BASE = 2.0    # base seconds for exponential backoff
-    RECONNECT_MAX_BACKOFF = 60.0    # max seconds between reconnection attempts
+    HEALTH_CHECK_INTERVAL = 30  # seconds between health probes
+    HEALTH_CHECK_TIMEOUT = 5  # seconds before probe is considered failed
+    RECONNECT_BACKOFF_BASE = 2.0  # base seconds for exponential backoff
+    RECONNECT_MAX_BACKOFF = 60.0  # max seconds between reconnection attempts
 
-    def __init__(self, config_path: str = None, agent_dir: str = None,
-                 global_disabled_servers: set = None):
+    def __init__(
+        self, config_path: str | None = None, agent_dir: str | None = None, global_disabled_servers: set | None = None
+    ):
         self.config_path = config_path
         self.agent_dir = agent_dir
         self._global_disabled: set = global_disabled_servers or set()
-        self._server_configs: Dict[str, Dict] = {}       # server_name -> raw config dict
-        self._sessions: Dict[str, ClientSession] = {}     # server_name -> ClientSession
-        self._exit_stacks: Dict[str, AsyncExitStack] = {} # server_name -> AsyncExitStack
-        self._tools_cache: Dict[str, list] = {}           # server_name -> List[Tool objects]
-        self._timeouts: Dict[str, int] = {}               # server_name -> timeout seconds
+        self._server_configs: dict[str, dict] = {}  # server_name -> raw config dict
+        self._sessions: dict[str, ClientSession] = {}  # server_name -> ClientSession
+        self._exit_stacks: dict[str, AsyncExitStack] = {}  # server_name -> AsyncExitStack
+        self._tools_cache: dict[str, list] = {}  # server_name -> List[Tool objects]
+        self._timeouts: dict[str, int] = {}  # server_name -> timeout seconds
         self._connected = False
 
         # P2-2: Health check / auto-reconnect state
-        self._health_task: Optional[asyncio.Task] = None
+        self._health_task: asyncio.Task | None = None
         self._stop_health = asyncio.Event()
-        self._server_health_status: Dict[str, bool] = {}  # server_name -> last known healthy
-        self._server_reconnect_backoff: Dict[str, float] = {}  # server_name -> current backoff seconds
+        self._server_health_status: dict[str, bool] = {}  # server_name -> last known healthy
+        self._server_reconnect_backoff: dict[str, float] = {}  # server_name -> current backoff seconds
 
     async def connect(self):
         """
@@ -180,10 +182,8 @@ class MCPAdapter:
 
                 # Clean up resources for this failed server
                 if server_name in self._exit_stacks:
-                    try:
+                    with suppress(Exception):
                         await self._exit_stacks[server_name].aclose()
-                    except Exception:
-                        pass
                     del self._exit_stacks[server_name]
 
                 # Continue attempting the next server
@@ -192,8 +192,7 @@ class MCPAdapter:
         self._connected = True
         total_tools = sum(len(t) for t in self._tools_cache.values())
         logger.info(
-            f"[MCP] Adapter ready: {len(self._sessions)}/{len(self._server_configs)} servers, "
-            f"{total_tools} tools"
+            f"[MCP] Adapter ready: {len(self._sessions)}/{len(self._server_configs)} servers, {total_tools} tools"
         )
 
         # P2-2: Start background health-check + auto-reconnect loop
@@ -211,27 +210,36 @@ class MCPAdapter:
                 line = await stream.readline()
                 if not line:
                     break
-                text = line.decode('utf-8', errors='replace').strip()
+                text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
 
                 # Noise filters (Startup banners)
-                if "Google collects usage statistics" in text: continue
-                if "Performance tools may send trace URLs" in text: continue
-                if "For more details, visit" in text: continue
-                if "Avoid sharing sensitive" in text: continue
-                if "chrome-devtools-mcp exposes content" in text: continue
-                if "debug, and modify any data" in text: continue
-                if "Windows CLI MCP Server running on stdio" in text: continue
-                if "To disable, run with" in text: continue
-                if "visit: https://github.com" in text: continue
+                if "Google collects usage statistics" in text:
+                    continue
+                if "Performance tools may send trace URLs" in text:
+                    continue
+                if "For more details, visit" in text:
+                    continue
+                if "Avoid sharing sensitive" in text:
+                    continue
+                if "chrome-devtools-mcp exposes content" in text:
+                    continue
+                if "debug, and modify any data" in text:
+                    continue
+                if "Windows CLI MCP Server running on stdio" in text:
+                    continue
+                if "To disable, run with" in text:
+                    continue
+                if "visit: https://github.com" in text:
+                    continue
 
                 # Log other output
                 logger.info(f"[MCP:{server_name}] {text}")
         except Exception:
             pass
 
-    async def _connect_server(self, server_name: str, cfg: Dict):
+    async def _connect_server(self, server_name: str, cfg: dict):
         """Connect to a single MCP server (Custom Implementation avoiding stdio_client generator issues)"""
         command = cfg.get("command", "npx")
         args = cfg.get("args", [])
@@ -249,13 +257,13 @@ class MCPAdapter:
         # Windows npx compatibility
         if sys.platform == "win32" and command == "npx":
             from shutil import which
+
             command = which("npx") or "npx.cmd"
 
         logger.info(f"[MCP] Connecting to '{server_name}': {command} {' '.join(args)}")
 
         # Use MCP SDK's stdio_client to manage subprocess lifecycle
         from mcp.client.stdio import StdioServerParameters
-        from mcp.client.stdio import stdio_client
 
         stack = AsyncExitStack()
 
@@ -272,7 +280,6 @@ class MCPAdapter:
             # We can wrap our `process.stdout` and `process.stdin` into anyio streams!
 
             # Let's import the necessary adapters
-            from anyio.streams.file import FileReadStream, FileWriteStream
 
             # process.stdout is an asyncio.StreamReader
             # process.stdin is an asyncio.StreamWriter
@@ -338,20 +345,12 @@ class MCPAdapter:
             # This allows me to use `create_subprocess_exec` (where I control stderr) and pass it to `ClientSession`.
 
             # Use stdio_client to create connection (it manages the subprocess automatically)
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env=env
-            )
+            server_params = StdioServerParameters(command=command, args=args, env=env)
 
-            read_stream, write_stream = await stack.enter_async_context(
-                stdio_client(server_params)
-            )
+            read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
 
             # Create ClientSession
-            session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
 
             # MCP protocol handshake
             init_result = await session.initialize()
@@ -374,7 +373,7 @@ class MCPAdapter:
             logger.error(f"[MCP] Failed to connect to '{server_name}': {e}")
             raise
 
-    def get_all_tools(self) -> List[Dict[str, Any]]:
+    def get_all_tools(self) -> list[dict[str, Any]]:
         """
         Return all MCP server tool descriptions in OpenAI function-calling format.
         Reads from the cache built at startup; zero-cost.
@@ -397,7 +396,7 @@ class MCPAdapter:
         real_tool_name = "__".join(parts[2:])
         return server_name, real_tool_name
 
-    async def call_tool_async(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def call_tool_async(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """
         Async MCP tool invocation.
 
@@ -422,9 +421,7 @@ class MCPAdapter:
         # anyio cancel scopes (MCP SDK uses anyio internally). This confines
         # any cancel scope to the child task, protecting the runner's main task.
         try:
-            result = await asyncio.create_task(
-                self._call_tool_impl(tool_name, arguments)
-            )
+            result = await asyncio.create_task(self._call_tool_impl(tool_name, arguments))
             return result
         except asyncio.CancelledError:
             # If the runner's task itself was cancelled (e.g. shutdown),
@@ -434,7 +431,7 @@ class MCPAdapter:
             logger.error(f"[MCP] call_tool_async error: {e}")
             return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-    async def _call_tool_impl(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def _call_tool_impl(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Internal implementation — runs inside a separate asyncio task."""
 
         server_name, real_tool_name = self._parse_tool_name(tool_name)
@@ -454,10 +451,9 @@ class MCPAdapter:
                     logger.error(f"[MCP] Reconnect failed: {e}")
 
             if session is None:
-                return json.dumps({
-                    "error": f"MCP server '{server_name}' not connected. "
-                             f"Available: {list(self._sessions.keys())}"
-                })
+                return json.dumps(
+                    {"error": f"MCP server '{server_name}' not connected. Available: {list(self._sessions.keys())}"}
+                )
 
         timeout = self._timeouts.get(server_name, 30)
 
@@ -475,10 +471,9 @@ class MCPAdapter:
                 for item in result.content:
                     if hasattr(item, "text"):
                         error_texts.append(item.text)
-                return json.dumps({
-                    "success": False,
-                    "error": "\n".join(error_texts) or "Unknown MCP error"
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {"success": False, "error": "\n".join(error_texts) or "Unknown MCP error"}, ensure_ascii=False
+                )
 
             # Extract result content -- distinguish text from images
             text_parts = []
@@ -490,10 +485,12 @@ class MCPAdapter:
                 elif hasattr(item, "data"):
                     mime = getattr(item, "mimeType", "") or ""
                     if mime.startswith("image/"):
-                        image_parts.append({
-                            "mimeType": mime,
-                            "data": item.data,
-                        })
+                        image_parts.append(
+                            {
+                                "mimeType": mime,
+                                "data": item.data,
+                            }
+                        )
                     else:
                         text_parts.append(f"[Binary: {mime}, {len(item.data)} bytes]")
                 else:
@@ -511,10 +508,10 @@ class MCPAdapter:
             }
 
         except asyncio.TimeoutError:
-            return json.dumps({
-                "success": False,
-                "error": f"Timeout after {timeout}s calling {real_tool_name} on {server_name}"
-            }, ensure_ascii=False)
+            return json.dumps(
+                {"success": False, "error": f"Timeout after {timeout}s calling {real_tool_name} on {server_name}"},
+                ensure_ascii=False,
+            )
         except Exception as e:
             logger.error(f"[MCP] call_tool_async error on '{server_name}.{real_tool_name}': {e}")
             # Connection may have dropped; mark for auto-reconnect on next call
@@ -523,7 +520,7 @@ class MCPAdapter:
                 logger.warning(f"[MCP] Marked '{server_name}' as disconnected for auto-reconnect")
             return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-    async def add_server(self, server_name: str, cfg: Dict[str, Any], persist: bool = True) -> Dict[str, Any]:
+    async def add_server(self, server_name: str, cfg: dict[str, Any], persist: bool = True) -> dict[str, Any]:
         """
         Hot-add a new MCP server at runtime.
 
@@ -547,10 +544,8 @@ class MCPAdapter:
         if server_name in self._sessions:
             logger.info(f"[MCP] add_server: '{server_name}' already exists, reconnecting...")
             if server_name in self._exit_stacks:
-                try:
+                with suppress(Exception):
                     await self._exit_stacks[server_name].aclose()
-                except Exception:
-                    pass
                 del self._exit_stacks[server_name]
             self._sessions.pop(server_name, None)
             self._tools_cache.pop(server_name, None)
@@ -561,10 +556,8 @@ class MCPAdapter:
             logger.error(f"[MCP] add_server failed for '{server_name}': {e}")
             # Clean up failed connection
             if server_name in self._exit_stacks:
-                try:
+                with suppress(Exception):
                     await self._exit_stacks[server_name].aclose()
-                except Exception:
-                    pass
                 del self._exit_stacks[server_name]
             return {"success": False, "server": server_name, "tools": [], "error": str(e)}
 
@@ -587,7 +580,7 @@ class MCPAdapter:
             "tools": tool_names,
         }
 
-    async def remove_server(self, server_name: str, persist: bool = True) -> Dict[str, Any]:
+    async def remove_server(self, server_name: str, persist: bool = True) -> dict[str, Any]:
         """
         Remove an MCP server at runtime.
 
@@ -624,9 +617,9 @@ class MCPAdapter:
 
         return {"success": True, "server": server_name}
 
-    def _persist_server_config(self, server_name: str, cfg: Dict):
+    def _persist_server_config(self, server_name: str, cfg: dict):
         """Write the new server config to config_basic.json."""
-        with open(self.config_path, "r", encoding="utf-8-sig") as f:
+        with open(self.config_path, encoding="utf-8-sig") as f:
             data = json.load(f)
 
         servers_key = "mcpServers" if "mcpServers" in data else "mcp_servers"
@@ -643,7 +636,7 @@ class MCPAdapter:
 
     def _unpersist_server_config(self, server_name: str):
         """Remove a server config from config_basic.json."""
-        with open(self.config_path, "r", encoding="utf-8-sig") as f:
+        with open(self.config_path, encoding="utf-8-sig") as f:
             data = json.load(f)
 
         servers_key = "mcpServers" if "mcpServers" in data else "mcp_servers"
@@ -653,7 +646,7 @@ class MCPAdapter:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             logger.info(f"[MCP] Removed config for '{server_name}' from {self.config_path}")
 
-    def list_servers(self) -> Dict[str, Any]:
+    def list_servers(self) -> dict[str, Any]:
         """
         List all configured MCP servers and their status.
 
@@ -661,7 +654,7 @@ class MCPAdapter:
             {server_name: {"connected": bool, "tools": [tool_names], "timeout": int}}
         """
         result = {}
-        for name, cfg in self._server_configs.items():
+        for name, _cfg in self._server_configs.items():
             connected = name in self._sessions
             tools = [t.name for t in self._tools_cache.get(name, [])]
             result[name] = {
@@ -756,11 +749,14 @@ class MCPAdapter:
         if _event_bus is None:
             return
         try:
-            _event_bus.emit("mcp_server_status", {
-                "server": server_name,
-                "status": status,
-                "timestamp": asyncio.get_event_loop().time(),
-            })
+            _event_bus.emit(
+                "mcp_server_status",
+                {
+                    "server": server_name,
+                    "status": status,
+                    "timestamp": asyncio.get_event_loop().time(),
+                },
+            )
         except Exception as e:
             logger.debug(f"[MCP] Failed to emit status event: {e}")
 
@@ -768,10 +764,8 @@ class MCPAdapter:
         """Reconnect a single MCP server (e.g. if its subprocess crashed)."""
         # Close old connection first
         if server_name in self._exit_stacks:
-            try:
+            with suppress(Exception):
                 await self._exit_stacks[server_name].aclose()
-            except Exception:
-                pass
             del self._exit_stacks[server_name]
         self._sessions.pop(server_name, None)
         self._tools_cache.pop(server_name, None)
@@ -798,10 +792,8 @@ class MCPAdapter:
                 await asyncio.wait_for(self._health_task, timeout=5.0)
             except asyncio.TimeoutError:
                 self._health_task.cancel()
-                try:
+                with suppress(asyncio.CancelledError):
                     await self._health_task
-                except asyncio.CancelledError:
-                    pass
             self._health_task = None
 
         for server_name, stack in list(self._exit_stacks.items()):
@@ -830,11 +822,12 @@ class MCPAdapter:
 # Global singleton + async initialization entry point
 # ===================================================================
 
-_mcp_adapter: Optional[MCPAdapter] = None
+_mcp_adapter: MCPAdapter | None = None
 
 
-async def init_mcp_adapter(config_path: str = None, agent_dir: str = None,
-                           global_disabled_servers: set = None) -> MCPAdapter:
+async def init_mcp_adapter(
+    config_path: str | None = None, agent_dir: str | None = None, global_disabled_servers: set | None = None
+) -> MCPAdapter:
     """
     Async initialization of the MCP adapter (global singleton).
     Replaces the old synchronous get_mcp_adapter().
@@ -851,13 +844,12 @@ async def init_mcp_adapter(config_path: str = None, agent_dir: str = None,
     """
     global _mcp_adapter
     if _mcp_adapter is None:
-        _mcp_adapter = MCPAdapter(config_path, agent_dir,
-                                  global_disabled_servers=global_disabled_servers)
+        _mcp_adapter = MCPAdapter(config_path, agent_dir, global_disabled_servers=global_disabled_servers)
         await _mcp_adapter.connect()
     return _mcp_adapter
 
 
-def get_mcp_adapter() -> Optional[MCPAdapter]:
+def get_mcp_adapter() -> MCPAdapter | None:
     """
     Return the already-initialized MCP adapter (sync; only valid after init_mcp_adapter).
     Kept for backward compatibility with any remaining synchronous call sites.

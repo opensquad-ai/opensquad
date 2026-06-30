@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Unified logging setup for OpenSquad.
 
@@ -14,10 +13,13 @@ Usage:
     logger = logging.getLogger(__name__)
     setup_logging(logger, "agent_run.log")
 """
+
+import contextlib
 import logging
 import os
 import sys
 import warnings
+
 from opensquad.safe_rotating_handler import SafeRotatingFileHandler
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -43,10 +45,8 @@ def _ensure_utf8_console() -> None:
     for attr in ("stdout", "stderr"):
         stream = getattr(sys, attr, None)
         if stream is not None and hasattr(stream, "reconfigure"):
-            try:
+            with contextlib.suppress(Exception):
                 stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
 
 
 _ensure_utf8_console()
@@ -59,10 +59,10 @@ def setup_logging(
     logger: logging.Logger,
     log_filename: str = "agent_run.log",
     *,
-    level: str = None,
+    level: str | None = None,
     console: bool = True,
     force: bool = False,
-    log_dir: str = None,  # Optional: specify log directory
+    log_dir: str | None = None,  # Optional: specify log directory
 ):
     """
     Configure a logger with console + rotating file handler.
@@ -97,7 +97,7 @@ def setup_logging(
         fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         datefmt = "%Y-%m-%d %H:%M:%S"
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
+
     # Use provided log_dir if given, otherwise use default
     actual_log_dir = log_dir if log_dir else default_log_dir
 
@@ -210,9 +210,7 @@ def get_tool_call_debug_logger() -> logging.Logger:
         _tc_debug_logger.addHandler(fh)
     except Exception as e:
         _tc_debug_logger.addHandler(logging.NullHandler())
-        logging.getLogger(__name__).error(
-            f"Failed to create tool_call_debug log: {e}"
-        )
+        logging.getLogger(__name__).error(f"Failed to create tool_call_debug log: {e}")
 
     _tc_debug_logger.setLevel(logging.DEBUG)
     return _tc_debug_logger

@@ -1,15 +1,13 @@
-# -*- coding: utf-8 -*-
 """Shared fixtures for OpenSquad unit tests."""
-import json
-import os
-import asyncio
-from unittest.mock import MagicMock, AsyncMock
+
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from opensquad._context import AgentContext, set_current_context
 
-
 # ── P0.5: AgentContext fixture (DI for testability) ─────────────────────
+
 
 @pytest.fixture
 def application_context():
@@ -86,10 +84,12 @@ def application_context():
 @pytest.fixture
 def tmp_file(tmp_path):
     """Return a helper that writes content to a file and returns its path."""
+
     def _make(content: str, filename: str = "test.json"):
         path = tmp_path / filename
         path.write_text(content, encoding="utf-8")
         return str(path)
+
     return _make
 
 

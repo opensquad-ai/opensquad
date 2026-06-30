@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 agent_memory_tool - Agent long-term associative memory system
 

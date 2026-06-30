@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Email Assistant Plugin
 
@@ -13,8 +12,10 @@ Design decisions:
 - Sending uses smtplib.SMTP_SSL (standard library, no extra deps).
 - imapclient is the only third-party dependency.
 """
+
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -23,15 +24,16 @@ import time
 from email import message_from_bytes
 from email.header import decode_header as _decode_header
 from email.utils import parseaddr
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from opensquad.plugin_api import register, tool, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register, tool
 
 logger = logging.getLogger("plugins.email_assistant")
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _decode_str(raw: Any) -> str:
     """Decode an email header value (bytes or str) to plain text."""
@@ -74,6 +76,7 @@ def _extract_plain_text(msg) -> str:
 # Database
 # ---------------------------------------------------------------------------
 
+
 class EmailStorage:
     """SQLite-backed email store."""
 
@@ -101,62 +104,65 @@ class EmailStorage:
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_received ON emails(received_at DESC)")
             self._conn.commit()
 
-    def insert(self, msg_id: str, subject: str, sender: str,
-               recipients: str, date_str: str, body: str) -> bool:
+    def insert(self, msg_id: str, subject: str, sender: str, recipients: str, date_str: str, body: str) -> bool:
         """Insert email; returns True if inserted, False if duplicate."""
         with self._lock:
             try:
                 self._conn.execute(
                     "INSERT INTO emails(msg_id,subject,sender,recipients,date_str,body,received_at)"
                     " VALUES (?,?,?,?,?,?,?)",
-                    (msg_id, subject, sender, recipients, date_str, body, time.time())
+                    (msg_id, subject, sender, recipients, date_str, body, time.time()),
                 )
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:
                 return False  # duplicate
 
-    def list_emails(self, limit: int = 50, offset: int = 0) -> List[Dict]:
+    def list_emails(self, limit: int = 50, offset: int = 0) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT id,msg_id,subject,sender,date_str,received_at"
                 " FROM emails ORDER BY received_at DESC LIMIT ? OFFSET ?",
-                (limit, offset)
+                (limit, offset),
             )
             rows = cur.fetchall()
         return [
-            {"id": r[0], "msg_id": r[1], "subject": r[2],
-             "sender": r[3], "date_str": r[4], "received_at": r[5]}
+            {"id": r[0], "msg_id": r[1], "subject": r[2], "sender": r[3], "date_str": r[4], "received_at": r[5]}
             for r in rows
         ]
 
-    def get_email(self, email_id: int) -> Optional[Dict]:
+    def get_email(self, email_id: int) -> dict | None:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at"
-                " FROM emails WHERE id=?", (email_id,)
+                "SELECT id,msg_id,subject,sender,recipients,date_str,body,received_at FROM emails WHERE id=?",
+                (email_id,),
             )
             r = cur.fetchone()
         if not r:
             return None
         return {
-            "id": r[0], "msg_id": r[1], "subject": r[2], "sender": r[3],
-            "recipients": r[4], "date_str": r[5], "body": r[6], "received_at": r[7]
+            "id": r[0],
+            "msg_id": r[1],
+            "subject": r[2],
+            "sender": r[3],
+            "recipients": r[4],
+            "date_str": r[5],
+            "body": r[6],
+            "received_at": r[7],
         }
 
-    def search_emails(self, query: str, limit: int = 20) -> List[Dict]:
+    def search_emails(self, query: str, limit: int = 20) -> list[dict]:
         like = f"%{query}%"
         with self._lock:
             cur = self._conn.execute(
                 "SELECT id,msg_id,subject,sender,date_str,received_at FROM emails"
                 " WHERE subject LIKE ? OR sender LIKE ? OR body LIKE ?"
                 " ORDER BY received_at DESC LIMIT ?",
-                (like, like, like, limit)
+                (like, like, like, limit),
             )
             rows = cur.fetchall()
         return [
-            {"id": r[0], "msg_id": r[1], "subject": r[2],
-             "sender": r[3], "date_str": r[4], "received_at": r[5]}
+            {"id": r[0], "msg_id": r[1], "subject": r[2], "sender": r[3], "date_str": r[4], "received_at": r[5]}
             for r in rows
         ]
 
@@ -166,15 +172,14 @@ class EmailStorage:
             return cur.fetchone()[0]
 
     def close(self):
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
 # IMAP IDLE listener (background thread)
 # ---------------------------------------------------------------------------
+
 
 class ImapIdleListener(threading.Thread):
     """
@@ -184,19 +189,27 @@ class ImapIdleListener(threading.Thread):
     IDLE is refreshed every 29 minutes to prevent server timeouts.
     """
 
-    IDLE_REFRESH_SECS = 29 * 60   # 29 minutes
-    MAX_BACKOFF_SECS  = 60
+    IDLE_REFRESH_SECS = 29 * 60  # 29 minutes
+    MAX_BACKOFF_SECS = 60
 
-    def __init__(self, host: str, port: int, username: str, password: str,
-                 mailbox: str, storage: EmailStorage, use_ssl: bool = True):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        mailbox: str,
+        storage: EmailStorage,
+        use_ssl: bool = True,
+    ):
         super().__init__(daemon=True, name="email_idle_listener")
-        self._host     = host
-        self._port     = port
+        self._host = host
+        self._port = port
         self._username = username
         self._password = password
-        self._mailbox  = mailbox
-        self._storage  = storage
-        self._use_ssl  = use_ssl
+        self._mailbox = mailbox
+        self._storage = storage
+        self._use_ssl = use_ssl
         self._stop_evt = threading.Event()
 
     def stop(self):
@@ -218,18 +231,15 @@ class ImapIdleListener(threading.Thread):
     def _run_session(self):
         """Open one IMAP connection, do initial fetch, then loop IDLE."""
         try:
-            import imapclient  # noqa: F401 — checked at import time
+            import imapclient
         except ImportError:
-            logger.error("[EmailAssistant] imapclient not installed. "
-                         "Run: pip install imapclient")
+            logger.error("[EmailAssistant] imapclient not installed. Run: pip install imapclient")
             self._stop_evt.wait(30)
             return
 
         import imapclient
 
-        client = imapclient.IMAPClient(
-            self._host, port=self._port, ssl=self._use_ssl, use_uid=True
-        )
+        client = imapclient.IMAPClient(self._host, port=self._port, ssl=self._use_ssl, use_uid=True)
         try:
             client.login(self._username, self._password)
             client.select_folder(self._mailbox, readonly=False)
@@ -263,10 +273,8 @@ class ImapIdleListener(threading.Thread):
                     client.idle()
                     idle_start = time.time()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 client.logout()
-            except Exception:
-                pass
 
     def _fetch_unseen(self, client):
         """Fetch all UNSEEN messages and store them."""
@@ -281,19 +289,23 @@ class ImapIdleListener(threading.Thread):
                     continue
                 try:
                     msg = message_from_bytes(raw)
-                    msg_id   = _decode_str(msg.get("Message-ID", f"<uid-{uid}>")).strip()
-                    subject  = _decode_str(msg.get("Subject", "(no subject)"))
+                    msg_id = _decode_str(msg.get("Message-ID", f"<uid-{uid}>")).strip()
+                    subject = _decode_str(msg.get("Subject", "(no subject)"))
                     from_raw = msg.get("From", "")
                     # Use only the email address part
                     _, sender_addr = parseaddr(from_raw)
-                    sender   = sender_addr or _decode_str(from_raw)
-                    to_raw   = msg.get("To", "")
+                    sender = sender_addr or _decode_str(from_raw)
+                    to_raw = msg.get("To", "")
                     recipients = to_raw
                     date_str = _decode_str(msg.get("Date", ""))
-                    body     = _extract_plain_text(msg)
+                    body = _extract_plain_text(msg)
                     inserted = self._storage.insert(
-                        msg_id=msg_id, subject=subject, sender=sender,
-                        recipients=recipients, date_str=date_str, body=body
+                        msg_id=msg_id,
+                        subject=subject,
+                        sender=sender,
+                        recipients=recipients,
+                        date_str=date_str,
+                        body=body,
                     )
                     if inserted:
                         logger.info(f"[EmailAssistant] New email from {sender}: {subject}")
@@ -306,6 +318,7 @@ class ImapIdleListener(threading.Thread):
 # ---------------------------------------------------------------------------
 # Plugin class
 # ---------------------------------------------------------------------------
+
 
 @register(
     name="email_assistant",
@@ -372,11 +385,10 @@ class ImapIdleListener(threading.Thread):
     tags=["email", "communication"],
 )
 class EmailAssistantPlugin(Plugin):
-
     def __init__(self, context: Context):
         super().__init__(context)
-        self._storage: Optional[EmailStorage] = None
-        self._listener: Optional[ImapIdleListener] = None
+        self._storage: EmailStorage | None = None
+        self._listener: ImapIdleListener | None = None
 
     # ---- lifecycle ----
 
@@ -386,18 +398,18 @@ class EmailAssistantPlugin(Plugin):
         self._storage = EmailStorage(db_path)
 
         imap_host = cfg.get("imap_host", "")
-        username  = cfg.get("username", "")
-        password  = cfg.get("password", "")
+        username = cfg.get("username", "")
+        password = cfg.get("password", "")
 
         if imap_host and username and password:
             self._listener = ImapIdleListener(
-                host     = imap_host,
-                port     = int(cfg.get("imap_port", 993)),
-                username = username,
-                password = password,
-                mailbox  = cfg.get("imap_mailbox", "INBOX"),
-                storage  = self._storage,
-                use_ssl  = bool(cfg.get("imap_ssl", True)),
+                host=imap_host,
+                port=int(cfg.get("imap_port", 993)),
+                username=username,
+                password=password,
+                mailbox=cfg.get("imap_mailbox", "INBOX"),
+                storage=self._storage,
+                use_ssl=bool(cfg.get("imap_ssl", True)),
             )
             self._listener.start()
             logger.info(f"[EmailAssistant] IMAP listener started for {username}@{imap_host}")
@@ -418,13 +430,13 @@ class EmailAssistantPlugin(Plugin):
         name="list_emails",
         description="List recent emails from the inbox. Returns a list with id, subject, sender, date.",
     )
-    def list_emails(self, limit: int = 20, offset: int = 0) -> Dict:
+    def list_emails(self, limit: int = 20, offset: int = 0) -> dict:
         """List recent emails."""
         if not self._storage:
             return {"error": "Email storage not initialized"}
         try:
             emails = self._storage.list_emails(limit=limit, offset=offset)
-            total  = self._storage.count()
+            total = self._storage.count()
             return {"emails": emails, "total": total, "limit": limit, "offset": offset}
         except Exception as e:
             logger.error(f"[EmailAssistant] list_emails error: {e}")
@@ -434,7 +446,7 @@ class EmailAssistantPlugin(Plugin):
         name="read_email",
         description="Read the full content of an email by its id (integer). Returns subject, sender, date, and body.",
     )
-    def read_email(self, email_id: int) -> Dict:
+    def read_email(self, email_id: int) -> dict:
         """Read full email content."""
         if not self._storage:
             return {"error": "Email storage not initialized"}
@@ -451,7 +463,7 @@ class EmailAssistantPlugin(Plugin):
         name="search_emails",
         description="Search emails by keyword (matches subject, sender, or body). Returns a list of matching emails.",
     )
-    def search_emails(self, query: str, limit: int = 20) -> Dict:
+    def search_emails(self, query: str, limit: int = 20) -> dict:
         """Search emails by keyword."""
         if not self._storage:
             return {"error": "Email storage not initialized"}
@@ -466,13 +478,13 @@ class EmailAssistantPlugin(Plugin):
         name="send_email",
         description="Send an email via SMTP. Parameters: to (recipient address), subject, body (plain text).",
     )
-    def send_email(self, to: str, subject: str, body: str) -> Dict:
+    def send_email(self, to: str, subject: str, body: str) -> dict:
         """Send an email via SMTP SSL."""
         cfg = self.context.config
         smtp_host = cfg.get("smtp_host", "")
         smtp_port = int(cfg.get("smtp_port", 465))
-        username  = cfg.get("username", "")
-        password  = cfg.get("password", "")
+        username = cfg.get("username", "")
+        password = cfg.get("password", "")
 
         if not smtp_host:
             return {"error": "SMTP host not configured"}
@@ -484,8 +496,8 @@ class EmailAssistantPlugin(Plugin):
 
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
-        msg["From"]    = username
-        msg["To"]      = to
+        msg["From"] = username
+        msg["To"] = to
 
         try:
             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:

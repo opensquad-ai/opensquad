@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 SubAgentRunner v1.1
 
@@ -18,14 +17,14 @@ v1.1 additions:
 import asyncio
 import logging
 import uuid
-from typing import Optional, Any, Dict
+from typing import Any
 
 from opensquad.events import bus
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 200     # Maximum LLM calls per sub-task
-MAX_DEPTH = 3       # Maximum recursive delegation depth
+MAX_TURNS = 200  # Maximum LLM calls per sub-task
+MAX_DEPTH = 3  # Maximum recursive delegation depth
 TASK_TIMEOUT = 300  # Sub-task total timeout (seconds)
 
 
@@ -33,16 +32,18 @@ TASK_TIMEOUT = 300  # Sub-task total timeout (seconds)
 # SubAgentJobManager -- background task management (supports concurrent sub-agents)
 # ---------------------------------------------------------------------------
 
+
 class _JobEntry:
     """State container for a single background sub-task."""
-    __slots__ = ("job_id", "label", "status", "result", "_asyncio_task")
+
+    __slots__ = ("_asyncio_task", "job_id", "label", "result", "status")
 
     def __init__(self, job_id: str, label: str):
         self.job_id = job_id
-        self.label = label          # Task summary (first 60 chars of task)
-        self.status = "pending"     # pending / running / done / error
-        self.result: Optional[str] = None
-        self._asyncio_task: Optional[asyncio.Task] = None
+        self.label = label  # Task summary (first 60 chars of task)
+        self.status = "pending"  # pending / running / done / error
+        self.result: str | None = None
+        self._asyncio_task: asyncio.Task | None = None
 
 
 class SubAgentJobManager:
@@ -56,7 +57,7 @@ class SubAgentJobManager:
     """
 
     def __init__(self):
-        self._jobs: Dict[str, _JobEntry] = {}
+        self._jobs: dict[str, _JobEntry] = {}
 
     def submit(self, runner: "SubAgentRunner", task: str) -> str:
         """
@@ -93,18 +94,15 @@ class SubAgentJobManager:
         if entry is None:
             return {"job_id": job_id, "status": "not_found", "result": None}
         return {
-            "job_id":  entry.job_id,
-            "label":   entry.label,
-            "status":  entry.status,
-            "result":  entry.result,
+            "job_id": entry.job_id,
+            "label": entry.label,
+            "status": entry.status,
+            "result": entry.result,
         }
 
     def list_jobs(self) -> list:
         """Return a summary list of all active jobs (for debugging or agent progress overview)."""
-        return [
-            {"job_id": e.job_id, "label": e.label, "status": e.status}
-            for e in self._jobs.values()
-        ]
+        return [{"job_id": e.job_id, "label": e.label, "status": e.status} for e in self._jobs.values()]
 
     def cleanup(self, job_id: str) -> bool:
         """Free memory for a completed task. Returns True if cleanup succeeded."""
@@ -120,10 +118,7 @@ class SubAgentJobManager:
 
     def cleanup_done(self) -> int:
         """Bulk-clean all completed/errored tasks; returns the count removed."""
-        done_ids = [
-            jid for jid, e in self._jobs.items()
-            if e.status in ("done", "error")
-        ]
+        done_ids = [jid for jid, e in self._jobs.items() if e.status in ("done", "error")]
         for jid in done_ids:
             del self._jobs[jid]
         return len(done_ids)
@@ -142,7 +137,14 @@ class SubAgentRunner:
         result = await runner.run_task(task_description)
     """
 
-    def __init__(self, chat_api_cfg: dict, tool_registry, delegation_depth: int = 1, sid: Optional[str] = None, sub_task_label: str = ""):
+    def __init__(
+        self,
+        chat_api_cfg: dict,
+        tool_registry,
+        delegation_depth: int = 1,
+        sid: str | None = None,
+        sub_task_label: str = "",
+    ):
         """
         chat_api_cfg: dict containing all parameters needed to instantiate ChatAPI;
             built by delegate.py from the parent agent config.
@@ -176,9 +178,13 @@ class SubAgentRunner:
         provider = cfg.get("api_protocol", "openai")
 
         # Sub-agent system prompt: concise version focused on completing a single task
-        prompt = cfg.get("prompt", "You are a sub-agent focused on completing a single task. Execute the task and return a concise natural-language result when done; do not call any tools after finishing.")
+        prompt = cfg.get(
+            "prompt",
+            "You are a sub-agent focused on completing a single task. Execute the task and return a concise natural-language result when done; do not call any tools after finishing.",
+        )
 
         from opensquad.xml_parser import StreamingTagParser
+
         stream_parser = StreamingTagParser({})
 
         common_kwargs = dict(
@@ -199,12 +205,15 @@ class SubAgentRunner:
 
         if provider in ("claude", "anthropic"):
             from opensquad.claude_api import ClaudeAPI
+
             return ClaudeAPI(**common_kwargs)
         elif provider in ("google", "gemini"):
             from opensquad.google_api import GoogleAPI
+
             return GoogleAPI(**common_kwargs)
         else:
             from opensquad.chat_api import ChatAPI
+
             return ChatAPI(**common_kwargs)
 
     def _get_sub_registry(self):
@@ -228,10 +237,7 @@ class SubAgentRunner:
         logger.info(f"[SubAgentRunner] depth={self.delegation_depth} starting task (len={len(task)}): {task[:100]}...")
 
         try:
-            result = await asyncio.wait_for(
-                self._execute(task),
-                timeout=TASK_TIMEOUT
-            )
+            result = await asyncio.wait_for(self._execute(task), timeout=TASK_TIMEOUT)
             logger.info(f"[SubAgentRunner] depth={self.delegation_depth} task completed, result_len={len(result)}")
             return result
         except asyncio.TimeoutError:
@@ -245,8 +251,9 @@ class SubAgentRunner:
         """Internal execution loop (no timeout wrapper)."""
         import json as _json
         from datetime import datetime as _dt
+
         # Notify frontend that sub-agent has started
-        await self._emit_sub('info', {"message": f"[Sub-Agent] Starting: {self._sub_task_label or task[:80]}"})
+        await self._emit_sub("info", {"message": f"[Sub-Agent] Starting: {self._sub_task_label or task[:80]}"})
 
         # Build an independent ChatAPI instance (reuse if already injected externally, e.g. for mock testing)
         if self._chat_api is None:
@@ -261,14 +268,15 @@ class SubAgentRunner:
                 "tool_call_mode": self.chat_api_cfg.get("tool_call_mode", "auto"),
                 "tool_filter": self.chat_api_cfg.get("tool_filter", "all"),
                 "api_protocol": self.chat_api_cfg.get("api_protocol", "openai"),
-                "model_name": self.chat_api_cfg.get("model", "")
+                "model_name": self.chat_api_cfg.get("model", ""),
             }
         }
-        
+
         # Select strategy using the fake config
         from opensquad.tool_call_strategy import ToolCallStrategySelector
+
         self.tool_call_strategy = ToolCallStrategySelector.select(fake_config, sub_registry)
-        
+
         # Prepare LLM call parameters (this handles both XML and Native FC mode)
         llm_params = self.tool_call_strategy.prepare_llm_call(self._chat_api.get_system_prompt())
         new_sys = llm_params.get("system_prompt")
@@ -293,9 +301,9 @@ class SubAgentRunner:
                         current_input,
                         tools=current_tools,
                         tool_choice=current_tool_choice,
-                        tool_call_strategy=self.tool_call_strategy
+                        tool_call_strategy=self.tool_call_strategy,
                     ),
-                    timeout=120.0
+                    timeout=120.0,
                 )
             except asyncio.TimeoutError:
                 logger.error(f"[SubAgentRunner] LLM call timed out at turn {turn}")
@@ -317,7 +325,7 @@ class SubAgentRunner:
 
             # Parse response
             from opensquad.runner import ResponseParser
-            
+
             # Prioritize tool_data from API strategy (Native FC mode)
             if tool_data_from_api:
                 tool_calls = tool_data_from_api  # List[(name, args)]
@@ -337,11 +345,14 @@ class SubAgentRunner:
                     t_args_json = _json.dumps(t_args, ensure_ascii=False, indent=2) if t_args else "{}"
 
                     # Emit tool_call event to frontend (under parent session)
-                    await self._emit_sub('tool_call', {
-                        "id": call_id,
-                        "name": t_name,
-                        "args": t_args_json,
-                    })
+                    await self._emit_sub(
+                        "tool_call",
+                        {
+                            "id": call_id,
+                            "name": t_name,
+                            "args": t_args_json,
+                        },
+                    )
 
                     # Execute tool
                     try:
@@ -350,22 +361,26 @@ class SubAgentRunner:
                         tool_result = f"Error: tool {t_name} execution failed -- {e}"
 
                     # Emit tool_result event to frontend
-                    await self._emit_sub('tool_result', {
-                        "id": call_id,
-                        "name": t_name,
-                        "args": t_args_json,
-                        "result": tool_result,
-                    })
+                    await self._emit_sub(
+                        "tool_result",
+                        {
+                            "id": call_id,
+                            "name": t_name,
+                            "args": t_args_json,
+                            "result": tool_result,
+                        },
+                    )
 
-                    all_results.append(f"[tool_result name=\"{t_name}\"]\n{tool_result}\n[/tool_result]")
-                
+                    all_results.append(f'[tool_result name="{t_name}"]\n{tool_result}\n[/tool_result]')
+
                 # Combine all tool results as next-turn input
                 current_input = "\n\n".join(all_results)
                 last_text = ""
             else:
                 # No tool call -> extract text, end this turn
                 from opensquad.runner import ResponseParser as RP
-                user_msg = RP.parse_to_user(ai_response) if hasattr(RP, 'parse_to_user') else _extract_text(ai_response)
+
+                user_msg = RP.parse_to_user(ai_response) if hasattr(RP, "parse_to_user") else _extract_text(ai_response)
                 if not user_msg:
                     user_msg = _extract_text(ai_response)
                 last_text = user_msg.strip()
@@ -376,7 +391,7 @@ class SubAgentRunner:
             last_text = f"[Sub-agent produced no final text output within {MAX_TURNS} turns]"
 
         # Notify frontend that sub-agent has finished
-        await self._emit_sub('info', {"message": f"[Sub-Agent] Done: {self._sub_task_label or task[:80]}"})
+        await self._emit_sub("info", {"message": f"[Sub-Agent] Done: {self._sub_task_label or task[:80]}"})
 
         return last_text
 
@@ -397,7 +412,7 @@ class _FilteredRegistry:
         name may be "delegate_task.delegate_task" (full name) or "delegate_task" (namespace).
         """
         # Full name format: ns.fn
-        ns = name.split('.', 1)[0] if '.' in name else name
+        ns = name.split(".", 1)[0] if "." in name else name
         return ns in self._exclude
 
     async def call(self, name: str, args: Any) -> str:
@@ -417,7 +432,7 @@ class _FilteredRegistry:
                 return []
         return [n for n in all_names if not self._is_excluded(n)]
 
-    def get_tool_docs(self, name: str) -> Optional[str]:
+    def get_tool_docs(self, name: str) -> str | None:
         """Proxy tool documentation lookup to the parent registry."""
         if self._is_excluded(name):
             return None
@@ -463,10 +478,7 @@ class _FilteredRegistry:
         except Exception:
             return []
         # Filter out tools whose name starts with an excluded namespace
-        return [
-            t for t in all_tools
-            if not self._is_excluded(t.get("function", {}).get("name", ""))
-        ]
+        return [t for t in all_tools if not self._is_excluded(t.get("function", {}).get("name", ""))]
 
 
 def _get_tool_docs(registry) -> str:
@@ -496,14 +508,27 @@ def _extract_text(response: str) -> str:
     if not response:
         return ""
     import re
+
     text = response
     # Remove thought/plan/think/tool_call/tool_result blocks
-    silent_blocks = ["thought", "plan", "think", "tool_call", "tool_result",
-                     "to_system", "state", "wake", "sleep", "title", "option", "arguments"]
+    silent_blocks = [
+        "thought",
+        "plan",
+        "think",
+        "tool_call",
+        "tool_result",
+        "to_system",
+        "state",
+        "wake",
+        "sleep",
+        "title",
+        "option",
+        "arguments",
+    ]
     for tag in silent_blocks:
         text = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", text, flags=re.DOTALL | re.IGNORECASE)
     # Keep to_user content
-    text = re.sub(r'<to_user\b[^>]*>(.*?)</to_user>', r'\1', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<to_user\b[^>]*>(.*?)</to_user>", r"\1", text, flags=re.DOTALL | re.IGNORECASE)
     # Remove remaining tags
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r"<[^>]+>", "", text)
     return text.strip()

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad Plugin Manager
 
@@ -8,17 +7,20 @@ All plugins must use the new-style decorator API (opensquad.plugin_api).
 Integrates with boot.py to register plugin-provided tools into agent ToolRegistry.
 Provides hook chain execution for runner.py lifecycle hooks.
 """
+
 import importlib
 import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Add opensquad to sys.path if needed
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _root not in sys.path:
     sys.path.insert(0, _root)
+
+import contextlib
 
 from opensquad.system_config import syscfg
 
@@ -43,7 +45,7 @@ class PluginManager:
         ctx = await pm.run_hook("on_message_received", context)
     """
 
-    def __init__(self, plugins_dir: str = None, agent_id: str = ""):
+    def __init__(self, plugins_dir: str | None = None, agent_id: str = ""):
         """
         Args:
             plugins_dir: absolute path to the plugins/ directory.
@@ -62,25 +64,25 @@ class PluginManager:
         #     "hook_map": {hook_name: [bound_method, ...]},
         #     "tool_wrappers": [ToolModuleWrapper, ...],
         # }}
-        self._plugins: Dict[str, Dict[str, Any]] = {}
+        self._plugins: dict[str, dict[str, Any]] = {}
 
         # Cached hook chain: {hook_name: [(priority, plugin_name, bound_method), ...]}
-        self._hook_chain_cache: Optional[Dict[str, List]] = None
+        self._hook_chain_cache: dict[str, list] | None = None
 
         # Hot-reload: track EventBus subscriptions per plugin for clean unload
         # {plugin_name: [(event_type, callback), ...]}
-        self._event_subscriptions: Dict[str, List] = {}
+        self._event_subscriptions: dict[str, list] = {}
 
         # Hot-reload: last known timestamp from .reload_ts file
         self._last_reload_ts: float = 0.0
 
         # Hot-reload: track config.json mtime per plugin for config-change detection
         # {plugin_name: mtime_float}
-        self._config_mtimes: Dict[str, float] = {}
+        self._config_mtimes: dict[str, float] = {}
         # Set of plugin names that need forced unload+reload due to config change
         self._config_reload_needed: set = set()
 
-    def discover_and_load(self) -> List[str]:
+    def discover_and_load(self) -> list[str]:
         """
         Scan plugins/ directory for plugin directories, load each plugin.
 
@@ -111,7 +113,7 @@ class PluginManager:
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as _f:
+                    with open(plugin_json_path, encoding="utf-8") as _f:
                         _pmeta = json.load(_f)
                     if _pmeta.get("service_only"):
                         logger.info(f"[PluginManager] Plugin '{entry}' is service_only, skipping agent load.")
@@ -130,7 +132,7 @@ class PluginManager:
         logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
         return loaded
 
-    def _load_plugin(self, plugin_dir: str, dir_name: str) -> Optional[str]:
+    def _load_plugin(self, plugin_dir: str, dir_name: str) -> str | None:
         """
         Import plugin.py and load the plugin class (must have __plugin_meta__).
         """
@@ -158,7 +160,7 @@ class PluginManager:
     # Plugin loading
     # ------------------------------------------------------------------
 
-    def _load_new_style(self, plugin_class, plugin_dir: str, dir_name: str) -> Optional[str]:
+    def _load_new_style(self, plugin_class, plugin_dir: str, dir_name: str) -> str | None:
         """
         Load a plugin decorated with @register.
 
@@ -172,9 +174,13 @@ class PluginManager:
         7. Call plugin.on_load()
         """
         from opensquad.plugin_api import (
-            Context, ToolModuleWrapper,
-            get_plugin_meta, get_tool_methods, get_hook_methods,
-            get_event_methods, generate_plugin_json,
+            Context,
+            ToolModuleWrapper,
+            generate_plugin_json,
+            get_event_methods,
+            get_hook_methods,
+            get_plugin_meta,
+            get_tool_methods,
         )
 
         meta = get_plugin_meta(plugin_class)
@@ -191,7 +197,7 @@ class PluginManager:
         manifest_path = os.path.join(plugin_dir, "plugin.json")
         if os.path.isfile(manifest_path):
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
+                with open(manifest_path, encoding="utf-8") as f:
                     existing = json.load(f)
                 enabled_flag = existing.get("enabled", True)
                 has_service = bool(existing.get("service"))
@@ -215,6 +221,7 @@ class PluginManager:
         event_bus = None
         try:
             from opensquad.events import bus
+
             event_bus = bus
         except ImportError:
             pass
@@ -231,7 +238,8 @@ class PluginManager:
         if os.path.isfile(persisted_config_path):
             try:
                 import json as _json
-                with open(persisted_config_path, "r", encoding="utf-8") as _f:
+
+                with open(persisted_config_path, encoding="utf-8") as _f:
                     persisted = _json.load(_f)
                 if isinstance(persisted, dict):
                     config_values.update(persisted)
@@ -257,7 +265,7 @@ class PluginManager:
         tool_wrappers = []
         tool_methods = get_tool_methods(plugin_instance)
         if tool_methods:
-            ns_groups: Dict[str, List] = {}
+            ns_groups: dict[str, list] = {}
             for tm in tool_methods:
                 ns = tm["meta"]["name"]
                 if ns not in ns_groups:
@@ -277,11 +285,13 @@ class PluginManager:
                         bound_method=tm["bound_method"],
                         doc=tm["bound_method"].__doc__ or "",
                     )
-                tool_wrappers.append({
-                    "wrapper": wrapper,
-                    "namespace": ns,
-                    "meta": methods[0]["meta"],
-                })
+                tool_wrappers.append(
+                    {
+                        "wrapper": wrapper,
+                        "namespace": ns,
+                        "meta": methods[0]["meta"],
+                    }
+                )
 
         # Scan @hook methods
         hook_map = get_hook_methods(plugin_instance)
@@ -292,11 +302,8 @@ class PluginManager:
             self._event_subscriptions[name] = []
             for em in event_methods:
                 event_bus.subscribe(em["event_type"], em["bound_method"])
-                self._event_subscriptions[name].append(
-                    (em["event_type"], em["bound_method"])
-                )
-                logger.info(f"[PluginManager] Plugin '{name}': subscribed to "
-                            f"EventBus '{em['event_type']}'")
+                self._event_subscriptions[name].append((em["event_type"], em["bound_method"]))
+                logger.info(f"[PluginManager] Plugin '{name}': subscribed to EventBus '{em['event_type']}'")
 
         # Auto-generate plugin.json
         generated = generate_plugin_json(plugin_class, plugin_instance)
@@ -309,20 +316,22 @@ class PluginManager:
                 for pt in proxy_tools:
                     pt_name = pt.get("name", "")
                     if pt_name and pt_name not in existing_names:
-                        generated.setdefault("tools", []).append({
-                            "name": pt_name,
-                            "module": "proxy",
-                            "level": pt.get("level", "extended"),
-                            "auto_register": pt.get("auto_register", False),
-                            "requires_agent_id": pt.get("requires_agent_id", False),
-                        })
+                        generated.setdefault("tools", []).append(
+                            {
+                                "name": pt_name,
+                                "module": "proxy",
+                                "level": pt.get("level", "extended"),
+                                "auto_register": pt.get("auto_register", False),
+                                "requires_agent_id": pt.get("requires_agent_id", False),
+                            }
+                        )
             except Exception as e:
                 logger.debug(f"[PluginManager] get_tool_modules() failed for '{name}': {e}")
 
         # Preserve runtime-only fields from existing file (not declared in @register)
         if os.path.isfile(manifest_path):
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
+                with open(manifest_path, encoding="utf-8") as f:
                     existing = json.load(f)
                 generated["enabled"] = existing.get("enabled", generated.get("enabled", True))
                 # Preserve service field (process management) - not part of @register metadata
@@ -343,7 +352,7 @@ class PluginManager:
             # Merge strategy: generated content (from @register metadata) is merged with
             # existing file, so runtime fields (service, service_toggle) are never lost.
             if os.path.isfile(manifest_path):
-                with open(manifest_path, "r", encoding="utf-8") as f:
+                with open(manifest_path, encoding="utf-8") as f:
                     existing_manifest = json.load(f)
                 # Overlay generated metadata on top of existing, preserving runtime keys
                 merged = existing_manifest.copy()
@@ -373,14 +382,10 @@ class PluginManager:
         plugin_instance.on_load()
 
         # Record initial config.json mtime so check_reload_needed() can detect future changes
-        persisted_config_path_for_mtime = os.path.join(
-            project_root, "data", "plugins", name, "config.json"
-        )
+        persisted_config_path_for_mtime = os.path.join(project_root, "data", "plugins", name, "config.json")
         if os.path.isfile(persisted_config_path_for_mtime):
-            try:
+            with contextlib.suppress(Exception):
                 self._config_mtimes[name] = os.path.getmtime(persisted_config_path_for_mtime)
-            except Exception:
-                pass
 
         self._plugins[name] = {
             "plugin": plugin_instance,
@@ -390,18 +395,24 @@ class PluginManager:
             "tool_wrappers": tool_wrappers,
         }
 
-        logger.info(f"[PluginManager] Loaded: {name} v{meta.get('version', '?')} "
-                     f"(type={plugin_type}, tools={len(tool_wrappers)}, "
-                     f"hooks={list(hook_map.keys())}, events={len(event_methods)})")
+        logger.info(
+            f"[PluginManager] Loaded: {name} v{meta.get('version', '?')} "
+            f"(type={plugin_type}, tools={len(tool_wrappers)}, "
+            f"hooks={list(hook_map.keys())}, events={len(event_methods)})"
+        )
         return name
 
     # ------------------------------------------------------------------
     # Tool registration
     # ------------------------------------------------------------------
 
-    def register_tools_to_agent(self, registry, agent_id: str,
-                                agent_tool_names: List[str] = None,
-                                agent_tool_levels: Dict[str, str] = None) -> int:
+    def register_tools_to_agent(
+        self,
+        registry,
+        agent_id: str,
+        agent_tool_names: list[str] | None = None,
+        agent_tool_levels: dict[str, str] | None = None,
+    ) -> int:
         """
         Register plugin-provided tools to an agent's ToolRegistry.
 
@@ -436,9 +447,9 @@ class PluginManager:
                 namespace = tw["namespace"]
                 meta = tw["meta"]
                 # Per-agent level override takes precedence over plugin default
-                level = agent_tool_levels.get(namespace,
-                        agent_tool_levels.get(plugin_name,
-                        meta.get("level", "extended")))
+                level = agent_tool_levels.get(
+                    namespace, agent_tool_levels.get(plugin_name, meta.get("level", "extended"))
+                )
                 auto_register = meta.get("auto_register", False)
                 enabled_by_namespace = namespace in agent_tool_names
 
@@ -452,8 +463,9 @@ class PluginManager:
 
                 registry.register(wrapper, namespace, level=level)
                 count += 1
-                logger.info(f"[PluginManager] Registered tool '{namespace}' from "
-                            f"plugin '{plugin_name}' (level={level})")
+                logger.info(
+                    f"[PluginManager] Registered tool '{namespace}' from plugin '{plugin_name}' (level={level})"
+                )
 
             # 2) Also check get_tool_modules() for proxy-pattern tools
             if hasattr(plugin, "get_tool_modules"):
@@ -461,9 +473,9 @@ class PluginManager:
                     tool_name = desc.get("name", "")
                     module = desc.get("module")
                     # Per-agent level override takes precedence over plugin default
-                    level = agent_tool_levels.get(tool_name,
-                            agent_tool_levels.get(plugin_name,
-                            desc.get("level", "extended")))
+                    level = agent_tool_levels.get(
+                        tool_name, agent_tool_levels.get(plugin_name, desc.get("level", "extended"))
+                    )
                     auto_register = desc.get("auto_register", False)
                     requires_agent_id = desc.get("requires_agent_id", False)
                     enabled_by_tool_name = tool_name in agent_tool_names
@@ -486,8 +498,10 @@ class PluginManager:
                         module.set_agent_id(agent_id)
 
                     count += 1
-                    logger.info(f"[PluginManager] Registered tool '{tool_name}' from "
-                                f"plugin '{plugin_name}' (proxy, level={level})")
+                    logger.info(
+                        f"[PluginManager] Registered tool '{tool_name}' from "
+                        f"plugin '{plugin_name}' (proxy, level={level})"
+                    )
 
         return count
 
@@ -495,7 +509,7 @@ class PluginManager:
     # Hook chain execution
     # ------------------------------------------------------------------
 
-    def _build_hook_chain(self) -> Dict[str, List]:
+    def _build_hook_chain(self) -> dict[str, list]:
         """
         Build the hook chain from all loaded plugins.
 
@@ -504,7 +518,7 @@ class PluginManager:
             sorted by (-priority, plugin_name) so higher-priority handlers run first,
             with alphabetical plugin name as the tiebreaker.
         """
-        chain: Dict[str, List] = {}
+        chain: dict[str, list] = {}
 
         for name in sorted(self._plugins.keys()):
             hook_map = self._plugins[name].get("hook_map", {})
@@ -525,7 +539,7 @@ class PluginManager:
 
         return chain
 
-    async def run_hook(self, hook_name: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def run_hook(self, hook_name: str, context: dict[str, Any]) -> dict[str, Any]:
         """
         Execute a hook across all registered plugins (chain pattern).
 
@@ -550,11 +564,11 @@ class PluginManager:
             try:
                 context = await method(context)
             except Exception as e:
-                logger.error(f"[PluginManager] Hook '{hook_name}' error in plugin "
-                             f"'{plugin_name}': {e}", exc_info=True)
+                logger.error(f"[PluginManager] Hook '{hook_name}' error in plugin '{plugin_name}': {e}", exc_info=True)
             if context.get("__stop__"):
-                logger.info(f"[PluginManager] Hook '{hook_name}' chain stopped by "
-                            f"plugin '{plugin_name}' (priority={priority})")
+                logger.info(
+                    f"[PluginManager] Hook '{hook_name}' chain stopped by plugin '{plugin_name}' (priority={priority})"
+                )
                 break
 
         return context
@@ -563,40 +577,38 @@ class PluginManager:
     # Query methods
     # ------------------------------------------------------------------
 
-    def get_plugin(self, name: str) -> Optional[Any]:
+    def get_plugin(self, name: str) -> Any | None:
         """Get a loaded plugin by name."""
         info = self._plugins.get(name)
         return info["plugin"] if info else None
 
-    def get_all_plugins(self) -> Dict[str, Any]:
+    def get_all_plugins(self) -> dict[str, Any]:
         """Return all loaded plugins as {name: plugin_instance}."""
         return {name: info["plugin"] for name, info in self._plugins.items()}
 
-    def get_plugins_by_type(self, plugin_type: str) -> List[Any]:
+    def get_plugins_by_type(self, plugin_type: str) -> list[Any]:
         """Return all loaded plugins of a specific type."""
-        return [
-            info["plugin"]
-            for info in self._plugins.values()
-            if info["metadata"].get("type") == plugin_type
-        ]
+        return [info["plugin"] for info in self._plugins.values() if info["metadata"].get("type") == plugin_type]
 
-    def get_plugin_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+    def get_plugin_metadata(self, name: str) -> dict[str, Any] | None:
         """Get the plugin.json metadata for a plugin."""
         info = self._plugins.get(name)
         return info["metadata"] if info else None
 
-    def list_plugins(self) -> List[Dict[str, str]]:
+    def list_plugins(self) -> list[dict[str, str]]:
         """Return a summary list of all loaded plugins."""
         result = []
         for name, info in self._plugins.items():
             meta = info["metadata"]
-            result.append({
-                "name": name,
-                "display_name": meta.get("display_name", name),
-                "version": meta.get("version", "0.0.0"),
-                "type": meta.get("type", ""),
-                "description": meta.get("description", ""),
-            })
+            result.append(
+                {
+                    "name": name,
+                    "display_name": meta.get("display_name", name),
+                    "version": meta.get("version", "0.0.0"),
+                    "type": meta.get("type", ""),
+                    "description": meta.get("description", ""),
+                }
+            )
         return result
 
     # ------------------------------------------------------------------
@@ -632,6 +644,7 @@ class PluginManager:
         if name in self._event_subscriptions:
             try:
                 from opensquad.events import bus
+
                 for event_type, callback in self._event_subscriptions[name]:
                     bus.unsubscribe(event_type, callback)
                     logger.debug(f"[PluginManager] Unsubscribed '{name}' from '{event_type}'")
@@ -659,8 +672,9 @@ class PluginManager:
         logger.info(f"[PluginManager] Unloaded plugin '{name}'")
         return True
 
-    def reload_plugins(self, registry=None, agent_id: str = "",
-                       agent_tool_names: List[str] = None) -> Dict[str, str]:
+    def reload_plugins(
+        self, registry=None, agent_id: str = "", agent_tool_names: list[str] | None = None
+    ) -> dict[str, str]:
         """
         Compare disk plugin.json enabled state vs in-memory _plugins.
         Unload newly-disabled plugins, load newly-enabled plugins.
@@ -703,7 +717,7 @@ class PluginManager:
 
             if os.path.isfile(manifest_path):
                 try:
-                    with open(manifest_path, "r", encoding="utf-8") as f:
+                    with open(manifest_path, encoding="utf-8") as f:
                         manifest = json.load(f)
                     # service_only plugins are never loaded into agents
                     if manifest.get("service_only"):
@@ -759,7 +773,9 @@ class PluginManager:
                                 module = desc.get("module")
                                 level = desc.get("level", "extended")
                                 req_aid = desc.get("requires_agent_id", False)
-                                if (desc.get("auto_register") or plugin_enabled_by_name or t_name in agent_tool_names) and module:
+                                if (
+                                    desc.get("auto_register") or plugin_enabled_by_name or t_name in agent_tool_names
+                                ) and module:
                                     registry.register(module, t_name, level=level)
                                     if req_aid and hasattr(module, "set_agent_id") and agent_id:
                                         module.set_agent_id(agent_id)
@@ -767,13 +783,11 @@ class PluginManager:
                     if loaded_name:
                         result["loaded"].append(loaded_name)
                 except Exception as e:
-                    logger.error(f"[PluginManager] Failed to reload plugin '{name}': {e}",
-                                 exc_info=True)
+                    logger.error(f"[PluginManager] Failed to reload plugin '{name}': {e}", exc_info=True)
 
         if result["loaded"] or result["unloaded"]:
             self._hook_chain_cache = None
-            logger.info(f"[PluginManager] Reload complete: loaded={result['loaded']}, "
-                        f"unloaded={result['unloaded']}")
+            logger.info(f"[PluginManager] Reload complete: loaded={result['loaded']}, unloaded={result['unloaded']}")
 
         return result
 
@@ -802,9 +816,7 @@ class PluginManager:
         # Check per-plugin config.json mtime for already-loaded plugins
         project_root = os.path.dirname(self.plugins_dir)
         for plugin_name in list(self._plugins.keys()):
-            config_path = os.path.join(
-                project_root, "data", "plugins", plugin_name, "config.json"
-            )
+            config_path = os.path.join(project_root, "data", "plugins", plugin_name, "config.json")
             if not os.path.isfile(config_path):
                 continue
             try:
@@ -817,8 +829,7 @@ class PluginManager:
                         # (i.e., this is a genuine update, not first-time discovery)
                         self._config_reload_needed.add(plugin_name)
                         logger.info(
-                            f"[PluginManager] Config change detected for '{plugin_name}', "
-                            f"scheduling force-reload"
+                            f"[PluginManager] Config change detected for '{plugin_name}', scheduling force-reload"
                         )
                         needed = True
             except Exception:

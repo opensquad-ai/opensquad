@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -67,7 +66,9 @@ class LlmCallOrchestrator:
             if audio_paths:
                 current_input += "\n\n[Audio attachment paths]\n" + "\n".join(audio_paths)
                 await self.runner._emit("info", f"Received {len(audio_paths)} audio file(s)")
-                current_input += "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                current_input += (
+                    "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                )
             if video_paths:
                 current_input += "\n\n[Video attachment paths]\n" + "\n".join(video_paths)
                 await self.runner._emit("info", f"Received {len(video_paths)} video file(s)")
@@ -102,6 +103,7 @@ class LlmCallOrchestrator:
 
     async def call_llm(self, prepared: LlmPreparedCall) -> Any:
         from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         llm_timeout = getattr(self.runner.chat_api, "timeout", 30.0)
         asyncio_timeout = llm_timeout + 15.0
@@ -125,15 +127,29 @@ class LlmCallOrchestrator:
             await self.runner._emit("status", "LLM API response timed out, please try again later")
             await self.runner._emit(
                 "error",
-                {"message": f"LLM API call timed out after {asyncio_timeout}s. Please check your network or try again later."},
+                {
+                    "message": f"LLM API call timed out after {asyncio_timeout}s. Please check your network or try again later."
+                },
             )
             elapsed_ms = int((__import__("time").perf_counter() - t0) * 1000)
-            perf_event("runner", "llm_call_done", agent_id=getattr(self.runner, "_agent_id", ""), elapsed_ms=elapsed_ms, error="timeout")
+            perf_event(
+                "runner",
+                "llm_call_done",
+                agent_id=getattr(self.runner, "_agent_id", ""),
+                elapsed_ms=elapsed_ms,
+                error="timeout",
+            )
             raise
         except Exception as exc:
             err_msg = str(exc)
             elapsed_ms = int((__import__("time").perf_counter() - t0) * 1000)
-            perf_event("runner", "llm_call_done", agent_id=getattr(self.runner, "_agent_id", ""), elapsed_ms=elapsed_ms, error=str(exc)[:80])
+            perf_event(
+                "runner",
+                "llm_call_done",
+                agent_id=getattr(self.runner, "_agent_id", ""),
+                elapsed_ms=elapsed_ms,
+                error=str(exc)[:80],
+            )
             if "401" in err_msg or "Unauthorized" in err_msg or "invalid api key" in err_msg.lower():
                 friendly = (
                     "LLM API authentication failed (HTTP 401). "
@@ -169,7 +185,9 @@ class LlmCallOrchestrator:
                 "text": "Context auto-compacted",
                 "summary": summary,
             }
-            self.runner._session_manager.add_event("info", summary_event, turn_id=self.runner._current_turn, round_id=self.runner._current_round)
+            self.runner._session_manager.add_event(
+                "info", summary_event, turn_id=self.runner._current_turn, round_id=self.runner._current_round
+            )
             self.runner._session_manager.add_message("system", summary, msg_type="context_summary")
             self.runner._session_manager.session_data["latest_summary"] = summary
             await self.runner._emit("info", summary_event)
@@ -279,7 +297,9 @@ class LlmCallOrchestrator:
         attachment_lines = []
         for attachment in self.runner._current_attachments:
             if isinstance(attachment, dict):
-                name = attachment.get("original_name") or attachment.get("filename") or attachment.get("name") or "unknown"
+                name = (
+                    attachment.get("original_name") or attachment.get("filename") or attachment.get("name") or "unknown"
+                )
                 path = attachment.get("path") or attachment.get("url") or ""
                 media_type = attachment.get("type")
                 if not media_type:

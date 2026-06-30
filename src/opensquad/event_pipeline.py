@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Event Pipeline v1.0 — Unified external event buffer
 
@@ -15,12 +14,13 @@ so the LLM sees accumulated events in the same inner-loop turn.
 This enables the "never stop" architecture:
   LLM → tool call → drain pipeline → LLM sees events → continues inner loop
 """
+
 import logging
 import threading
 import time
 from collections import deque
-from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PipelineEvent:
     """A single event in the pipeline."""
-    source: str       # "web" | "group" | "dm" | "timer" | "task_watch" | "custom"
+
+    source: str  # "web" | "group" | "dm" | "timer" | "task_watch" | "custom"
     content: str
     timestamp: float = field(default_factory=time.time)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def format_for_llm(self) -> str:
         """Format this event for LLM consumption."""
@@ -66,7 +67,7 @@ class EventPipeline:
         self._lock = threading.Lock()
         self._stats = {"pushed": 0, "drained": 0}
 
-    def push_nowait(self, source: str, content: str, metadata: Dict[str, Any] = None):
+    def push_nowait(self, source: str, content: str, metadata: dict[str, Any] | None = None):
         """Sync push (non-async). Safe to call from sync code like input_hub.push()."""
         evt = PipelineEvent(
             source=source,
@@ -78,7 +79,7 @@ class EventPipeline:
         self._stats["pushed"] += 1
         logger.debug(f"[EventPipeline] Pushed: {source} - {content[:80]}")
 
-    def drain_sync(self) -> List[PipelineEvent]:
+    def drain_sync(self) -> list[PipelineEvent]:
         """Sync drain. Thread-safe, for use from sync code paths."""
         with self._lock:
             events = list(self._events)
@@ -98,7 +99,7 @@ class EventPipeline:
         lines.append("--- End External Events ---")
         return "\n".join(lines)
 
-    async def push(self, source: str, content: str, metadata: Dict[str, Any] = None):
+    async def push(self, source: str, content: str, metadata: dict[str, Any] | None = None):
         """Push an event into the pipeline."""
         evt = PipelineEvent(
             source=source,
@@ -111,7 +112,7 @@ class EventPipeline:
         self._has_events.set()
         logger.debug(f"[EventPipeline] Pushed: {source} — {content[:80]}")
 
-    async def drain(self) -> List[PipelineEvent]:
+    async def drain(self) -> list[PipelineEvent]:
         """
         Drain all accumulated events. Called by tool execution path
         before returning results to LLM.
@@ -145,7 +146,7 @@ class EventPipeline:
         return len(self._events)
 
     @property
-    def stats(self) -> Dict:
+    def stats(self) -> dict:
         return dict(self._stats)
 
 
@@ -159,5 +160,6 @@ def get_event_pipeline(ctx=None):
     if ctx is not None:
         return ctx.event_pipeline
     from opensquad._context import get_current_context
+
     ctx = get_current_context()
     return ctx.event_pipeline if ctx is not None else event_pipeline

@@ -1,10 +1,11 @@
-# -*- coding: utf-8 -*-
 """opensquad start — Start all OpenSquad services (gateway, registry, frontend, launcher)."""
+
+import contextlib
 import json
 import os
-import sys
-import subprocess
 import signal
+import subprocess
+import sys
 import time
 
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
@@ -13,7 +14,7 @@ _DEFAULT_VITE_PORT = 5173
 
 def _get_managed_ports(syscfg):
     """Return tuple of all OpenSquad-managed ports from configuration."""
-    _vite_port = syscfg.port("frontend") if hasattr(syscfg, 'port') else _DEFAULT_VITE_PORT
+    _vite_port = syscfg.port("frontend") if hasattr(syscfg, "port") else _DEFAULT_VITE_PORT
     return (
         syscfg.port("gateway"),
         syscfg.port("launcher"),
@@ -26,6 +27,7 @@ def _get_managed_ports(syscfg):
 def _find_python():
     """Find a usable Python interpreter (handles pip console_scripts .exe wrappers on Windows)."""
     import shutil
+
     # Prefer sys.executable — it's the actual python that's running right now
     exe = sys.executable
     if exe and os.path.isfile(exe):
@@ -52,6 +54,7 @@ def _find_python():
 def _find_npm():
     """Find npm executable."""
     import shutil
+
     path = shutil.which("npm")
     return path or "npm"
 
@@ -64,7 +67,8 @@ def _kill_tree(pid: int) -> None:
         if sys.platform == "win32":
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, check=False,
+                capture_output=True,
+                check=False,
             )
         else:
             try:
@@ -86,24 +90,26 @@ def _kill_port_owners(*ports: int) -> None:
     if sys.platform == "win32":
         # 1st: PowerShell Get-NetTCPConnection — reads kernel socket table directly, PID is accurate
         ps_cmd = (
-            f'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue '
-            f'| Where-Object {{ $_.LocalPort -in @({",".join(str(p) for p in ports)}) }} '
-            f'| ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}'
+            f"Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue "
+            f"| Where-Object {{ $_.LocalPort -in @({','.join(str(p) for p in ports)}) }} "
+            f"| ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
         )
-        try:
+        with contextlib.suppress(Exception):
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True, timeout=15,
+                capture_output=True,
+                timeout=15,
             )
-        except Exception:
-            pass
 
         # 2nd: netstat fallback (for older Windows without Get-NetTCPConnection)
         for port in ports:
             try:
                 result = subprocess.run(
                     f'netstat -ano | findstr ":{port} " | findstr "LISTENING"',
-                    shell=True, capture_output=True, text=True, timeout=10,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 )
                 for line in result.stdout.strip().splitlines():
                     parts = line.split()
@@ -113,7 +119,9 @@ def _kill_port_owners(*ports: int) -> None:
                         if pid.isdigit() and pid != "0":
                             subprocess.run(
                                 ["taskkill", "/F", "/PID", pid],
-                                capture_output=True, check=False, timeout=10,
+                                capture_output=True,
+                                check=False,
+                                timeout=10,
                             )
             except Exception:
                 pass
@@ -124,20 +132,21 @@ def _kill_port_owners(*ports: int) -> None:
         try:
             result = subprocess.run(
                 ["lsof", "-ti", f":{port}"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             for pid in result.stdout.strip().splitlines():
                 if pid.strip() and pid.strip().isdigit():
                     subprocess.run(["kill", "-9", pid.strip()], capture_output=True, timeout=10)
         except FileNotFoundError:
             # Fallback to fuser
-            try:
+            with contextlib.suppress(Exception):
                 subprocess.run(
                     ["fuser", "-k", f"{port}/tcp"],
-                    capture_output=True, timeout=10,
+                    capture_output=True,
+                    timeout=10,
                 )
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -149,7 +158,7 @@ def _setup_local_mode(_root):
 
     if os.path.isfile(cfg_path):
         try:
-            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            with open(cfg_path, encoding="utf-8-sig") as f:
                 cfg = json.load(f)
             cfg.setdefault("hosts", {})["gateway"] = "0.0.0.0"
             with open(cfg_path, "w", encoding="utf-8") as f:
@@ -158,13 +167,13 @@ def _setup_local_mode(_root):
         except Exception as e:
             print(f"[start] Warning: Failed to update system_config.json: {e}")
 
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(
             [_find_python(), os.path.join(_root, "scripts", "update_workspace_config.py"), "0.0.0.0"],
-            cwd=_root, capture_output=True, timeout=10,
+            cwd=_root,
+            capture_output=True,
+            timeout=10,
         )
-    except Exception:
-        pass
 
     frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
     env_local = os.path.join(frontend_dir, ".env.local")
@@ -177,7 +186,7 @@ def _setup_local_mode(_root):
             candidate = os.path.join(search_dir, "system_config.json")
             if os.path.isfile(candidate):
                 try:
-                    with open(candidate, "r", encoding="utf-8") as scf:
+                    with open(candidate, encoding="utf-8") as scf:
                         sc = json.load(scf)
                     gateway_port = sc.get("ports", {}).get("gateway")
                     if gateway_port is not None:
@@ -189,13 +198,13 @@ def _setup_local_mode(_root):
             last_ws_file = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
             if os.path.isfile(last_ws_file):
                 try:
-                    with open(last_ws_file, "r", encoding="utf-8") as lwf:
+                    with open(last_ws_file, encoding="utf-8") as lwf:
                         lw = json.load(lwf)
                     ws_path = lw.get("last_workspace")
                     if ws_path:
                         scfp = os.path.join(ws_path, "system_config.json")
                         if os.path.isfile(scfp):
-                            with open(scfp, "r", encoding="utf-8") as scf:
+                            with open(scfp, encoding="utf-8") as scf:
                                 sc = json.load(scf)
                             gateway_port = sc.get("ports", {}).get("gateway")
                 except Exception:
@@ -212,7 +221,7 @@ def _setup_local_mode(_root):
 
 def _popen_opts(args):
     """Build subprocess.Popen kwargs based on verbose flag."""
-    if getattr(args, 'verbose', False):
+    if getattr(args, "verbose", False):
         # Show all logs in the same console (inherit stdout/stderr)
         return {"stderr": None, "stdout": None}
     else:
@@ -253,13 +262,13 @@ def run_start(args):
     _t_before_local = time.perf_counter()
     _setup_local_mode(_root)
     _t_after_local = time.perf_counter()
-    print(f"[start.timing] _setup_local_mode: {(_t_after_local - _t_before_local)*1000:.0f}ms")
+    print(f"[start.timing] _setup_local_mode: {(_t_after_local - _t_before_local) * 1000:.0f}ms")
 
     # 启动前先清理残留端口（防止上次未正常退出导致端口占用）
     _t_before_kill = time.perf_counter()
     _kill_port_owners(*_get_managed_ports(syscfg))
     _t_after_kill = time.perf_counter()
-    print(f"[start.timing] _kill_port_owners: {(_t_after_kill - _t_before_kill)*1000:.0f}ms")
+    print(f"[start.timing] _kill_port_owners: {(_t_after_kill - _t_before_kill) * 1000:.0f}ms")
 
     processes = []
 
@@ -327,7 +336,7 @@ def run_start(args):
             except Exception as e:
                 print(f"[start] Warning: Failed to start frontend: {e}")
         else:
-            print(f"[start] [3/4] Skipping Frontend (package.json not found)")
+            print("[start] [3/4] Skipping Frontend (package.json not found)")
 
     # [4/4] Start launcher (agent management, port 9600)
     if not args.no_launcher:
@@ -338,7 +347,8 @@ def run_start(args):
 
         print(f"[start] [4/4] Starting Launcher (port {launcher_port})...")
         p = subprocess.Popen(
-            launcher_cmd, cwd=_root,
+            launcher_cmd,
+            cwd=_root,
             **popts,
         )
         processes.append(("launcher", p))
@@ -356,15 +366,19 @@ def run_start(args):
             # Give the other services a few seconds to bind their ports before
             # the watchdog starts its first check.
             time.sleep(2)
-            print(f"[start] [5/5] Starting Health-Check Watchdog...")
+            print("[start] [5/5] Starting Health-Check Watchdog...")
             wd_cmd = [
-                python_exe, watchdog_script,
-                "--workspace", workspace,
-                "--interval", "15",
+                python_exe,
+                watchdog_script,
+                "--workspace",
+                workspace,
+                "--interval",
+                "15",
             ]
             try:
                 wd_p = subprocess.Popen(
-                    wd_cmd, cwd=_root,
+                    wd_cmd,
+                    cwd=_root,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,  # capture stderr for crash diagnostics
                     text=True,
@@ -379,26 +393,28 @@ def run_start(args):
         return
 
     print(f"\n{'=' * 50}")
-    print(f"  OpenSquad All-in-One (Local Mode)")
+    print("  OpenSquad All-in-One (Local Mode)")
     print(f"{'=' * 50}")
     print(f"  Gateway Backend : http://127.0.0.1:{args.port or syscfg.port('gateway')}")
     print(f"  Plugin Registry : http://127.0.0.1:{syscfg.port('registry')}")
     print(f"  Frontend Dev    : http://127.0.0.1:{_VITE_DEV_PORT}")
     print(f"  Launcher        : http://127.0.0.1:{launcher_port}")
-    print(f"  Watchdog        : health-checking (15s interval)")
+    print("  Watchdog        : health-checking (15s interval)")
     print(f"{'=' * 50}")
     print(f"\n[start] {len(processes)} service(s) running. Press Ctrl+C to stop.\n")
 
     # ── Health check: wait briefly then verify ports ──
     _check_ports = {
-        "gateway":       gateway_port,
-        "registry":      syscfg.port("registry"),
-        "frontend":      _VITE_DEV_PORT,
-        "launcher":      launcher_port,
-        "external_api":  syscfg.port("external_adapter"),
+        "gateway": gateway_port,
+        "registry": syscfg.port("registry"),
+        "frontend": _VITE_DEV_PORT,
+        "launcher": launcher_port,
+        "external_api": syscfg.port("external_adapter"),
     }
     print("[start] Waiting for services to bind ports...")
-    import time as _time, socket as _socket
+    import socket as _socket
+    import time as _time
+
     max_wait = 30
     _time.sleep(3)
     for name, port in _check_ports.items():
@@ -415,7 +431,7 @@ def run_start(args):
         if ok:
             print(f"  \u2705 {name}: port {port} ready")
         else:
-            print(f"  \u274C {name}: port {port} FAILED to start ({max_wait}s timeout)")
+            print(f"  \u274c {name}: port {port} FAILED to start ({max_wait}s timeout)")
 
     # ── Shutdown state ──
     _shutting_down = False
@@ -425,7 +441,7 @@ def run_start(args):
         if _shutting_down:
             return
         _shutting_down = True
-        print(f"\n[start] Ctrl+C received, shutting down all services...")
+        print("\n[start] Ctrl+C received, shutting down all services...")
         for name, p in processes:
             _kill_tree(p.pid)
             print(f"[start] {name} (PID {p.pid}) killed.")
@@ -486,7 +502,8 @@ def run_start(args):
                             cmd, cwd = _launch_info.get(name, (None, None))
                             if cmd:
                                 new_p = subprocess.Popen(
-                                    cmd, cwd=cwd,
+                                    cmd,
+                                    cwd=cwd,
                                     **popts,
                                 )
                                 for i, (n, _) in enumerate(processes):
@@ -501,7 +518,7 @@ def run_start(args):
             time.sleep(1)
     except KeyboardInterrupt:
         if not _shutting_down:
-            print(f"\n[start] Ctrl+C received, shutting down all services...")
+            print("\n[start] Ctrl+C received, shutting down all services...")
             for name, p in processes:
                 _kill_tree(p.pid)
                 print(f"[start] {name} (PID {p.pid}) killed.")

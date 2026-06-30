@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Regression tests for telegram adapter preflight (issue #42).
 
 A deployment tester reported that the telegram adapter failed at startup
@@ -19,19 +18,16 @@ the first ``getMe`` retry and emits clear, actionable log lines:
 These tests pin both halves of the contract and exercise every branch
 of the warning-vs-error decision tree.
 """
+
 from __future__ import annotations
 
 import logging
-from unittest.mock import patch, MagicMock
-
-import pytest
-
+from unittest.mock import MagicMock, patch
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _make_cfg(name="bot", bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg",
-              agent_id="default-001", proxy=""):
+def _make_cfg(name="bot", bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg", agent_id="default-001", proxy=""):
     """Build a minimal TelegramBotConfig-like object for preflight tests."""
     cfg = MagicMock()
     cfg.name = name
@@ -47,8 +43,7 @@ def _make_cfg(name="bot", bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcde
 def test_validate_accepts_real_token_and_agent_id(caplog):
     from plugins.telegram.adapter import _validate_bot_configs
 
-    cfg = _make_cfg(bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg",
-                    agent_id="coder-001")
+    cfg = _make_cfg(bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg", agent_id="coder-001")
 
     with caplog.at_level(logging.WARNING, logger="plugins.telegram.adapter"):
         ok = _validate_bot_configs([cfg])
@@ -111,8 +106,7 @@ def test_validate_warns_on_malformed_but_non_placeholder_token(caplog):
 def test_validate_returns_false_if_any_bot_fails(caplog):
     from plugins.telegram.adapter import _validate_bot_configs
 
-    good = _make_cfg(name="good", agent_id="coder-001",
-                     bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg")
+    good = _make_cfg(name="good", agent_id="coder-001", bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg")
     bad = _make_cfg(name="bad", bot_token="YOUR_TELEGRAM_BOT_TOKEN")
     with caplog.at_level(logging.ERROR, logger="plugins.telegram.adapter"):
         ok = _validate_bot_configs([good, bad])
@@ -130,15 +124,16 @@ def test_preflight_direct_path_reachable_logs_info(caplog):
     from plugins.telegram.adapter import _preflight_network
 
     cfg = _make_cfg(proxy="")
-    with patch("socket.create_connection") as mock_conn, \
-         caplog.at_level(logging.INFO, logger="plugins.telegram.adapter"):
+    with (
+        patch("socket.create_connection") as mock_conn,
+        caplog.at_level(logging.INFO, logger="plugins.telegram.adapter"),
+    ):
         mock_conn.return_value.__enter__ = MagicMock()
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
         ok = _preflight_network([cfg])
 
     assert ok is True
-    assert any("api.telegram.org" in r.getMessage() and "reachable" in r.getMessage()
-               for r in caplog.records)
+    assert any("api.telegram.org" in r.getMessage() and "reachable" in r.getMessage() for r in caplog.records)
 
 
 def test_preflight_direct_path_unreachable_warns_does_not_fail(caplog):
@@ -148,8 +143,10 @@ def test_preflight_direct_path_unreachable_warns_does_not_fail(caplog):
     from plugins.telegram.adapter import _preflight_network
 
     cfg = _make_cfg(proxy="")
-    with patch("socket.create_connection", side_effect=OSError("timeout")), \
-         caplog.at_level(logging.WARNING, logger="plugins.telegram.adapter"):
+    with (
+        patch("socket.create_connection", side_effect=OSError("timeout")),
+        caplog.at_level(logging.WARNING, logger="plugins.telegram.adapter"),
+    ):
         ok = _preflight_network([cfg])
 
     # Issue #42: "预检测失败**不阻止** adapter 启动" for direct path
@@ -162,8 +159,10 @@ def test_preflight_proxy_reachable_logs_info(caplog):
     from plugins.telegram.adapter import _preflight_network
 
     cfg = _make_cfg(proxy="socks5://proxy.example.com:1080")
-    with patch("socket.create_connection") as mock_conn, \
-         caplog.at_level(logging.INFO, logger="plugins.telegram.adapter"):
+    with (
+        patch("socket.create_connection") as mock_conn,
+        caplog.at_level(logging.INFO, logger="plugins.telegram.adapter"),
+    ):
         mock_conn.return_value.__enter__ = MagicMock()
         mock_conn.return_value.__exit__ = MagicMock(return_value=False)
         ok = _preflight_network([cfg])
@@ -179,8 +178,10 @@ def test_preflight_proxy_unreachable_errors(caplog):
     from plugins.telegram.adapter import _preflight_network
 
     cfg = _make_cfg(proxy="socks5://proxy.example.com:1080")
-    with patch("socket.create_connection", side_effect=OSError("connection refused")), \
-         caplog.at_level(logging.ERROR, logger="plugins.telegram.adapter"):
+    with (
+        patch("socket.create_connection", side_effect=OSError("connection refused")),
+        caplog.at_level(logging.ERROR, logger="plugins.telegram.adapter"),
+    ):
         ok = _preflight_network([cfg])
 
     assert ok is False
@@ -194,8 +195,7 @@ def test_preflight_proxy_unreachable_errors(caplog):
 def test_run_preflight_logs_combined_summary(caplog):
     from plugins.telegram.adapter import _run_preflight
 
-    good = _make_cfg(name="good", agent_id="coder-001",
-                     bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg")
+    good = _make_cfg(name="good", agent_id="coder-001", bot_token="1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefg")
     bad = _make_cfg(name="bad", bot_token="YOUR_TELEGRAM_BOT_TOKEN")
 
     with caplog.at_level(logging.WARNING, logger="plugins.telegram.adapter"):

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Event-driven runtime model switching.
 
@@ -27,6 +26,7 @@ Security: only the *card name* travels over the WebSocket.  The api_key is
 read from the local ``model_cards/<card>.json`` inside the agent process and
 never leaves it -- consistent with the secret_guard.py / .gitignore defenses.
 """
+
 import json
 import logging
 import os
@@ -93,7 +93,7 @@ def _resolve_card(card_name: str) -> dict:
     card_path = syscfg.builtin_resources_dir("model_cards", f"{safe}.json")
     if not os.path.isfile(card_path):
         raise FileNotFoundError(f"model card not found: {safe} ({card_path})")
-    with open(card_path, "r", encoding="utf-8") as f:
+    with open(card_path, encoding="utf-8") as f:
         cfg = json.load(f)
     if not cfg.get("model_name"):
         raise ValueError(f"model card {safe!r} has no model_name")
@@ -118,11 +118,7 @@ def _strip_unsupported_multimodal(req: list, new_model: dict) -> bool:
     """
     if not req:
         return False
-    supports_mm = bool(
-        new_model.get("is_image")
-        or new_model.get("is_audio_model")
-        or new_model.get("is_video")
-    )
+    supports_mm = bool(new_model.get("is_image") or new_model.get("is_audio_model") or new_model.get("is_video"))
     if supports_mm:
         return False
     changed = False
@@ -213,10 +209,7 @@ async def apply_model_reload(runner, new_model: dict) -> None:
     # rejecting `image_url`). Reload preserves self.req by design, so we clean
     # it here instead of dropping history.
     if _strip_unsupported_multimodal(chat_api.req, new_model):
-        logger.info(
-            "[model_switch] Stripped unsupported multimodal content from "
-            "history (target model is text-only)."
-        )
+        logger.info("[model_switch] Stripped unsupported multimodal content from history (target model is text-only).")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +226,7 @@ def _persist_config(config_path: str, new_model: dict) -> None:
     if not config_path or not os.path.isfile(config_path):
         return
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             cfg = json.load(f)
         cfg["model"] = new_model
         with open(config_path, "w", encoding="utf-8") as f:
@@ -277,6 +270,7 @@ async def switch_to_card(card_name: str) -> dict:
     # sub-agents keep their own instance and finish with the old model.
     try:
         from .tools.delegate import set_chat_api_cfg
+
         set_chat_api_cfg(new_cfg)
     except Exception as e:
         logger.warning("[model_switch] Delegate cfg update failed: %s", e)
@@ -302,7 +296,9 @@ async def switch_to_card(card_name: str) -> dict:
 
     logger.info(
         "[model_switch] Switched to card=%s model=%s api_protocol=%s",
-        card_name, model_name, api_protocol,
+        card_name,
+        model_name,
+        api_protocol,
     )
     return {"ok": True, "card": card_name, "model": model_name, "api_protocol": api_protocol}
 

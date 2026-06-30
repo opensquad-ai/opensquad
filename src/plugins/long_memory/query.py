@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Long Memory - Query Module
 
@@ -10,12 +9,13 @@ Standard entry points (called by Launcher's dynamic routing):
     query_data(project_root: str, params: dict) -> dict
     handle_action(project_root: str, action: str, data: dict) -> dict
 """
-import os
+
 import json
+import logging
+import os
 import sqlite3
 import time
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def _get_last_workspace() -> str:
     try:
         lw_path = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
         if os.path.isfile(lw_path):
-            with open(lw_path, "r", encoding="utf-8") as f:
+            with open(lw_path, encoding="utf-8") as f:
                 data = json.load(f)
             ws = data.get("last_workspace", "")
             if ws and os.path.isdir(os.path.join(ws, "agents")):
@@ -38,7 +38,7 @@ def _get_last_workspace() -> str:
     return ""
 
 
-def _scan_agents(root: str) -> List[Dict[str, str]]:
+def _scan_agents(root: str) -> list[dict[str, str]]:
     """Scan a single root's agents/ directory."""
     agents_root = os.path.join(root, "agents")
     result = []
@@ -49,20 +49,22 @@ def _scan_agents(root: str) -> List[Dict[str, str]]:
         if not os.path.isfile(cfg_path):
             continue
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
+            with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            result.append({
-                "agent_id": cfg.get("agent_id", name),
-                "agent_name": cfg.get("agent_name", name),
-                "dir_name": name,
-                "root": root,
-            })
+            result.append(
+                {
+                    "agent_id": cfg.get("agent_id", name),
+                    "agent_name": cfg.get("agent_name", name),
+                    "dir_name": name,
+                    "root": root,
+                }
+            )
         except Exception:
             continue
     return result
 
 
-def _find_agent_dir(project_root: str, agent_id: str) -> Optional[str]:
+def _find_agent_dir(project_root: str, agent_id: str) -> str | None:
     """Resolve agent_id to its directory. Checks project_root first, then last_workspace."""
     # Check primary workspace
     agents_root = os.path.join(project_root, "agents")
@@ -72,7 +74,7 @@ def _find_agent_dir(project_root: str, agent_id: str) -> Optional[str]:
             if not os.path.isfile(cfg_path):
                 continue
             try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
+                with open(cfg_path, encoding="utf-8") as f:
                     cfg = json.load(f)
                 if cfg.get("agent_id") == agent_id:
                     return os.path.join(agents_root, name)
@@ -89,7 +91,7 @@ def _find_agent_dir(project_root: str, agent_id: str) -> Optional[str]:
                 if not os.path.isfile(cfg_path):
                     continue
                 try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
+                    with open(cfg_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     if cfg.get("agent_id") == agent_id:
                         return os.path.join(alt_root, name)
@@ -99,10 +101,10 @@ def _find_agent_dir(project_root: str, agent_id: str) -> Optional[str]:
     return None
 
 
-def _list_agents(project_root: str) -> List[Dict[str, str]]:
+def _list_agents(project_root: str) -> list[dict[str, str]]:
     """List all agents across current workspace and last_workspace fallback."""
     seen_ids: set = set()
-    result: List[Dict[str, str]] = []
+    result: list[dict[str, str]] = []
 
     # Primary workspace
     for a in _scan_agents(project_root):
@@ -123,7 +125,7 @@ def _list_agents(project_root: str) -> List[Dict[str, str]]:
     return result
 
 
-def _open_db(db_path: str, read_only: bool = True) -> Optional[sqlite3.Connection]:
+def _open_db(db_path: str, read_only: bool = True) -> sqlite3.Connection | None:
     """Open SQLite connection with appropriate pragma."""
     if not os.path.isfile(db_path):
         return None
@@ -149,7 +151,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d["keywords"] = []
     # Format timestamp as ISO string
     ts = d.get("timestamp")
-    if isinstance(ts, (int, float)) and ts > 0:
+    if isinstance(ts, int | float) and ts > 0:
         d["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
     else:
         d["created_at"] = ""
@@ -210,8 +212,8 @@ def query_data(project_root: str, params: dict) -> dict:
 
     try:
         # Build filters
-        where_clauses: List[str] = []
-        bind_params: List[Any] = []
+        where_clauses: list[str] = []
+        bind_params: list[Any] = []
 
         search = params.get("search", "").strip()
         if search:
@@ -234,9 +236,7 @@ def query_data(project_root: str, params: dict) -> dict:
             where_sql = " WHERE " + " AND ".join(where_clauses)
 
         # Count total
-        count_row = conn.execute(
-            f"SELECT COUNT(*) AS cnt FROM entries{where_sql}", bind_params
-        ).fetchone()
+        count_row = conn.execute(f"SELECT COUNT(*) AS cnt FROM entries{where_sql}", bind_params).fetchone()
         total = count_row["cnt"] if count_row else 0
 
         # Sort
@@ -254,7 +254,7 @@ def query_data(project_root: str, params: dict) -> dict:
 
         rows = conn.execute(
             f"SELECT * FROM entries{where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
-            bind_params + [limit, offset],
+            [*bind_params, limit, offset],
         ).fetchall()
 
         memories = [_row_to_dict(r) for r in rows]
@@ -342,12 +342,8 @@ def _action_delete_multi(project_root: str, data: dict) -> dict:
 
     placeholders = ",".join("?" for _ in ids)
     try:
-        conn.execute(
-            f"DELETE FROM keyword_index WHERE entry_id IN ({placeholders})", ids
-        )
-        conn.execute(
-            f"DELETE FROM entries WHERE id IN ({placeholders})", ids
-        )
+        conn.execute(f"DELETE FROM keyword_index WHERE entry_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", ids)
         conn.commit()
         return {"status": "ok", "message": f"Deleted {len(ids)} entries"}
     except Exception as e:

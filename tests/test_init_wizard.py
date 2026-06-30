@@ -197,7 +197,7 @@ def _patched_register_dependencies(monkeypatch, *, web_user_exists: bool):
     return created
 
 
-def _make_fake_user(email: str, name: str, id: str = "123456") -> User:
+def _make_fake_user(email: str, name: str, id: str = "123456"):
     """Build a real ``User`` ORM instance suitable for ``UserResponse.model_validate``."""
     from datetime import datetime, timezone
 

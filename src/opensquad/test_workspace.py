@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Workspace mechanism tests
 
@@ -7,6 +6,7 @@ Verifies:
 2. Workspace initialization
 3. Workspace records
 """
+
 import os
 import sys
 
@@ -15,17 +15,14 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _root)
 
 from opensquad.system_config import syscfg
-from opensquad.workspace_utils import (
-    get_default_workspace_path,
-    bootstrap_workspace,
-    detect_legacy_data
-)
+from opensquad.workspace_utils import detect_legacy_data, get_default_workspace_path
+
 
 def test_workspace_paths():
     """Test workspace path functions"""
-    print("="*60)
+    print("=" * 60)
     print("Test 1: Workspace path functions")
-    print("="*60)
+    print("=" * 60)
 
     # Set test workspace
     test_workspace = r"C:\test_workspace"
@@ -36,8 +33,16 @@ def test_workspace_paths():
         ("workspace_data_dir", syscfg.workspace_data_dir(), r"C:\test_workspace\data"),
         ("workspace_data_dir('uploads')", syscfg.workspace_data_dir("uploads"), r"C:\test_workspace\data\uploads"),
         ("workspace_agents_dir", syscfg.workspace_agents_dir(), r"C:\test_workspace\agents"),
-        ("workspace_agents_dir('nexus_router')", syscfg.workspace_agents_dir("nexus_router"), r"C:\test_workspace\agents\nexus_router"),
-        ("workspace_gateway_dir('backend')", syscfg.workspace_gateway_dir("backend"), r"C:\test_workspace\gateway\backend"),
+        (
+            "workspace_agents_dir('nexus_router')",
+            syscfg.workspace_agents_dir("nexus_router"),
+            r"C:\test_workspace\agents\nexus_router",
+        ),
+        (
+            "workspace_gateway_dir('backend')",
+            syscfg.workspace_gateway_dir("backend"),
+            r"C:\test_workspace\gateway\backend",
+        ),
         ("workspace_db_path", syscfg.workspace_db_path(), r"C:\test_workspace\gateway\backend\chat.db"),
         ("workspace_sessions_dir", syscfg.workspace_sessions_dir(), r"C:\test_workspace\data\sessions"),
         ("workspace_logs_dir", syscfg.workspace_logs_dir(), r"C:\test_workspace\data\logs"),
@@ -69,12 +74,12 @@ def test_workspace_paths():
 
 def test_workspace_init():
     """Test workspace initialization"""
-    print("="*60)
+    print("=" * 60)
     print("Test 2: Workspace initialization")
-    print("="*60)
+    print("=" * 60)
 
-    import tempfile
     import shutil
+    import tempfile
 
     # Create a temporary test workspace
     test_dir = tempfile.mkdtemp(prefix="opensquad_test_")
@@ -111,14 +116,15 @@ def test_workspace_init():
         # Verify metadata file
         meta_file = os.path.join(test_dir, ".opensquad", "workspace.json")
         if os.path.exists(meta_file):
-            print(f"  [OK] Metadata file exists")
+            print("  [OK] Metadata file exists")
             import json
-            with open(meta_file, "r", encoding="utf-8") as f:
+
+            with open(meta_file, encoding="utf-8") as f:
                 meta = json.load(f)
                 print(f"    Version: {meta.get('version')}")
                 print(f"    Created at: {meta.get('created_at')}")
         else:
-            print(f"  [FAIL] Metadata file not found")
+            print("  [FAIL] Metadata file not found")
             all_exist = False
 
         print(f"\nResult: {'passed' if all_exist else 'failed'}\n")
@@ -132,9 +138,9 @@ def test_workspace_init():
 
 def test_default_workspace():
     """Test default workspace path"""
-    print("="*60)
+    print("=" * 60)
     print("Test 3: Default workspace path")
-    print("="*60)
+    print("=" * 60)
 
     default_path = get_default_workspace_path()
     print(f"  Default workspace path: {default_path}")
@@ -163,9 +169,9 @@ def test_default_workspace():
 
 def test_legacy_detection():
     """Test legacy data detection"""
-    print("="*60)
+    print("=" * 60)
     print("Test 4: Legacy data detection")
-    print("="*60)
+    print("=" * 60)
 
     install_dir = syscfg.get_builtin_root()
     has_legacy = detect_legacy_data(install_dir)
@@ -184,15 +190,15 @@ def test_legacy_detection():
         if os.path.exists(path):
             print(f"  Found: {os.path.relpath(path, install_dir)}")
 
-    print(f"\nResult: detection complete\n")
+    print("\nResult: detection complete\n")
     return True
 
 
 def main():
     """Run all tests"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("OpenSquad Workspace Mechanism Tests")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     results = []
 
@@ -203,9 +209,9 @@ def main():
     results.append(("Legacy data detection", test_legacy_detection()))
 
     # Summary
-    print("="*60)
+    print("=" * 60)
     print("Test Summary")
-    print("="*60)
+    print("=" * 60)
 
     passed = sum(1 for _, r in results if r)
     total = len(results)
@@ -215,7 +221,7 @@ def main():
         print(f"  {status}: {name}")
 
     print(f"\nTotal: {passed}/{total} passed")
-    print("="*60)
+    print("=" * 60)
 
     return passed == total
 

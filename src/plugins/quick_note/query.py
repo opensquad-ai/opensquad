@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 """Quick Note Plugin - Data Query & Action Module"""
-from typing import Dict, List, Any
+
 import json
 import os
 import uuid
@@ -9,15 +8,15 @@ from datetime import datetime
 DATA_FILE_NAME = "notes.json"
 
 
-def query_data(project_root: str, params: Dict) -> Dict:
+def query_data(project_root: str, params: dict) -> dict:
     """Standard entry point for GET requests."""
     notes = _load_notes(project_root)
-    
+
     tag = params.get("tag")
     done = params.get("done")
     search = params.get("search")
     limit = int(params.get("limit", "50"))
-    
+
     filtered = notes
     if tag:
         filtered = [n for n in filtered if tag in n.get("tags", [])]
@@ -28,19 +27,19 @@ def query_data(project_root: str, params: Dict) -> Dict:
     if search:
         search_lower = search.lower()
         filtered = [
-            n for n in filtered
-            if search_lower in n.get("content", "").lower()
-            or any(search_lower in t.lower() for t in n.get("tags", []))
+            n
+            for n in filtered
+            if search_lower in n.get("content", "").lower() or any(search_lower in t.lower() for t in n.get("tags", []))
         ]
-    
+
     total = len(notes)
     done_count = len([n for n in notes if n.get("done")])
     todo_count = total - done_count
-    
+
     all_tags = set()
     for n in notes:
         all_tags.update(n.get("tags", []))
-    
+
     return {
         "success": True,
         "summary": {
@@ -54,14 +53,14 @@ def query_data(project_root: str, params: Dict) -> Dict:
         "meta": {
             "query": params,
             "filtered_count": len(filtered),
-        }
+        },
     }
 
 
-def handle_action(project_root: str, action: str, data: Dict) -> Dict:
+def handle_action(project_root: str, action: str, data: dict) -> dict:
     """Handle POST actions from Web UI."""
     notes = _load_notes(project_root)
-    
+
     if action == "add":
         content = data.get("content", "").strip()
         if not content:
@@ -77,7 +76,7 @@ def handle_action(project_root: str, action: str, data: Dict) -> Dict:
         notes.insert(0, note)
         _save_notes(project_root, notes)
         return {"success": True, "note": note}
-    
+
     elif action == "update":
         note_id = data.get("id")
         if not note_id:
@@ -92,7 +91,7 @@ def handle_action(project_root: str, action: str, data: Dict) -> Dict:
                 _save_notes(project_root, notes)
                 return {"success": True, "note": note}
         return {"success": False, "error": "Note not found"}
-    
+
     elif action == "toggle":
         note_id = data.get("id")
         if not note_id:
@@ -104,7 +103,7 @@ def handle_action(project_root: str, action: str, data: Dict) -> Dict:
                 _save_notes(project_root, notes)
                 return {"success": True, "note": note}
         return {"success": False, "error": "Note not found"}
-    
+
     elif action == "delete":
         note_id = data.get("id")
         if not note_id:
@@ -114,13 +113,13 @@ def handle_action(project_root: str, action: str, data: Dict) -> Dict:
             return {"success": False, "error": "Note not found"}
         _save_notes(project_root, new_notes)
         return {"success": True, "deleted_id": note_id}
-    
+
     elif action == "clear_done":
         new_notes = [n for n in notes if not n.get("done", False)]
         deleted_count = len(notes) - len(new_notes)
         _save_notes(project_root, new_notes)
         return {"success": True, "deleted_count": deleted_count}
-    
+
     else:
         return {"success": False, "error": f"Unknown action: {action}"}
 
@@ -129,16 +128,16 @@ def _get_data_file(project_root: str) -> str:
     return os.path.join(project_root, "data", "plugins", "quick_note", DATA_FILE_NAME)
 
 
-def _load_notes(project_root: str) -> List[Dict]:
+def _load_notes(project_root: str) -> list[dict]:
     data_file = _get_data_file(project_root)
     try:
-        with open(data_file, "r", encoding="utf-8") as f:
+        with open(data_file, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 
-def _save_notes(project_root: str, notes: List[Dict]):
+def _save_notes(project_root: str, notes: list[dict]):
     data_file = _get_data_file(project_root)
     os.makedirs(os.path.dirname(data_file), exist_ok=True)
     with open(data_file, "w", encoding="utf-8") as f:

@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 External API Platform Plugin (New-style Decorator API)
 
 Provides HTTP/WebSocket gateway adapter.
 No outbound tools -- this plugin is an inbound-only adapter.
 """
-import logging
-from typing import Any, Dict, List
 
-from opensquad.plugin_api import register, Plugin, Context
+import logging
+from typing import Any
+
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.external_api")
 
@@ -32,7 +32,7 @@ class ExternalApiPlugin(Plugin):
     def on_load(self) -> None:
         logger.info("[ExternalApiPlugin] External API plugin loaded (new-style).")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         """No outbound tools for external_api."""
         return []
 

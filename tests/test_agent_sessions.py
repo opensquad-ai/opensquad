@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Tests for agent_sessions.py — Agent session reader (local, HTTP, WS).
 
 Covers:
@@ -8,26 +7,32 @@ Covers:
 - async_get_reader / get_reader factory functions
 - refresh_agent_id_map / invalidate_reader
 """
+
 import importlib.util
 import json
 import os
-import sys
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ── Direct import of agent_sessions.py (bypass ai_web/__init__.py eagerly
 #    importing routes which cascades into app.api, app.models, etc.) ──────────
 _AGENT_SESSIONS_PATH = os.path.normpath(
     os.path.join(
         os.path.dirname(__file__),
-        "..", "src", "opensquad",
-        "gateway", "backend", "app", "ai_web", "agent_sessions.py",
+        "..",
+        "src",
+        "opensquad",
+        "gateway",
+        "backend",
+        "app",
+        "ai_web",
+        "agent_sessions.py",
     )
 )
 _spec = importlib.util.spec_from_file_location(
-    "agent_sessions_test", _AGENT_SESSIONS_PATH,
+    "agent_sessions_test",
+    _AGENT_SESSIONS_PATH,
 )
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -46,6 +51,7 @@ set_ws_handler = _mod.set_ws_handler
 # =====================================================================
 # Fixtures
 # =====================================================================
+
 
 @pytest.fixture(autouse=True)
 def reset_globals():
@@ -83,6 +89,7 @@ def _make_agent_dir(root, agent_name, agent_id):
 # AgentSessionReader — local disk reader
 # =====================================================================
 
+
 class TestAgentSessionReader:
     """AgentSessionReader: local disk session reader tests."""
 
@@ -98,7 +105,8 @@ class TestAgentSessionReader:
         assert reader.save_dir == save_dir
         assert reader.history_dir == history_dir
         assert reader.current_session_file == os.path.join(
-            save_dir, "current_session.json",
+            save_dir,
+            "current_session.json",
         )
         assert os.path.isdir(save_dir)
         assert os.path.isdir(history_dir)
@@ -163,13 +171,16 @@ class TestAgentSessionReader:
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(history_dir, exist_ok=True)
         (save_dir / "current_session.json").write_text(
-            json.dumps({
-                "id": "cur-1", "title": "My Chat",
-                "messages": [
-                    {"role": "user", "content": "Hello"},
-                    {"role": "assistant", "content": "<title>My Chat</title>Hi"},
-                ],
-            }),
+            json.dumps(
+                {
+                    "id": "cur-1",
+                    "title": "My Chat",
+                    "messages": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "assistant", "content": "<title>My Chat</title>Hi"},
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         reader = AgentSessionReader(str(save_dir), str(history_dir))
@@ -196,6 +207,7 @@ class TestAgentSessionReader:
             encoding="utf-8",
         )
         import time
+
         time.sleep(0.01)
         (history_dir / "hist-2.json").write_text(
             json.dumps({"id": "hist-2", "title": "Hist 2", "messages": []}),
@@ -222,14 +234,17 @@ class TestAgentSessionReader:
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(history_dir, exist_ok=True)
         (save_dir / "current_session.json").write_text(
-            json.dumps({
-                "id": "cur-1", "title": "Current",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "events": [
-                    {"name": "user_message", "data": "hello"},
-                    {"name": "system__event_pipeline", "data": "internal"},
-                ],
-            }),
+            json.dumps(
+                {
+                    "id": "cur-1",
+                    "title": "Current",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "events": [
+                        {"name": "user_message", "data": "hello"},
+                        {"name": "system__event_pipeline", "data": "internal"},
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         reader = AgentSessionReader(str(save_dir), str(history_dir))
@@ -252,10 +267,13 @@ class TestAgentSessionReader:
             encoding="utf-8",
         )
         (history_dir / "hist-on-disk.json").write_text(
-            json.dumps({
-                "id": "hist-on-disk", "title": "Disk Session",
-                "messages": [{"role": "user", "content": "Disk data"}],
-            }),
+            json.dumps(
+                {
+                    "id": "hist-on-disk",
+                    "title": "Disk Session",
+                    "messages": [{"role": "user", "content": "Disk data"}],
+                }
+            ),
             encoding="utf-8",
         )
         reader = AgentSessionReader(str(save_dir), str(history_dir))
@@ -275,10 +293,12 @@ class TestAgentSessionReader:
             encoding="utf-8",
         )
         (history_dir / "hist-list.json").write_text(
-            json.dumps([
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi"},
-            ]),
+            json.dumps(
+                [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi"},
+                ]
+            ),
             encoding="utf-8",
         )
         reader = AgentSessionReader(str(save_dir), str(history_dir))
@@ -526,6 +546,7 @@ class TestAgentSessionReader:
 # _RemoteSessionReader — HTTP proxy reader
 # =====================================================================
 
+
 class TestRemoteSessionReader:
     """_RemoteSessionReader: HTTP-based remote session reader tests."""
 
@@ -552,12 +573,14 @@ class TestRemoteSessionReader:
     @patch("httpx.Client")
     def test_remote_get_session_list(self, mock_cls):
         """Returns session list from mock HTTP response."""
-        mock_inst = self._make_client_mock({
-            "sessions": [
-                {"id": "s1", "title": "Remote 1"},
-                {"id": "s2", "title": "Remote 2"},
-            ],
-        })
+        mock_inst = self._make_client_mock(
+            {
+                "sessions": [
+                    {"id": "s1", "title": "Remote 1"},
+                    {"id": "s2", "title": "Remote 2"},
+                ],
+            }
+        )
         mock_cls.return_value = mock_inst
 
         with patch.object(_mod.syscfg, "launcher_url", return_value="http://launcher:8080"):
@@ -574,9 +597,12 @@ class TestRemoteSessionReader:
     @patch("httpx.Client")
     def test_remote_get_current_session_id(self, mock_cls):
         """Returns current_session_id from list endpoint."""
-        mock_inst = self._make_client_mock({
-            "sessions": [], "current_session_id": "cur-remote",
-        })
+        mock_inst = self._make_client_mock(
+            {
+                "sessions": [],
+                "current_session_id": "cur-remote",
+            }
+        )
         mock_cls.return_value = mock_inst
 
         with patch.object(_mod.syscfg, "launcher_url", return_value="http://launcher:8080"):
@@ -586,9 +612,11 @@ class TestRemoteSessionReader:
     @patch("httpx.Client")
     def test_remote_get_session_history(self, mock_cls):
         """Returns session data from history endpoint."""
-        mock_inst = self._make_client_mock({
-            "session": {"id": "s1", "title": "Remote", "messages": []},
-        })
+        mock_inst = self._make_client_mock(
+            {
+                "session": {"id": "s1", "title": "Remote", "messages": []},
+            }
+        )
         mock_cls.return_value = mock_inst
 
         with patch.object(_mod.syscfg, "launcher_url", return_value="http://launcher:8080"):
@@ -611,9 +639,11 @@ class TestRemoteSessionReader:
     @patch("httpx.Client")
     def test_remote_get_session_history_paged(self, mock_cls):
         """Returns paged data and passes query parameters."""
-        mock_inst = self._make_client_mock({
-            "session": {"id": "s1", "has_more": True, "messages": []},
-        })
+        mock_inst = self._make_client_mock(
+            {
+                "session": {"id": "s1", "has_more": True, "messages": []},
+            }
+        )
         mock_cls.return_value = mock_inst
 
         with patch.object(_mod.syscfg, "launcher_url", return_value="http://launcher:8080"):
@@ -720,6 +750,7 @@ class TestRemoteSessionReader:
 # _WsSessionReader — WebSocket tunnel reader
 # =====================================================================
 
+
 class TestWsSessionReader:
     """_WsSessionReader: WebSocket tunnel session reader tests."""
 
@@ -728,15 +759,19 @@ class TestWsSessionReader:
     @staticmethod
     def _ok_rpc(result_dict):
         """Build an RPC function that returns result_dict."""
+
         async def rpc(node_id, method, path, body=None):
             return result_dict
+
         return rpc
 
     @staticmethod
     def _failing_rpc(exc=Exception("WS error")):
         """Build an RPC function that always raises."""
+
         async def rpc(node_id, method, path, body=None):
             raise exc
+
         return rpc
 
     # ── Tests ─────────────────────────────────────────────────────────
@@ -771,10 +806,12 @@ class TestWsSessionReader:
     @pytest.mark.asyncio
     async def test_async_get_session_history_paged(self):
         """Returns paged data; verifies query string in path."""
+
         async def check_rpc(node_id, method, path, body=None):
             assert "offset=3" in path
             assert "limit=7" in path
             return {"session": {"id": "s1", "has_more": True}}
+
         reader = _WsSessionReader("agent-1", check_rpc, "n1")
         result = await reader.async_get_session_history_paged("s1", 3, 7)
         assert result["has_more"] is True
@@ -788,10 +825,12 @@ class TestWsSessionReader:
     @pytest.mark.asyncio
     async def test_async_delete_session(self):
         """Calls POST via WS RPC, returns ok."""
+
         async def del_rpc(node_id, method, path, body=None):
             assert method == "POST"
             assert path.endswith("/delete")
             return {"ok": True}
+
         reader = _WsSessionReader("agent-1", del_rpc, "n1")
         assert await reader.async_delete_session("s1") is True
 
@@ -805,6 +844,7 @@ class TestWsSessionReader:
 # =====================================================================
 # Factory functions — get_reader / async_get_reader
 # =====================================================================
+
 
 class TestFactoryFunctions:
     """Factory function tests: get_reader and async_get_reader."""
@@ -900,8 +940,10 @@ class TestFactoryFunctions:
     @pytest.mark.asyncio
     async def test_async_get_reader_ws_fallback(self):
         """Returns _WsSessionReader when WS handler is configured."""
+
         async def fake_rpc(*a, **kw):
             return {"ok": True}
+
         set_ws_handler(fake_rpc, lambda: "ws-node-1")
 
         with (

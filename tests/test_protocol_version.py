@@ -1,17 +1,15 @@
-# -*- coding: utf-8 -*-
 """Tests for protocol_version — API version control."""
-import pytest
 
 from opensquad.protocol_version import (
     CURRENT_VERSION,
     MIN_SUPPORTED_VERSION,
-    version_string,
-    negotiate_version,
-    wrap_message,
-    unwrap_message,
-    get_message_version,
-    normalize_v1_message,
     downgrade_message,
+    get_message_version,
+    negotiate_version,
+    normalize_v1_message,
+    unwrap_message,
+    version_string,
+    wrap_message,
 )
 
 

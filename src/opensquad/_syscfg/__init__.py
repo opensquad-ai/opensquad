@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg -- Modular system configuration sub-package.
 
@@ -10,170 +9,169 @@ Structure:
     _network.py    -- Network config (ports, hosts, URLs, auth)
     _logging.py    -- Logging configuration
 """
+
 from __future__ import annotations
-
-# Workspace lifecycle
-from ._workspace import (
-    get_workspace,
-    get_builtin_root,
-    set_workspace,
-    get_config_path,
-)
-
-# Path builders (from _workspace)
-from ._workspace import (
-    workspace_data_dir,
-    workspace_agents_dir,
-    workspace_gateway_dir,
-    workspace_db_path,
-    workspace_sessions_dir,
-    workspace_logs_dir,
-    workspace_uploads_dir,
-    workspace_metadata_dir,
-    builtin_resources_dir,
-)
 
 # Config loading + all domain functions that read from config
 from ._config import (
     _load,
-    reload,
-    raw,
+    ctx_conv_text_budget_chars,
+    ctx_keep_recent_fraction,
+    ctx_keep_recent_rounds,
+    ctx_recent_hard_cap_frac,
+    ctx_summary_max_tokens,
+    ctx_trigger_threshold,
+    ensure_external_api_key,
+    ensure_gateway_token,
+    ensure_node_id,
+    ensure_node_secret,
+    ensure_workspace_structure,
+    filesystem_workspace_dirs,
     get,
     get_int,
-    ensure_workspace_structure,
+    github_plugins_token,
     init_workspace,
     is_service_enabled,
-    ctx_trigger_threshold,
-    ctx_keep_recent_fraction,
-    ctx_recent_hard_cap_frac,
-    ctx_keep_recent_rounds,
-    ctx_summary_max_tokens,
-    ctx_conv_text_budget_chars,
-    vcs_git_server,
-    vcs_default_remote,
-    vcs_default_branch,
     node_id,
     node_label,
     node_register_to_gateway,
     node_secret,
-    github_plugins_token,
-    ensure_node_id,
-    ensure_external_api_key,
-    ensure_gateway_token,
-    ensure_node_secret,
     project_root,
+    raw,
+    reload,
     skills_dir,
-    filesystem_workspace_dirs,
-)
-
-# Network
-from ._network import (
-    port,
-    host,
-    client_host,
-    cors_origins,
-    auth,
-    gateway_http,
-    gateway_ws,
-    gateway_register_url,
-    launcher_url,
-    external_adapter_url,
-    default_agent_id,
-    default_timeout,
-    async_result_ttl,
-    whisper_url,
-    websearch_url,
+    vcs_default_branch,
+    vcs_default_remote,
+    vcs_git_server,
 )
 
 # Logging
 from ._logging import (
-    log_dir,
-    log_max_size_mb,
     log_backup_count,
-    log_level,
-    log_format,
     log_date_format,
+    log_dir,
+    log_format,
+    log_level,
+    log_max_size_mb,
     tool_call_debug,
-    tool_call_debug_max_size_mb,
     tool_call_debug_backup_count,
+    tool_call_debug_max_size_mb,
 )
 
 # Typed config models (Pydantic v2)
 from ._models import SystemConfig as SystemConfig
 
+# Network
+from ._network import (
+    async_result_ttl,
+    auth,
+    client_host,
+    cors_origins,
+    default_agent_id,
+    default_timeout,
+    external_adapter_url,
+    gateway_http,
+    gateway_register_url,
+    gateway_ws,
+    host,
+    launcher_url,
+    port,
+    websearch_url,
+    whisper_url,
+)
+
+# Workspace lifecycle
+# Path builders (from _workspace)
+from ._workspace import (
+    builtin_resources_dir,
+    get_builtin_root,
+    get_config_path,
+    get_workspace,
+    set_workspace,
+    workspace_agents_dir,
+    workspace_data_dir,
+    workspace_db_path,
+    workspace_gateway_dir,
+    workspace_logs_dir,
+    workspace_metadata_dir,
+    workspace_sessions_dir,
+    workspace_uploads_dir,
+)
+
 __all__ = [
-    # Workspace
-    "get_workspace",
-    "get_builtin_root",
-    "set_workspace",
-    "get_config_path",
-    "ensure_workspace_structure",
-    "init_workspace",
-    "is_service_enabled",
-    # Paths
-    "workspace_data_dir",
-    "workspace_agents_dir",
-    "workspace_gateway_dir",
-    "workspace_db_path",
-    "workspace_sessions_dir",
-    "workspace_logs_dir",
-    "workspace_uploads_dir",
-    "workspace_metadata_dir",
-    "builtin_resources_dir",
     # Config
     "_load",
-    "reload",
-    "raw",
-    "get",
-    "get_int",
-    # Network
-    "port",
-    "host",
-    "cors_origins",
-    "auth",
-    "gateway_http",
-    "gateway_ws",
-    "gateway_register_url",
-    "launcher_url",
-    "external_adapter_url",
-    "default_agent_id",
-    "default_timeout",
     "async_result_ttl",
-    "whisper_url",
-    "websearch_url",
-    # Logging
-    "log_dir",
-    "log_max_size_mb",
-    "log_backup_count",
-    "log_level",
-    "log_format",
-    "log_date_format",
-    "tool_call_debug",
-    "tool_call_debug_max_size_mb",
-    "tool_call_debug_backup_count",
+    "auth",
+    "builtin_resources_dir",
+    "client_host",
+    "cors_origins",
+    "ctx_conv_text_budget_chars",
+    "ctx_keep_recent_fraction",
+    "ctx_keep_recent_rounds",
+    "ctx_recent_hard_cap_frac",
+    "ctx_summary_max_tokens",
     # Context compression
     "ctx_trigger_threshold",
-    "ctx_keep_recent_fraction",
-    "ctx_recent_hard_cap_frac",
-    "ctx_keep_recent_rounds",
-    "ctx_summary_max_tokens",
-    "ctx_conv_text_budget_chars",
-    # VCS
-    "vcs_git_server",
-    "vcs_default_remote",
-    "vcs_default_branch",
+    "default_agent_id",
+    "default_timeout",
+    "ensure_external_api_key",
+    "ensure_gateway_token",
+    "ensure_node_id",
+    "ensure_node_secret",
+    "ensure_workspace_structure",
+    "external_adapter_url",
+    "filesystem_workspace_dirs",
+    "gateway_http",
+    "gateway_register_url",
+    "gateway_ws",
+    "get",
+    "get_builtin_root",
+    "get_config_path",
+    "get_int",
+    # Workspace
+    "get_workspace",
+    "github_plugins_token",
+    "host",
+    "init_workspace",
+    "is_service_enabled",
+    "launcher_url",
+    "log_backup_count",
+    "log_date_format",
+    # Logging
+    "log_dir",
+    "log_format",
+    "log_level",
+    "log_max_size_mb",
     # Node identity
     "node_id",
     "node_label",
     "node_register_to_gateway",
     "node_secret",
-    "github_plugins_token",
-    "ensure_node_id",
-    "ensure_external_api_key",
-    "ensure_gateway_token",
-    "ensure_node_secret",
+    # Network
+    "port",
     # Project
     "project_root",
+    "raw",
+    "reload",
+    "set_workspace",
     "skills_dir",
-    "filesystem_workspace_dirs",
+    "tool_call_debug",
+    "tool_call_debug_backup_count",
+    "tool_call_debug_max_size_mb",
+    "vcs_default_branch",
+    "vcs_default_remote",
+    # VCS
+    "vcs_git_server",
+    "websearch_url",
+    "whisper_url",
+    "workspace_agents_dir",
+    # Paths
+    "workspace_data_dir",
+    "workspace_db_path",
+    "workspace_gateway_dir",
+    "workspace_logs_dir",
+    "workspace_metadata_dir",
+    "workspace_sessions_dir",
+    "workspace_uploads_dir",
 ]

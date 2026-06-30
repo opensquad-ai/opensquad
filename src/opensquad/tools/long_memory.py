@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Long Memory Tools v2.0
 Long-term memory toolset based on MemoryManager (replaces the old memory.py).
@@ -12,7 +11,8 @@ Provides four agent-callable tools:
 Automatic memory injection (Layer 1) is implemented by memory_manager + context.py before_input
 and is not handled at the tool layer.
 """
-from typing import List, Dict, Any
+
+from typing import Any
 
 # Global MemoryManager instance, injected by boot.py after initialization
 _memory_manager = None
@@ -37,10 +37,16 @@ def get_memory_manager():
     return _memory_manager
 
 
-def memory_write(topic: str, summary: str, keywords: List[str] = None,
-                 body: str = None, entry_type: str = "knowledge",
-                 category: str = None, importance: int = 3,
-                 supersedes: str = None) -> Dict[str, Any]:
+def memory_write(
+    topic: str,
+    summary: str,
+    keywords: list[str] | None = None,
+    body: str | None = None,
+    entry_type: str = "knowledge",
+    category: str | None = None,
+    importance: int = 3,
+    supersedes: str | None = None,
+) -> dict[str, Any]:
     """
     [Long-term Memory - Write] Write important knowledge, experience, or discoveries into
     the long-term memory system. After writing, it is automatically incorporated into the
@@ -67,14 +73,20 @@ def memory_write(topic: str, summary: str, keywords: List[str] = None,
         return {"status": "error", "message": "Long-term memory system not initialized"}
 
     return mm.write_memory(
-        topic=topic, summary=summary, keywords=keywords,
-        body=body, entry_type=entry_type, category=category,
-        importance=importance, supersedes=supersedes,
+        topic=topic,
+        summary=summary,
+        keywords=keywords,
+        body=body,
+        entry_type=entry_type,
+        category=category,
+        importance=importance,
+        supersedes=supersedes,
     )
 
 
-def memory_query(query_text: str = None, keywords: List[str] = None,
-                 depth: str = "standard", token_budget: int = 3000) -> Dict[str, Any]:
+def memory_query(
+    query_text: str | None = None, keywords: list[str] | None = None, depth: str = "standard", token_budget: int = 3000
+) -> dict[str, Any]:
     """
     [Long-term Memory - Deep Query] Actively search long-term memory to retrieve
     associated knowledge and reasoning chains. More in-depth than automatic injection;
@@ -98,13 +110,20 @@ def memory_query(query_text: str = None, keywords: List[str] = None,
         return {"status": "error", "message": "Long-term memory system not initialized"}
 
     return mm.query_deep(
-        query_text=query_text, keywords=keywords,
-        depth=depth, token_budget=token_budget,
+        query_text=query_text,
+        keywords=keywords,
+        depth=depth,
+        token_budget=token_budget,
     )
 
 
-def memory_log(content: str, detail: str = None, category: str = None,
-               tags: List[str] = None, importance: int = 2) -> Dict[str, Any]:
+def memory_log(
+    content: str,
+    detail: str | None = None,
+    category: str | None = None,
+    tags: list[str] | None = None,
+    importance: int = 2,
+) -> dict[str, Any]:
     """
     [Long-term Memory - Log] Record an activity or event log entry.
     Supports date-based lookback queries and auto-integration into the knowledge graph.
@@ -127,13 +146,15 @@ def memory_log(content: str, detail: str = None, category: str = None,
         return {"status": "error", "message": "Long-term memory system not initialized"}
 
     return mm.log_memory(
-        content=content, detail=detail,
-        category=category, tags=tags,
+        content=content,
+        detail=detail,
+        category=category,
+        tags=tags,
         importance=importance,
     )
 
 
-def memory_find_chain(anchor_words: List[str]) -> Dict[str, Any]:
+def memory_find_chain(anchor_words: list[str]) -> dict[str, Any]:
     """
     [Long-term Memory - Chain Reasoning] Discover hidden association chains between
     two seemingly unrelated concepts. Uses PPR + shortest-path algorithm to find

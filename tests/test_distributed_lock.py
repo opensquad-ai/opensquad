@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
 """Tests for distributed_lock — cross-process mutual exclusion."""
+
+import contextlib
 import multiprocessing
 import os
 import tempfile
@@ -8,10 +9,10 @@ import time
 import pytest
 
 from opensquad.distributed_lock import (
-    SessionLock,
-    LockTimeoutError,
-    session_lock,
     DEFAULT_LOCK_DIR,
+    LockTimeoutError,
+    SessionLock,
+    session_lock,
 )
 
 
@@ -61,6 +62,7 @@ class TestSessionLockBasics:
 # Cross-process test: verify the lock actually blocks another process
 # ---------------------------------------------------------------------------
 
+
 def _worker_acquire_and_hold(lock_dir: str, resource_id: str, hold_time: float, result_queue):
     """Worker process: acquire lock, signal success, hold for hold_time, then release."""
     lock = SessionLock(resource_id, timeout=2.0, lock_dir=lock_dir)
@@ -78,10 +80,8 @@ class TestCrossProcessLock:
     def _cleanup(self, lock_dir: str, resource_id: str):
         lock_file = os.path.join(lock_dir, f"{resource_id}.lock")
         if os.path.exists(lock_file):
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(lock_file)
-            except Exception:
-                pass
 
     def test_second_process_waits_for_lock(self):
         lock_dir = os.path.join(tempfile.gettempdir(), "opensquad_test_locks")

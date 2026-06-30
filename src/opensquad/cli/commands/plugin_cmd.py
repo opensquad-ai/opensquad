@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """opensquad plugin — Manage plugins (install, uninstall, list)."""
+
 import json
 import os
 import sys
@@ -16,6 +16,7 @@ def _get_plugins_dir():
     if _root not in sys.path:
         sys.path.insert(0, _root)
     from opensquad.system_config import syscfg
+
     return os.path.join(syscfg.get_builtin_root(), "plugins")
 
 
@@ -29,15 +30,17 @@ def _list_installed(plugins_dir):
         if not os.path.isfile(pj):
             continue
         try:
-            with open(pj, "r", encoding="utf-8") as f:
+            with open(pj, encoding="utf-8") as f:
                 meta = json.load(f)
             display_name = meta.get("display_name") or meta.get("name") or name
-            result.append({
-                "id": name,
-                "name": display_name,
-                "version": meta.get("version", "?"),
-                "enabled": meta.get("enabled", True),
-            })
+            result.append(
+                {
+                    "id": name,
+                    "name": display_name,
+                    "version": meta.get("version", "?"),
+                    "enabled": meta.get("enabled", True),
+                }
+            )
         except Exception:
             result.append({"id": name, "name": name, "version": "?", "enabled": True})
     return result
@@ -46,6 +49,7 @@ def _list_installed(plugins_dir):
 def _trigger_reload(plugins_dir):
     """Write .reload_ts to trigger plugin hot-reload."""
     import time
+
     try:
         with open(os.path.join(plugins_dir, ".reload_ts"), "w") as f:
             f.write(str(time.time()))
@@ -98,7 +102,7 @@ def _install_from_store(plugins_dir, plugin_id, mode):
     """Install a plugin from the registry."""
     REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-plugins/main/index.json"
 
-    print(f"[plugin] Fetching registry...")
+    print("[plugin] Fetching registry...")
     try:
         resp = httpx.get(REGISTRY_URL, timeout=15)
         resp.raise_for_status()
@@ -123,13 +127,13 @@ def _install_from_store(plugins_dir, plugin_id, mode):
         return
 
     if not download_url:
-        print(f"[plugin] Error: Plugin has no download_url and no git_url.", file=sys.stderr)
+        print("[plugin] Error: Plugin has no download_url and no git_url.", file=sys.stderr)
         sys.exit(1)
 
     # Download and extract
     import io
-    import zipfile
     import shutil
+    import zipfile
 
     print(f"[plugin] Downloading from {download_url}...")
     try:
@@ -182,9 +186,9 @@ def _install_from_store(plugins_dir, plugin_id, mode):
 
 def _install_from_git(plugins_dir, git_url, mode, plugin_id=None):
     """Install a plugin from a Git repository."""
+    import shutil
     import subprocess
     import tempfile
-    import shutil
 
     if plugin_id is None:
         # Derive plugin_id from URL
@@ -198,7 +202,7 @@ def _install_from_git(plugins_dir, git_url, mode, plugin_id=None):
             print(f"[plugin] Error: Git clone failed: {e.stderr.decode()}", file=sys.stderr)
             sys.exit(1)
         except FileNotFoundError:
-            print(f"[plugin] Error: Git not found. Install git first.", file=sys.stderr)
+            print("[plugin] Error: Git not found. Install git first.", file=sys.stderr)
             sys.exit(1)
 
         plugin_dest = os.path.join(plugins_dir, plugin_id)
@@ -223,7 +227,7 @@ def _cmd_uninstall(plugins_dir, plugin_id):
 
     # Safety check
     if not os.path.abspath(plugin_dest).startswith(os.path.abspath(plugins_dir)):
-        print(f"[plugin] Error: Path traversal detected. Aborting.", file=sys.stderr)
+        print("[plugin] Error: Path traversal detected. Aborting.", file=sys.stderr)
         sys.exit(1)
 
     print(f"[plugin] Removing {plugin_dest}...")
@@ -235,5 +239,6 @@ def _cmd_uninstall(plugins_dir, plugin_id):
 def _remove_readonly(func, path, exc):
     """Handle read-only files on Windows."""
     import stat
+
     os.chmod(path, stat.S_IWRITE)
     func(path)

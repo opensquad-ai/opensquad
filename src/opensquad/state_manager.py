@@ -1,17 +1,20 @@
-# -*- coding: utf-8 -*-
 """
 AI State Manager - Persistence and Sharing
 """
+
+import asyncio
+import contextlib
 import json
+import logging
 import os
 import shutil
-import logging
 import time as _time
+from collections.abc import Callable
 from datetime import datetime
-from typing import Optional, Dict, Any, Callable, List
-import asyncio
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
 
 class AIStateManager:
     """
@@ -23,21 +26,26 @@ class AIStateManager:
     - Batched writes: changes accumulate and flush to disk on interval or count threshold
     """
 
-    _DEFAULT_FLUSH_INTERVAL = 2.0    # seconds between disk flushes
-    _DEFAULT_FLUSH_COUNT = 3         # flush after this many dirty state changes
+    _DEFAULT_FLUSH_INTERVAL = 2.0  # seconds between disk flushes
+    _DEFAULT_FLUSH_COUNT = 3  # flush after this many dirty state changes
 
-    def __init__(self, state_file: str = "ai_state.json", flush_interval: float = _DEFAULT_FLUSH_INTERVAL, flush_count: int = _DEFAULT_FLUSH_COUNT):
+    def __init__(
+        self,
+        state_file: str = "ai_state.json",
+        flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
+        flush_count: int = _DEFAULT_FLUSH_COUNT,
+    ):
         self.state_file = state_file
         self.backup_file = state_file + ".bak"
         self._state = {
-            "ai_state": "idle",           # idle | working | sleeping
-            "wake_mode": "strict",        # strict | normal
-            "sleep_end_time": None,       # ISO format time or None
-            "last_updated": None,         # last updated time
-            "version": 1
+            "ai_state": "idle",  # idle | working | sleeping
+            "wake_mode": "strict",  # strict | normal
+            "sleep_end_time": None,  # ISO format time or None
+            "last_updated": None,  # last updated time
+            "version": 1,
         }
-        self._lock: Optional[asyncio.Lock] = None  # lazily created
-        self._listeners: List[Callable] = []  # state change listeners
+        self._lock: asyncio.Lock | None = None  # lazily created
+        self._listeners: list[Callable] = []  # state change listeners
 
         # Batched write state
         self._flush_interval = flush_interval
@@ -45,7 +53,7 @@ class AIStateManager:
         self._dirty = False
         self._dirty_count = 0
         self._last_save_time = 0.0
-        self._pending_save_task: Optional[asyncio.Task] = None
+        self._pending_save_task: asyncio.Task | None = None
         self._pending_save_lock = asyncio.Lock()
 
         # Load on startup
@@ -70,29 +78,32 @@ class AIStateManager:
         """Load state from file."""
         if os.path.exists(self.state_file):
             try:
-                with open(self.state_file, 'r', encoding='utf-8') as f:
+                with open(self.state_file, encoding="utf-8") as f:
                     loaded = json.load(f)
                     self._state.update(loaded)
-                    logger.info(f"[StateManager] Loaded state: ai_state={self._state['ai_state']}, wake_mode={self._state['wake_mode']}")
+                    logger.info(
+                        f"[StateManager] Loaded state: ai_state={self._state['ai_state']}, wake_mode={self._state['wake_mode']}"
+                    )
             except Exception as e:
                 logger.error(f"[StateManager] Failed to load: {e}, using defaults")
                 if os.path.exists(self.backup_file):
                     try:
-                        with open(self.backup_file, 'r', encoding='utf-8') as f:
+                        with open(self.backup_file, encoding="utf-8") as f:
                             loaded = json.load(f)
                             self._state.update(loaded)
-                            logger.info(f"[StateManager] Restored from backup")
+                            logger.info("[StateManager] Restored from backup")
                     except Exception as e2:
                         logger.error(f"[StateManager] Backup also failed: {e2}")
 
     def _sync_flush(self):
         """Synchronous flush — performs actual I/O. Called via run_in_executor."""
         from opensquad.structured_log import perf_event
+
         t0 = _time.perf_counter()
         self._backup()
         self._state["last_updated"] = datetime.now().isoformat()
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2, ensure_ascii=False)
             flush_ms = int((_time.perf_counter() - t0) * 1000)
             if flush_ms > 50:
@@ -189,7 +200,7 @@ class AIStateManager:
                 await self._save()
                 logger.info(f"[StateManager] Wake mode changed: {old_mode} -> {mode}")
 
-    async def set_sleep_end(self, end_time: Optional[datetime]):
+    async def set_sleep_end(self, end_time: datetime | None):
         """Set the sleep end time."""
         async with self._get_lock():
             if end_time:
@@ -198,7 +209,7 @@ class AIStateManager:
                 self._state["sleep_end_time"] = None
             await self._save()
 
-    async def get_sleep_end(self) -> Optional[datetime]:
+    async def get_sleep_end(self) -> datetime | None:
         """Get the sleep end time."""
         async with self._get_lock():
             end_str = self._state.get("sleep_end_time")
@@ -222,7 +233,7 @@ class AIStateManager:
         """Check whether currently sleeping."""
         return await self.get_state() == "sleeping"
 
-    def get_full_state(self) -> Dict[str, Any]:
+    def get_full_state(self) -> dict[str, Any]:
         """Get the full state dict (for API responses)."""
         return self._state.copy()
 
@@ -230,10 +241,8 @@ class AIStateManager:
         """Force an immediate synchronous flush (call on shutdown)."""
         if self._pending_save_task and not self._pending_save_task.done():
             self._pending_save_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._pending_save_task
-            except asyncio.CancelledError:
-                pass
         async with self._get_lock():
             if self._dirty:
                 self._dirty = False
@@ -241,8 +250,10 @@ class AIStateManager:
                 self._last_save_time = _time.perf_counter()
                 await self._flush()
 
+
 # Global singleton
 import logging
+
 state_manager = AIStateManager()
 
 
@@ -252,6 +263,7 @@ def get_state_manager(ctx=None):
     if ctx is not None:
         return ctx.state_manager
     from opensquad._context import get_current_context
+
     ctx = get_current_context()
     return ctx.state_manager if ctx is not None else state_manager
 

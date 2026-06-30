@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OpenSquad CLI
 
@@ -14,6 +13,7 @@ Usage:
     opensquad plugin uninstall <id>             Uninstall a plugin
     opensquad plugin list                       List installed plugins
 """
+
 import argparse
 import sys
 
@@ -54,7 +54,9 @@ def main():
 
     # ── config ──
     p_config = sub.add_parser("config", help="Validate or show configuration")
-    p_config.add_argument("action", nargs="?", default="validate", choices=["validate", "show"], help="Action (default: validate)")
+    p_config.add_argument(
+        "action", nargs="?", default="validate", choices=["validate", "show"], help="Action (default: validate)"
+    )
 
     # ── doctor ──
     sub.add_parser("doctor", help="Run system diagnostic report")
@@ -91,13 +93,24 @@ def main():
     # --version flag (before subcommand parsing)
     if getattr(args, "version", False):
         from opensquad import __version__
+
         print(f"opensquad v{__version__}")
         sys.exit(0)
 
     if not args.command:
         # Default: run 'start' when no subcommand is given
         from argparse import Namespace
-        args = Namespace(command="start", port=None, no_launcher=False, no_gateway=False, no_registry=False, no_frontend=False, no_watchdog=False, verbose=getattr(args, "verbose", False))
+
+        args = Namespace(
+            command="start",
+            port=None,
+            no_launcher=False,
+            no_gateway=False,
+            no_registry=False,
+            no_frontend=False,
+            no_watchdog=False,
+            verbose=getattr(args, "verbose", False),
+        )
 
     if args.command == "help":
         parser.print_help()
@@ -105,39 +118,51 @@ def main():
 
     if args.command == "init":
         from opensquad.cli.commands.init_cmd import run_init
+
         run_init(args)
     elif args.command == "start":
         from opensquad.cli.commands.start_cmd import run_start
+
         run_start(args)
     elif args.command == "status":
         from opensquad.cli.commands.status_cmd import run_status
+
         run_status(args)
     elif args.command == "stop":
         from opensquad.cli.commands.stop_cmd import run_stop
+
         run_stop(args)
     elif args.command == "doctor":
         from opensquad.cli.commands.doctor_cmd import run_doctor
+
         run_doctor(args)
     elif args.command == "config":
         from opensquad.cli.commands.config_cmd import run_config
+
         run_config(args)
     elif args.command == "logs":
         from opensquad.cli.commands.logs_cmd import run_logs
+
         run_logs(args)
     elif args.command == "restart":
         print("[restart] Stopping services...")
         from opensquad.cli.commands.stop_cmd import run_stop
+
         run_stop(args)
         import time
+
         time.sleep(1)
         print("[restart] Starting services...")
         from opensquad.cli.commands.start_cmd import run_start
+
         run_start(args)
     elif args.command == "update":
         from opensquad.cli.commands.update_cmd import run_update
+
         run_update(args)
     elif args.command == "plugin":
         from opensquad.cli.commands.plugin_cmd import run_plugin
+
         run_plugin(args)
 
 

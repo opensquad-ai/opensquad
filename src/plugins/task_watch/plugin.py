@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Task Watch Plugin (Decorator-based API)
 
@@ -15,12 +14,13 @@ Data sources:
 All data is persisted to:
     data/plugins/task_watch/task_watch.db
 """
+
 import logging
 import os
-import time
-from typing import Any, Dict
+from typing import Any
 
-from opensquad.plugin_api import register, hook, on_event, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, hook, on_event, register
+
 from .storage import TaskWatchStorage
 
 logger = logging.getLogger("plugins.task_watch")
@@ -81,6 +81,7 @@ class TaskWatchPlugin(Plugin):
         """Register listener for agent state changes (idle/working/sleeping)."""
         try:
             from opensquad.state_manager import state_manager
+
             state_manager.add_listener(self._on_state_change)
             self._state_listener_registered = True
             logger.info("[TaskWatch] State change listener registered")
@@ -103,6 +104,7 @@ class TaskWatchPlugin(Plugin):
         # This means: state transitions count as "activity"
         try:
             from opensquad.task_supervisor import task_supervisor
+
             task_supervisor.report_activity()
         except Exception:
             pass
@@ -119,7 +121,7 @@ class TaskWatchPlugin(Plugin):
                 logger.error(f"[TaskWatch] Error recording state change: {e}")
 
     @hook.on_after_tool
-    async def track_tool_activity(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def track_tool_activity(self, context: dict[str, Any]) -> dict[str, Any]:
         """Record every tool call for the activity timeline."""
         if not self._storage:
             return context
@@ -130,9 +132,9 @@ class TaskWatchPlugin(Plugin):
             result = context.get("result", "")
             # Heuristic: if result contains "error" key, mark as failure
             success = True
-            if isinstance(result, dict) and result.get("error"):
-                success = False
-            elif isinstance(result, str) and result.startswith("Error"):
+            if (isinstance(result, dict) and result.get("error")) or (
+                isinstance(result, str) and result.startswith("Error")
+            ):
                 success = False
 
             self._storage.record_tool_activity(
@@ -146,6 +148,7 @@ class TaskWatchPlugin(Plugin):
         # Also report activity to task_supervisor (resets stall timer)
         try:
             from opensquad.task_supervisor import task_supervisor
+
             task_supervisor.report_activity()
         except Exception:
             pass
@@ -153,7 +156,7 @@ class TaskWatchPlugin(Plugin):
         return context
 
     @on_event("task_supervisor")
-    def handle_task_event(self, event_data: Dict[str, Any]) -> None:
+    def handle_task_event(self, event_data: dict[str, Any]) -> None:
         """
         EventBus callback: record task lifecycle events.
 
@@ -189,6 +192,7 @@ class TaskWatchPlugin(Plugin):
         if self._state_listener_registered:
             try:
                 from opensquad.state_manager import state_manager
+
                 state_manager.remove_listener(self._on_state_change)
                 logger.info("[TaskWatch] State change listener unregistered")
             except Exception:

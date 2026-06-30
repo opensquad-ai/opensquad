@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import asyncio
 import sys
 import types
@@ -103,7 +102,9 @@ def test_register_builtin_tools_wires_levels_and_filesystem(monkeypatch, tmp_pat
 
     monkeypatch.setattr(agent_boot_phases_module.importlib, "import_module", fake_import)
     monkeypatch.setattr(agent_boot_phases_module.syscfg, "get_workspace", lambda: str(tmp_path / "ws"))
-    monkeypatch.setattr(agent_boot_phases_module.syscfg, "filesystem_workspace_dirs", lambda: [str(tmp_path / "global")])
+    monkeypatch.setattr(
+        agent_boot_phases_module.syscfg, "filesystem_workspace_dirs", lambda: [str(tmp_path / "global")]
+    )
 
     phases = AgentBootPhases(
         tool_modules={"system": "mod.system", "filesystem": "mod.filesystem"},
@@ -155,9 +156,7 @@ def test_initialize_runtime_infrastructure_registers_mcp_adapter(monkeypatch, tm
         )
     )
 
-    assert registry.mcp_adapters == [
-        ({"agent_dir": str(tmp_path / "agent"), "disabled": set()}, "extended")
-    ]
+    assert registry.mcp_adapters == [({"agent_dir": str(tmp_path / "agent"), "disabled": set()}, "extended")]
 
 
 def test_setup_connections_starts_gateway(monkeypatch):
@@ -193,7 +192,12 @@ def test_setup_connections_starts_gateway(monkeypatch):
 
     asyncio.run(
         phases.setup_connections(
-            config={"gateway": {"enabled": True}, "agent_id": "agent-1", "agent_name": "Agent", "agent_type": "general"},
+            config={
+                "gateway": {"enabled": True},
+                "agent_id": "agent-1",
+                "agent_name": "Agent",
+                "agent_type": "general",
+            },
             logger=logger,
             data_dir="",
         )

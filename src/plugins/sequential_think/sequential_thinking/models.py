@@ -1,25 +1,27 @@
-from typing import List, Optional, Dict, Any
-from enum import Enum
-from datetime import datetime
-from uuid import uuid4, UUID
-from pydantic import BaseModel, Field, field_validator
 import re
+from datetime import datetime
+from enum import Enum
+from typing import Any
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, Field, field_validator
 
 
 def to_camel_case(snake_str: str) -> str:
     """Convert a snake_case string to camelCase."""
-    components = snake_str.split('_')
-    return components[0] + ''.join(x.title() for x in components[1:])
+    components = snake_str.split("_")
+    return components[0] + "".join(x.title() for x in components[1:])
 
 
 def to_snake_case(camel_str: str) -> str:
     """Convert a camelCase string to snake_case."""
-    s1 = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', camel_str)
-    return re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", camel_str)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
 
 
 class ThoughtStage(Enum):
     """Basic thinking stages for structured sequential thinking."""
+
     PROBLEM_DEFINITION = "Problem Definition"
     RESEARCH = "Research"
     ANALYSIS = "Analysis"
@@ -27,7 +29,7 @@ class ThoughtStage(Enum):
     CONCLUSION = "Conclusion"
 
     @classmethod
-    def from_string(cls, value: str) -> 'ThoughtStage':
+    def from_string(cls, value: str) -> "ThoughtStage":
         """Convert a string to a thinking stage."""
         for stage in cls:
             if stage.value.casefold() == value.casefold():
@@ -38,14 +40,15 @@ class ThoughtStage(Enum):
 
 class ThoughtData(BaseModel):
     """Data structure for a single thought in the sequential thinking process."""
+
     thought: str
     thought_number: int
     total_thoughts: int
     next_thought_needed: bool
     stage: ThoughtStage
-    tags: List[str] = Field(default_factory=list)
-    axioms_used: List[str] = Field(default_factory=list)
-    assumptions_challenged: List[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    axioms_used: list[str] = Field(default_factory=list)
+    assumptions_challenged: list[str] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     id: UUID = Field(default_factory=uuid4)
 
@@ -59,24 +62,24 @@ class ThoughtData(BaseModel):
             return False
         return self.id == other.id
 
-    @field_validator('thought')
-    def thought_not_empty(cls, v: str) -> str:
+    @field_validator("thought")
+    def thought_not_empty(self, v: str) -> str:
         """Validate that thought content is not empty."""
         if not v or not v.strip():
             raise ValueError("Thought content cannot be empty")
         return v
 
-    @field_validator('thought_number')
-    def thought_number_positive(cls, v: int) -> int:
+    @field_validator("thought_number")
+    def thought_number_positive(self, v: int) -> int:
         """Validate that thought number is positive."""
         if v < 1:
             raise ValueError("Thought number must be positive")
         return v
 
-    @field_validator('total_thoughts')
-    def total_thoughts_valid(cls, v: int, values: Dict[str, Any]) -> int:
+    @field_validator("total_thoughts")
+    def total_thoughts_valid(self, v: int, values: dict[str, Any]) -> int:
         """Validate that total thoughts is valid."""
-        thought_number = values.data.get('thought_number')
+        thought_number = values.data.get("thought_number")
         if thought_number is not None and v < thought_number:
             raise ValueError("Total thoughts must be greater or equal to current thought number")
         return v
@@ -89,25 +92,25 @@ class ThoughtData(BaseModel):
             data.pop("id", None)
         else:
             data["id"] = str(data["id"])
-        
+
         result = {}
         for key, value in data.items():
             camel_key = to_camel_case(key)
             result[camel_key] = value
-        
+
         return result
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'ThoughtData':
+    def from_dict(cls, data: dict) -> "ThoughtData":
         """Create a ThoughtData instance from a dictionary."""
         snake_data = {}
         for key, value in data.items():
             snake_key = to_snake_case(key)
             snake_data[snake_key] = value
-            
+
         if "stage" in snake_data:
             snake_data["stage"] = ThoughtStage.from_string(snake_data["stage"])
-            
+
         if "id" in snake_data:
             try:
                 snake_data["id"] = UUID(snake_data["id"])
@@ -116,6 +119,4 @@ class ThoughtData(BaseModel):
 
         return cls(**snake_data)
 
-    model_config = {
-        "arbitrary_types_allowed": True
-    }
+    model_config = {"arbitrary_types_allowed": True}

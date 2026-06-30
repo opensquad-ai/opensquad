@@ -1,8 +1,8 @@
-from typing import List, Dict, Any
 from collections import Counter
-from datetime import datetime
-from .models import ThoughtData, ThoughtStage
+from typing import Any
+
 from .logging_conf import configure_logging
+from .models import ThoughtData, ThoughtStage
 
 logger = configure_logging("sequential-thinking.analysis")
 
@@ -11,12 +11,11 @@ class ThoughtAnalyzer:
     """Analyzer for thought data to extract insights and patterns."""
 
     @staticmethod
-    def find_related_thoughts(current_thought: ThoughtData,
-                             all_thoughts: List[ThoughtData],
-                             max_results: int = 3) -> List[ThoughtData]:
+    def find_related_thoughts(
+        current_thought: ThoughtData, all_thoughts: list[ThoughtData], max_results: int = 3
+    ) -> list[ThoughtData]:
         """Find thoughts related to the current thought."""
-        same_stage = [t for t in all_thoughts
-                     if t.stage == current_thought.stage and t.id != current_thought.id]
+        same_stage = [t for t in all_thoughts if t.stage == current_thought.stage and t.id != current_thought.id]
 
         if current_thought.tags:
             tag_matches = []
@@ -52,7 +51,7 @@ class ThoughtAnalyzer:
         return combined
 
     @staticmethod
-    def generate_summary(thoughts: List[ThoughtData]) -> Dict[str, Any]:
+    def generate_summary(thoughts: list[ThoughtData]) -> dict[str, Any]:
         """Generate a summary of the thinking process."""
         if not thoughts:
             return {"summary": "No thoughts recorded yet"}
@@ -80,27 +79,21 @@ class ThoughtAnalyzer:
 
             logger.debug(f"Calculating completion: {len(thoughts)}/{max_total} = {percent_complete}%")
 
-            stage_counts = {
-                stage: len(thoughts_list) 
-                for stage, thoughts_list in stages.items()
-            }
-            
+            stage_counts = {stage: len(thoughts_list) for stage, thoughts_list in stages.items()}
+
             sorted_thoughts = sorted(thoughts, key=lambda x: x.thought_number)
             timeline_entries = [{"number": t.thought_number, "stage": t.stage.value} for t in sorted_thoughts]
-            
+
             top_tags_entries = [{"tag": tag, "count": count} for tag, count in top_tags]
-            
+
             all_stages_present = all(stage.value in stages for stage in ThoughtStage)
-            
+
             summary = {
                 "totalThoughts": len(thoughts),
                 "stages": stage_counts,
                 "timeline": timeline_entries,
                 "topTags": top_tags_entries,
-                "completionStatus": {
-                    "hasAllStages": all_stages_present,
-                    "percentComplete": percent_complete
-                }
+                "completionStatus": {"hasAllStages": all_stages_present, "percentComplete": percent_complete},
             }
         except Exception as e:
             logger.error(f"Error generating summary: {e}")
@@ -109,10 +102,10 @@ class ThoughtAnalyzer:
         return {"summary": summary}
 
     @staticmethod
-    def analyze_thought(thought: ThoughtData, all_thoughts: List[ThoughtData]) -> Dict[str, Any]:
+    def analyze_thought(thought: ThoughtData, all_thoughts: list[ThoughtData]) -> dict[str, Any]:
         """Analyze a single thought in the context of all thoughts."""
         related_thoughts = ThoughtAnalyzer.find_related_thoughts(thought, all_thoughts)
-        
+
         same_stage_thoughts = [t for t in all_thoughts if t.stage == thought.stage]
         is_first_in_stage = len(same_stage_thoughts) <= 1
 
@@ -126,7 +119,7 @@ class ThoughtAnalyzer:
                     "nextThoughtNeeded": thought.next_thought_needed,
                     "stage": thought.stage.value,
                     "tags": thought.tags,
-                    "timestamp": thought.timestamp
+                    "timestamp": thought.timestamp,
                 },
                 "analysis": {
                     "relatedThoughtsCount": len(related_thoughts),
@@ -134,15 +127,13 @@ class ThoughtAnalyzer:
                         {
                             "thoughtNumber": t.thought_number,
                             "stage": t.stage.value,
-                            "snippet": t.thought[:100] + "..." if len(t.thought) > 100 else t.thought
-                        } for t in related_thoughts
+                            "snippet": t.thought[:100] + "..." if len(t.thought) > 100 else t.thought,
+                        }
+                        for t in related_thoughts
                     ],
                     "progress": progress,
-                    "isFirstInStage": is_first_in_stage
+                    "isFirstInStage": is_first_in_stage,
                 },
-                "context": {
-                    "thoughtHistoryLength": len(all_thoughts),
-                    "currentStage": thought.stage.value
-                }
+                "context": {"thoughtHistoryLength": len(all_thoughts), "currentStage": thought.stage.value},
             }
         }

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Delegate Task Tool v1.1
 
@@ -20,15 +19,15 @@ Constraints:
 - Sub-task timeout: 300 seconds
 - Sub-agent maximum LLM calls: 20 rounds
 """
+
 import json
 import logging
 import threading
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Injected at startup by agents_boot.py via init_delegate_tool()
-_chat_api_cfg: Optional[dict] = None
+_chat_api_cfg: dict | None = None
 _tool_registry = None
 _parent_sid: str = ""
 
@@ -75,7 +74,7 @@ def set_chat_api_cfg(cfg: dict) -> None:
     )
 
 
-def _check_init() -> Optional[str]:
+def _check_init() -> str | None:
     """Check whether initialized. Returns an error string if not, or None if ready."""
     if _chat_api_cfg is None or _tool_registry is None:
         return "Error: delegate_task tool not properly initialized. Check init_delegate_tool() call in agents_boot.py."
@@ -117,17 +116,21 @@ def _build_sub_prompt(parent_prompt: str) -> str:
     # This covers: {{TOOL_DESCRIPTIONS}}, {{AGENT_WORKSPACE}}, {{AGENT_PROFILE}},
     # {{CONTEXT_SUMMARY}}, {{TEAM_COLLAB_CARDS}}, {{SKILLS_INSTRUCTIONS}},
     # {{MCP_GUIDE}}, {{MCP_CURRENT_STATE}}, and any future additions.
-    cleaned = re.sub(r'\{\{[A-Z_]+\}\}', '', parent_prompt)
+    cleaned = re.sub(r"\{\{[A-Z_]+\}\}", "", parent_prompt)
 
     return SUB_AGENT_HEADER + cleaned
 
 
 def _build_runner(depth: int, task_preview: str):
     """Build a SubAgentRunner instance (with depth check). Returns (runner, error_str)."""
-    from opensquad.sub_agent_runner import SubAgentRunner, MAX_DEPTH
+    from opensquad.sub_agent_runner import MAX_DEPTH, SubAgentRunner
+
     actual_depth = depth + 1
     if actual_depth > MAX_DEPTH:
-        return None, f"Error: Sub-agent delegation depth exceeds limit {MAX_DEPTH}. Refusing to execute. Please handle this task directly."
+        return (
+            None,
+            f"Error: Sub-agent delegation depth exceeds limit {MAX_DEPTH}. Refusing to execute. Please handle this task directly.",
+        )
 
     # Snapshot cfg under the lock so a concurrent runtime model switch
     # (set_chat_api_cfg) can't mutate the dict mid-copy.
@@ -145,6 +148,7 @@ def _build_runner(depth: int, task_preview: str):
     current_sid = _parent_sid  # fall back to boot-time value if session_manager unavailable
     try:
         from opensquad import session_manager as _sm_module
+
         current_sid = _sm_module.session_manager.get_current_session_id() or _parent_sid
     except Exception:
         pass
@@ -169,6 +173,7 @@ def _build_full_task(task: str, context: str) -> str:
 # ---------------------------------------------------------------------------
 # Tool 1: Synchronous blocking delegation (simple scenarios)
 # ---------------------------------------------------------------------------
+
 
 async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
     """
@@ -200,7 +205,7 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
         return err
 
     full_task = _build_full_task(task, context)
-    logger.info(f"[delegate_task] sync spawn depth={depth+1}, task={task[:80]}...")
+    logger.info(f"[delegate_task] sync spawn depth={depth + 1}, task={task[:80]}...")
     result = await runner.run_task(full_task)
     logger.info(f"[delegate_task] sync done, result_len={len(result)}")
     return result
@@ -209,6 +214,7 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
 # ---------------------------------------------------------------------------
 # Tool 2: Async submit (concurrent scenarios)
 # ---------------------------------------------------------------------------
+
 
 async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> str:
     """
@@ -244,6 +250,7 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
     full_task = _build_full_task(task, context)
 
     from opensquad.sub_agent_runner import job_manager
+
     job_id = job_manager.submit(runner, full_task)
     logger.info(f"[delegate_task] async submit job_id={job_id}, task={task[:80]}...")
     return json.dumps({"job_id": job_id, "status": "running", "label": task[:60]}, ensure_ascii=False)
@@ -252,6 +259,7 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
 # ---------------------------------------------------------------------------
 # Tool 3: Poll result
 # ---------------------------------------------------------------------------
+
 
 async def delegate_task_result(job_id: str, cleanup_on_done: bool = True) -> str:
     """
@@ -271,6 +279,7 @@ async def delegate_task_result(job_id: str, cleanup_on_done: bool = True) -> str
           not found:       {"job_id": ..., "status": "not_found","result": null}
     """
     from opensquad.sub_agent_runner import job_manager
+
     info = job_manager.get_result(job_id)
 
     if cleanup_on_done and info["status"] in ("done", "error"):
@@ -284,6 +293,7 @@ async def delegate_task_result(job_id: str, cleanup_on_done: bool = True) -> str
 # Tool 4: List active tasks (for debugging)
 # ---------------------------------------------------------------------------
 
+
 async def delegate_task_list() -> str:
     """
     [Sub-task Delegation - List Tasks] List job_id, label, and current status of all active sub-tasks.
@@ -294,5 +304,6 @@ async def delegate_task_list() -> str:
         JSON string in the format: [{"job_id": ..., "label": ..., "status": ...}, ...]
     """
     from opensquad.sub_agent_runner import job_manager
+
     jobs = job_manager.list_jobs()
     return json.dumps(jobs, ensure_ascii=False)

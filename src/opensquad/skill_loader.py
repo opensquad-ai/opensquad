@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 opensquad/skill_loader.py - Skill package loader
 
@@ -25,19 +24,19 @@ SKILL.md format:
     Markdown instruction content...
 """
 
-import os
-import re
-import json
-import logging
 import importlib
 import importlib.util
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+import json
+import logging
+import os
+import re
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 # Module-level cache for build_skills_prompt (keyed by id(skills) + cfg hash)
-_build_skills_prompt_cache: Dict[str, str] = {}
+_build_skills_prompt_cache: dict[str, str] = {}
+
 
 def _build_skills_prompt_cache_key(skills, prompt_preload_cfg) -> str:
     """Generate cache key. Using id(skills) is safe because _loaded_skills is a
@@ -57,10 +56,10 @@ class Skill:
         self.content = ""  # Markdown instruction body
         self.disable_model_invocation = False
         self.user_invocable = True
-        self.allowed_tools: List[str] = []
+        self.allowed_tools: list[str] = []
         self.has_tools_module = False
         self.tools_module = None
-        self.frontmatter: Dict[str, Any] = {}
+        self.frontmatter: dict[str, Any] = {}
         self.is_private = False  # True = agent-private skill (fully injected), False = public skill (summary only)
 
     def __repr__(self):
@@ -74,18 +73,18 @@ def parse_skill_md(filepath: str) -> tuple:
     Returns:
         (frontmatter_dict, markdown_content)
     """
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         raw = f.read()
 
     frontmatter = {}
     content = raw
 
     # Detect YAML frontmatter (starts and ends with ---)
-    fm_pattern = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
+    fm_pattern = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
     match = fm_pattern.match(raw)
     if match:
         fm_text = match.group(1)
-        content = raw[match.end():]
+        content = raw[match.end() :]
 
         # Simple YAML parsing (no pyyaml dependency)
         for line in fm_text.strip().split("\n"):
@@ -163,9 +162,7 @@ def load_skill(skill_dir: str, skill_name: str) -> Optional["Skill"]:
     if os.path.exists(tools_path):
         skill.has_tools_module = True
         try:
-            spec = importlib.util.spec_from_file_location(
-                f"skill_{skill_name}_tools", tools_path
-            )
+            spec = importlib.util.spec_from_file_location(f"skill_{skill_name}_tools", tools_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             skill.tools_module = module
@@ -177,14 +174,14 @@ def load_skill(skill_dir: str, skill_name: str) -> Optional["Skill"]:
     if not skill.description and content:
         first_para = content.split("\n\n")[0].strip()
         # Strip Markdown heading markers
-        first_para = re.sub(r'^#+\s*', '', first_para)
+        first_para = re.sub(r"^#+\s*", "", first_para)
         skill.description = first_para[:200]
 
     logger.info(f"[SkillLoader] Loaded skill: {skill.display_name} ({skill_name})")
     return skill
 
 
-def discover_skills(skills_base_dir: str) -> List[str]:
+def discover_skills(skills_base_dir: str) -> list[str]:
     """
     Auto-discover all skills under the skills directory (subdirectories containing SKILL.md).
 
@@ -212,7 +209,7 @@ def load_skills_from_config(
     config: dict,
     agent_dir: str,
     project_root: str,
-) -> List[Skill]:
+) -> list[Skill]:
     """
     Load skill packages based on the skills config in config.json (public/private separation).
 
@@ -274,6 +271,7 @@ def load_skills_from_config(
     public_skills_dir = ""
     try:
         from opensquad.system_config import builtin_resources_dir as _builtin_res_dir
+
         _candidate = _builtin_res_dir("skills")
         if _candidate and os.path.isdir(_candidate):
             public_skills_dir = _candidate
@@ -301,7 +299,7 @@ def load_skills_from_config(
     return loaded
 
 
-def build_skills_prompt(skills: List[Skill], prompt_preload_cfg: Optional[Dict[str, Any]] = None) -> str:
+def build_skills_prompt(skills: list[Skill], prompt_preload_cfg: dict[str, Any] | None = None) -> str:
     """
     Build the skill injection block for the system prompt.
 
@@ -339,7 +337,7 @@ def build_skills_prompt(skills: List[Skill], prompt_preload_cfg: Optional[Dict[s
             return default
         if isinstance(v, bool):
             return v
-        if isinstance(v, (int, float)):
+        if isinstance(v, int | float):
             return bool(v)
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on", "enabled")
@@ -349,9 +347,9 @@ def build_skills_prompt(skills: List[Skill], prompt_preload_cfg: Optional[Dict[s
     full_set = {str(x).strip() for x in (cfg.get("full_skills", []) or []) if str(x).strip()}
     hidden_set = {str(x).strip() for x in (cfg.get("hidden_skills", []) or []) if str(x).strip()}
 
-    full_skills: List[Skill] = []
-    summary_skills: List[Skill] = []
-    hidden_skills: List[Skill] = []
+    full_skills: list[Skill] = []
+    summary_skills: list[Skill] = []
+    hidden_skills: list[Skill] = []
 
     for s in skills:
         if getattr(s, "is_private", False):
@@ -417,11 +415,11 @@ def build_skills_prompt(skills: List[Skill], prompt_preload_cfg: Optional[Dict[s
 # ===================================================================
 # Runtime state: loaded skills and associated registry
 # ===================================================================
-_loaded_skills: List[Skill] = []
+_loaded_skills: list[Skill] = []
 _active_registry = None
 
 
-def init_skill_runtime(skills: List[Skill], registry):
+def init_skill_runtime(skills: list[Skill], registry):
     """
     Called by boot.py at startup to record runtime state for hot-reload support.
 
@@ -434,12 +432,12 @@ def init_skill_runtime(skills: List[Skill], registry):
     _active_registry = registry
 
 
-def get_loaded_skills() -> List[Skill]:
+def get_loaded_skills() -> list[Skill]:
     """Return the currently loaded Skill list (used by runner.py to build the skills prompt each turn)."""
     return _loaded_skills
 
 
-def add_skill(skill_dir: str, skill_name: str = None) -> dict:
+def add_skill(skill_dir: str, skill_name: str | None = None) -> dict:
     """
     Hot-load a new Skill at runtime.
 
@@ -501,7 +499,7 @@ def add_skill(skill_dir: str, skill_name: str = None) -> dict:
     }
 
 
-def add_skill_from_file(filepath: str, skill_name: str = None) -> dict:
+def add_skill_from_file(filepath: str, skill_name: str | None = None) -> dict:
     """
     Hot-load a Skill at runtime directly from a single .md file (not a directory).
 
@@ -552,7 +550,7 @@ def add_skill_from_file(filepath: str, skill_name: str = None) -> dict:
     # If no description, use the first paragraph of the body
     if not skill.description and content:
         first_para = content.split("\n\n")[0].strip()
-        first_para = re.sub(r'^#+\s*', '', first_para)
+        first_para = re.sub(r"^#+\s*", "", first_para)
         skill.description = first_para[:200]
 
     _loaded_skills.append(skill)
@@ -609,7 +607,7 @@ def list_skills() -> list:
     ]
 
 
-def register_skill_tools(skills: List[Skill], registry) -> None:
+def register_skill_tools(skills: list[Skill], registry) -> None:
     """
     Register tools.py modules from skills into the ToolRegistry.
 
@@ -625,10 +623,6 @@ def register_skill_tools(skills: List[Skill], registry) -> None:
                     f"skill_{skill.name}",
                     level="extended",
                 )
-                logger.info(
-                    f"[SkillLoader] Registered tools from skill '{skill.name}'"
-                )
+                logger.info(f"[SkillLoader] Registered tools from skill '{skill.name}'")
             except Exception as e:
-                logger.error(
-                    f"[SkillLoader] Failed to register tools for '{skill.name}': {e}"
-                )
+                logger.error(f"[SkillLoader] Failed to register tools for '{skill.name}': {e}")

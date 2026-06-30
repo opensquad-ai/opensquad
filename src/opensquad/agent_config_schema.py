@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 agent_config_schema.py - Agent config.json structure validation
 
@@ -77,7 +76,7 @@ def validate_agent_config(config: dict) -> list:
             '    "email": "mybot@ai",\n'
             '    "password": "Bot@2026",\n'
             '    "groups": ["gXXXXX"]\n'
-            '  }'
+            "  }"
         )
 
     # - 1. Top-level required fields -
@@ -98,7 +97,7 @@ def validate_agent_config(config: dict) -> list:
             '    "model_name": "gpt-4o",\n'
             '    "token_max": 128000,\n'
             '    "temperature": 0\n'
-            '  }'
+            "  }"
         )
     else:
         for field in ("api_protocol", "model_name", "base_url"):
@@ -114,9 +113,6 @@ def validate_agent_config(config: dict) -> list:
             errors.append("Missing required field 'group_chat.password'")
         groups = gc.get("groups")
         if isinstance(groups, str):
-            errors.append(
-                "group_chat.groups must be an array, not a string. "
-                'Should be ["gXXXXX"] instead of "gXXXXX"'
-            )
+            errors.append('group_chat.groups must be an array, not a string. Should be ["gXXXXX"] instead of "gXXXXX"')
 
     return errors

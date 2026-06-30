@@ -1,16 +1,18 @@
-# -*- coding: utf-8 -*-
 """opensquad stop — Kill all OpenSQuad processes by port (cross-platform)."""
+
+import contextlib
 import json
 import os
-import signal
+import subprocess
 import sys
 import time
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 def _get_opensquad_ports():
     """Return tuple of all OpenSquad-managed ports from configuration."""
     from opensquad.system_config import syscfg
+
     return (
         syscfg.port("frontend"),  # Vite dev server port
         syscfg.port("gateway"),
@@ -18,6 +20,7 @@ def _get_opensquad_ports():
         syscfg.port("external_adapter"),
         syscfg.port("registry"),
     )
+
 
 # Substrings used to detect OpenSQuad-related processes for the tree-kill
 # fallback. These are matched against the full command line of each process.
@@ -38,6 +41,7 @@ def _read_runtime_registry_entries() -> list[dict]:
     """Read launcher runtime registry entries so stop can kill known child PIDs."""
     try:
         from opensquad.launcher.process_manager import _read_runtime_registry
+
         return _read_runtime_registry() or []
     except ImportError:
         return []
@@ -46,7 +50,7 @@ def _read_runtime_registry_entries() -> list[dict]:
 def _terminate_registered_processes() -> tuple[int, int, set[int]]:
     """Terminate agent/plugin processes recorded by launcher runtime registry."""
     try:
-        from opensquad.launcher.process_manager import _terminate_pid_tree, _pid_exists, _remove_runtime_registry
+        from opensquad.launcher.process_manager import _pid_exists, _remove_runtime_registry, _terminate_pid_tree
     except ImportError:
         return 0, 0, set()
 
@@ -69,19 +73,18 @@ def _terminate_registered_processes() -> tuple[int, int, set[int]]:
         alive = _pid_exists(pid_int)
         if alive and _terminate_pid_tree(pid_int):
             killed += 1
-        try:
+        with contextlib.suppress(OSError):
             _remove_runtime_registry(kind, identifier)
-        except OSError:
-            pass
     return killed, len(entries), touched_pids
 
 
 def _probe_port(port: int, timeout: float = 0.15) -> bool:
     """Check if a port has an active listener (instant on connection refused)."""
     import socket as _socket
+
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
-        return s.connect_ex(('127.0.0.1', port)) == 0
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[str]]:
@@ -114,7 +117,10 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
         port_csv = ",".join(str(p) for p in sorted(active_ports))
         result = subprocess.run(
             [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
                 f"Get-NetTCPConnection -State Listen -LocalPort {port_csv} "
                 f"| Select-Object LocalPort,OwningProcess | ConvertTo-Json -Compress",
             ],
@@ -258,6 +264,7 @@ def _collect_listening_pids_unix(ports: tuple[int, ...]) -> dict[int, list[str]]
         return listeners
 
     import re
+
     for line in result.stdout.splitlines():
         if "LISTEN" not in line:
             continue
@@ -274,13 +281,13 @@ def _collect_listening_pids_unix(ports: tuple[int, ...]) -> dict[int, list[str]]
     return listeners
 
 
-def _kill_port_pids(ports: tuple[int, ...], skip_pids: set[int] | None = None) -> tuple[int, list[tuple[int, list[str]]]]:
+def _kill_port_pids(
+    ports: tuple[int, ...], skip_pids: set[int] | None = None
+) -> tuple[int, list[tuple[int, list[str]]]]:
     """Kill listener PIDs for managed ports, skipping PIDs already handled earlier."""
     skip = {str(pid) for pid in (skip_pids or set()) if pid and pid > 0}
     listeners = (
-        _collect_listening_pids_windows(ports)
-        if sys.platform == "win32"
-        else _collect_listening_pids_unix(ports)
+        _collect_listening_pids_windows(ports) if sys.platform == "win32" else _collect_listening_pids_unix(ports)
     )
     total = 0
     details: list[tuple[int, list[str]]] = []
@@ -317,7 +324,6 @@ def _kill_port_pids(ports: tuple[int, ...], skip_pids: set[int] | None = None) -
     return total, details
 
 
-
 def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
     """Snapshot all Windows processes via WMIC in a single subprocess call.
 
@@ -329,8 +335,10 @@ def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
     try:
         result = subprocess.run(
             [
-                "wmic", "process",
-                "get", "ProcessId,ParentProcessId,Name",
+                "wmic",
+                "process",
+                "get",
+                "ProcessId,ParentProcessId,Name",
                 "/format:csv",
             ],
             capture_output=True,
@@ -362,12 +370,13 @@ def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
     # Fallback: psutil (slower but always available)
     try:
         import psutil
+
         procs = {}
-        for p in psutil.process_iter(['pid', 'ppid', 'name']):
+        for p in psutil.process_iter(["pid", "ppid", "name"]):
             try:
-                pid = p.info['pid']
-                ppid = p.info.get('ppid')
-                name = (p.info.get('name') or '').lower()
+                pid = p.info["pid"]
+                ppid = p.info.get("ppid")
+                name = (p.info.get("name") or "").lower()
                 procs[pid] = (ppid, name)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
@@ -413,7 +422,7 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
             children_of.setdefault(ppid, []).append(pid)
 
     # ── Phase 4: FAST pre-filter by process name, then lazy cmdline check ──
-    CANDIDATE_NAMES = {'python.exe', 'pythonw.exe', 'python3.exe', 'node.exe', 'node'}
+    CANDIDATE_NAMES = {"python.exe", "pythonw.exe", "python3.exe", "node.exe", "node"}
     candidate_pids: set[int] = set()
     for pid, (ppid, name) in procs_info.items():
         if pid in skip_pids:
@@ -451,7 +460,9 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, check=False, timeout=5,
+                capture_output=True,
+                check=False,
+                timeout=5,
             )
             killed += 1
         except Exception:
@@ -474,11 +485,11 @@ def _kill_unix_tree_psutil(my_pid: int) -> int:
     # ── Phase 1: snapshot all process info in one pass ──
     procs_info: list[tuple[int, int | None, str]] = []
     try:
-        for p in psutil.process_iter(['pid', 'ppid', 'cmdline']):
+        for p in psutil.process_iter(["pid", "ppid", "cmdline"]):
             try:
-                pid = p.info['pid']
-                ppid = p.info.get('ppid')
-                cmdline = " ".join(p.info.get('cmdline') or [])
+                pid = p.info["pid"]
+                ppid = p.info.get("ppid")
+                cmdline = " ".join(p.info.get("cmdline") or [])
                 procs_info.append((pid, ppid, cmdline.lower()))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
@@ -530,10 +541,8 @@ def _kill_unix_tree_psutil(my_pid: int) -> int:
     pid_to_proc: dict[int, psutil.Process] = {}
     for pid, _, _ in procs_info:
         if pid in to_kill and pid not in skip_pids:
-            try:
+            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
                 pid_to_proc[pid] = psutil.Process(pid)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
 
     for pid, _, _ in procs_info:
         if pid in to_kill and pid in pid_to_proc and pid not in skip_pids:
@@ -559,6 +568,7 @@ def run_stop(args):
     # ── Step 0: Graceful shutdown — notify launcher to stop agents cleanly ──
     syscfg_import_start = time.perf_counter()
     from opensquad.system_config import syscfg
+
     syscfg_import_elapsed = time.perf_counter() - syscfg_import_start
     graceful_start = time.perf_counter()
     try:
@@ -566,9 +576,11 @@ def run_stop(args):
         print(f"[stop] Sending graceful shutdown to launcher (port {launcher_port})...")
         # Quick socket probe first — if port isn't listening, skip HTTP entirely
         if not _probe_port(launcher_port, timeout=0.5):
-            print(f"[stop] Launcher port not listening, skipping graceful shutdown.")
+            print("[stop] Launcher port not listening, skipping graceful shutdown.")
         else:
-            import urllib.request, urllib.error
+            import urllib.error
+            import urllib.request
+
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{launcher_port}/api/shutdown",
@@ -577,14 +589,14 @@ def run_stop(args):
                     headers={"Content-Type": "application/json"},
                 )
                 urllib.request.urlopen(req, timeout=3)
-                print(f"[stop] Launcher acknowledged shutdown.")
+                print("[stop] Launcher acknowledged shutdown.")
                 # Brief wait for processes to exit gracefully, then verify
                 for _ in range(5):
                     time.sleep(0.5)
                     if not _probe_port(launcher_port, timeout=0.3):
                         break
             except urllib.error.URLError:
-                print(f"[stop] Launcher not responding, proceeding to force kill.")
+                print("[stop] Launcher not responding, proceeding to force kill.")
                 pass
     except Exception:
         pass
@@ -596,8 +608,7 @@ def run_stop(args):
     handled_pids.update(registry_pids)
     registry_elapsed = time.perf_counter() - registry_start
     print(
-        f"[stop] Runtime registry: {registry_entries} entrie(s), "
-        f"killed {registry_killed} in {registry_elapsed:.2f}s."
+        f"[stop] Runtime registry: {registry_entries} entrie(s), killed {registry_killed} in {registry_elapsed:.2f}s."
     )
     if registry_entries > 0:
         time.sleep(0.5)
@@ -655,7 +666,9 @@ def run_stop(args):
     total_killed = registry_killed + parent_killed + total
     total_elapsed = time.perf_counter() - started_at
     if total_killed == 0:
-        print(f"[stop] No OpenSQuad processes found. syscfg_import={syscfg_import_elapsed:.2f}s, graceful={graceful_elapsed:.2f}s, registry={registry_elapsed:.2f}s, tree={tree_elapsed:.2f}s, port={port_elapsed:.2f}s, total={total_elapsed:.2f}s")
+        print(
+            f"[stop] No OpenSQuad processes found. syscfg_import={syscfg_import_elapsed:.2f}s, graceful={graceful_elapsed:.2f}s, registry={registry_elapsed:.2f}s, tree={tree_elapsed:.2f}s, port={port_elapsed:.2f}s, total={total_elapsed:.2f}s"
+        )
     else:
         print(
             f"[stop] Done. registry={registry_killed}, tree={parent_killed}, port={total} "

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Token Analytics Plugin (New-style Decorator API)
 
@@ -18,11 +17,13 @@ Data is collected from two sources:
 All data is persisted to a shared SQLite database at:
     data/plugins/token_analytics/analytics.db
 """
+
 import logging
 import os
-from typing import Any, Dict
+from typing import Any
 
-from opensquad.plugin_api import register, hook, on_event, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, hook, on_event, register
+
 from .storage import TokenStorage
 
 logger = logging.getLogger("plugins.token_analytics")
@@ -99,11 +100,10 @@ class TokenAnalyticsPlugin(Plugin):
             flush_interval_sec=flush_interval,
         )
 
-        logger.info(f"[TokenAnalytics] Initialized (agent={self.context.agent_id}, "
-                     f"db={db_path})")
+        logger.info(f"[TokenAnalytics] Initialized (agent={self.context.agent_id}, db={db_path})")
 
     @on_event("token_stats")
-    def handle_token_stats(self, event_data: Dict[str, Any]) -> None:
+    def handle_token_stats(self, event_data: dict[str, Any]) -> None:
         """
         EventBus callback: record a token snapshot after each LLM call.
 
@@ -140,7 +140,7 @@ class TokenAnalyticsPlugin(Plugin):
             logger.error(f"[TokenAnalytics] Error recording snapshot: {e}", exc_info=True)
 
     @hook.on_after_tool
-    async def track_tool_usage(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def track_tool_usage(self, context: dict[str, Any]) -> dict[str, Any]:
         """
         Hook callback: record tool usage with estimated token consumption.
 

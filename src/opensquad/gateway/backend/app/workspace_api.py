@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Workspace management API (Gateway proxy layer)
 
@@ -6,9 +5,9 @@ All workspace operations are forwarded to the Launcher node for execution.
 Launcher holds the file system permissions for the agent server and is the sole authority for workspace operations.
 Gateway itself does not directly operate any workspace file system.
 """
+
 import os
 import sys
-from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -25,9 +24,10 @@ router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
 # ==================== Pydantic Models ====================
 
+
 class CreateWorkspaceRequest(BaseModel):
-    path: Optional[str] = None
-    name: Optional[str] = None
+    path: str | None = None
+    name: str | None = None
 
 
 class SwitchWorkspaceRequest(BaseModel):
@@ -35,13 +35,14 @@ class SwitchWorkspaceRequest(BaseModel):
 
 
 class MigrationRequest(BaseModel):
-    source: str             # Source workspace directory (path on Launcher server)
-    target: str             # Target workspace directory (path on Launcher server)
-    mode: str = "copy"      # "copy"=keep source files  "move"=delete source files after migration
+    source: str  # Source workspace directory (path on Launcher server)
+    target: str  # Target workspace directory (path on Launcher server)
+    mode: str = "copy"  # "copy"=keep source files  "move"=delete source files after migration
     conflict: str = "skip"  # "skip" | "overwrite"
 
 
 # ==================== Proxy Helper Functions ====================
+
 
 async def _proxy_get(path: str, timeout: float = 10.0) -> dict:
     """Send a GET request to Launcher"""
@@ -51,8 +52,7 @@ async def _proxy_get(path: str, timeout: float = 10.0) -> dict:
             resp = await client.get(f"{launcher_url}{path}")
     except httpx.ConnectError:
         raise HTTPException(
-            status_code=503,
-            detail="Cannot connect to Launcher node, please confirm Launcher is running"
+            status_code=503, detail="Cannot connect to Launcher node, please confirm Launcher is running"
         )
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Launcher node response timed out")
@@ -75,8 +75,7 @@ async def _proxy_post(path: str, body: dict, timeout: float = 10.0) -> dict:
             resp = await client.post(f"{launcher_url}{path}", json=body)
     except httpx.ConnectError:
         raise HTTPException(
-            status_code=503,
-            detail="Cannot connect to Launcher node, please confirm Launcher is running"
+            status_code=503, detail="Cannot connect to Launcher node, please confirm Launcher is running"
         )
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Launcher node response timed out")
@@ -92,6 +91,7 @@ async def _proxy_post(path: str, body: dict, timeout: float = 10.0) -> dict:
 
 
 # ==================== API Endpoints ====================
+
 
 @router.get("/list")
 async def list_workspaces():
@@ -120,10 +120,13 @@ async def create_workspace(request: CreateWorkspaceRequest):
 
     Does not auto-switch after creation; call /switch to activate manually.
     """
-    return await _proxy_post("/api/workspace/create", {
-        "path": request.path,
-        "name": request.name,
-    })
+    return await _proxy_post(
+        "/api/workspace/create",
+        {
+            "path": request.path,
+            "name": request.name,
+        },
+    )
 
 
 @router.post("/switch")
@@ -158,12 +161,15 @@ async def start_migration(request: MigrationRequest):
 
     Returns task_id; poll progress via /migrate/status/{task_id}.
     """
-    return await _proxy_post("/api/workspace/migrate", {
-        "source":   request.source,
-        "target":   request.target,
-        "mode":     request.mode,
-        "conflict": request.conflict,
-    })
+    return await _proxy_post(
+        "/api/workspace/migrate",
+        {
+            "source": request.source,
+            "target": request.target,
+            "mode": request.mode,
+            "conflict": request.conflict,
+        },
+    )
 
 
 @router.get("/migrate/status/{task_id}")

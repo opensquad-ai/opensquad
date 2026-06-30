@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 anyio_patches.py — Global monkey-patch for anyio CancelScope on Python 3.12+
 
@@ -34,7 +33,6 @@ Usage:
 import asyncio
 import sys
 
-
 _patch_applied = False
 
 
@@ -68,6 +66,7 @@ def apply() -> None:
     # breaks every LLM call. Skip the patch entirely on 3.x.
     try:
         import importlib.metadata as _md
+
         _anyio_version = tuple(int(p) for p in _md.version("anyio").split(".")[:2])
     except Exception:
         _anyio_version = (0, 0)
@@ -88,7 +87,7 @@ def _patch_deliver_cancellation(_ba) -> None:
 
     def _patched_deliver(self, origin):
         # Initialize the dedup set lazily (once per scope lifecycle)
-        if not hasattr(self, '_cancelled_task_ids'):
+        if not hasattr(self, "_cancelled_task_ids"):
             self._cancelled_task_ids = set()
 
         current = _ba.current_task()
@@ -107,23 +106,17 @@ def _patch_deliver_cancellation(_ba) -> None:
                         self._cancelled_task_ids.add(tid)
                         task.cancel(f"Cancelled by cancel scope {id(origin):x}")
                         did_new_cancel = True
-                        if (
-                            task is origin._host_task
-                            and origin._pending_uncancellations is not None
-                        ):
+                        if task is origin._host_task and origin._pending_uncancellations is not None:
                             origin._pending_uncancellations += 1
 
         for scope in self._child_scopes:
-            if not scope._shield and not scope.cancel_called:
-                if scope._deliver_cancellation(origin):
-                    did_new_cancel = True
+            if not scope._shield and not scope.cancel_called and scope._deliver_cancellation(origin):
+                did_new_cancel = True
 
         # Only re-schedule if we actually delivered a NEW cancellation
         if origin is self:
             if did_new_cancel and self._active:
-                self._cancel_handle = _ba.get_running_loop().call_soon(
-                    self._deliver_cancellation, origin
-                )
+                self._cancel_handle = _ba.get_running_loop().call_soon(self._deliver_cancellation, origin)
             else:
                 self._cancel_handle = None
 
@@ -145,7 +138,7 @@ def _patch_exit(_ba) -> None:
         # (Python 3.12+). This catches cases where cancellations were
         # delivered but the matching __exit__ cleanup didn't fully drain.
         try:
-            if host_task is not None and hasattr(host_task, 'uncancel'):
+            if host_task is not None and hasattr(host_task, "uncancel"):
                 while host_task.uncancel() > 0:
                     pass
         except Exception:

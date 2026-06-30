@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 State machine module -- handles idle / working / sleeping transitions and the
 idle wait loop.
@@ -9,12 +8,13 @@ Extracted from runner.py.  Manages:
 - Sleep / wake lifecycle
 - The "never stop" inner wait loop that listens for pipeline events
 """
+
 from __future__ import annotations
 
 import asyncio
-import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from opensquad.tool import logger
 
@@ -39,7 +39,7 @@ class StateMachine:
 
     @staticmethod
     def generate_wake_prompt(
-        sleep_controller: "SleepController",
+        sleep_controller: SleepController,
     ) -> str:
         """Build the prompt injected when the agent wakes from sleep."""
         wake_info = sleep_controller._wake_reason  # type: ignore[attr-defined]
@@ -56,11 +56,11 @@ class StateMachine:
     async def idle_wait(
         self,
         runner: Any,
-        input_hub: "InputHub",
-        message_queue: "MessageQueue",
-        state_manager: "AIStateManager",
-        event_bus: "EventBus",
-        sleep_controller: "SleepController",
+        input_hub: InputHub,
+        message_queue: MessageQueue,
+        state_manager: AIStateManager,
+        event_bus: EventBus,
+        sleep_controller: SleepController,
         emit: Callable[[str, Any], Any],
         get_state: Callable[[], Any],
         set_state: Callable[[str], Any],
@@ -123,7 +123,7 @@ class StateMachine:
                         mtime = os.path.getmtime(config_path)
                         if mtime > runner._config_mtime:
                             runner._config_mtime = mtime
-                            with open(config_path, "r", encoding="utf-8") as _f:
+                            with open(config_path, encoding="utf-8") as _f:
                                 _new_cfg = _json.load(_f)
                             new_tools = _new_cfg.get("tools", [])
                             new_levels = _new_cfg.get("tool_levels", {})
@@ -138,9 +138,7 @@ class StateMachine:
                             if new_model != runner._model_config:
                                 await self._apply_model_reload(runner, new_model)
                     except Exception as _e:
-                        logger.warning(
-                            "[StateMachine] Config reload error: %s", _e
-                        )
+                        logger.warning("[StateMachine] Config reload error: %s", _e)
 
             # -- 3. Drain message queue if messages accumulated ---------------
             if message_queue.size > 0:
@@ -153,6 +151,7 @@ class StateMachine:
             # -- 4. Auto-sleep while awaiting group reply --------------------
             elif message_queue.size == 0:
                 from opensquad.message_router import get_message_router
+
                 message_router = get_message_router()
 
                 if message_router.awaiting_reply:
@@ -164,8 +163,7 @@ class StateMachine:
                     await emit("status", "sleeping")
                     await emit(
                         "info",
-                        f"Group message sent, waiting for reply "
-                        f"({sleep_seconds}s timeout)...",
+                        f"Group message sent, waiting for reply ({sleep_seconds}s timeout)...",
                     )
                     await set_state("sleeping")
                     message_router.clear_await_reply()
@@ -208,10 +206,7 @@ class StateMachine:
                     if current_task and hasattr(current_task, "uncancel"):
                         while current_task.uncancel() > 0:
                             pass
-                    logger.warning(
-                        "[StateMachine] CancelledError safety net "
-                        "(uncancel called), continuing..."
-                    )
+                    logger.warning("[StateMachine] CancelledError safety net (uncancel called), continuing...")
                 continue
 
             # -- 8. Got input ----------------------------------------------
@@ -226,16 +221,10 @@ class StateMachine:
         try:
             from opensquad.agents_boot import register_builtin_tools_sync
 
-            register_builtin_tools_sync(
-                new_cfg, runner.tool_registry, runner._agent_dir
-            )
-            logger.info(
-                "[StateMachine] Config reload: built-in tools re-registered"
-            )
+            register_builtin_tools_sync(new_cfg, runner.tool_registry, runner._agent_dir)
+            logger.info("[StateMachine] Config reload: built-in tools re-registered")
         except Exception as _e:
-            logger.warning(
-                "[StateMachine] Built-in tool re-registration failed: %s", _e
-            )
+            logger.warning("[StateMachine] Built-in tool re-registration failed: %s", _e)
 
         if runner._plugin_manager:
             runner._plugin_manager.reload_plugins(
@@ -249,9 +238,7 @@ class StateMachine:
                 agent_tool_names=runner._agent_tool_names,
                 agent_tool_levels=runner._agent_tool_levels,
             )
-            logger.info(
-                "[StateMachine] Config reload: plugin tools re-registered"
-            )
+            logger.info("[StateMachine] Config reload: plugin tools re-registered")
 
     async def _apply_model_reload(self, runner: Any, new_model: dict) -> None:
         """Apply model-level changes from a reloaded config.json.
@@ -266,15 +253,13 @@ class StateMachine:
 
             await apply_model_reload(runner, new_model)
         except Exception as _e:
-            logger.warning(
-                "[StateMachine] Model hot-reload failed: %s", _e
-            )
+            logger.warning("[StateMachine] Model hot-reload failed: %s", _e)
 
     async def wait_for_events(
         self,
         runner: Any,
-        input_hub: "InputHub",
-        message_queue: "MessageQueue",
+        input_hub: InputHub,
+        message_queue: MessageQueue,
         emit: Callable[[str, Any], Any],
         set_state: Callable[[str], Any],
         get_session_manager: Callable[[], Any],
@@ -309,9 +294,7 @@ class StateMachine:
 
             for cmd in input_hub.check_urgent_commands():
                 content = cmd.get("content", "")
-                result = await self._handle_urgent_command(
-                    runner, cmd, content, emit, set_state, get_session_manager
-                )
+                result = await self._handle_urgent_command(runner, cmd, content, emit, set_state, get_session_manager)
                 if result is not None:
                     return result
 
@@ -321,17 +304,14 @@ class StateMachine:
 
             pending = message_queue.get_all()
             if pending:
-                queue_images = [
-                    img for msg in pending if msg.images for img in msg.images
-                ]
+                queue_images = [img for msg in pending if msg.images for img in msg.images]
                 if queue_images:
                     runner._current_images.extend(queue_images)
                 return False, None
 
             # Nothing available — wait for signal or timeout
             done, _ = await asyncio.wait(
-                [asyncio.create_task(input_event.wait()),
-                 asyncio.create_task(msg_event.wait())],
+                [asyncio.create_task(input_event.wait()), asyncio.create_task(msg_event.wait())],
                 timeout=poll_interval,
                 return_when=asyncio.FIRST_COMPLETED,
             )
@@ -385,9 +365,7 @@ class StateMachine:
                 emit("turn_start", 0)
                 from opensquad.events import get_event_bus
 
-                await get_event_bus().emit_async(
-                    "current_session", {"id": sid, "title": "Current Session"}
-                )
+                await get_event_bus().emit_async("current_session", {"id": sid, "title": "Current Session"})
                 emit("info", f"Session loaded: {sid}")
             return True, None
 

@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
+import builtins
 import json
 import os
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Any
 
-from opensquad.plugin_api import register, tool, Context, Plugin
+from opensquad.plugin_api import Context, Plugin, register, tool
 
 
 @register(
@@ -28,29 +28,27 @@ from opensquad.plugin_api import register, tool, Context, Plugin
 class QuickNotePlugin(Plugin):
     def __init__(self, context: Context):
         super().__init__(context)
-        self.data_file = os.path.join(
-            context.project_root, "data", "plugins", "quick_note", "notes.json"
-        )
+        self.data_file = os.path.join(context.project_root, "data", "plugins", "quick_note", "notes.json")
         self._ensure_data_file()
-    
+
     def _ensure_data_file(self):
         os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
         if not os.path.exists(self.data_file):
             self._save_notes([])
-    
-    def _load_notes(self) -> List[Dict]:
+
+    def _load_notes(self) -> list[dict]:
         try:
-            with open(self.data_file, "r", encoding="utf-8") as f:
+            with open(self.data_file, encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return []
-    
-    def _save_notes(self, notes: List[Dict]):
+
+    def _save_notes(self, notes: list[dict]):
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(notes, f, ensure_ascii=False, indent=2)
-    
+
     @tool(name="quick_note", level="extended", description="quick note tool")
-    def add(self, content: str, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+    def add(self, content: str, tags: list[str] | None = None) -> dict[str, Any]:
         notes = self._load_notes()
         note = {
             "id": str(uuid.uuid4())[:8],
@@ -63,29 +61,29 @@ class QuickNotePlugin(Plugin):
         notes.insert(0, note)
         self._save_notes(notes)
         return {"success": True, "note": note}
-    
+
     @tool(name="quick_note", level="extended")
-    def list(self, limit: int = 20, tag: Optional[str] = None, done: Optional[bool] = None) -> Dict[str, Any]:
+    def list(self, limit: int = 20, tag: str | None = None, done: bool | None = None) -> dict[str, Any]:
         notes = self._load_notes()
         if tag:
             notes = [n for n in notes if tag in n.get("tags", [])]
         if done is not None:
             notes = [n for n in notes if n.get("done") == done]
         return {"success": True, "notes": notes[:limit], "total": len(notes)}
-    
+
     @tool(name="quick_note", level="extended")
-    def search(self, query: str, limit: int = 10) -> Dict[str, Any]:
+    def search(self, query: str, limit: int = 10) -> dict[str, Any]:
         notes = self._load_notes()
         query_lower = query.lower()
         results = [
-            n for n in notes
-            if query_lower in n.get("content", "").lower()
-            or any(query_lower in t.lower() for t in n.get("tags", []))
+            n
+            for n in notes
+            if query_lower in n.get("content", "").lower() or any(query_lower in t.lower() for t in n.get("tags", []))
         ]
         return {"success": True, "notes": results[:limit], "total": len(results), "query": query}
-    
+
     @tool(name="quick_note", level="extended")
-    def toggle(self, note_id: str) -> Dict[str, Any]:
+    def toggle(self, note_id: str) -> dict[str, Any]:
         notes = self._load_notes()
         for note in notes:
             if note.get("id") == note_id:
@@ -94,18 +92,20 @@ class QuickNotePlugin(Plugin):
                 self._save_notes(notes)
                 return {"success": True, "note": note}
         return {"success": False, "error": "Note not found"}
-    
+
     @tool(name="quick_note", level="extended")
-    def delete(self, note_id: str) -> Dict[str, Any]:
+    def delete(self, note_id: str) -> dict[str, Any]:
         notes = self._load_notes()
         new_notes = [n for n in notes if n.get("id") != note_id]
         if len(new_notes) == len(notes):
             return {"success": False, "error": "Note not found"}
         self._save_notes(new_notes)
         return {"success": True, "deleted_id": note_id}
-    
+
     @tool(name="quick_note", level="extended")
-    def update(self, note_id: str, content: Optional[str] = None, tags: Optional[List[str]] = None) -> Dict[str, Any]:
+    def update(
+        self, note_id: str, content: str | None = None, tags: builtins.list[str] | None = None
+    ) -> dict[str, Any]:
         notes = self._load_notes()
         for note in notes:
             if note.get("id") == note_id:
@@ -117,9 +117,9 @@ class QuickNotePlugin(Plugin):
                 self._save_notes(notes)
                 return {"success": True, "note": note}
         return {"success": False, "error": "Note not found"}
-    
+
     @tool(name="quick_note", level="extended")
-    def clear_done(self) -> Dict[str, Any]:
+    def clear_done(self) -> dict[str, Any]:
         notes = self._load_notes()
         new_notes = [n for n in notes if not n.get("done", False)]
         deleted_count = len(notes) - len(new_notes)

@@ -1,18 +1,16 @@
-# -*- coding: utf-8 -*-
 import json
 import logging
 import os
-from typing import Any, Dict, List
-from opensquad.plugin_api import register, Plugin, Context, hook
+from typing import Any
+
+from opensquad.plugin_api import Context, Plugin, hook, register
 
 logger = logging.getLogger("plugins.git_core")
 
 
 def _is_absolute_url(url: str) -> bool:
     """Return True if url is already a full absolute URL or SSH path."""
-    return any(url.startswith(p) for p in (
-        "http://", "https://", "git://", "ssh://", "git@", "file://"
-    ))
+    return any(url.startswith(p) for p in ("http://", "https://", "git://", "ssh://", "git@", "file://"))
 
 
 def _inject_auth(server_url: str, username: str, token: str) -> str:
@@ -20,6 +18,7 @@ def _inject_auth(server_url: str, username: str, token: str) -> str:
     if not token:
         return server_url
     from urllib.parse import urlparse, urlunparse
+
     parsed = urlparse(server_url)
     if parsed.scheme in ("http", "https"):
         user = username or "oauth2"
@@ -56,29 +55,28 @@ class GitCorePlugin(Plugin):
           > built-in defaults
         """
         from opensquad.system_config import syscfg
+
         saved = {}
-        config_path = os.path.join(
-            syscfg.project_root(), "data", "plugins", "git_core", "config.json"
-        )
+        config_path = os.path.join(syscfg.project_root(), "data", "plugins", "git_core", "config.json")
         if os.path.isfile(config_path):
             try:
-                with open(config_path, "r", encoding="utf-8") as f:
+                with open(config_path, encoding="utf-8") as f:
                     saved = json.load(f)
             except Exception as e:
                 logger.warning(f"[GitCore] Failed to read plugin config: {e}")
 
         return {
-            "git_server":     (saved.get("git_server")     or syscfg.vcs_git_server()).rstrip("/"),
-            "default_remote": saved.get("default_remote")  or syscfg.vcs_default_remote(),
-            "default_branch": saved.get("default_branch")  or syscfg.vcs_default_branch(),
-            "username":       saved.get("username", ""),
-            "access_token":   saved.get("access_token", ""),
+            "git_server": (saved.get("git_server") or syscfg.vcs_git_server()).rstrip("/"),
+            "default_remote": saved.get("default_remote") or syscfg.vcs_default_remote(),
+            "default_branch": saved.get("default_branch") or syscfg.vcs_default_branch(),
+            "username": saved.get("username", ""),
+            "access_token": saved.get("access_token", ""),
         }
 
     # ── Hook ───────────────────────────────────────────────────────
 
     @hook.on_before_tool
-    async def inject_git_config(self, ctx: Dict[str, Any]):
+    async def inject_git_config(self, ctx: dict[str, Any]):
         """
         Before any git.* tool call, inject:
           - git.commit     → agent identity as author
@@ -120,8 +118,9 @@ class GitCorePlugin(Plugin):
 
         return ctx
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         from . import git_tools
+
         return [
             {
                 "name": "git",

@@ -1,16 +1,15 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-import re
-import logging
 
 logger_name = "opensquad.run_command_dispatcher"
 logger = logging.getLogger(logger_name)
 
-_SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
 def _validate_session_id(sid: str) -> bool:
@@ -44,7 +43,9 @@ class RunCommandDispatcher:
 
         if initial_query == "__RESUME_WORKFLOW__":
             self.runner._current_input_source = "wake"
-            return CommandDispatchResult(handled=False, next_query="Continue the previous task from where you left off.")
+            return CommandDispatchResult(
+                handled=False, next_query="Continue the previous task from where you left off."
+            )
 
         if initial_query == "__NEW_SESSION__":
             await self._handle_new_session()

@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
 # Core framework tools (NOT pluginized, remain here)
 
 import logging
+
 logger = logging.getLogger(__name__)
 
 # Use try-except for each import to prevent one broken module from blocking all tools
@@ -38,9 +38,9 @@ except ImportError as e:
 #   sequential_think -> plugins/sequential_think/
 
 __all__ = [
-    "system",
     "filesystem",
-    "memory",
     "im",
+    "memory",
+    "system",
     "web",
 ]

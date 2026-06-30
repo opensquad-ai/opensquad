@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Token Analytics - SQLite Storage Layer
 
@@ -10,13 +9,14 @@ Tables:
 - token_snapshots: per-LLM-call token window state + cumulative stats
 - tool_usage: per-tool-call estimated token consumption
 """
+
 import logging
 import os
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any
 
 logger = logging.getLogger("plugins.token_analytics.storage")
 
@@ -143,15 +143,16 @@ class TokenStorage:
         self._conn.commit()
 
         # Internal buffers
-        self._snapshot_buf: List[tuple] = []
-        self._tool_buf: List[tuple] = []
+        self._snapshot_buf: list[tuple] = []
+        self._tool_buf: list[tuple] = []
         self._lock = threading.Lock()
         self._last_flush_time = time.time()
 
-        logger.info(f"[TokenStorage] Initialized: {db_path} (buffer={buffer_size}, flush_interval={flush_interval_sec}s)")
+        logger.info(
+            f"[TokenStorage] Initialized: {db_path} (buffer={buffer_size}, flush_interval={flush_interval_sec}s)"
+        )
 
-    def record_snapshot(self, agent_id: str, session_id: str, model: str,
-                        token_data: Dict[str, Any]) -> None:
+    def record_snapshot(self, agent_id: str, session_id: str, model: str, token_data: dict[str, Any]) -> None:
         """
         Buffer a token snapshot record.
 
@@ -190,8 +191,9 @@ class TokenStorage:
             self._snapshot_buf.append(row)
             self._maybe_flush()
 
-    def record_tool_usage(self, agent_id: str, session_id: str, model: str,
-                          tool_name: str, args_text: str, result_text: str) -> None:
+    def record_tool_usage(
+        self, agent_id: str, session_id: str, model: str, tool_name: str, args_text: str, result_text: str
+    ) -> None:
         """
         Buffer a tool usage record with estimated token counts.
 

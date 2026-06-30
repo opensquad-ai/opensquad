@@ -1,15 +1,13 @@
-# -*- coding: utf-8 -*-
 """Unit tests for launcher.process_manager utility functions.
 
 Tests cover: _read_json, _registry_path, check_port_conflict,
 AgentProcess mock tests (get_status, get_logs), _cleanup_runtime_registry.
 """
-import json
-import os
-import pytest
 
+import os
 
 # ── _read_json ───────────────────────────────────────────────────────────
+
 
 class TestReadJson:
     """Test _read_json — BOM-safe JSON file reading."""
@@ -17,6 +15,7 @@ class TestReadJson:
     @staticmethod
     def _target(path, default=None):
         from opensquad.launcher.process_manager import _read_json
+
         return _read_json(path, default)
 
     def test_valid_json(self, tmp_file):
@@ -25,7 +24,7 @@ class TestReadJson:
         assert result == {"key": "value"}
 
     def test_bom_json(self, tmp_file):
-        path = tmp_file(b'\xef\xbb\xbf{"key": "value"}'.decode('utf-8'))
+        path = tmp_file(b'\xef\xbb\xbf{"key": "value"}'.decode("utf-8"))
         result = self._target(path)
         assert result == {"key": "value"}
 
@@ -45,23 +44,25 @@ class TestReadJson:
 
 # ── _registry_path ──────────────────────────────────────────────────────
 
+
 class TestRegistryPath:
     """Test _registry_path — identifier file path generation."""
 
     @staticmethod
     def _target(kind, identifier):
         from opensquad.launcher.process_manager import _registry_path
+
         return _registry_path(kind, identifier)
 
     def test_basic(self):
         path = self._target("agent", "test-agent-01")
         # Should be absolute and end with the expected filename
         assert path.endswith("agent_test-agent-01.json")
-        assert os.path.isabs(path)  # noqa: F821
+        assert os.path.isabs(path)
 
     def test_special_chars_sanitized(self):
         path = self._target("plugin", "my/plugin:id@123")
-        basename = path.split(os.sep)[-1]  # noqa: F821
+        basename = path.split(os.sep)[-1]
         assert "/" not in basename
         assert ".json" in path
 
@@ -72,14 +73,14 @@ class TestRegistryPath:
 
 # ── check_port_conflict ─────────────────────────────────────────────────
 
+
 class TestCheckPortConflict:
     """Test check_port_conflict — port conflict detection logic."""
 
     @staticmethod
     def _target(config, processes=None):
-        from opensquad.launcher.process_manager import check_port_conflict
-        from opensquad.launcher.process_manager import _processes
-        import copy
+        from opensquad.launcher.process_manager import _processes, check_port_conflict
+
         saved = dict(_processes)
         try:
             _processes.clear()

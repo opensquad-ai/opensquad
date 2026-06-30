@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Enhanced EventBus with subscriber tracking (P1-1).
 
@@ -10,6 +9,7 @@ Changes from V3.2:
   - ``get_subscribers(event_type)`` returns the list of (id, callback) pairs for inspection.
   - Original ``unsubscribe(event_type, callback)`` retained for backward compatibility.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,8 +17,9 @@ import logging
 import threading
 import uuid
 import weakref
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from opensquad._events.payloads import EVENT_PAYLOADS
 
@@ -28,9 +29,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SubscriberInfo:
     """Metadata for a single subscription entry."""
+
     id: str
     callback: Any = None  # Direct callback (only for non-weakref lambda fallback)
-    owner: Optional[str] = None  # Arbitrary tag for bulk removal
+    owner: str | None = None  # Arbitrary tag for bulk removal
     callback_ref: Any = None  # weakref.ref or None for strong reference (lambda fallback)
 
 
@@ -47,9 +49,9 @@ class EventBus:
 
     def __init__(self):
         # Original: event_type -> list of SubscriberInfo
-        self._subscribers: Dict[str, List[SubscriberInfo]] = {}
+        self._subscribers: dict[str, list[SubscriberInfo]] = {}
         # New: subscriber_id -> SubscriberInfo (for O(1) removal)
-        self._by_id: Dict[str, SubscriberInfo] = {}
+        self._by_id: dict[str, SubscriberInfo] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         # Track background tasks to avoid fire-and-forget losing exceptions
         self._background_tasks: set[asyncio.Task] = set()
@@ -98,7 +100,7 @@ class EventBus:
         callback_ref = None
         bound_self = None
         bound_func = None
-        if hasattr(callback, '__self__'):
+        if hasattr(callback, "__self__"):
             # Bound method — weakref the owning object
             try:
                 bound_self = weakref.ref(callback.__self__)
@@ -110,28 +112,34 @@ class EventBus:
                 callback_ref = weakref.ref(callback)
             except TypeError:
                 logger.debug(
-                    "[EventBus] Callback type %s does not support weakref, "
-                    "using strong reference (sub_id=%s)",
-                    type(callback).__name__, sub_id,
+                    "[EventBus] Callback type %s does not support weakref, using strong reference (sub_id=%s)",
+                    type(callback).__name__,
+                    sub_id,
                 )
 
         # When weakref is used, do NOT store a strong ref to callback.
         # The strong ref would prevent GC of bound methods/objects.
         if bound_self is not None:
             info = SubscriberInfo(
-                id=sub_id, callback=None, owner=owner,
+                id=sub_id,
+                callback=None,
+                owner=owner,
             )
             # Store bound-method specific data in callback_ref slot
             # Tuple: (self_ref, func) — NO strong ref to the bound method
             info.callback_ref = (bound_self, bound_func)
         elif callback_ref is not None:
             info = SubscriberInfo(
-                id=sub_id, callback=None, owner=owner,
+                id=sub_id,
+                callback=None,
+                owner=owner,
                 callback_ref=callback_ref,
             )
         else:
             info = SubscriberInfo(
-                id=sub_id, callback=callback, owner=owner,
+                id=sub_id,
+                callback=callback,
+                owner=owner,
                 callback_ref=None,
             )
 
@@ -177,7 +185,9 @@ class EventBus:
         # That would make the one-shot callback never fire. Keep a STRONG
         # reference via info.callback instead.
         info = SubscriberInfo(
-            id=sub_id, callback=_wrapper, owner=owner,
+            id=sub_id,
+            callback=_wrapper,
+            owner=owner,
             callback_ref=None,
         )
         with self._lock:
@@ -273,9 +283,7 @@ class EventBus:
             The number of subscriptions removed.
         """
         with self._lock:
-            to_remove: List[str] = [
-                sid for sid, info in self._by_id.items() if info.owner == owner
-            ]
+            to_remove: list[str] = [sid for sid, info in self._by_id.items() if info.owner == owner]
         for sid in to_remove:
             self.unsubscribe_by_id(sid)
         if to_remove:
@@ -286,14 +294,14 @@ class EventBus:
     # Inspection
     # --------------------------------------------------------------------------
 
-    def get_subscribers(self, event_type: str) -> List[tuple[str, Callable]]:
+    def get_subscribers(self, event_type: str) -> list[tuple[str, Callable]]:
         """
         Return list of (subscriber_id, callback) pairs for an event type.
 
         Useful for debugging and introspection. GC'd subscribers are excluded.
         """
         lst = self._subscribers.get(event_type, [])
-        result: List[tuple[str, Callable]] = []
+        result: list[tuple[str, Callable]] = []
         for info in lst:
             resolved = self._resolve_callback(info)
             if resolved is not None:
@@ -349,7 +357,8 @@ class EventBus:
                 lst.remove(info)
                 logger.debug(
                     "[EventBus] Auto-cleaned GC'd subscriber id=%s from [%s]",
-                    info.id, etype,
+                    info.id,
+                    etype,
                 )
                 break
 
@@ -370,10 +379,7 @@ class EventBus:
         if is_dataclass(data) and not isinstance(data, type):
             payload_cls = EVENT_PAYLOADS.get(event_type)
             if payload_cls is not None and not isinstance(data, payload_cls):
-                raise TypeError(
-                    f"Event '{event_type}' expects {payload_cls.__name__}, "
-                    f"got {type(data).__name__}"
-                )
+                raise TypeError(f"Event '{event_type}' expects {payload_cls.__name__}, got {type(data).__name__}")
             data = asdict(data)
 
         # Snapshot the subscriber list under the lock so concurrent
@@ -440,10 +446,7 @@ class EventBus:
         payload_cls = EVENT_PAYLOADS.get(event_type)
         if payload_cls is not None:
             if not isinstance(payload, payload_cls):
-                raise TypeError(
-                    f"Event '{event_type}' expects {payload_cls.__name__}, "
-                    f"got {type(payload).__name__}"
-                )
+                raise TypeError(f"Event '{event_type}' expects {payload_cls.__name__}, got {type(payload).__name__}")
             if hasattr(payload, "__dataclass_fields__"):
                 payload = payload.__dict__
         self.emit(event_type, payload)
@@ -485,5 +488,6 @@ def get_event_bus(ctx=None):
     if ctx is not None:
         return ctx.event_bus
     from opensquad._context import get_current_context
+
     ctx = get_current_context()
     return ctx.event_bus if ctx is not None else bus

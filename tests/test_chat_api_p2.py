@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 """P2/P3 fix verification for opensquad.chat_api (history trim pairing).
 
 Run: python -m pytest tests/test_chat_api_p2.py -q
 """
-import pytest
 
 from opensquad.chat_api import ChatAPI
 
@@ -37,9 +35,7 @@ def test_trim_does_not_split_tool_pair():
     for i, msg in enumerate(api.req):
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             nxt = api.req[i + 1] if i + 1 < len(api.req) else {}
-            assert nxt.get("role") == "tool", (
-                f"orphan tool_calls at index {i}: next msg is {nxt.get('role')}"
-            )
+            assert nxt.get("role") == "tool", f"orphan tool_calls at index {i}: next msg is {nxt.get('role')}"
 
 
 def test_trim_keeps_system_prompt():

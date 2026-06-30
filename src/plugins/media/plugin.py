@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Media Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/media/media.py.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.media")
 
@@ -31,17 +31,19 @@ class MediaPlugin(Plugin):
     def on_load(self) -> None:
         logger.info("[MediaPlugin] loaded (new-style).")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         tools = []
         try:
             module = importlib.import_module("plugins.media.media")
-            tools.append({
-                "name": "media",
-                "module": module,
-                "level": "core",
-                "auto_register": False,
-                "requires_agent_id": False,
-            })
+            tools.append(
+                {
+                    "name": "media",
+                    "module": module,
+                    "level": "core",
+                    "auto_register": False,
+                    "requires_agent_id": False,
+                }
+            )
         except ImportError as e:
             logger.error(f"[MediaPlugin] Cannot import media module: {e}")
         return tools

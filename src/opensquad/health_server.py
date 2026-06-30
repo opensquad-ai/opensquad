@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Lightweight HTTP health-check server for Agent processes (P0-2).
 
 Runs on a dedicated localhost port (auto-assigned) and exposes a minimal
@@ -9,21 +8,19 @@ Why not reuse the WebSocket or Web Server?
 - Web Server may be slow to start or disabled
 - This server is intentionally tiny (stdlib only) and starts instantly
 """
-import asyncio
+
 import json
 import logging
 import os
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Global state ──
-_health_server: Optional[HTTPServer] = None
-_health_thread: Optional[threading.Thread] = None
+_health_server: HTTPServer | None = None
+_health_thread: threading.Thread | None = None
 _health_port: int = 0
 _start_time: float = 0.0
 

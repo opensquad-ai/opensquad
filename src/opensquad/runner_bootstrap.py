@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +6,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from opensquad.chat_api import ChatAPI
 from opensquad.claude_api import ClaudeAPI
@@ -44,7 +43,7 @@ def configure_runner_process_warnings() -> None:
 
 
 def load_runner_config(config_path: str) -> dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as file_obj:
+    with open(config_path, encoding="utf-8") as file_obj:
         return json.load(file_obj)
 
 
@@ -66,7 +65,7 @@ def resolve_prompt_path(path: str, agent_dir: str) -> str:
 def read_prompt_file(path: str, agent_dir: str) -> str:
     resolved_path = resolve_prompt_path(path, agent_dir)
     if resolved_path and os.path.exists(resolved_path):
-        with open(resolved_path, "r", encoding="utf-8") as file_obj:
+        with open(resolved_path, encoding="utf-8") as file_obj:
             return file_obj.read()
     logger.warning("Prompt file not found: %s (looked in %s and cwd)", path, agent_dir)
     return ""
@@ -128,7 +127,7 @@ def create_tool_registry(config: dict[str, Any]) -> ToolRegistry:
     return registry
 
 
-def _validate_api_key(config: dict[str, Any], api_key: Optional[str]) -> None:
+def _validate_api_key(config: dict[str, Any], api_key: str | None) -> None:
     if api_key not in (None, ""):
         return
     agent_name = config.get("agent_name", "unknown")
@@ -153,7 +152,9 @@ def create_chat_api(config: dict[str, Any], agent_dir: str) -> tuple[ChatAPI | C
     stream_parser = StreamingTagParser(handlers={})
 
     if model_name.startswith("claude"):
-        chat_api = ClaudeAPI(api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max)
+        chat_api = ClaudeAPI(
+            api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max
+        )
     else:
         chat_api = ChatAPI(api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max)
 

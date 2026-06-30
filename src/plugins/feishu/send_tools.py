@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Feishu Send Tools (Plugin Version)
 Allow agents to proactively send messages to Feishu chats (groups or individuals).
@@ -9,16 +8,17 @@ Each agent is bound to a specific bot via agent_id matching.
 
 Migrated from opensquad/tools/feishu_send.py to plugins/feishu/send_tools.py
 """
+
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger("plugins.feishu.send_tools")
 
 # Lazy-loaded clients: {app_id: lark.Client}
-_lark_clients: Dict[str, object] = {}
+_lark_clients: dict[str, object] = {}
 # agent_id -> bot config mapping (built once)
-_agent_bot_map: Dict[str, dict] = {}
+_agent_bot_map: dict[str, dict] = {}
 # Current agent_id (set externally during boot or auto-detected)
 _current_agent_id: str = ""
 
@@ -36,10 +36,13 @@ def _ensure_bot_map():
     if _agent_bot_map:
         return
     try:
-        import sys, os
+        import os
+        import sys
+
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         sys.path.insert(0, root)
         from opensquad.system_config import syscfg
+
         bots = syscfg.get("feishu", "bots", [])
         for b in bots:
             if not b.get("enabled", True):
@@ -63,13 +66,8 @@ def _get_lark_client(app_id: str, app_secret: str):
         return _lark_clients[app_id]
     try:
         import lark_oapi as lark
-        client = (
-            lark.Client.builder()
-            .app_id(app_id)
-            .app_secret(app_secret)
-            .log_level(lark.LogLevel.WARNING)
-            .build()
-        )
+
+        client = lark.Client.builder().app_id(app_id).app_secret(app_secret).log_level(lark.LogLevel.WARNING).build()
         _lark_clients[app_id] = client
         logger.info(f"[FeishuSend] Lark client created for app_id={app_id[:8]}...")
         return client
@@ -109,7 +107,7 @@ def _get_client_for_current_agent():
     return client, None
 
 
-def send_message(chat_id: str, content: str, msg_type: str = "text") -> Dict[str, Any]:
+def send_message(chat_id: str, content: str, msg_type: str = "text") -> dict[str, Any]:
     """
     Send a message to a Feishu chat (group or individual).
 
@@ -142,11 +140,7 @@ def send_message(chat_id: str, content: str, msg_type: str = "text") -> Dict[str
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
             .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(chat_id)
-                .msg_type(msg_type)
-                .content(body_content)
-                .build()
+                CreateMessageRequestBody.builder().receive_id(chat_id).msg_type(msg_type).content(body_content).build()
             )
             .build()
         )
@@ -169,10 +163,10 @@ def send_message(chat_id: str, content: str, msg_type: str = "text") -> Dict[str
 
     except Exception as e:
         logger.error(f"[FeishuSend] Exception: {e}", exc_info=True)
-        return {"status": "error", "message": f"Failed to send: {str(e)}"}
+        return {"status": "error", "message": f"Failed to send: {e!s}"}
 
 
-def list_chats(page_size: int = 20) -> Dict[str, Any]:
+def list_chats(page_size: int = 20) -> dict[str, Any]:
     """
     List Feishu chats (groups) the bot has joined.
     Returns chat_id and name for each chat, which can be used with send_message.
@@ -187,23 +181,21 @@ def list_chats(page_size: int = 20) -> Dict[str, Any]:
     try:
         from lark_oapi.api.im.v1 import ListChatRequest
 
-        request = (
-            ListChatRequest.builder()
-            .page_size(min(page_size, 100))
-            .build()
-        )
+        request = ListChatRequest.builder().page_size(min(page_size, 100)).build()
 
         response = client.im.v1.chat.list(request)
         if response.success() and response.data:
             chats = []
             items = response.data.items or []
             for item in items:
-                chats.append({
-                    "chat_id": getattr(item, "chat_id", ""),
-                    "name": getattr(item, "name", ""),
-                    "description": getattr(item, "description", ""),
-                    "chat_mode": getattr(item, "chat_mode", ""),
-                })
+                chats.append(
+                    {
+                        "chat_id": getattr(item, "chat_id", ""),
+                        "name": getattr(item, "name", ""),
+                        "description": getattr(item, "description", ""),
+                        "chat_mode": getattr(item, "chat_mode", ""),
+                    }
+                )
             return {
                 "status": "success",
                 "count": len(chats),
@@ -219,4 +211,3 @@ def list_chats(page_size: int = 20) -> Dict[str, Any]:
 
 
 # Use the common function from plugins/__init__.py
-from plugins import get_current_source_chat_id

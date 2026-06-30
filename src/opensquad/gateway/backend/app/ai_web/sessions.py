@@ -11,12 +11,12 @@ Design:
 - Self-invalidating: 15-minute TTL on cached sessions prevents stale data
 - Thread-safe (threading.Lock) — safe from any thread
 """
+
 import asyncio
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +41,11 @@ class GatewaySessionCache:
 
     def __init__(self, **kwargs):
         # Accept legacy kwargs for backward compatibility (no-op).
-        self.sessions: Dict[str, dict] = {}
+        self.sessions: dict[str, dict] = {}
         # RLock needed because add_message()/clear_session()/etc. call
         # get_or_create_session() internally while holding the lock.
         self.lock = threading.RLock()
-        logger.info(
-            "GatewaySessionCache (cache-only) initialized. "
-            "Runner disk is the authoritative session source."
-        )
+        logger.info("GatewaySessionCache (cache-only) initialized. Runner disk is the authoritative session source.")
 
     # ── Internal helpers ──────────────────────────────────────────
 
@@ -98,11 +95,11 @@ class GatewaySessionCache:
         role: str,
         content: str,
         msg_type: str = "text",
-        extra: Optional[dict] = None,
-        message_id: Optional[str] = None,
-        images: Optional[list] = None,
-        attachments: Optional[list] = None,
-        files: Optional[list] = None,
+        extra: dict | None = None,
+        message_id: str | None = None,
+        images: list | None = None,
+        attachments: list | None = None,
+        files: list | None = None,
     ):
         """Add a message to the in-memory cache.
 
@@ -139,7 +136,9 @@ class GatewaySessionCache:
                         if (now_ts - last_ts).total_seconds() < 1.0:
                             logger.debug(
                                 "Dedup (content): %s role=%s len=%d",
-                                session_key, role, len(content),
+                                session_key,
+                                role,
+                                len(content),
                             )
                             return
                     except Exception:
@@ -176,7 +175,11 @@ class GatewaySessionCache:
                 message["extra"] = extra
                 if "images" not in message and isinstance(extra.get("images"), list) and extra.get("images"):
                     message["images"] = extra.get("images")
-                if "attachments" not in message and isinstance(extra.get("attachments"), list) and extra.get("attachments"):
+                if (
+                    "attachments" not in message
+                    and isinstance(extra.get("attachments"), list)
+                    and extra.get("attachments")
+                ):
                     message["attachments"] = extra.get("attachments")
                 if "files" not in message and isinstance(extra.get("files"), list) and extra.get("files"):
                     message["files"] = extra.get("files")
@@ -188,12 +191,14 @@ class GatewaySessionCache:
 
             logger.debug(
                 "Cached message: %s role=%s total=%d",
-                session_key, role, session["message_count"],
+                session_key,
+                role,
+                session["message_count"],
             )
 
     # ── Read APIs ────────────────────────────────────────────────
 
-    def get_history(self, user_id: str, agent_id: str, limit: int = None) -> List[dict]:
+    def get_history(self, user_id: str, agent_id: str, limit: int | None = None) -> list[dict]:
         """Get cached message history. Returns empty list if no cache or stale."""
         session_key = self._get_session_key(user_id, agent_id)
         with self.lock:
@@ -205,7 +210,7 @@ class GatewaySessionCache:
                 return messages[-limit:]
             return list(messages)
 
-    def get_session(self, user_id: str, agent_id: str) -> Optional[dict]:
+    def get_session(self, user_id: str, agent_id: str) -> dict | None:
         """Get a cached session dict, or None."""
         session_key = self._get_session_key(user_id, agent_id)
         session = self.sessions.get(session_key)
@@ -213,7 +218,7 @@ class GatewaySessionCache:
             return None
         return session
 
-    def get_user_sessions(self, user_id: str) -> List[dict]:
+    def get_user_sessions(self, user_id: str) -> list[dict]:
         """Get all cached sessions for a user, sorted by recency (stale entries removed)."""
         results = []
         stale_keys = []
@@ -277,9 +282,7 @@ class GatewaySessionCache:
     def get_stats(self) -> dict:
         """Get cache statistics."""
         with self.lock:
-            total_messages = sum(
-                s.get("message_count", 0) for s in self.sessions.values()
-            )
+            total_messages = sum(s.get("message_count", 0) for s in self.sessions.values())
             return {
                 "total_sessions": len(self.sessions),
                 "total_messages": total_messages,
@@ -293,22 +296,40 @@ class GatewaySessionCache:
     async def async_get_or_create_session(self, user_id: str, agent_id: str) -> dict:
         return await asyncio.to_thread(self.get_or_create_session, user_id, agent_id)
 
-    async def async_add_message(self, user_id: str, agent_id: str, role: str, content: str,
-                                msg_type: str = "text", extra: Optional[dict] = None,
-                                message_id: Optional[str] = None, images: Optional[list] = None,
-                                attachments: Optional[list] = None, files: Optional[list] = None):
+    async def async_add_message(
+        self,
+        user_id: str,
+        agent_id: str,
+        role: str,
+        content: str,
+        msg_type: str = "text",
+        extra: dict | None = None,
+        message_id: str | None = None,
+        images: list | None = None,
+        attachments: list | None = None,
+        files: list | None = None,
+    ):
         return await asyncio.to_thread(
-            self.add_message, user_id, agent_id, role, content, msg_type,
-            extra, message_id, images, attachments, files,
+            self.add_message,
+            user_id,
+            agent_id,
+            role,
+            content,
+            msg_type,
+            extra,
+            message_id,
+            images,
+            attachments,
+            files,
         )
 
-    async def async_get_history(self, user_id: str, agent_id: str, limit: int = None) -> List[dict]:
+    async def async_get_history(self, user_id: str, agent_id: str, limit: int | None = None) -> list[dict]:
         return await asyncio.to_thread(self.get_history, user_id, agent_id, limit)
 
-    async def async_get_session(self, user_id: str, agent_id: str) -> Optional[dict]:
+    async def async_get_session(self, user_id: str, agent_id: str) -> dict | None:
         return await asyncio.to_thread(self.get_session, user_id, agent_id)
 
-    async def async_get_user_sessions(self, user_id: str) -> List[dict]:
+    async def async_get_user_sessions(self, user_id: str) -> list[dict]:
         return await asyncio.to_thread(self.get_user_sessions, user_id)
 
     async def async_invalidate(self, user_id: str, agent_id: str):

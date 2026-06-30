@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg/_workspace.py -- Workspace lifecycle, path constants, and directory builders.
 
 Extracted from system_config.py.
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,6 +47,7 @@ def get_config_path() -> str:
 # ========================================================================
 # Path builders
 # ========================================================================
+
 
 def workspace_data_dir(*subpaths: str) -> str:
     """Return the workspace data directory path."""
@@ -101,6 +102,7 @@ def builtin_resources_dir(resource_type: str, *subpaths: str) -> str:
     root = os.environ.get("OPENSQUAD_BUILTIN_ROOT")
     if not root:
         from ._config import _load as _cfg_load
+
         cfg = _cfg_load()
         root = cfg.get("builtin_resources_root", "")
     if root:

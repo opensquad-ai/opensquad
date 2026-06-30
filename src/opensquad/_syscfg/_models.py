@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 _syscfg/_models.py — Typed configuration models (Pydantic v2).
 
@@ -18,19 +17,19 @@ Usage:
 Migration: new code should prefer ``SystemConfig`` over ``raw()`` / ``get()``.
 The legacy functions in ``_config.py`` remain for backward compatibility.
 """
+
 from __future__ import annotations
 
 import json
-import os
-from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
-
 # ── Nested models ───────────────────────────────────────────────────────────
+
 
 class HostsConfig(BaseModel, extra="forbid"):
     """Top-level ``hosts`` section."""
+
     gateway: str = "127.0.0.1"
     ai_web: str = "127.0.0.1"
 
@@ -41,6 +40,7 @@ class PortsConfig(BaseModel, extra="forbid"):
     Defaults are aligned with ``_syscfg._network.port()`` so the typed model and
     the runtime resolver agree on the same gateway port (9555).
     """
+
     gateway: int = 9555
     launcher: int = 9600
     plugin_registry: int = 9720
@@ -56,13 +56,13 @@ class SecurityConfig(BaseModel, extra="forbid"):
     from any origin (LAN IP, Electron, production domain) without manual CORS
     configuration. See issue #43 for the diagnosis that led to this default.
     """
-    cors_allow_origins: list[str] = Field(
-        default_factory=lambda: ["*"]
-    )
+
+    cors_allow_origins: list[str] = Field(default_factory=lambda: ["*"])
 
 
 class AuthConfig(BaseModel, extra="forbid"):
     """Top-level ``auth`` section."""
+
     node_secret: str = ""
     gateway_token: str = ""
     external_api_key: str = ""
@@ -70,6 +70,7 @@ class AuthConfig(BaseModel, extra="forbid"):
 
 class JwtConfig(BaseModel, extra="forbid"):
     """Top-level ``jwt`` section."""
+
     secret_key: str = "CHANGE_ME"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
@@ -77,6 +78,7 @@ class JwtConfig(BaseModel, extra="forbid"):
 
 class NodeConfig(BaseModel, extra="forbid"):
     """Top-level ``node`` section."""
+
     id: str = ""
     label: str = ""
     register_to_gateway: bool = False
@@ -84,11 +86,13 @@ class NodeConfig(BaseModel, extra="forbid"):
 
 class ServiceConfig(BaseModel, extra="forbid"):
     """Single entry in ``services`` section."""
+
     enabled: bool = True
     auto_start: bool = False
 
 
 # ── Root model ──────────────────────────────────────────────────────────────
+
 
 class SystemConfig(BaseModel, extra="ignore"):
     """Typed root model for ``system_config.json``.
@@ -106,7 +110,7 @@ class SystemConfig(BaseModel, extra="ignore"):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     jwt: JwtConfig = Field(default_factory=JwtConfig)
     node: NodeConfig = Field(default_factory=NodeConfig)
-    services: Dict[str, ServiceConfig] = Field(default_factory=dict)
+    services: dict[str, ServiceConfig] = Field(default_factory=dict)
 
     # ── Factories ───────────────────────────────────────────────────────
 
@@ -114,7 +118,7 @@ class SystemConfig(BaseModel, extra="ignore"):
     def from_file(cls, path: str) -> SystemConfig:
         """Load from a JSON file path.  Returns all-defaults when missing."""
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}

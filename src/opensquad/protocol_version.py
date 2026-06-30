@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 API / Protocol version control for OpenSquad WebSocket messages.
 
@@ -18,9 +17,10 @@ Version history:
   v2 (current): adds seq (dedup), timestamp as ISO-8601, version field
   v3 (future):  adds batching, compression, binary frames
 """
+
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Version constants
@@ -37,6 +37,7 @@ def version_string(v: int) -> str:
 # ---------------------------------------------------------------------------
 # Negotiation
 # ---------------------------------------------------------------------------
+
 
 def negotiate_version(peer_versions: list[int]) -> int:
     """Pick the highest version supported by both sides.
@@ -59,7 +60,8 @@ def negotiate_version(peer_versions: list[int]) -> int:
 # Message wrapping / unwrapping
 # ---------------------------------------------------------------------------
 
-def wrap_message(payload: Dict[str, Any], version: Optional[int] = None) -> Dict[str, Any]:
+
+def wrap_message(payload: dict[str, Any], version: int | None = None) -> dict[str, Any]:
     """Wrap a payload with protocol metadata.
 
     Args:
@@ -77,7 +79,7 @@ def wrap_message(payload: Dict[str, Any], version: Optional[int] = None) -> Dict
     return payload
 
 
-def unwrap_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+def unwrap_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Extract payload from a versioned message.
 
     Returns the message with version metadata normalized.
@@ -88,7 +90,7 @@ def unwrap_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg
 
 
-def get_message_version(msg: Dict[str, Any]) -> int:
+def get_message_version(msg: dict[str, Any]) -> int:
     """Return the protocol version of a message (defaults to 1)."""
     v = msg.get("v")
     if isinstance(v, int) and v >= 1:
@@ -106,7 +108,8 @@ def get_message_version(msg: Dict[str, Any]) -> int:
 # Compatibility helpers
 # ---------------------------------------------------------------------------
 
-def normalize_v1_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+
+def normalize_v1_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Convert a v1 (legacy) message to v2-compatible shape.
 
     - Adds seq=0 if missing (v1 had no dedup)
@@ -116,11 +119,12 @@ def normalize_v1_message(msg: Dict[str, Any]) -> Dict[str, Any]:
         msg["seq"] = 0
     if "timestamp" not in msg:
         from opensquad.time_utils import utc_now_iso
+
         msg["timestamp"] = utc_now_iso()
     return msg
 
 
-def downgrade_message(msg: Dict[str, Any], target_version: int) -> Dict[str, Any]:
+def downgrade_message(msg: dict[str, Any], target_version: int) -> dict[str, Any]:
     """Strip fields that are unknown to an older peer.
 
     Args:

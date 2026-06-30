@@ -1,9 +1,10 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
 import time as _time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+
 from opensquad.structured_log import perf_event
 
 
@@ -53,7 +54,8 @@ class TurnLifecycle:
             "diff": diff_lines,
         }
         perf_event(
-            "runner", "prompt_setup_done",
+            "runner",
+            "prompt_setup_done",
             agent_id=getattr(self.runner, "_agent_id", ""),
             elapsed_ms=int((_time.perf_counter() - t0) * 1000),
             turn=self.runner._current_turn,

@@ -33,6 +33,7 @@ def get_workspace_root() -> str:
     """Return the current workspace root (fallback to process cwd)."""
     try:
         from opensquad.system_config import syscfg
+
         ws = syscfg.get_workspace()
         if ws and os.path.isdir(ws):
             return os.path.normcase(os.path.abspath(ws))

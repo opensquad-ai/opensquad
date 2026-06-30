@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Structured logging with trace IDs for OpenSquad.
 
@@ -29,17 +28,17 @@ Performance logging helpers:
         pt.update(turn_id=3, tool_count=5)
     # Logs: {"level":"INFO","msg":"turn","elapsed_ms":12,"turn_id":3,"tool_count":5}
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import sys
-import threading
 import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Dict, Optional
+from typing import Any
 
 from opensquad.time_utils import utc_now_iso
 
@@ -47,15 +46,15 @@ from opensquad.time_utils import utc_now_iso
 # Trace context propagation (thread-safe + asyncio-safe via contextvars)
 # ---------------------------------------------------------------------------
 
-_trace_id: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
+_trace_id: ContextVar[str | None] = ContextVar("trace_id", default=None)
 
 
-def get_trace_id() -> Optional[str]:
+def get_trace_id() -> str | None:
     """Return the current trace ID (or None if not set)."""
     return _trace_id.get()
 
 
-def set_trace_id(tid: Optional[str]) -> None:
+def set_trace_id(tid: str | None) -> None:
     """Set the trace ID for the current execution context."""
     _trace_id.set(tid)
 
@@ -66,7 +65,7 @@ def new_trace_id() -> str:
 
 
 @contextmanager
-def TraceContext(trace_id: Optional[str] = None):
+def TraceContext(trace_id: str | None = None):
     """Context manager that sets a trace ID for the enclosed block."""
     tid = trace_id or new_trace_id()
     token = _trace_id.set(tid)
@@ -80,11 +79,12 @@ def TraceContext(trace_id: Optional[str] = None):
 # JSON formatter
 # ---------------------------------------------------------------------------
 
+
 class JSONFormatter(logging.Formatter):
     """Format log records as single-line JSON."""
 
     def format(self, record: logging.LogRecord) -> str:
-        obj: Dict[str, Any] = {
+        obj: dict[str, Any] = {
             "ts": utc_now_iso(),
             "level": record.levelname,
             "logger": record.name,
@@ -98,11 +98,31 @@ class JSONFormatter(logging.Formatter):
 
         # Add any extra fields from the record
         for key, value in record.__dict__.items():
-            if key in ("name", "msg", "args", "levelname", "levelno", "pathname",
-                       "filename", "module", "exc_info", "exc_text", "stack_info",
-                       "lineno", "funcName", "created", "msecs", "relativeCreated",
-                       "thread", "threadName", "processName", "process", "trace_id",
-                       "message", "asctime"):
+            if key in (
+                "name",
+                "msg",
+                "args",
+                "levelname",
+                "levelno",
+                "pathname",
+                "filename",
+                "module",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "lineno",
+                "funcName",
+                "created",
+                "msecs",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "processName",
+                "process",
+                "trace_id",
+                "message",
+                "asctime",
+            ):
                 continue
             if value is not None:
                 try:
@@ -122,6 +142,7 @@ class JSONFormatter(logging.Formatter):
 # Plain-text formatter (with trace_id support)
 # ---------------------------------------------------------------------------
 
+
 class TraceFormatter(logging.Formatter):
     """Standard text format but appends [trace_id=...] when available."""
 
@@ -137,6 +158,7 @@ class TraceFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 # Logger adapter that injects trace_id into every record
 # ---------------------------------------------------------------------------
+
 
 class TraceLoggerAdapter(logging.LoggerAdapter):
     """Logger adapter that automatically includes trace_id in every log record."""
@@ -154,7 +176,7 @@ class TraceLoggerAdapter(logging.LoggerAdapter):
 # Performance profiling helpers
 # ---------------------------------------------------------------------------
 
-_perf_logger: Optional[logging.Logger] = None
+_perf_logger: logging.Logger | None = None
 
 
 def _get_perf_logger() -> logging.Logger:
@@ -171,7 +193,7 @@ def perf_event(
     domain: str,
     event: str,
     agent_id: str = "",
-    trace_id: Optional[str] = None,
+    trace_id: str | None = None,
     **fields: Any,
 ) -> None:
     """Emit a structured performance event.
@@ -180,7 +202,7 @@ def perf_event(
     emitted as a raw integer milliseconds value.
     """
     tid = trace_id or get_trace_id()
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "domain": domain,
         "event": event,
         "ts": utc_now_iso(),
@@ -208,7 +230,7 @@ class PerfTimer:
         domain: str,
         event: str = "complete",
         agent_id: str = "",
-        trace_id: Optional[str] = None,
+        trace_id: str | None = None,
         log_on_start: bool = False,
     ):
         self.domain = domain
@@ -217,14 +239,14 @@ class PerfTimer:
         self.trace_id = trace_id
         self.log_on_start = log_on_start
         self._t0: float = 0.0
-        self._extra: Dict[str, Any] = {}
+        self._extra: dict[str, Any] = {}
 
-    def update(self, **fields: Any) -> "PerfTimer":
+    def update(self, **fields: Any) -> PerfTimer:
         """Attach arbitrary fields captured mid-block."""
         self._extra.update(fields)
         return self
 
-    def __enter__(self) -> "PerfTimer":
+    def __enter__(self) -> PerfTimer:
         self._t0 = time.perf_counter()
         if self.log_on_start:
             tid = self.trace_id or get_trace_id()
@@ -255,7 +277,7 @@ def configure_structured_logging(
     *,
     json_mode: bool = False,
     level: str = "INFO",
-    log_dir: Optional[str] = None,
+    log_dir: str | None = None,
 ):
     """Configure root logger with structured formatting.
 
@@ -290,7 +312,9 @@ def configure_structured_logging(
     # Optional file handler
     if log_dir:
         import os
+
         from opensquad.safe_rotating_handler import SafeRotatingFileHandler
+
         os.makedirs(log_dir, exist_ok=True)
         fh = SafeRotatingFileHandler(
             os.path.join(log_dir, "structured.log"),

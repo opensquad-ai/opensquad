@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Collaboration Tools v4.1
 
@@ -14,12 +13,11 @@ v4.1 changes:
 - Added update_task_progress() for workers to update progress without touching Markdown
 - Workers no longer need to parse/rewrite Markdown — just call update_task_progress(subtask_id, status)
 """
-import os
-import json
+
 import logging
+import os
 import threading
-from typing import Dict, Any, List, Optional
-from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +31,14 @@ _collab_rw_lock = threading.Lock()
 # Paths
 # ---------------------------------------------------------------------------
 
+
 def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
 def _collab_cards_dir() -> str:
     return os.path.join(_project_root(), "collab_cards")
+
 
 def _agents_dir() -> str:
     return os.path.join(_project_root(), "agents")
@@ -47,7 +48,8 @@ def _agents_dir() -> str:
 # Collab card discovery & parsing (reuses skill_loader parser)
 # ---------------------------------------------------------------------------
 
-def list_collab_cards() -> Dict[str, Any]:
+
+def list_collab_cards() -> dict[str, Any]:
     """
     List all available collaboration cards.
     Each card defines a collaboration pattern (e.g., software development, research).
@@ -66,14 +68,17 @@ def list_collab_cards() -> Dict[str, Any]:
         fpath = os.path.join(cards_dir, fname)
         try:
             from ..skill_loader import parse_skill_md
+
             fm, _ = parse_skill_md(fpath)
-            results.append({
-                "name": card_name,
-                "display_name": fm.get("name", card_name),
-                "description": fm.get("description", ""),
-                "suggested_roles": fm.get("suggested_roles", []),
-                "tags": fm.get("tags", ""),
-            })
+            results.append(
+                {
+                    "name": card_name,
+                    "display_name": fm.get("name", card_name),
+                    "description": fm.get("description", ""),
+                    "suggested_roles": fm.get("suggested_roles", []),
+                    "tags": fm.get("tags", ""),
+                }
+            )
         except Exception as e:
             logger.warning(f"[Collab] Failed to parse collab card {card_name}: {e}")
             results.append({"name": card_name, "description": "(parse error)", "suggested_roles": []})
@@ -85,10 +90,14 @@ def list_collab_cards() -> Dict[str, Any]:
 # Collaboration lifecycle
 # ---------------------------------------------------------------------------
 
-def start_collaboration(card: str, members: Optional[List[str]] = None,
-                        group_id: str = "",
-                        project_name: str = "",
-                        project_description: str = "") -> Dict[str, Any]:
+
+def start_collaboration(
+    card: str,
+    members: list[str] | None = None,
+    group_id: str = "",
+    project_name: str = "",
+    project_description: str = "",
+) -> dict[str, Any]:
     """
     [PM only] Start a collaboration session.
 
@@ -121,6 +130,7 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
     # skill_loader.add_skill_from_file() rebinds `_loaded_skills` to a new list,
     # so a previously imported list reference would become stale and private marking would fail.
     from .. import skill_loader as _skill_loader
+
     result = _skill_loader.add_skill_from_file(card_file, f"collab_{card}")
     if not result.get("success"):
         return {"status": "error", "message": f"Failed to load collab card: {result.get('error')}"}
@@ -134,8 +144,9 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
     # 3. Create collaboration task id (6-char alnum) for board tracking
     task_rec = None
     try:
-        from ..input_hub import input_hub
         from ..collab_board import create_task
+        from ..input_hub import input_hub
+
         agent_dir = input_hub.agent_dir or ""
         creator = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
         task_rec = create_task(task_name=project_name or card, created_by=creator)
@@ -150,8 +161,9 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
         im_result = "No group_id provided; notify members manually"
     else:
         from ..input_hub import input_hub
+
         agent_dir = input_hub.agent_dir
-        current_agent = os.path.basename(agent_dir) if agent_dir else "unknown"
+        os.path.basename(agent_dir) if agent_dir else "unknown"
 
         # Build @mention list
         mention_parts = []
@@ -160,6 +172,7 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
             agent_name = m
             if os.path.exists(config_path):
                 from opensquad.json_cache import load_json_cached
+
                 cfg = load_json_cached(config_path)
                 agent_name = cfg.get("agent_name", m) if cfg else m
             mention_parts.append(f"@{agent_name}")
@@ -172,12 +185,13 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
             f"Task ID: {_task_id}\n"
             f"Collab Card: {card}\n"
             f"{project_description or ''}\n"
-            f"You're invited to join -- consider calling: join_collaboration(card=\"{card}\")\n"
-            f"All board updates/reads must include collab_id=\"{_task_id}\""
+            f'You\'re invited to join -- consider calling: join_collaboration(card="{card}")\n'
+            f'All board updates/reads must include collab_id="{_task_id}"'
         )
 
         try:
             from ..bridge import bridge
+
             if bridge and bridge.token:
                 # Resolve group name -> ID if a name was passed instead of an ID
                 target = group_id
@@ -194,6 +208,7 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
                 if isinstance(task_rec, dict) and task_rec.get("task_id"):
                     try:
                         from ..collab_board import update_task as _cb_update_task
+
                         _cb_update_task(
                             task_id=task_rec["task_id"],
                             extra={"group_id": target, "group_name": group_id},
@@ -209,12 +224,13 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
     # 5. Auto-inject collaboration board protocol as runtime guidance
     try:
         from ..input_hub import input_hub
+
         input_hub.push(
             "[Collab Board Protocol] Mandatory: use collaboration module board APIs for all board updates. "
             "PM must update Requirements + Plan + Assignment/Progress via collaboration.board_update; "
             "Worker must read assigned tasks via collaboration.board_list/board_list_my_tasks and frequently update progress with [ ]/[>]/[x]. "
             "Board stores only latest snapshots, not full history.",
-            source="system"
+            source="system",
         )
     except Exception:
         pass
@@ -242,7 +258,7 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
             "rule": "Use assign_task() to assign tasks to workers. Each call creates one task entry under the target worker's agent_id with structured subtasks.",
             "pm_example": (
                 "# Example: PM assigns auth module to coder using assign_task (structured API)\n"
-                'assign_task(\n'
+                "assign_task(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    worker_id="coder",\n'
                 '    task_name="用户认证模块",\n'
@@ -251,16 +267,16 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
                 '    dependencies="none",\n'
                 '    deadline="2h",\n'
                 '    acceptance_criteria="单元测试全部通过，错误处理完善",\n'
-                '    subtasks=[\n'
+                "    subtasks=[\n"
                 '        {"title": "登录API接口", "description": "POST /api/login, 参数验证username/password, 返回JWT token"},\n'
                 '        {"title": "注册API接口", "description": "POST /api/register, bcrypt加密, 邮箱验证"},\n'
                 '        {"title": "Token刷新", "description": "POST /api/token/refresh, access_token 15min, refresh_token 7days"},\n'
-                '    ],\n'
+                "    ],\n"
                 '    item_key="task_coder_auth"\n'
-                ')\n\n'
+                ")\n\n"
                 "# Returns: {subtask_ids: {'登录API接口': 'st_task_coder_auth_1', ...}}\n\n"
                 "# Assign another task to qa_agent:\n"
-                'assign_task(\n'
+                "assign_task(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    worker_id="qa",\n'
                 '    task_name="认证模块测试",\n'
@@ -268,32 +284,32 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
                 '    dependencies="task_coder_auth",\n'
                 '    deadline="1h",\n'
                 '    acceptance_criteria="测试覆盖率 > 80%",\n'
-                '    subtasks=[\n'
+                "    subtasks=[\n"
                 '        {"title": "编写登录API单元测试", "description": "正常登录、错误密码、空字段等场景"},\n'
                 '        {"title": "编写注册API集成测试", "description": "重复注册检测、密码强度验证"},\n'
-                '    ],\n'
+                "    ],\n"
                 '    item_key="task_qa_test"\n'
-                ')'
+                ")"
             ),
             "worker_example": (
                 "# Example: Worker(coder) updates subtask progress using update_task_progress (NO Markdown needed!)\n"
-                'update_task_progress(\n'
+                "update_task_progress(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    item_key="task_coder_auth",\n'
                 '    subtask_id="st_task_coder_auth_1",\n'
                 '    status="done",\n'
-                '    progress=100,\n'
+                "    progress=100,\n"
                 '    note="API已实现并通过本地测试"\n'
-                ')\n\n'
+                ")\n\n"
                 "# Batch update multiple subtasks:\n"
-                'batch_update_tasks(\n'
+                "batch_update_tasks(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    item_key="task_coder_auth",\n'
-                '    updates=[\n'
+                "    updates=[\n"
                 '        {"subtask_id": "st_task_coder_auth_1", "status": "done", "progress": 100},\n'
                 '        {"subtask_id": "st_task_coder_auth_2", "status": "doing", "progress": 50},\n'
-                '    ]\n'
-                ')'
+                "    ]\n"
+                ")"
             ),
             "key_rules": (
                 "1. PM uses assign_task() — structured parameters, no Markdown writing needed\n"
@@ -306,7 +322,7 @@ def start_collaboration(card: str, members: Optional[List[str]] = None,
     }
 
 
-def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
+def join_collaboration(card: str, collab_id: str = "") -> dict[str, Any]:
     """
     [Worker] Join an active collaboration session.
 
@@ -325,6 +341,7 @@ def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
 
     # 2. Load collab card into own prompt
     from .. import skill_loader as _skill_loader
+
     result = _skill_loader.add_skill_from_file(card_file, f"collab_{card}")
     if not result.get("success"):
         return {"status": "error", "message": f"Failed to load collab card: {result.get('error')}"}
@@ -338,12 +355,13 @@ def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
     # Auto-inject collaboration board protocol as runtime guidance
     try:
         from ..input_hub import input_hub
+
         input_hub.push(
             "[Collab Board Protocol] Worker MUST: 1) Call board_list_my_tasks() to find assigned tasks AFTER joining. "
             "2) Use update_task_progress(item_key, subtask_id, status) to update progress — NO Markdown rewriting needed. "
             "3) NEVER use board_update for progress updates — use structured API instead. "
             "Group chat is coordination only, not board update.",
-            source="system"
+            source="system",
         )
     except Exception:
         pass
@@ -351,8 +369,9 @@ def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
     join_tracking = ""
     if collab_id:
         try:
-            from ..input_hub import input_hub
             from ..collab_board import update_task
+            from ..input_hub import input_hub
+
             _agent_dir = input_hub.agent_dir or ""
             _agent_id = os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
             update_task(task_id=collab_id, add_member=_agent_id)
@@ -390,28 +409,28 @@ def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
                 "3. Overall progress is auto-calculated — you don't need to compute it"
             ),
             "pm_assigns_example": (
-                '# PM calls assign_task() which returns subtask_ids:\n'
+                "# PM calls assign_task() which returns subtask_ids:\n"
                 '{"subtask_ids": {"登录API": "st_task_auth_1", "注册API": "st_task_auth_2"}}'
             ),
             "worker_update_example": (
-                '# Worker calls update_task_progress (simple, no Markdown):\n'
-                'update_task_progress(\n'
+                "# Worker calls update_task_progress (simple, no Markdown):\n"
+                "update_task_progress(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    item_key="task_auth",\n'
                 '    subtask_id="st_task_auth_1",\n'
                 '    status="done",\n'
-                '    progress=100,\n'
+                "    progress=100,\n"
                 '    note="API已实现"\n'
-                ')\n\n'
-                '# Or batch update:\n'
-                'batch_update_tasks(\n'
+                ")\n\n"
+                "# Or batch update:\n"
+                "batch_update_tasks(\n"
                 '    collab_id="a8K2pQ",\n'
                 '    item_key="task_auth",\n'
-                '    updates=[\n'
+                "    updates=[\n"
                 '        {"subtask_id": "st_task_auth_1", "status": "done", "progress": 100},\n'
                 '        {"subtask_id": "st_task_auth_2", "status": "doing", "progress": 50},\n'
-                '    ]\n'
-                ')'
+                "    ]\n"
+                ")"
             ),
             "key_rules": (
                 "1. MUST call board_list_my_tasks() BEFORE starting work — find your item_key and subtask_ids\n"
@@ -424,7 +443,7 @@ def join_collaboration(card: str, collab_id: str = "") -> Dict[str, Any]:
     }
 
 
-def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dict[str, Any]:
+def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> dict[str, Any]:
     """
     [PM only] End a collaboration session after user approval.
 
@@ -441,6 +460,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
     """
     # 1. Unload collab card
     from ..skill_loader import remove_skill
+
     unload_result = remove_skill(f"collab_{card}")
 
     # 2. Notify group chat
@@ -450,6 +470,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
     else:
         try:
             from ..bridge import bridge
+
             if bridge and bridge.token:
                 # Resolve group name -> ID if needed
                 target = group_id
@@ -464,6 +485,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
                 current_agent_id = ""
                 try:
                     from ..input_hub import input_hub
+
                     _dir = input_hub.agent_dir or ""
                     current_agent_id = os.path.basename(_dir) if _dir else ""
                 except Exception:
@@ -472,6 +494,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
                 if collab_id:
                     try:
                         from ..collab_board import list_tasks
+
                         tasks = list_tasks()
                         target_task = next((t for t in tasks if str(t.get("task_id", "")) == collab_id), None)
                         members = target_task.get("members", []) if isinstance(target_task, dict) else []
@@ -483,11 +506,12 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
                 if not mentioned_members:
                     try:
                         from ..bridge import bridge as _bridge
+
                         if _bridge and _bridge.token:
                             detail = _bridge.get_group_detail_api(target)
                             if detail:
                                 raw_members = detail.get("members", [])
-                                member_map: Dict[str, str] = {}
+                                member_map: dict[str, str] = {}
                                 for m in raw_members:
                                     if isinstance(m, dict):
                                         uid = str(m.get("id", ""))
@@ -502,6 +526,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
                                         if not os.path.isdir(agent_path) or not os.path.exists(config_path):
                                             continue
                                         from opensquad.json_cache import load_json_cached
+
                                         cfg = load_json_cached(config_path)
                                         if not cfg:
                                             continue
@@ -523,7 +548,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
                     f"{mention_str}"
                     f"[Collaboration Ended] Collab Card: {card}\n"
                     f"Task ID: {collab_id or '(not provided)'}\n"
-                    f"Project completed. Please call leave_collaboration(card=\"{card}\") "
+                    f'Project completed. Please call leave_collaboration(card="{card}") '
                     f"to unload the collab card."
                 )
                 bridge.send_message(msg, target_id=target, target_type="group")
@@ -536,6 +561,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
     if collab_id:
         try:
             from ..collab_board import update_task
+
             update_task(task_id=collab_id, status="done")
         except Exception:
             pass
@@ -548,7 +574,7 @@ def end_collaboration(card: str, collab_id: str = "", group_id: str = "") -> Dic
     }
 
 
-def delete_collaboration(collab_id: str) -> Dict[str, Any]:
+def delete_collaboration(collab_id: str) -> dict[str, Any]:
     """
     Delete a collaboration task and all its associated board data.
 
@@ -567,6 +593,7 @@ def delete_collaboration(collab_id: str) -> Dict[str, Any]:
     """
     try:
         from ..collab_board import delete_task
+
         result = delete_task(task_id=collab_id)
         if not result.get("deleted"):
             return {"status": "error", "message": result.get("reason", "Task not found")}
@@ -579,7 +606,7 @@ def delete_collaboration(collab_id: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def leave_collaboration(card: str) -> Dict[str, Any]:
+def leave_collaboration(card: str) -> dict[str, Any]:
     """
     [Worker] Leave a collaboration session and clean up.
 
@@ -592,6 +619,7 @@ def leave_collaboration(card: str) -> Dict[str, Any]:
     """
     # Unload collab card
     from ..skill_loader import remove_skill
+
     unload_result = remove_skill(f"collab_{card}")
 
     return {
@@ -601,7 +629,7 @@ def leave_collaboration(card: str) -> Dict[str, Any]:
     }
 
 
-def list_active_collaborations() -> Dict[str, Any]:
+def list_active_collaborations() -> dict[str, Any]:
     """
     [Worker] List all active collaboration sessions that the current agent has joined.
 
@@ -618,6 +646,7 @@ def list_active_collaborations() -> Dict[str, Any]:
     try:
         my_ids = _resolve_my_agent_ids()
         from ..collab_board import list_tasks
+
         tasks = list_tasks(include_stale=False)
 
         active_tasks = []
@@ -629,16 +658,18 @@ def list_active_collaborations() -> Dict[str, Any]:
                 continue
             # Check if any of my IDs is in the member list
             if any(mid in members for mid in my_ids if mid):
-                active_tasks.append({
-                    "task_id": t.get("task_id"),
-                    "task_name": t.get("task_name"),
-                    "collab_card": t.get("task_name", ""),
-                    "members": members,
-                    "progress": t.get("progress", 0),
-                    "created_at": t.get("created_at"),
-                    "updated_at": t.get("updated_at"),
-                    "member_count": t.get("member_count", len(members)),
-                })
+                active_tasks.append(
+                    {
+                        "task_id": t.get("task_id"),
+                        "task_name": t.get("task_name"),
+                        "collab_card": t.get("task_name", ""),
+                        "members": members,
+                        "progress": t.get("progress", 0),
+                        "created_at": t.get("created_at"),
+                        "updated_at": t.get("updated_at"),
+                        "member_count": t.get("member_count", len(members)),
+                    }
+                )
 
         return {
             "status": "success",
@@ -659,10 +690,10 @@ def assign_task(
     dependencies: str = "",
     deadline: str = "",
     acceptance_criteria: str = "",
-    subtasks: Optional[List[Dict[str, str]]] = None,
+    subtasks: list[dict[str, str]] | None = None,
     status: str = "pending",
     visibility: str = "public",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     [PM only] Assign a structured task to a specific worker agent.
 
@@ -717,13 +748,15 @@ def assign_task(
         subtask_records = []
         for i, st in enumerate(subtasks or [], start=1):
             st_id = f"st_{item_key}_{i}"
-            subtask_records.append({
-                "id": st_id,
-                "title": st.get("title", f"Subtask {i}"),
-                "description": st.get("description", ""),
-                "status": "pending",
-                "progress": 0,
-            })
+            subtask_records.append(
+                {
+                    "id": st_id,
+                    "title": st.get("title", f"Subtask {i}"),
+                    "description": st.get("description", ""),
+                    "status": "pending",
+                    "progress": 0,
+                }
+            )
 
         # Store structured data in the 'extra' field, and generate clean Markdown for display
         extra_data = {
@@ -752,7 +785,7 @@ def assign_task(
         for i, st in enumerate(subtask_records, start=1):
             content_lines.append(f"### 子任务 {i}.{i}: {st['title']}")
             content_lines.append(f"[ ] {i}.{i} {st['title']}")
-            if st['description']:
+            if st["description"]:
                 content_lines.append(f"- {st['description']}")
             content_lines.append("")
 
@@ -781,6 +814,7 @@ def assign_task(
         # Push notification: send group chat @mention to worker about new task assignment
         try:
             from ..collab_board import list_tasks as _cb_list_tasks
+
             _tasks = _cb_list_tasks()
             _my_task = next((t for t in _tasks if str(t.get("task_id", "")) == collab_id), None)
             if _my_task and isinstance(_my_task, dict):
@@ -788,14 +822,13 @@ def assign_task(
                 _group_id = _extra.get("group_id", "")
                 if _group_id:
                     from ..bridge import bridge
+
                     if bridge and bridge.token:
-                        _sub_lines = "\n".join(
-                            f"  - {st['title']}" for st in subtask_records
-                        )
+                        _sub_lines = "\n".join(f"  - {st['title']}" for st in subtask_records)
                         _assign_msg = (
                             f"@{worker_id}\n"
                             f"[Task Assigned] {task_name}\n"
-                            f"Check your tasks via: collaboration.board_list_my_tasks(collab_id=\"{collab_id}\")\n"
+                            f'Check your tasks via: collaboration.board_list_my_tasks(collab_id="{collab_id}")\n'
                             f"Subtasks:\n{_sub_lines}"
                         )
                         bridge.send_message(_assign_msg, target_id=_group_id, target_type="group")
@@ -818,7 +851,7 @@ def add_subtask(
     item_key: str,
     title: str,
     description: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     [PM only] Add a new subtask to an existing task assignment.
 
@@ -850,13 +883,15 @@ def add_subtask(
             extra = target.get("extra") or {}
             subtasks = extra.get("subtasks", [])
             new_id = f"st_{item_key}_{len(subtasks) + 1}"
-            subtasks.append({
-                "id": new_id,
-                "title": title,
-                "description": description,
-                "status": "pending",
-                "progress": 0,
-            })
+            subtasks.append(
+                {
+                    "id": new_id,
+                    "title": title,
+                    "description": description,
+                    "status": "pending",
+                    "progress": 0,
+                }
+            )
             extra["subtasks"] = subtasks
 
             # Regenerate content
@@ -877,7 +912,7 @@ def add_subtask(
                     content_lines.append(f"- {st['description']}")
                 content_lines.append("")
 
-            item = upsert_item(
+            upsert_item(
                 collab_id=collab_id,
                 agent_id=target.get("agent_id", ""),
                 item_type="task",
@@ -907,7 +942,7 @@ def update_task_progress(
     status: str = "doing",
     progress: int = 0,
     note: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     [Worker only] Update progress of a specific subtask.
 
@@ -971,8 +1006,7 @@ def update_task_progress(
                 return {
                     "status": "error",
                     "message": (
-                        f"Invalid status transition: '{old_status}' → '{status}'. "
-                        f"Allowed transitions: {allowed}"
+                        f"Invalid status transition: '{old_status}' → '{status}'. Allowed transitions: {allowed}"
                     ),
                 }
 
@@ -985,7 +1019,7 @@ def update_task_progress(
             total = len(subtasks)
             done_count = sum(1 for s in subtasks if s["status"] == "done")
             doing_count = sum(1 for s in subtasks if s["status"] == "doing")
-            overall_progress = int(round(((done_count + doing_count * 0.5) / total) * 100)) if total > 0 else 0
+            overall_progress = round(((done_count + doing_count * 0.5) / total) * 100) if total > 0 else 0
             overall_status = "done" if done_count == total else "doing" if doing_count > 0 else "pending"
 
             extra["subtasks"] = subtasks
@@ -1039,8 +1073,8 @@ def update_task_progress(
 def batch_update_tasks(
     collab_id: str,
     item_key: str,
-    updates: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    updates: list[dict[str, Any]],
+) -> dict[str, Any]:
     """
     [Worker only] Batch update multiple subtasks in one call.
 
@@ -1094,7 +1128,7 @@ def board_update(
     visibility: str = "public",
     item_type: str = "task",
     item_key: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Upsert the current agent's collaboration board item.
 
@@ -1130,8 +1164,8 @@ def board_update(
       - Do NOT use board_update for structured task assignments or progress
     """
     try:
-        from ..input_hub import input_hub
         from ..collab_board import upsert_item
+        from ..input_hub import input_hub
 
         agent_dir = input_hub.agent_dir or ""
         agent_id = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
@@ -1152,7 +1186,7 @@ def board_update(
         return {"status": "error", "message": str(e)}
 
 
-def board_list(collab_id: str, agent_id: str = "", scope: str = "public", item_type: str = "") -> Dict[str, Any]:
+def board_list(collab_id: str, agent_id: str = "", scope: str = "public", item_type: str = "") -> dict[str, Any]:
     """
     Read collaboration board entries.
 
@@ -1171,6 +1205,7 @@ def board_list(collab_id: str, agent_id: str = "", scope: str = "public", item_t
     """
     try:
         from ..collab_board import list_items
+
         items = list_items(
             collab_id=collab_id,
             agent_id=agent_id or None,
@@ -1183,7 +1218,7 @@ def board_list(collab_id: str, agent_id: str = "", scope: str = "public", item_t
         return {"status": "error", "message": str(e)}
 
 
-def board_view(collab_id: str) -> Dict[str, Any]:
+def board_view(collab_id: str) -> dict[str, Any]:
     """
     View the complete collaboration board — all zones (requirements, plan, tasks, discussions).
 
@@ -1256,7 +1291,7 @@ def board_view(collab_id: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def board_list_tasks(collab_id: str) -> Dict[str, Any]:
+def board_list_tasks(collab_id: str) -> dict[str, Any]:
     """
     View all task assignments for a collaboration session.
 
@@ -1305,7 +1340,7 @@ def board_list_tasks(collab_id: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def _resolve_my_agent_ids() -> List[str]:
+def _resolve_my_agent_ids() -> list[str]:
     """Resolve current agent's possible identifiers for task matching.
 
     Returns a prioritized list of agent IDs:
@@ -1314,6 +1349,7 @@ def _resolve_my_agent_ids() -> List[str]:
     """
     try:
         from ..input_hub import input_hub
+
         agent_dir = input_hub.agent_dir or ""
         ids = []
         dir_name = os.path.basename(agent_dir) if agent_dir else ""
@@ -1324,6 +1360,7 @@ def _resolve_my_agent_ids() -> List[str]:
             config_path = os.path.join(agent_dir, "config.json")
             if os.path.exists(config_path):
                 from opensquad.json_cache import load_json_cached
+
                 cfg = load_json_cached(config_path)
                 if cfg:
                     cid = str(cfg.get("agent_id", "")).strip()
@@ -1334,7 +1371,7 @@ def _resolve_my_agent_ids() -> List[str]:
         return []
 
 
-def board_list_my_tasks(collab_id: str, scope: str = "public", debug: bool = False) -> Dict[str, Any]:
+def board_list_my_tasks(collab_id: str, scope: str = "public", debug: bool = False) -> dict[str, Any]:
     """
     Worker convenience helper: list task checklist items assigned to the current agent.
 
@@ -1381,18 +1418,17 @@ def board_list_my_tasks(collab_id: str, scope: str = "public", debug: bool = Fal
             if stored_agent_id and any(stored_agent_id == mid for mid in my_ids if mid):
                 match_reason = "exact_agent_id_match"
             # Strategy 2: Content mention (@<id> or **负责人**: <id>)
-            elif any(
-                f"@{mid}" in content or f"**负责人**: {mid}" in content
-                for mid in my_ids if mid
-            ):
+            elif any(f"@{mid}" in content or f"**负责人**: {mid}" in content for mid in my_ids if mid):
                 match_reason = "content_mention"
             else:
                 if debug and unmatched_info is not None:
-                    unmatched_info.append({
-                        "item_key": item_key,
-                        "stored_agent_id": stored_agent_id,
-                        "my_ids": my_ids,
-                    })
+                    unmatched_info.append(
+                        {
+                            "item_key": item_key,
+                            "stored_agent_id": stored_agent_id,
+                            "my_ids": my_ids,
+                        }
+                    )
                 continue
 
             # Avoid duplicates from multiple matching strategies
@@ -1427,7 +1463,7 @@ def board_list_my_tasks(collab_id: str, scope: str = "public", debug: bool = Fal
         return {"status": "error", "message": str(e)}
 
 
-def board_post_public_discussion(collab_id: str, task_name: str, title: str, content: str) -> Dict[str, Any]:
+def board_post_public_discussion(collab_id: str, task_name: str, title: str, content: str) -> dict[str, Any]:
     """
     Post a public discussion/decision memo visible to all agents.
     Use this for confirmed task plans and shared context to prevent forgetting.
@@ -1436,8 +1472,8 @@ def board_post_public_discussion(collab_id: str, task_name: str, title: str, con
     This is the canonical tool — always use this function name.
     """
     try:
-        from ..input_hub import input_hub
         from ..collab_board import append_public_discussion
+        from ..input_hub import input_hub
 
         agent_dir = input_hub.agent_dir or ""
         agent_id = os.path.basename(agent_dir) if agent_dir else "unknown_agent"
@@ -1453,7 +1489,7 @@ def board_post_public_discussion(collab_id: str, task_name: str, title: str, con
         return {"status": "error", "message": str(e)}
 
 
-def get_team_status() -> Dict[str, Any]:
+def get_team_status() -> dict[str, Any]:
     """
     Get real-time status of all collaboration-enabled agents.
     Reads each agent's ai_state.json for live status (idle/working/sleeping).
@@ -1472,6 +1508,7 @@ def get_team_status() -> Dict[str, Any]:
             continue
 
         from opensquad.json_cache import load_json_cached
+
         cfg = load_json_cached(config_path)
         if not cfg:
             continue
@@ -1487,18 +1524,20 @@ def get_team_status() -> Dict[str, Any]:
             state = load_json_cached(state_file)
             live_status = state.get("ai_state", "offline") if state else "offline"
 
-        agents.append({
-            "agent_id": entry,
-            "name": cfg.get("agent_name", entry),
-            "role": collab.get("role", "unknown"),
-            "capabilities": cfg.get("capabilities", []),
-            "status": live_status,
-        })
+        agents.append(
+            {
+                "agent_id": entry,
+                "name": cfg.get("agent_name", entry),
+                "role": collab.get("role", "unknown"),
+                "capabilities": cfg.get("capabilities", []),
+                "status": live_status,
+            }
+        )
 
     return {"status": "success", "agents": agents}
 
 
-def get_group_roster(group_id: str) -> Dict[str, Any]:
+def get_group_roster(group_id: str) -> dict[str, Any]:
     """
     Get the roster of agent members in a specific group.
 
@@ -1549,7 +1588,7 @@ def get_group_roster(group_id: str) -> Dict[str, Any]:
         raw_members = detail.get("members", [])
 
         # Build {user_id_str: display_name} from group members
-        member_map: Dict[str, str] = {}
+        member_map: dict[str, str] = {}
         for m in raw_members:
             if isinstance(m, dict):
                 uid = str(m.get("id", ""))
@@ -1567,6 +1606,7 @@ def get_group_roster(group_id: str) -> Dict[str, Any]:
                 if not os.path.isdir(agent_path) or not os.path.exists(config_path):
                     continue
                 from opensquad.json_cache import load_json_cached
+
                 cfg = load_json_cached(config_path)
                 if not cfg:
                     continue
@@ -1585,16 +1625,19 @@ def get_group_roster(group_id: str) -> Dict[str, Any]:
                 status = "offline"
                 if os.path.exists(state_file):
                     from opensquad.json_cache import load_json_cached
+
                     status_data = load_json_cached(state_file)
                     status = status_data.get("ai_state", "offline") if status_data else "offline"
 
-                agent_roster.append({
-                    "name": name,
-                    "agent_dir": entry,
-                    "role": role,
-                    "status": status,
-                    "capabilities": caps,
-                })
+                agent_roster.append(
+                    {
+                        "name": name,
+                        "agent_dir": entry,
+                        "role": role,
+                        "status": status,
+                        "capabilities": caps,
+                    }
+                )
 
         return {
             "status": "success",
@@ -1609,7 +1652,8 @@ def get_group_roster(group_id: str) -> Dict[str, Any]:
 
 # ── Task Watch: PM queries worker status from launcher ──
 
-def check_worker_status(collab_id: str = "", worker_id: str = "") -> Dict[str, Any]:
+
+def check_worker_status(collab_id: str = "", worker_id: str = "") -> dict[str, Any]:
     """
     PM tool: query worker heartbeat status from the launcher.
 
@@ -1637,8 +1681,9 @@ def check_worker_status(collab_id: str = "", worker_id: str = "") -> Dict[str, A
         collaboration.check_worker_status(worker_id="agent301")
     """
     try:
-        import urllib.request
         import json as _json
+        import urllib.request
+
         launcher_port = os.environ.get("OPENSQUAD_LAUNCHER_PORT", "9600")
         url = f"http://127.0.0.1:{launcher_port}/api/task_watch_status"
         resp = urllib.request.urlopen(url, timeout=5)
@@ -1648,8 +1693,7 @@ def check_worker_status(collab_id: str = "", worker_id: str = "") -> Dict[str, A
         if worker_id:
             return workers.get(worker_id, {"error": f"Worker '{worker_id}' not found"})
         if collab_id:
-            filtered = {aid: info for aid, info in workers.items()
-                        if collab_id in str(info.get("detail", ""))}
+            filtered = {aid: info for aid, info in workers.items() if collab_id in str(info.get("detail", ""))}
             return {"workers": filtered, "total": len(filtered)}
         return {"workers": workers, "total": len(workers)}
     except Exception as e:

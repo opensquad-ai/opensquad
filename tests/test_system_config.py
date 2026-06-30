@@ -1,13 +1,10 @@
-# -*- coding: utf-8 -*-
 """Tests for system_config module (syscfg singleton)."""
-import json
-import os
-import importlib.util
-import pytest
 
-_SRC_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "src", "opensquad", "system_config.py")
-)
+import contextlib
+import importlib.util
+import os
+
+_SRC_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "src", "opensquad", "system_config.py"))
 _spec = importlib.util.spec_from_file_location("system_config_test", _SRC_PATH)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -50,13 +47,11 @@ class TestSyscfg:
         """port() returns something."""
         try:
             val = syscfg.port("gateway")
-            assert val is None or isinstance(val, (int, str))
+            assert val is None or isinstance(val, int | str)
         except Exception:
             pass
 
     def test_reload_no_crash(self):
         """reload() does not raise."""
-        try:
+        with contextlib.suppress(Exception):
             syscfg.reload()
-        except Exception:
-            pass

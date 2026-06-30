@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """ContextBuilder — Extracted from AgentRunner (P1-1).
 
 Responsible for building the system prompt and dynamic context prefix
@@ -7,13 +6,12 @@ which was ~200 lines and made the runner class too large.
 
 The builder is stateless (per-turn): all mutable state is passed in and returned.
 """
+
 import asyncio
-import json
 import logging
 import os
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Any
 
-from opensquad.system_config import syscfg
 from opensquad.context_base import inject_standard
 from opensquad.skill_loader import build_skills_prompt, get_loaded_skills
 
@@ -22,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # ── Module-level helpers (moved from runner.py) ──
 
+
 def build_context_prefix(dynamic_parts: dict) -> str:
     """
     Assemble the dynamic variable dict into a system context block prepended to the user message.
@@ -29,9 +28,9 @@ def build_context_prefix(dynamic_parts: dict) -> str:
     Fixed order: RUNTIME_STATE -> TASK_STATE -> MEMORY_CONTEXT -> other custom keys
     """
     _ORDER = [
-        ("RUNTIME_STATE",    "Runtime State"),
-        ("TASK_STATE",       "Task Plan"),
-        ("MEMORY_CONTEXT",   "Long-term Memory (Recalled This Round)"),
+        ("RUNTIME_STATE", "Runtime State"),
+        ("TASK_STATE", "Task Plan"),
+        ("MEMORY_CONTEXT", "Long-term Memory (Recalled This Round)"),
     ]
     _known_keys = {k for k, _ in _ORDER}
 
@@ -84,6 +83,7 @@ def build_dynamic_mcp_state(mcp_adapter) -> str:
 
 # ── ContextBuilder class ──
 
+
 class ContextBuilder:
     """Builds system prompt and dynamic context for each turn.
 
@@ -110,7 +110,7 @@ class ContextBuilder:
         tool_call_strategy,
         task_manager,
         plugin_manager=None,
-        hooks: Dict = None,
+        hooks: dict | None = None,
         memory_manager=None,
         config_path: str = "",
     ):
@@ -133,7 +133,7 @@ class ContextBuilder:
         current_input_source: str,
         current_turn: int,
         current_round: int,
-    ) -> Tuple[str, str, Dict[str, Any], bool]:
+    ) -> tuple[str, str, dict[str, Any], bool]:
         """Build the system prompt and dynamic context for this turn.
 
         Returns:
@@ -144,7 +144,7 @@ class ContextBuilder:
         """
         # Start from template
         base = self.chat_api.get_template()
-        dynamic_parts: Dict[str, Any] = {}
+        dynamic_parts: dict[str, Any] = {}
 
         # Layer 1: Engine built-in injection (tool call strategy)
         llm_params = self.tool_call_strategy.prepare_llm_call(base)
@@ -155,6 +155,7 @@ class ContextBuilder:
         if self.config_path and os.path.isfile(self.config_path):
             try:
                 from opensquad.json_cache import load_json_cached
+
                 _agent_cfg = load_json_cached(self.config_path)
                 _prompt_preload_cfg = _agent_cfg.get("prompt_preload") if _agent_cfg else None
             except Exception:
@@ -166,6 +167,7 @@ class ContextBuilder:
         # MCP two-stage injection
         try:
             from opensquad.tools.mcp_adapter import get_mcp_adapter
+
             mcp_adapter = get_mcp_adapter()
             mcp_state = build_dynamic_mcp_state(mcp_adapter) if mcp_adapter else ""
         except Exception as e:
@@ -176,7 +178,7 @@ class ContextBuilder:
             final = final.replace("{{MCP_CURRENT_STATE}}", "")
         base_final = final
 
-        base_changed = (base_final != self._last_base_system_prompt)
+        base_changed = base_final != self._last_base_system_prompt
         if base_changed:
             self._last_base_system_prompt = base_final
             if mcp_state:
@@ -191,6 +193,7 @@ class ContextBuilder:
 
         # Layer 2: Standard injection (parallelize independent state queries)
         from opensquad import state_manager as _state_module
+
         current_state, current_wake = await asyncio.gather(
             _state_module.state_manager.get_state(),
             _state_module.state_manager.get_wake_mode(),
@@ -241,10 +244,13 @@ class ContextBuilder:
         # Plugin hook: on_before_prompt
         if self.plugin_manager:
             try:
-                _hook_ctx = await self.plugin_manager.run_hook("on_before_prompt", {
-                    "prompt": final,
-                    "agent_id": getattr(self, "_agent_id", ""),
-                })
+                _hook_ctx = await self.plugin_manager.run_hook(
+                    "on_before_prompt",
+                    {
+                        "prompt": final,
+                        "agent_id": getattr(self, "_agent_id", ""),
+                    },
+                )
                 final = _hook_ctx.get("prompt", final)
             except Exception as e:
                 logger.warning(f"[ContextBuilder] on_before_prompt hook error: {e}")
@@ -262,10 +268,15 @@ class ContextBuilder:
         # Build dynamic prefix
         dynamic_prefix = build_context_prefix(dynamic_parts)
 
-        return final, dynamic_prefix, {
-            "tools": llm_params.get("tools"),
-            "tool_choice": llm_params.get("tool_choice", "auto"),
-        }, is_changed
+        return (
+            final,
+            dynamic_prefix,
+            {
+                "tools": llm_params.get("tools"),
+                "tool_choice": llm_params.get("tool_choice", "auto"),
+            },
+            is_changed,
+        )
 
     def mark_snapshot_emitted(self):
         """Mark that the prompt snapshot has been emitted."""

@@ -8,6 +8,7 @@ once per service via ``--service <name>``. Without the flag (or with
 launch paths (``python run.py``, ``run.exe``) keep working unchanged.
 """
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -168,10 +169,8 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         for _s in (sys.stdout, sys.stderr):
             if hasattr(_s, "reconfigure"):
-                try:
+                with contextlib.suppress(Exception):
                     _s.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
 
     # ── Dispatch on --service ──────────────────────────────────────────────
     # Single frozen binary serves multiple processes: the desktop app spawns

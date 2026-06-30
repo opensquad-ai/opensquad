@@ -38,7 +38,7 @@ admin_router = APIRouter()  # prefix comes from main router include
 # ============================================================
 
 
-async def _proxy_get(path: str, params: dict = None, launcher_url: str = None) -> dict:
+async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | None = None) -> dict:
     """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     # WS tunnel: no inbound port needed on home machine
@@ -75,7 +75,7 @@ async def _proxy_get(path: str, params: dict = None, launcher_url: str = None) -
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_post(path: str, json: dict = None, launcher_url: str = None) -> dict:
+async def _proxy_post(path: str, json: dict | None = None, launcher_url: str | None = None) -> dict:
     """POST proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     if launcher_url is None and launcher_handler.has_connections():
@@ -104,7 +104,7 @@ async def _proxy_post(path: str, json: dict = None, launcher_url: str = None) ->
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_put(path: str, json_body: dict = None, launcher_url: str = None) -> dict:
+async def _proxy_put(path: str, json_body: dict | None = None, launcher_url: str | None = None) -> dict:
     """PUT proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     if launcher_url is None and launcher_handler.has_connections():
@@ -133,7 +133,7 @@ async def _proxy_put(path: str, json_body: dict = None, launcher_url: str = None
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_delete(path: str, launcher_url: str = None) -> dict:
+async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
     """DELETE proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     if launcher_url is None and launcher_handler.has_connections():

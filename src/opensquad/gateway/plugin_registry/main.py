@@ -4,15 +4,16 @@ Provides plugin metadata, search, pagination, likes, upload, and admin sync endp
 
 Admin endpoints require X-Admin-Key header matching OPENSQUAD_REGISTRY_ADMIN_KEY env var.
 """
+
 import json
-import os
 import math
+import os
 import re
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, Query, Header
+
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
 
 app = FastAPI(title="OpenSquad Plugin Registry", version="1.1.0")
 
@@ -38,7 +39,7 @@ ADMIN_KEY = os.environ.get("OPENSQUAD_REGISTRY_ADMIN_KEY", "")
 
 
 def load_plugins():
-    with open(DB_PATH, "r", encoding="utf-8") as f:
+    with open(DB_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -56,7 +57,7 @@ def name_to_id(name: str) -> str:
     return s or "plugin"
 
 
-def _require_admin(x_admin_key: Optional[str]):
+def _require_admin(x_admin_key: str | None):
     """Raise 403 if admin key is missing or wrong."""
     if not x_admin_key or x_admin_key != ADMIN_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing X-Admin-Key header")
@@ -64,45 +65,48 @@ def _require_admin(x_admin_key: Optional[str]):
 
 # ---- Models ----
 
+
 class PluginUpload(BaseModel):
     name: str
     version: str
     author: str
     description: str
-    tags: List[str] = []
+    tags: list[str] = []
     type: str  # tool | platform | hook
-    homepage: Optional[str] = None
-    git_url: Optional[str] = None
-    icon_url: Optional[str] = None
+    homepage: str | None = None
+    git_url: str | None = None
+    icon_url: str | None = None
     # Bilingual optional fields
-    name_zh: Optional[str] = None
-    description_zh: Optional[str] = None
-    description_en: Optional[str] = None
+    name_zh: str | None = None
+    description_zh: str | None = None
+    description_en: str | None = None
 
 
 class AdminPluginSync(BaseModel):
     """
     Used by GitHub Actions CI after merging a plugin PR.
     """
+
     name: str
     version: str
     author: str
     github_user: str
     description: str
-    tags: List[str] = []
+    tags: list[str] = []
     type: str
     download_url: str
-    git_url: Optional[str] = None
-    homepage: Optional[str] = None
-    icon_url: Optional[str] = None
-    plugin_id: Optional[str] = None
+    git_url: str | None = None
+    homepage: str | None = None
+    icon_url: str | None = None
+    plugin_id: str | None = None
     is_featured: bool = True  # New field
-    name_zh: Optional[str] = None
-    description_zh: Optional[str] = None
-    description_en: Optional[str] = None
+    name_zh: str | None = None
+    description_zh: str | None = None
+    description_en: str | None = None
 
 
 # ---- Endpoints ----
+
 
 @app.get("/health")
 def health():
@@ -123,7 +127,8 @@ def list_plugins(
     if search:
         q = search.lower()
         plugins = [
-            p for p in plugins
+            p
+            for p in plugins
             if q in p["name"].lower()
             or q in p["description"].lower()
             or any(q in tag.lower() for tag in p.get("tags", []))
@@ -133,7 +138,7 @@ def list_plugins(
     if type and type != "all":
         plugins = [p for p in plugins if p.get("type") == type]
 
-    reverse = (order == "desc")
+    reverse = order == "desc"
     if sort == "likes":
         plugins.sort(key=lambda p: p.get("likes", 0), reverse=reverse)
     elif sort == "created_at":
@@ -196,7 +201,7 @@ def upload_plugin(body: PluginUpload):
             raise HTTPException(
                 status_code=409,
                 detail=f"Plugin name '{body.name}' is already taken by plugin id='{p['id']}'. "
-                       f"Use a different name or publish an update via POST /plugins/{p['id']}/update.",
+                f"Use a different name or publish an update via POST /plugins/{p['id']}/update.",
             )
 
     # Derive id from name
@@ -224,7 +229,7 @@ def upload_plugin(body: PluginUpload):
         "type": body.type,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "likes": 0,
-        "is_featured": False, # Manual uploads are community by default
+        "is_featured": False,  # Manual uploads are community by default
         "icon_url": body.icon_url,
         "git_url": body.git_url or "",
         "homepage": body.homepage or "",
@@ -258,15 +263,17 @@ def update_plugin_version(plugin_id: str, body: PluginUpload):
                     detail="Plugin name cannot be changed in an update.",
                 )
             # Update fields
-            plugins[i].update({
-                "version": body.version.strip(),
-                "description": body.description.strip(),
-                "tags": [t.strip() for t in body.tags if t.strip()],
-                "author": body.author.strip(),
-                "homepage": body.homepage or p.get("homepage", ""),
-                "git_url": body.git_url or p.get("git_url", ""),
-                "icon_url": body.icon_url if body.icon_url is not None else p.get("icon_url"),
-            })
+            plugins[i].update(
+                {
+                    "version": body.version.strip(),
+                    "description": body.description.strip(),
+                    "tags": [t.strip() for t in body.tags if t.strip()],
+                    "author": body.author.strip(),
+                    "homepage": body.homepage or p.get("homepage", ""),
+                    "git_url": body.git_url or p.get("git_url", ""),
+                    "icon_url": body.icon_url if body.icon_url is not None else p.get("icon_url"),
+                }
+            )
             save_plugins(plugins)
             return plugins[i]
 
@@ -275,10 +282,11 @@ def update_plugin_version(plugin_id: str, body: PluginUpload):
 
 # ---- Admin Endpoints (require X-Admin-Key) ----
 
+
 @app.post("/admin/plugins/sync", status_code=200)
 def admin_sync_plugin(
     body: AdminPluginSync,
-    x_admin_key: Optional[str] = Header(None),
+    x_admin_key: str | None = Header(None),
 ):
     """
     Upsert a plugin record from the official GitHub plugin repository.
@@ -312,25 +320,27 @@ def admin_sync_plugin(
                 raise HTTPException(
                     status_code=403,
                     detail=f"Ownership mismatch: plugin '{plugin_id}' is owned by GitHub user "
-                           f"'{existing_github_user}'. Sync rejected.",
+                    f"'{existing_github_user}'. Sync rejected.",
                 )
-            plugins[i].update({
-                "version": body.version.strip(),
-                "author": body.author.strip(),
-                "github_user": body.github_user.strip(),
-                "description": body.description.strip(),
-                "is_featured": body.is_featured, # Update featured status
-                "name_zh": body.name_zh.strip() if body.name_zh else p.get("name_zh"),
-                "description_zh": body.description_zh.strip() if body.description_zh else p.get("description_zh"),
-                "description_en": body.description_en.strip() if body.description_en else p.get("description_en"),
-                "tags": [t.strip() for t in body.tags if t.strip()],
-                "type": body.type,
-                "download_url": body.download_url.strip(),
-                "git_url": body.git_url or p.get("git_url", ""),
-                "homepage": body.homepage or p.get("homepage", ""),
-                "icon_url": body.icon_url if body.icon_url is not None else p.get("icon_url"),
-                "updated_at": now,
-            })
+            plugins[i].update(
+                {
+                    "version": body.version.strip(),
+                    "author": body.author.strip(),
+                    "github_user": body.github_user.strip(),
+                    "description": body.description.strip(),
+                    "is_featured": body.is_featured,  # Update featured status
+                    "name_zh": body.name_zh.strip() if body.name_zh else p.get("name_zh"),
+                    "description_zh": body.description_zh.strip() if body.description_zh else p.get("description_zh"),
+                    "description_en": body.description_en.strip() if body.description_en else p.get("description_en"),
+                    "tags": [t.strip() for t in body.tags if t.strip()],
+                    "type": body.type,
+                    "download_url": body.download_url.strip(),
+                    "git_url": body.git_url or p.get("git_url", ""),
+                    "homepage": body.homepage or p.get("homepage", ""),
+                    "icon_url": body.icon_url if body.icon_url is not None else p.get("icon_url"),
+                    "updated_at": now,
+                }
+            )
             save_plugins(plugins)
             return {"action": "updated", "plugin": plugins[i]}
 
@@ -372,7 +382,7 @@ def admin_sync_plugin(
 @app.delete("/admin/plugins/{plugin_id}")
 def admin_delete_plugin(
     plugin_id: str,
-    x_admin_key: Optional[str] = Header(None),
+    x_admin_key: str | None = Header(None),
 ):
     """Remove a plugin from the registry (admin only). Does not uninstall from users."""
     _require_admin(x_admin_key)
@@ -386,6 +396,7 @@ def admin_delete_plugin(
 
 if __name__ == "__main__":
     import uvicorn
+
     from opensquad.system_config import syscfg
 
     uvicorn.run(app, host="0.0.0.0", port=syscfg.port("registry"))

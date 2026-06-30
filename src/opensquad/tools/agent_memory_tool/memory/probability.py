@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 """
 Probability matrix computation module
 - PPMI (Positive Pointwise Mutual Information): filters high-frequency stop-word noise,
   more accurate than conditional probability
 - Conditional probability matrix: retained for backward compatibility with the original approach
 """
+
 import numpy as np
-from scipy.sparse import diags, csr_matrix
+from scipy.sparse import csr_matrix, diags
 
 
 def compute_conditional_prob_matrix(cooccurrence_csr):
@@ -61,7 +61,7 @@ def compute_ppmi_matrix(cooccurrence_csr, total_docs):
     new_row = []
     new_col = []
 
-    for r, c, v in zip(coo.row, coo.col, coo.data):
+    for r, c, v in zip(coo.row, coo.col, coo.data, strict=False):
         # Skip diagonal (a word's co-occurrence with itself is meaningless)
         if r == c:
             continue
@@ -81,10 +81,7 @@ def compute_ppmi_matrix(cooccurrence_csr, total_docs):
             new_row.append(r)
             new_col.append(c)
 
-    ppmi_matrix = csr_matrix(
-        (new_data, (new_row, new_col)),
-        shape=cooccurrence_csr.shape
-    )
+    ppmi_matrix = csr_matrix((new_data, (new_row, new_col)), shape=cooccurrence_csr.shape)
     return ppmi_matrix
 
 
@@ -102,12 +99,11 @@ def print_top_associations(prob_matrix, idx_to_word, min_score=0.2, max_score=1.
     coo = prob_matrix.tocoo()
 
     pairs = []
-    for r, c, v in zip(coo.row, coo.col, coo.data):
+    for r, c, v in zip(coo.row, coo.col, coo.data, strict=False):
         if r == c:
             continue
-        if min_score <= v < max_score:
-            if r in idx_to_word and c in idx_to_word:
-                pairs.append((idx_to_word[r], idx_to_word[c], v))
+        if min_score <= v < max_score and r in idx_to_word and c in idx_to_word:
+            pairs.append((idx_to_word[r], idx_to_word[c], v))
 
     pairs.sort(key=lambda x: x[2], reverse=True)
 

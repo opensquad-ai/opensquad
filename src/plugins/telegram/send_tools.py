@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Telegram Send Tools (Plugin Version)
 Allow agents to proactively send messages to Telegram chats (groups or individuals).
@@ -9,16 +8,16 @@ Each agent is bound to a specific bot via agent_id matching.
 
 Migrated from opensquad/tools/telegram_send.py to plugins/telegram/send_tools.py
 """
-import json
+
 import logging
-from typing import Dict, Any, List
+from typing import Any
 
 import requests
 
 logger = logging.getLogger("plugins.telegram.send_tools")
 
 # agent_id -> bot config mapping (built once)
-_agent_bot_map: Dict[str, dict] = {}
+_agent_bot_map: dict[str, dict] = {}
 # Current agent_id (set externally during boot)
 _current_agent_id: str = ""
 
@@ -38,10 +37,13 @@ def _ensure_bot_map():
     if _agent_bot_map:
         return
     try:
-        import sys, os
+        import os
+        import sys
+
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         sys.path.insert(0, root)
         from opensquad.system_config import syscfg
+
         bots = syscfg.get("telegram", "bots", [])
         for b in bots:
             if not b.get("enabled", True):
@@ -85,7 +87,7 @@ def _get_bot_token() -> tuple:
     return token, proxy, None
 
 
-def send_message(chat_id: str, text: str, parse_mode: str = "") -> Dict[str, Any]:
+def send_message(chat_id: str, text: str, parse_mode: str = "") -> dict[str, Any]:
     """
     Send a text message to a Telegram chat (group or individual).
 
@@ -136,10 +138,10 @@ def send_message(chat_id: str, text: str, parse_mode: str = "") -> Dict[str, Any
         return {"status": "error", "message": f"Cannot connect to Telegram API: {e}"}
     except Exception as e:
         logger.error(f"[TelegramSend] Exception: {e}", exc_info=True)
-        return {"status": "error", "message": f"Failed to send: {str(e)}"}
+        return {"status": "error", "message": f"Failed to send: {e!s}"}
 
 
-def send_document(chat_id: str, file_path: str, caption: str = "") -> Dict[str, Any]:
+def send_document(chat_id: str, file_path: str, caption: str = "") -> dict[str, Any]:
     """
     Send a file/document to a Telegram chat.
 
@@ -149,6 +151,7 @@ def send_document(chat_id: str, file_path: str, caption: str = "") -> Dict[str, 
         caption: Optional caption text for the document.
     """
     import os
+
     if not os.path.exists(file_path):
         return {"status": "error", "message": f"File not found: {file_path}"}
 
@@ -181,4 +184,3 @@ def send_document(chat_id: str, file_path: str, caption: str = "") -> Dict[str, 
 
 
 # Use the common function from plugins/__init__.py
-from plugins import get_current_source_chat_id

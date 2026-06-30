@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
 """
 Workspace Tool
 Provides workspace management capabilities for agents: query current workspace, list workspaces,
 create workspaces, switch workspaces, and migrate data.
 """
-import os
+
 import logging
-from typing import Any, Dict, List, Optional
+import os
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 # Tool functions
 # ===================================================================
 
-def get_current() -> Dict[str, Any]:
+
+def get_current() -> dict[str, Any]:
     """
     Get detailed information about the currently active workspace.
 
@@ -34,6 +35,7 @@ def get_current() -> Dict[str, Any]:
     """
     try:
         from opensquad.system_config import syscfg
+
         ws_root = syscfg.get_workspace()
     except Exception as e:
         return {"status": "error", "message": f"Cannot read workspace config: {e}"}
@@ -42,11 +44,12 @@ def get_current() -> Dict[str, Any]:
     agents_dir = os.path.join(ws_root, "agents")
     meta_path = os.path.join(ws_root, ".opensquad", "workspace.json")
 
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
     if os.path.isfile(meta_path):
         try:
             import json
-            with open(meta_path, "r", encoding="utf-8") as f:
+
+            with open(meta_path, encoding="utf-8") as f:
                 metadata = json.load(f)
         except Exception:
             pass
@@ -62,7 +65,7 @@ def get_current() -> Dict[str, Any]:
     }
 
 
-def list_workspaces() -> Dict[str, Any]:
+def list_workspaces() -> dict[str, Any]:
     """
     List all known workspaces (currently active + recently used list).
 
@@ -77,18 +80,18 @@ def list_workspaces() -> Dict[str, Any]:
             print(ws["path"], ws["is_current"])
     """
     try:
-        from opensquad.system_config import syscfg
-        from opensquad.workspace_utils import load_last_workspace
         import json
+
+        from opensquad.system_config import syscfg
 
         current = syscfg.get_workspace()
 
         # Read recent_workspaces
         record_file = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
-        recent: List[Dict] = []
+        recent: list[dict] = []
         if os.path.isfile(record_file):
             try:
-                with open(record_file, "r", encoding="utf-8") as f:
+                with open(record_file, encoding="utf-8") as f:
                     data = json.load(f)
                 raw = data.get("recent_workspaces", [])
                 if raw and isinstance(raw[0], dict):
@@ -106,13 +109,15 @@ def list_workspaces() -> Dict[str, Any]:
         workspaces = []
         for item in recent:
             path = item.get("path", "")
-            workspaces.append({
-                "path": path,
-                "name": item.get("name") or os.path.basename(path),
-                "is_current": (path == current),
-                "exists": os.path.isdir(path),
-                "last_opened": item.get("last_opened"),
-            })
+            workspaces.append(
+                {
+                    "path": path,
+                    "name": item.get("name") or os.path.basename(path),
+                    "is_current": (path == current),
+                    "exists": os.path.isdir(path),
+                    "last_opened": item.get("last_opened"),
+                }
+            )
 
         return {
             "status": "ok",
@@ -123,7 +128,7 @@ def list_workspaces() -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def create(path: str, name: Optional[str] = None) -> Dict[str, Any]:
+def create(path: str, name: str | None = None) -> dict[str, Any]:
     """
     Create a new workspace (or initialize an existing directory as a workspace).
 
@@ -189,7 +194,7 @@ def create(path: str, name: Optional[str] = None) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def switch(path: str) -> Dict[str, Any]:
+def switch(path: str) -> dict[str, Any]:
     """
     Switch to the specified workspace.
 
@@ -239,7 +244,7 @@ def switch(path: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def migrate(source: str, target: str, mode: str = "copy", conflict: str = "skip") -> Dict[str, Any]:
+def migrate(source: str, target: str, mode: str = "copy", conflict: str = "skip") -> dict[str, Any]:
     """
     Migrate data from an old workspace (or installation directory) to the target workspace.
 
@@ -338,9 +343,9 @@ TOOL_DESCRIPTION = {
     "migrate": {
         "description": "Migrate data from an old workspace or installation directory to the target workspace",
         "parameters": {
-            "source":   {"type": "string", "description": "Source directory path"},
-            "target":   {"type": "string", "description": "Target workspace path"},
-            "mode":     {"type": "string", "description": "'copy' (default) or 'move'"},
+            "source": {"type": "string", "description": "Source directory path"},
+            "target": {"type": "string", "description": "Target workspace path"},
+            "mode": {"type": "string", "description": "'copy' (default) or 'move'"},
             "conflict": {"type": "string", "description": "'skip' (default) or 'overwrite'"},
         },
         "required": ["source", "target"],

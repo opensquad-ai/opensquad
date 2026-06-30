@@ -1,17 +1,21 @@
-# -*- coding: utf-8 -*-
 """
 测试泄漏检测函数是否正确处理系统标签
 
 从 runner.py 直接导入真实方法，消除代码复制（原为 MockRunner 内嵌完整副本）。
 """
-import sys, os
+
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if sys.platform == 'win32':
+if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+
+from unittest.mock import MagicMock
 
 from opensquad.runner import AgentRunner
-from unittest.mock import MagicMock
 
 
 def _make_runner():
@@ -27,10 +31,12 @@ def test_system_tags_not_leaked():
     xml = '<tool_call name="system.echo"><message>hello</message></tool_call>'
     assert not runner._is_leaked_tool_params(xml)
 
+
 def test_json_leak_detected():
     runner = _make_runner()
     assert runner._is_leaked_tool_params("{}")
     assert runner._is_leaked_tool_params('{"key": "value"}')
+
 
 def test_plain_text_not_leaked():
     runner = _make_runner()

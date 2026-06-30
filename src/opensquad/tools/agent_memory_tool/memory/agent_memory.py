@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 """
 AgentMemory - Unified API for multi-agent shared memory system
 
@@ -49,19 +49,19 @@ Usage:
     am.load("./memory_data")
 """
 
-import os
 import json
+import os
 import time
-import re
-import numpy as np
-from scipy.sparse import save_npz, load_npz
 
-from .cooccurrence import IncrementalCooccurrence
-from .probability import compute_ppmi_matrix, compute_conditional_prob_matrix
-from .decay import DecayManager
-from .storage import MemoryStore, extract_keywords_jieba, extract_nouns_jieba, parse_time_expression
-from .retriever import MemoryRetriever
+import numpy as np
+from scipy.sparse import load_npz, save_npz
+
 from .chain import discover_hidden_chain, discover_hidden_chain_with_evidence
+from .cooccurrence import IncrementalCooccurrence
+from .decay import DecayManager
+from .probability import compute_ppmi_matrix
+from .retriever import MemoryRetriever
+from .storage import MemoryStore, extract_keywords_jieba, extract_nouns_jieba, parse_time_expression
 
 
 class AgentMemory:
@@ -95,9 +95,15 @@ class AgentMemory:
             (inverse function 1/(1+lambda*days))
     """
 
-    def __init__(self, data_dir=None, max_dim=100000, min_cooccurrence=5,
-                 decay_rate=0.005, decay_interval=500,
-                 time_decay_lambda=0.1):
+    def __init__(
+        self,
+        data_dir=None,
+        max_dim=100000,
+        min_cooccurrence=5,
+        decay_rate=0.005,
+        decay_interval=500,
+        time_decay_lambda=0.1,
+    ):
         # Configuration
         self._data_dir = data_dir
         self._config = {
@@ -110,8 +116,7 @@ class AgentMemory:
 
         # Core components
         self._cooccurrence = IncrementalCooccurrence(max_dim=max_dim)
-        self._decay = DecayManager(decay_rate=decay_rate,
-                                   decay_interval=decay_interval)
+        self._decay = DecayManager(decay_rate=decay_rate, decay_interval=decay_interval)
 
         # SQLite storage: real-time persistence in data_dir mode, otherwise pure in-memory
         if data_dir:
@@ -133,9 +138,9 @@ class AgentMemory:
         self._last_rebuild_docs = 0
 
         # Episodic Layer (log memory) indexes
-        self._date_index = {}        # {"2026-02-09": ["mem_001", ...]} in chronological order
-        self._category_index = {}    # {"work": {"mem_001", ...}}
-        self._episodic_ids = set()   # marks which entries are log entries
+        self._date_index = {}  # {"2026-02-09": ["mem_001", ...]} in chronological order
+        self._category_index = {}  # {"work": {"mem_001", ...}}
+        self._episodic_ids = set()  # marks which entries are log entries
 
     # ================================================================
     # Document ingestion (build co-occurrence knowledge)
@@ -160,8 +165,7 @@ class AgentMemory:
         self._decay.maybe_decay(self._cooccurrence)
         self._matrices_dirty = True
 
-    def ingest_documents_from_csv(self, csv_path, content_column="content",
-                                  min_word_len=2, progress_callback=None):
+    def ingest_documents_from_csv(self, csv_path, content_column="content", min_word_len=2, progress_callback=None):
         """
         Batch-ingest documents from a CSV file.
 
@@ -181,14 +185,13 @@ class AgentMemory:
         df = pd.read_csv(csv_path)
 
         if content_column not in df.columns:
-            raise ValueError(f"Column '{content_column}' not found in CSV, "
-                             f"available columns: {list(df.columns)}")
+            raise ValueError(f"Column '{content_column}' not found in CSV, available columns: {list(df.columns)}")
 
         docs_processed = 0
         docs_skipped = 0
         total = len(df)
 
-        for idx, row in df.iterrows():
+        for _idx, row in df.iterrows():
             text = row.get(content_column)
             if not isinstance(text, str) or len(text.strip()) < 10:
                 docs_skipped += 1
@@ -211,10 +214,20 @@ class AgentMemory:
     # Memory entry CRUD
     # ================================================================
 
-    def write(self, topic=None, keywords=None, summary=None, body=None,
-              source=None, auto_extract_keywords=False, timestamp=None,
-              entry_type="knowledge", category=None, importance=3,
-              supersedes=None):
+    def write(
+        self,
+        topic=None,
+        keywords=None,
+        summary=None,
+        body=None,
+        source=None,
+        auto_extract_keywords=False,
+        timestamp=None,
+        entry_type="knowledge",
+        category=None,
+        importance=3,
+        supersedes=None,
+    ):
         """
         Write a memory entry.
 
@@ -238,8 +251,10 @@ class AgentMemory:
         date_str = self._ts_to_date_str(ts)
 
         entry_id = self._store.add(
-            topic=topic, keywords=keywords,
-            summary=summary, body=body,
+            topic=topic,
+            keywords=keywords,
+            summary=summary,
+            body=body,
             source=source,
             auto_extract_keywords=auto_extract_keywords,
             timestamp=ts,
@@ -327,11 +342,23 @@ class AgentMemory:
     # Query (main API - for agent prompt injection)
     # ================================================================
 
-    def query(self, keywords=None, user_input=None, depth="standard",
-              token_budget=1000, time_recent=None, time_range=None,
-              source_filter=None, top_n_expand=10, top_n_entries=10,
-              chain_fuzzy=False, auto_parse_time=False,
-              long_threshold=80, core_ratio=0.2, important_ratio=0.4):
+    def query(
+        self,
+        keywords=None,
+        user_input=None,
+        depth="standard",
+        token_budget=1000,
+        time_recent=None,
+        time_range=None,
+        source_filter=None,
+        top_n_expand=10,
+        top_n_entries=10,
+        chain_fuzzy=False,
+        auto_parse_time=False,
+        long_threshold=80,
+        core_ratio=0.2,
+        important_ratio=0.4,
+    ):
         """
         Multi-level memory query; returns a result ready to inject into a prompt.
 
@@ -416,8 +443,9 @@ class AgentMemory:
     # Chain inference (on-demand - for complex problem analysis)
     # ================================================================
 
-    def find_chain(self, anchor_words, top_k_candidates=50, alpha=0.85,
-                   min_edge_weight=0.1, top_n=10, with_evidence=False):
+    def find_chain(
+        self, anchor_words, top_k_candidates=50, alpha=0.85, min_edge_weight=0.1, top_n=10, with_evidence=False
+    ):
         """
         Hidden-chain inference: given anchor words, discover intermediate
         associated concepts and chain paths.
@@ -443,8 +471,10 @@ class AgentMemory:
 
         if self._ppmi_matrix is None:
             return {
-                "hidden_words": [], "chains": [],
-                "anchors_found": [], "anchors_missing": list(anchor_words),
+                "hidden_words": [],
+                "chains": [],
+                "anchors_found": [],
+                "anchors_missing": list(anchor_words),
                 "error": "PPMI matrix not built; please ingest documents and call rebuild_matrices() first",
             }
 
@@ -490,6 +520,7 @@ class AgentMemory:
     def _date_str_to_ts_range(date_str):
         """Date string -> (timestamp of 00:00:00 that day, timestamp of 00:00:00 next day)"""
         import datetime
+
         dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
         start = dt.timestamp()
         end = start + 86400
@@ -511,9 +542,17 @@ class AgentMemory:
         # Mark as log entry
         self._episodic_ids.add(entry_id)
 
-    def log(self, content, detail=None, category=None, tags=None,
-            source=None, timestamp=None, auto_extract_keywords=True,
-            importance=3):
+    def log(
+        self,
+        content,
+        detail=None,
+        category=None,
+        tags=None,
+        source=None,
+        timestamp=None,
+        auto_extract_keywords=True,
+        importance=3,
+    ):
         """
         Write a log entry (activity/event record).
 
@@ -594,15 +633,17 @@ class AgentMemory:
             if entry is None:
                 continue
             category = entry.get("topic")
-            entries.append({
-                "id": eid,
-                "time": self._ts_to_time_str(entry["timestamp"]),
-                "category": category,
-                "content": entry.get("summary"),
-                "detail": entry.get("body"),
-                "tags": entry.get("keywords"),
-                "source": entry.get("source"),
-            })
+            entries.append(
+                {
+                    "id": eid,
+                    "time": self._ts_to_time_str(entry["timestamp"]),
+                    "category": category,
+                    "content": entry.get("summary"),
+                    "detail": entry.get("body"),
+                    "tags": entry.get("keywords"),
+                    "source": entry.get("source"),
+                }
+            )
             if category:
                 cat_counts[category] = cat_counts.get(category, 0) + 1
 
@@ -613,8 +654,7 @@ class AgentMemory:
             "categories": cat_counts,
         }
 
-    def recall_by_range(self, start_date, end_date, category=None,
-                        keyword=None, source_filter=None):
+    def recall_by_range(self, start_date, end_date, category=None, keyword=None, source_filter=None):
         """
         Query logs by time range (with optional category/keyword filters).
 
@@ -638,6 +678,7 @@ class AgentMemory:
             }
         """
         import datetime
+
         dt_start = datetime.datetime.strptime(start_date, "%Y-%m-%d")
         dt_end = datetime.datetime.strptime(end_date, "%Y-%m-%d")
 
@@ -681,15 +722,17 @@ class AgentMemory:
                     if not found:
                         continue
 
-                day_entries.append({
-                    "id": eid,
-                    "time": self._ts_to_time_str(entry["timestamp"]),
-                    "category": entry_cat,
-                    "content": entry.get("summary"),
-                    "detail": entry.get("body"),
-                    "tags": entry.get("keywords"),
-                    "source": entry.get("source"),
-                })
+                day_entries.append(
+                    {
+                        "id": eid,
+                        "time": self._ts_to_time_str(entry["timestamp"]),
+                        "category": entry_cat,
+                        "content": entry.get("summary"),
+                        "detail": entry.get("body"),
+                        "tags": entry.get("keywords"),
+                        "source": entry.get("source"),
+                    }
+                )
 
                 if entry_cat:
                     all_cat_counts[entry_cat] = all_cat_counts.get(entry_cat, 0) + 1
@@ -729,10 +772,7 @@ class AgentMemory:
         """
         import datetime
 
-        if end_date:
-            dt_end = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-        else:
-            dt_end = datetime.datetime.now()
+        dt_end = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.datetime.now()
 
         if period == "day":
             dt_start = dt_end
@@ -805,15 +845,13 @@ class AgentMemory:
         """
         t0 = time.time()
 
-        thresh = min_cooccurrence if min_cooccurrence is not None \
-            else self._config["min_cooccurrence"]
+        thresh = min_cooccurrence if min_cooccurrence is not None else self._config["min_cooccurrence"]
 
         # Prune
         self._pruned_matrix = self._cooccurrence.prune(min_cooccurrence=thresh)
 
         # PPMI
-        self._ppmi_matrix = compute_ppmi_matrix(
-            self._pruned_matrix, self._cooccurrence.total_docs)
+        self._ppmi_matrix = compute_ppmi_matrix(self._pruned_matrix, self._cooccurrence.total_docs)
 
         # Rebuild retriever
         self._retriever = MemoryRetriever(
@@ -853,8 +891,7 @@ class AgentMemory:
     # Sleep consolidation
     # ================================================================
 
-    def consolidate(self, min_cooccurrence=None, max_vocab=None,
-                    rebuild_from_recent=None):
+    def consolidate(self, min_cooccurrence=None, max_vocab=None, rebuild_from_recent=None):
         """
         Sleep consolidation: vocabulary pruning + matrix rebuild + persistence.
 
@@ -894,9 +931,8 @@ class AgentMemory:
             # Reset co-occurrence matrix (keep vocab structure, clear counts)
             max_dim = self._config["max_dim"]
             from scipy.sparse import dok_matrix
-            self._cooccurrence.matrix = dok_matrix(
-                (max_dim, max_dim), dtype=np.float64
-            )
+
+            self._cooccurrence.matrix = dok_matrix((max_dim, max_dim), dtype=np.float64)
             self._cooccurrence.total_docs = 0
 
             # Rebuild from recent entries' keywords
@@ -912,8 +948,7 @@ class AgentMemory:
         )
 
         # Step 3: rebuild matrices
-        thresh = min_cooccurrence if min_cooccurrence is not None \
-            else self._config["min_cooccurrence"]
+        thresh = min_cooccurrence if min_cooccurrence is not None else self._config["min_cooccurrence"]
         rebuild_stats = self.rebuild_matrices(min_cooccurrence=thresh)
 
         # Step 4: persist (if data_dir is set)
@@ -945,11 +980,10 @@ class AgentMemory:
         Returns:
             int - number of words removed
         """
-        if not hasattr(self._cooccurrence, 'remove_words'):
+        if not hasattr(self._cooccurrence, "remove_words"):
             return 0
 
-        thresh = min_cooccurrence if min_cooccurrence is not None \
-            else self._config["min_cooccurrence"]
+        thresh = min_cooccurrence if min_cooccurrence is not None else self._config["min_cooccurrence"]
 
         # Find low-frequency words (total co-occurrence count below threshold)
         csr = self._cooccurrence.get_csr_matrix()
@@ -977,11 +1011,10 @@ class AgentMemory:
         # If max_vocab is set and current vocab exceeds it
         if max_vocab and (vc - len(words_to_remove)) > max_vocab:
             # Sort by frequency and remove more low-frequency words
-            remaining = {w: f for w, f in word_freqs.items()
-                         if w not in words_to_remove}
+            remaining = {w: f for w, f in word_freqs.items() if w not in words_to_remove}
             sorted_remaining = sorted(remaining.items(), key=lambda x: x[1])
             excess = (vc - len(words_to_remove)) - max_vocab
-            for w, f in sorted_remaining[:excess]:
+            for w, _f in sorted_remaining[:excess]:
                 words_to_remove.append(w)
 
         if words_to_remove:
@@ -1086,8 +1119,7 @@ class AgentMemory:
         meta = {
             "config": self._config,
             "vocab_dict": self._cooccurrence.vocab_dict,
-            "idx_to_word": {str(k): v for k, v in
-                            self._cooccurrence.idx_to_word.items()},
+            "idx_to_word": {str(k): v for k, v in self._cooccurrence.idx_to_word.items()},
             "vocab_count": self._cooccurrence.vocab_count,
             "total_docs": self._cooccurrence.total_docs,
             "decay_state": self._decay.get_info(),
@@ -1101,10 +1133,9 @@ class AgentMemory:
 
         # 6. Log index (Episodic Layer)
         episodic_meta = {
-            "date_index": self._date_index,          # {date_str: [entry_ids]}
-            "category_index": {k: sorted(v) for k, v
-                               in self._category_index.items()},  # set -> list
-            "episodic_ids": sorted(self._episodic_ids),            # set -> list
+            "date_index": self._date_index,  # {date_str: [entry_ids]}
+            "category_index": {k: sorted(v) for k, v in self._category_index.items()},  # set -> list
+            "episodic_ids": sorted(self._episodic_ids),  # set -> list
         }
         ep_path = os.path.join(directory, "episodic_meta.json")
         with open(ep_path, "w", encoding="utf-8") as f:
@@ -1125,7 +1156,7 @@ class AgentMemory:
             return False
 
         # 1. Load config + metadata
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
 
         self._config = meta.get("config", self._config)
@@ -1140,10 +1171,8 @@ class AgentMemory:
 
         # Restore decay state
         decay_state = meta.get("decay_state", {})
-        self._decay.decay_rate = decay_state.get("decay_rate",
-                                                  self._config["decay_rate"])
-        self._decay.decay_interval = decay_state.get("decay_interval",
-                                                      self._config["decay_interval"])
+        self._decay.decay_rate = decay_state.get("decay_rate", self._config["decay_rate"])
+        self._decay.decay_interval = decay_state.get("decay_interval", self._config["decay_interval"])
         self._decay.last_decay_doc = decay_state.get("last_decay_doc", 0)
         self._decay.total_decay_steps = decay_state.get("total_decay_steps", 0)
 
@@ -1158,11 +1187,12 @@ class AgentMemory:
             cooc_csr = load_npz(cooc_path)
             # Restore to max_dim-sized DOK matrix
             from scipy.sparse import dok_matrix
+
             max_dim = self._config["max_dim"]
             full_dok = dok_matrix((max_dim, max_dim), dtype=np.float64)
             # Fill in loaded data
             cooc_coo = cooc_csr.tocoo()
-            for r, c, v in zip(cooc_coo.row, cooc_coo.col, cooc_coo.data):
+            for r, c, v in zip(cooc_coo.row, cooc_coo.col, cooc_coo.data, strict=False):
                 full_dok[r, c] = v
             self._cooccurrence.matrix = full_dok
 
@@ -1172,7 +1202,6 @@ class AgentMemory:
             self._pruned_matrix = load_npz(pruned_path)
             # Expand back to max_dim size to keep compatibility with vocab_dict indexes
             if self._pruned_matrix.shape[0] < self._config["max_dim"]:
-                from scipy.sparse import csr_matrix as csr_ctor
                 max_dim = self._config["max_dim"]
                 self._pruned_matrix.resize((max_dim, max_dim))
 
@@ -1203,12 +1232,10 @@ class AgentMemory:
         # 7. Load log index (Episodic Layer)
         ep_path = os.path.join(directory, "episodic_meta.json")
         if os.path.exists(ep_path):
-            with open(ep_path, "r", encoding="utf-8") as f:
+            with open(ep_path, encoding="utf-8") as f:
                 ep_meta = json.load(f)
             self._date_index = ep_meta.get("date_index", {})
-            self._category_index = {
-                k: set(v) for k, v in ep_meta.get("category_index", {}).items()
-            }
+            self._category_index = {k: set(v) for k, v in ep_meta.get("category_index", {}).items()}
             self._episodic_ids = set(ep_meta.get("episodic_ids", []))
 
         return True

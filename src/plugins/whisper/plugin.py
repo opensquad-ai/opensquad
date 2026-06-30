@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 Whisper Transcribe Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/whisper/whisper_transcribe.py.
 Service auto-start: launches the Whisper Flask service on plugin load.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Context
+from opensquad.plugin_api import Context, register
 from opensquad.service_plugin import ServicePlugin
 
 logger = logging.getLogger("plugins.whisper")
@@ -49,30 +49,32 @@ class WhisperPlugin(ServicePlugin):
         # Call ServicePlugin's initializer, configure service parameters
         super().__init__(
             context=context,
-            service_script="service.py",     # Whisper uses Flask (service.py)
+            service_script="service.py",  # Whisper uses Flask (service.py)
             health_endpoint="/health",
             service_name="WhisperPlugin",
             max_startup_wait=10,
             health_check_interval=60,
         )
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         """
         Proxy pattern: return the existing tool module for ToolRegistry.
-        
+
         This method is recognized by PluginManager for new-style plugins
         that proxy existing tool modules instead of using @tool decorators.
         """
         tools = []
         try:
             module = importlib.import_module("plugins.whisper.whisper_transcribe")
-            tools.append({
-                "name": "whisper_transcribe",
-                "module": module,
-                "level": "core",
-                "auto_register": False,
-                "requires_agent_id": False,
-            })
+            tools.append(
+                {
+                    "name": "whisper_transcribe",
+                    "module": module,
+                    "level": "core",
+                    "auto_register": False,
+                    "requires_agent_id": False,
+                }
+            )
         except ImportError as e:
             logger.error(f"[WhisperPlugin] Cannot import whisper_transcribe module: {e}")
         return tools

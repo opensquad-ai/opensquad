@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 AgentContext — dependency container for agent runtime.
 
@@ -18,18 +17,16 @@ Migration phases:
 from __future__ import annotations
 
 import logging
-import os
 from contextvars import ContextVar
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from opensquad._syscfg._config import _SysCfg
     from opensquad.chat_api import ChatAPI
     from opensquad.claude_api import ClaudeAPI
-    from opensquad.google_api import GoogleAPI
-    from opensquad.events import EventBus
     from opensquad.event_pipeline import EventPipeline
+    from opensquad.events import EventBus
+    from opensquad.google_api import GoogleAPI
     from opensquad.input_hub import InputHub
     from opensquad.message_queue import MessageQueue
     from opensquad.message_router import MessageRouter
@@ -80,31 +77,31 @@ class AgentContext:
     """
 
     # Runtime services — instantiated by boot()
-    event_bus: Optional["EventBus"] = None
+    event_bus: EventBus | None = None
     """Application-wide event bus (``EventBus``)."""
-    input_hub: Optional["InputHub"] = None
+    input_hub: InputHub | None = None
     """Input dispatch hub — receives user/group messages."""
-    message_queue: Optional["MessageQueue"] = None
+    message_queue: MessageQueue | None = None
     """Async message queue for group/DM messages (``asyncio.Queue`` wrapper)."""
-    sleep_controller: Optional["SleepController"] = None
+    sleep_controller: SleepController | None = None
     """Agent sleep/wake cycle controller."""
-    state_manager: Optional["AIStateManager"] = None
+    state_manager: AIStateManager | None = None
     """AI state machine (idle/working/sleeping)."""
-    event_pipeline: Optional["EventPipeline"] = None
+    event_pipeline: EventPipeline | None = None
     """External event pipeline for role=tool message injection."""
-    message_router: Optional["MessageRouter"] = None
+    message_router: MessageRouter | None = None
     """Routes incoming messages between agents and group chats."""
-    session_manager: Optional["SessionManager"] = None
+    session_manager: SessionManager | None = None
     """Conversation session persistence manager."""
 
     # Core domain objects — created by boot(), consumed by Runner
-    chat_api: Optional["ChatAPIType"] = None
+    chat_api: ChatAPIType | None = None
     """LLM API client (``ChatAPI`` | ``ClaudeAPI`` | ``GoogleAPI``)."""
-    tool_registry: Optional["ToolRegistry"] = None
+    tool_registry: ToolRegistry | None = None
     """Tool discovery and dispatch center."""
-    memory_manager: Optional[Any] = None
+    memory_manager: Any | None = None
     """Long-term memory manager (optional, lazily initialized)."""
-    plugin_manager: Optional[Any] = None
+    plugin_manager: Any | None = None
     """Plugin system manager (optional, set post-boot)."""
 
     # Metadata — set by boot()
@@ -128,15 +125,17 @@ class AgentContext:
         optional at construction time because they may be set after
         the plugin system initialises.
         """
-        return all([
-            self.event_bus is not None,
-            self.input_hub is not None,
-            self.message_queue is not None,
-            self.state_manager is not None,
-            self.session_manager is not None,
-            self.chat_api is not None,
-            self.tool_registry is not None,
-        ])
+        return all(
+            [
+                self.event_bus is not None,
+                self.input_hub is not None,
+                self.message_queue is not None,
+                self.state_manager is not None,
+                self.session_manager is not None,
+                self.chat_api is not None,
+                self.tool_registry is not None,
+            ]
+        )
 
     @classmethod
     def from_boot(cls, **overrides: Any) -> AgentContext:
@@ -152,15 +151,14 @@ class AgentContext:
         Returns:
             AgentContext with module-level defaults merged with overrides.
         """
-        from opensquad import _runtime_ctx
+        from opensquad.event_pipeline import event_pipeline
         from opensquad.events import bus
         from opensquad.input_hub import input_hub
         from opensquad.message_queue import message_queue
+        from opensquad.message_router import message_router
         from opensquad.session_manager import session_manager
         from opensquad.sleep_controller import sleep_controller
         from opensquad.state_manager import state_manager
-        from opensquad.event_pipeline import event_pipeline
-        from opensquad.message_router import message_router
 
         defaults = {
             "event_bus": bus,
@@ -181,7 +179,7 @@ class AgentContext:
 # Phase 1b sets this via set_current_context().
 # ------------------------------------------------------------------
 
-_context_var: ContextVar[Optional[AgentContext]] = ContextVar(
+_context_var: ContextVar[AgentContext | None] = ContextVar(
     "agent_context",
     default=None,
 )
@@ -197,7 +195,7 @@ def set_current_context(ctx: AgentContext) -> None:
     _context_var.set(ctx)
 
 
-def get_current_context() -> Optional[AgentContext]:
+def get_current_context() -> AgentContext | None:
     """Return the AgentContext for the current execution context, or None
     if no context has been set.
 
@@ -218,8 +216,5 @@ def require_context() -> AgentContext:
     """
     ctx = _context_var.get()
     if ctx is None:
-        raise RuntimeError(
-            "No AgentContext available. Ensure set_current_context() "
-            "was called during boot."
-        )
+        raise RuntimeError("No AgentContext available. Ensure set_current_context() was called during boot.")
     return ctx

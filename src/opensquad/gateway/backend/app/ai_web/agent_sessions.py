@@ -8,17 +8,17 @@ Each Agent stores sessions in:
   agents/{name}/data/sessions/current_session.json
   agents/{name}/data/history/{session_id}.json
 """
+
 import asyncio
+import copy
 import json
+import logging
 import os
 import re
 import threading
-import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
-import logging
-import copy
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def _build_agent_id_map() -> dict:
             cfg_path = os.path.join(agents_root, name, "config.json")
             if os.path.isfile(cfg_path):
                 try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
+                    with open(cfg_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     aid = cfg.get("agent_id", name)
                     id_map[aid] = os.path.join(agents_root, name)
@@ -59,15 +59,19 @@ class AgentSessionReader:
         self.save_dir = save_dir
         self.history_dir = history_dir
         self.current_session_file = os.path.join(save_dir, "current_session.json")
-        self.session_data: Dict[str, Any] = {
-            "id": None, "title": None, "messages": [], "events": [],
-            "last_updated": None, "created_at": None,
+        self.session_data: dict[str, Any] = {
+            "id": None,
+            "title": None,
+            "messages": [],
+            "events": [],
+            "last_updated": None,
+            "created_at": None,
         }
         # LRU cache: sid -> {"data": ..., "mtime": ...}
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._cache_max_size = 10
         # mtime cache for current_session.json — avoid re-parsing unchanged large files
-        self._current_session_mtime: Optional[float] = None
+        self._current_session_mtime: float | None = None
         # Load current session from disk
         self._reload()
 
@@ -89,7 +93,7 @@ class AgentSessionReader:
             mtime = os.path.getmtime(self.current_session_file)
             if not force and mtime == self._current_session_mtime:
                 return  # file unchanged, skip disk read
-            with open(self.current_session_file, "r", encoding="utf-8") as f:
+            with open(self.current_session_file, encoding="utf-8") as f:
                 self.session_data = json.load(f)
             if "events" not in self.session_data:
                 self.session_data["events"] = []
@@ -115,7 +119,7 @@ class AgentSessionReader:
 
     # ---- LRU cache ----
 
-    def _get_history_file_mtime(self, sid: str) -> Optional[float]:
+    def _get_history_file_mtime(self, sid: str) -> float | None:
         fp = os.path.join(self.history_dir, f"{sid}.json")
         try:
             return os.path.getmtime(fp) if os.path.exists(fp) else None
@@ -132,7 +136,7 @@ class AgentSessionReader:
         while len(self._cache) > self._cache_max_size:
             self._cache.popitem(last=False)
 
-    def _cache_get(self, sid: str) -> Optional[dict]:
+    def _cache_get(self, sid: str) -> dict | None:
         if sid not in self._cache:
             return None
         entry = self._cache[sid]
@@ -162,10 +166,10 @@ class AgentSessionReader:
         self._reload()
         return self.session_data.get("id", "unknown")
 
-    def get_session_list(self) -> List[Dict[str, Any]]:
+    def get_session_list(self) -> list[dict[str, Any]]:
         """Return list of all sessions (current + history), newest first."""
         self._reload()
-        sessions: List[Dict[str, Any]] = []
+        sessions: list[dict[str, Any]] = []
         seen_ids: set = set()
 
         def _extract_title(messages: list, fallback: str) -> str:
@@ -191,12 +195,14 @@ class AgentSessionReader:
             messages = self.session_data.get("messages", [])
             title = self.session_data.get("title") or _extract_title(messages, curr_id)
             preview = _extract_preview(messages)
-            sessions.append({
-                "id": curr_id,
-                "title": title,
-                "preview": preview,
-                "current": True,
-            })
+            sessions.append(
+                {
+                    "id": curr_id,
+                    "title": title,
+                    "preview": preview,
+                    "current": True,
+                }
+            )
             seen_ids.add(curr_id)
 
         # 2. History files
@@ -221,7 +227,7 @@ class AgentSessionReader:
                     else:
                         try:
                             fp = os.path.join(self.history_dir, f)
-                            with open(fp, "r", encoding="utf-8") as jf:
+                            with open(fp, encoding="utf-8") as jf:
                                 content = jf.read()
                                 try:
                                     data = json.loads(content)
@@ -233,19 +239,21 @@ class AgentSessionReader:
                                         title = match.group(1).strip()
                         except Exception:
                             pass
-                    sessions.append({
-                        "id": sid,
-                        "title": title,
-                        "preview": preview,
-                        "current": False,
-                    })
+                    sessions.append(
+                        {
+                            "id": sid,
+                            "title": title,
+                            "preview": preview,
+                            "current": False,
+                        }
+                    )
                     seen_ids.add(sid)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")
 
         return sessions
 
-    def get_session_history(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session_history(self, session_id: str) -> dict[str, Any] | None:
         """Read-only: get a session's full data by id."""
         self._reload(force=True)
 
@@ -267,7 +275,7 @@ class AgentSessionReader:
             return None
 
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 content = json.load(f)
 
             if isinstance(content, list):
@@ -319,18 +327,18 @@ class AgentSessionReader:
 
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 
-    async def async_get_session_list(self) -> List[Dict[str, Any]]:
+    async def async_get_session_list(self) -> list[dict[str, Any]]:
         return self.get_session_list()
 
     async def async_get_current_session_id(self) -> str:
         return self.get_current_session_id()
 
-    async def async_get_session_history(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def async_get_session_history(self, session_id: str) -> dict[str, Any] | None:
         return self.get_session_history(session_id)
 
     async def async_get_session_history_paged(
         self, session_id: str, offset: int = 0, limit: int = 50
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         return self.get_session_history_paged(session_id, offset, limit)
 
     async def async_delete_session(self, session_id: str) -> bool:
@@ -341,7 +349,7 @@ class AgentSessionReader:
         session_id: str,
         offset: int = 0,
         limit: int = 50,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Get a session's data with pagination (from the end, backwards).
 
@@ -366,10 +374,7 @@ class AgentSessionReader:
         else:
             end_idx = total_messages - offset
             start_idx = max(0, end_idx - limit)
-            if end_idx <= 0:
-                paged_messages = []
-            else:
-                paged_messages = all_messages[start_idx:end_idx]
+            paged_messages = [] if end_idx <= 0 else all_messages[start_idx:end_idx]
 
         # Slice events by timestamp range of the paged messages.
         # Proportional slicing is fundamentally wrong: events are not
@@ -425,7 +430,8 @@ class AgentSessionReader:
                 else:
                     # No timestamps on messages; fall back to round_id matching
                     paged_events = [
-                        evt for evt in all_events
+                        evt
+                        for evt in all_events
                         if evt.get("round_id") is not None and evt["round_id"] in paged_round_ids
                     ]
                     if not paged_events and all_events:
@@ -464,7 +470,7 @@ class AgentSessionReader:
 # of plain HTTP (which would fail when Gateway is on cloud and Launcher is
 # at home without a reverse-proxy).
 # ============================================================
-_ws_rpc = None           # async (node_id, method, path, body=None) -> dict
+_ws_rpc = None  # async (node_id, method, path, body=None) -> dict
 _ws_node_id_func = None  # () -> str | None  (returns None when no WS peer)
 
 
@@ -479,9 +485,9 @@ def set_ws_handler(rpc_func, node_id_func):
 # ============================================================
 # Global registry: agent_id -> AgentSessionReader (with lock)
 # ============================================================
-_readers: Dict[str, AgentSessionReader] = {}
+_readers: dict[str, AgentSessionReader] = {}
 _lock = threading.Lock()
-_agent_id_map: Optional[dict] = None
+_agent_id_map: dict | None = None
 
 
 def _ensure_agent_id_map() -> dict:
@@ -575,8 +581,9 @@ class _RemoteSessionReader:
         self._agent_id = agent_id
         self._base = f"{syscfg.launcher_url()}/api/sessions/{agent_id}"
 
-    def _get(self, path: str, params: dict = None):
+    def _get(self, path: str, params: dict | None = None):
         import httpx
+
         with httpx.Client(timeout=10) as c:
             r = c.get(f"{self._base}{path}", params=params or {})
             r.raise_for_status()
@@ -584,6 +591,7 @@ class _RemoteSessionReader:
 
     def _post(self, path: str):
         import httpx
+
         with httpx.Client(timeout=10) as c:
             r = c.post(f"{self._base}{path}")
             r.raise_for_status()
@@ -592,10 +600,10 @@ class _RemoteSessionReader:
     def get_session_list(self):
         return self._get("/list").get("sessions", [])
 
-    def get_current_session_id(self) -> Optional[str]:
+    def get_current_session_id(self) -> str | None:
         return self._get("/list").get("current_session_id")
 
-    def get_session_history(self, session_id: str) -> Optional[dict]:
+    def get_session_history(self, session_id: str) -> dict | None:
         try:
             return self._get(f"/{session_id}").get("session")
         except Exception as e:
@@ -607,7 +615,7 @@ class _RemoteSessionReader:
         session_id: str,
         offset: int = 0,
         limit: int = 50,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         try:
             return self._get(f"/{session_id}/paged", {"offset": offset, "limit": limit}).get("session")
         except Exception as e:
@@ -626,15 +634,13 @@ class _RemoteSessionReader:
     async def async_get_session_list(self):
         return await asyncio.to_thread(self.get_session_list)
 
-    async def async_get_current_session_id(self) -> Optional[str]:
+    async def async_get_current_session_id(self) -> str | None:
         return await asyncio.to_thread(self.get_current_session_id)
 
-    async def async_get_session_history(self, session_id: str) -> Optional[dict]:
+    async def async_get_session_history(self, session_id: str) -> dict | None:
         return await asyncio.to_thread(self.get_session_history, session_id)
 
-    async def async_get_session_history_paged(
-        self, session_id: str, offset: int = 0, limit: int = 50
-    ) -> Optional[dict]:
+    async def async_get_session_history_paged(self, session_id: str, offset: int = 0, limit: int = 50) -> dict | None:
         return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit)
 
     async def async_delete_session(self, session_id: str) -> bool:
@@ -647,6 +653,7 @@ class _RemoteSessionReader:
 # port needed, the already-established WS tunnel carries the RPC.
 # ============================================================
 
+
 class _WsSessionReader:
     """
     Async session reader that proxies requests through the Launcher WS tunnel.
@@ -657,22 +664,22 @@ class _WsSessionReader:
 
     def __init__(self, agent_id: str, rpc, node_id: str):
         self._agent_id = agent_id
-        self._rpc = rpc        # async (node_id, method, path, body=None) -> dict
+        self._rpc = rpc  # async (node_id, method, path, body=None) -> dict
         self._node_id = node_id
         self._base = f"/api/sessions/{agent_id}"
 
     async def _call(self, method: str, path: str, body=None) -> dict:
         return await self._rpc(self._node_id, method, path, body)
 
-    async def async_get_session_list(self) -> List[Dict[str, Any]]:
+    async def async_get_session_list(self) -> list[dict[str, Any]]:
         result = await self._call("GET", f"{self._base}/list")
         return result.get("sessions", [])
 
-    async def async_get_current_session_id(self) -> Optional[str]:
+    async def async_get_current_session_id(self) -> str | None:
         result = await self._call("GET", f"{self._base}/list")
         return result.get("current_session_id")
 
-    async def async_get_session_history(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def async_get_session_history(self, session_id: str) -> dict[str, Any] | None:
         try:
             result = await self._call("GET", f"{self._base}/{session_id}")
             return result.get("session")
@@ -685,9 +692,10 @@ class _WsSessionReader:
         session_id: str,
         offset: int = 0,
         limit: int = 50,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         try:
             from urllib.parse import urlencode
+
             qs = urlencode({"offset": offset, "limit": limit})
             result = await self._call("GET", f"{self._base}/{session_id}/paged?{qs}")
             return result.get("session")
@@ -708,6 +716,7 @@ class _WsSessionReader:
 # async_get_reader — async-aware factory
 # Priority: local disk  →  WS tunnel  →  HTTP fallback
 # ============================================================
+
 
 async def async_get_reader(agent_id: str):
     """
@@ -743,9 +752,7 @@ async def async_get_reader(agent_id: str):
     if _ws_rpc and _ws_node_id_func:
         node_id = _ws_node_id_func()
         if node_id:
-            logger.info(
-                f"Agent {agent_id} not found locally; using WS tunnel reader (node={node_id!r})"
-            )
+            logger.info(f"Agent {agent_id} not found locally; using WS tunnel reader (node={node_id!r})")
             return _WsSessionReader(agent_id, _ws_rpc, node_id)
 
     # HTTP fallback (same-machine frp / explicit launcher_url)
@@ -754,9 +761,7 @@ async def async_get_reader(agent_id: str):
     except Exception:
         launcher = ""
     if launcher:
-        logger.info(
-            f"Agent {agent_id} not found locally; using HTTP remote reader via {launcher}"
-        )
+        logger.info(f"Agent {agent_id} not found locally; using HTTP remote reader via {launcher}")
         return _RemoteSessionReader(agent_id)
 
     logger.warning(f"Agent {agent_id} not found locally and no remote available")

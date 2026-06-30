@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from opensquad.agent_config_schema import apply_config_defaults, validate_agent_config
 
 

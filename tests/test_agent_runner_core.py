@@ -1,23 +1,25 @@
-# -*- coding: utf-8 -*-
 """
 AgentRunner core loop tests.
 
 Validates P0.3 (DI via AgentContext) + P0.5 (test fixture).
 Covers pure methods and the main run() loop with mocked dependencies.
 """
-import os
+
 import json
+import os
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-import asyncio
+
+from opensquad._context import get_current_context
 from opensquad.runner import AgentRunner
-from opensquad._context import AgentContext, set_current_context, get_current_context
 
 pytestmark = pytest.mark.asyncio
 
 # ===================================================================
 # Helper: minimal runner with mocked deps (for method-level tests)
 # ===================================================================
+
 
 @pytest.fixture
 def minimal_runner(application_context):
@@ -34,6 +36,7 @@ def minimal_runner(application_context):
 # ===================================================================
 # Pure method tests (instance methods, need a runner)
 # ===================================================================
+
 
 class TestIsLeakedToolParams:
     """Runner._is_leaked_tool_params — instance method, no side effects."""
@@ -61,20 +64,20 @@ class TestFilterNativeTokens:
     """Runner._filter_native_tokens — static method, pure."""
 
     def test_qwen3_tokens_removed(self):
-        text = '<|tool_calls_section_begin|><|tool|>...<|tool_calls_section_end|>Hello'
+        text = "<|tool_calls_section_begin|><|tool|>...<|tool_calls_section_end|>Hello"
         result = AgentRunner._filter_native_tokens(text)
-        assert '<|tool_calls_section_begin|>' not in result
-        assert 'Hello' in result
+        assert "<|tool_calls_section_begin|>" not in result
+        assert "Hello" in result
 
     def test_plain_text_unchanged(self):
-        text = 'Hello, this is a normal response.'
+        text = "Hello, this is a normal response."
         assert AgentRunner._filter_native_tokens(text) == text
 
     def test_kimi_function_call_removed(self):
         text = 'functions.read_file:0{"path": "/tmp/test.txt"}output'
         result = AgentRunner._filter_native_tokens(text)
-        assert 'functions' not in result
-        assert 'output' in result
+        assert "functions" not in result
+        assert "output" in result
 
 
 class TestValidateMessageSequence:
@@ -179,9 +182,10 @@ class TestConfigHotReload:
         )
         mtime_1 = runner._config_mtime
         import time as _time
+
         _time.sleep(0.02)
         cfg.write_text(json.dumps({"tools": ["filesystem", "system"]}), encoding="utf-8")
-        with patch('opensquad.agents_boot.register_builtin_tools_sync') as mock_reg:
+        with patch("opensquad.agents_boot.register_builtin_tools_sync"):
             await runner._check_config_hot_reload()
             assert runner._agent_tool_names == ["filesystem", "system"]
             assert runner._config_mtime > mtime_1

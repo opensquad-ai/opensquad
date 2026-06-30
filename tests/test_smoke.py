@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """Smoke tests — verify basic imports and version."""
+
 import importlib
 
 import pytest

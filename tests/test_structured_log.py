@@ -1,18 +1,16 @@
-# -*- coding: utf-8 -*-
 """Tests for structured_log — trace IDs and JSON formatting."""
+
 import json
 import logging
 
-import pytest
-
 from opensquad.structured_log import (
+    JSONFormatter,
     TraceContext,
+    TraceFormatter,
+    configure_structured_logging,
+    get_logger,
     get_trace_id,
     new_trace_id,
-    JSONFormatter,
-    TraceFormatter,
-    get_logger,
-    configure_structured_logging,
 )
 
 
@@ -26,7 +24,7 @@ class TestTraceContext:
             assert len(tid) == 16
 
     def test_trace_context_custom_id(self):
-        with TraceContext(trace_id="my_custom_id") as tid:
+        with TraceContext(trace_id="my_custom_id"):
             assert get_trace_id() == "my_custom_id"
 
     def test_trace_context_restores_after_exit(self):
@@ -51,8 +49,13 @@ class TestJSONFormatter:
     def test_basic_json_output(self):
         formatter = JSONFormatter()
         record = logging.LogRecord(
-            name="test", level=logging.INFO, pathname="", lineno=0,
-            msg="hello world", args=(), exc_info=None,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="hello world",
+            args=(),
+            exc_info=None,
         )
         output = formatter.format(record)
         data = json.loads(output)
@@ -65,8 +68,13 @@ class TestJSONFormatter:
         formatter = JSONFormatter()
         with TraceContext(trace_id="trace_abc"):
             record = logging.LogRecord(
-                name="test", level=logging.INFO, pathname="", lineno=0,
-                msg="with trace", args=(), exc_info=None,
+                name="test",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg="with trace",
+                args=(),
+                exc_info=None,
             )
             output = formatter.format(record)
             data = json.loads(output)
@@ -75,8 +83,13 @@ class TestJSONFormatter:
     def test_extra_fields(self):
         formatter = JSONFormatter()
         record = logging.LogRecord(
-            name="test", level=logging.INFO, pathname="", lineno=0,
-            msg="extra", args=(), exc_info=None,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="extra",
+            args=(),
+            exc_info=None,
         )
         record.agent_id = "agent_1"
         record.turn = 5
@@ -88,25 +101,31 @@ class TestJSONFormatter:
 
 class TestTraceFormatter:
     def test_plain_format(self):
-        formatter = TraceFormatter(
-            "%(name)s - %(levelname)s - %(message)s%(trace_id_str)s"
-        )
+        formatter = TraceFormatter("%(name)s - %(levelname)s - %(message)s%(trace_id_str)s")
         record = logging.LogRecord(
-            name="test", level=logging.INFO, pathname="", lineno=0,
-            msg="plain msg", args=(), exc_info=None,
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="plain msg",
+            args=(),
+            exc_info=None,
         )
         output = formatter.format(record)
         assert "plain msg" in output
         assert "trace_id" not in output
 
     def test_includes_trace_id_text(self):
-        formatter = TraceFormatter(
-            "%(name)s - %(levelname)s - %(message)s%(trace_id_str)s"
-        )
+        formatter = TraceFormatter("%(name)s - %(levelname)s - %(message)s%(trace_id_str)s")
         with TraceContext(trace_id="tid_xyz"):
             record = logging.LogRecord(
-                name="test", level=logging.INFO, pathname="", lineno=0,
-                msg="traced msg", args=(), exc_info=None,
+                name="test",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg="traced msg",
+                args=(),
+                exc_info=None,
             )
             output = formatter.format(record)
             assert "traced msg" in output

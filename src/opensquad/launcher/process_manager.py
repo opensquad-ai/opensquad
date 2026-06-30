@@ -1,30 +1,27 @@
-# -*- coding: utf-8 -*-
 """
 Process management for OpenSquad Launcher.
 
 Contains AgentProcess, PluginServiceProcess, and process lifecycle utilities.
 Extracted from launcher.py to improve maintainability.
 """
-import os
-import sys
+
 import json
-import time
+import logging
+import os
+import re
 import signal
 import socket
 import subprocess
+import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime
-from typing import Dict, List, Optional
-
-import re
-import logging
 
 _log = logging.getLogger("launcher.process_manager")
 
-from opensquad.system_config import syscfg
-from opensquad.agent_config_schema import validate_agent_config, apply_config_defaults
 from opensquad._storage.json_io import read_json as _read_json
+from opensquad.system_config import syscfg
 
 # ── Constants ──
 MAX_RESTART_ATTEMPTS = 5
@@ -33,36 +30,45 @@ RESTART_BACKOFF_SCHEDULE = [3, 6, 12, 30, 60]
 STABLE_RESET_SECONDS = 300
 
 # Circuit breaker constants
-CIRCUIT_BREAKER_MAX_FAILS = 5       # consecutive failures before opening
-CIRCUIT_BREAKER_COOLDOWN = 60       # seconds to stay open before half-open retry
-CIRCUIT_BREAKER_HALF_OPEN_MAX = 1   # max half-open retries before staying open
-CIRCUIT_BREAKER_RESET_SECONDS = 300 # stable uptime before fully resetting circuit
+CIRCUIT_BREAKER_MAX_FAILS = 5  # consecutive failures before opening
+CIRCUIT_BREAKER_COOLDOWN = 60  # seconds to stay open before half-open retry
+CIRCUIT_BREAKER_HALF_OPEN_MAX = 1  # max half-open retries before staying open
+CIRCUIT_BREAKER_RESET_SECONDS = 300  # stable uptime before fully resetting circuit
 
 # Permanent failure indicators (retrying these is pointless)
 PERMANENT_FAILURE_SIGNALS = {
-    "EADDRINUSE", "EACCES", "ENOENT", "ECONNREFUSED",
-    "Address already in use", "Permission denied",
-    "No such file or directory", "Cannot assign requested address",
+    "EADDRINUSE",
+    "EACCES",
+    "ENOENT",
+    "ECONNREFUSED",
+    "Address already in use",
+    "Permission denied",
+    "No such file or directory",
+    "Cannot assign requested address",
 }
 LOG_BUFFER_SIZE = 500
 MANAGEMENT_PORT = syscfg.port("launcher")
 RUNTIME_REGISTRY_DIR = syscfg.workspace_metadata_dir("runtime")
 
 # Project root (same as launcher.py)
+import contextlib
+
 import opensquad
+
 BOOT_SCRIPT_DIR = os.path.dirname(os.path.abspath(opensquad.__file__))
 BOOT_MODULE = "opensquad.agents_boot"
 PROJECT_ROOT = syscfg.project_root()
 
 # ── Global process tables (shared with launcher.py) ──
 # These are populated by launcher.py main() and read by ManagementHandler
-_processes: Dict[str, "AgentProcess"] = {}
-_plugin_services: Dict[str, "PluginServiceProcess"] = {}
+_processes: dict[str, "AgentProcess"] = {}
+_plugin_services: dict[str, "PluginServiceProcess"] = {}
 
 # Global reentrant lock protecting _processes, _plugin_services, and all
 # launcher shared state (task heartbeats, stalled set).  Acquired by
 # launcher.py and _launcher_api.py for the same dicts.
 _launcher_state_lock = threading.RLock()
+
 
 def get_launcher_state_lock() -> threading.RLock:
     return _launcher_state_lock
@@ -73,6 +79,7 @@ def set_process_tables(procs: dict, plugin_svcs: dict):
     global _processes, _plugin_services
     _processes = procs
     _plugin_services = plugin_svcs
+
 
 # NOTE: _read_json is now imported from opensquad._storage.json_io
 
@@ -88,14 +95,11 @@ RUNTIME_REGISTRY_DIR = syscfg.workspace_metadata_dir("runtime")
 _workspace_migration_tasks: dict = {}
 
 
-from opensquad.agent_config_schema import validate_agent_config, apply_config_defaults
-
-
 def is_port_in_use(port: int) -> bool:
     """Check whether a local port is in use"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
-        return s.connect_ex(('127.0.0.1', port)) == 0
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def check_port_conflict(config: dict) -> str:
@@ -127,7 +131,7 @@ def check_port_conflict(config: dict) -> str:
     return ""
 
 
-def find_available_port(start_port: int, exclude_ports: List[int] = None) -> int:
+def find_available_port(start_port: int, exclude_ports: list[int] | None = None) -> int:
     """Find the first available free port starting from start_port"""
     port = start_port
     exclude = set(exclude_ports or [])
@@ -139,10 +143,8 @@ def find_available_port(start_port: int, exclude_ports: List[int] = None) -> int
 
 
 def _ensure_runtime_registry_dir():
-    try:
+    with contextlib.suppress(Exception):
         os.makedirs(RUNTIME_REGISTRY_DIR, exist_ok=True)
-    except Exception:
-        pass
 
 
 def _registry_path(kind: str, identifier: str) -> str:
@@ -196,9 +198,7 @@ def _kill_port_owner(port: int) -> bool:
         return False
     try:
         if sys.platform == "win32":
-            result = subprocess.run(
-                ["netstat", "-ano"], capture_output=True, text=True, check=False
-            )
+            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, check=False)
             for line in result.stdout.splitlines():
                 if f":{port}" in line and "LISTENING" in line:
                     parts = line.split()
@@ -206,19 +206,15 @@ def _kill_port_owner(port: int) -> bool:
                     try:
                         pid = int(pid_str)
                         _log.warning(f"[Launcher] Found stale port {port} held by PID {pid}, killing...")
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(pid)],
-                            capture_output=True, check=False
-                        )
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
                         import time
+
                         time.sleep(1)
                         return True
                     except ValueError:
                         pass
         else:
-            result = subprocess.run(
-                ["lsof", "-ti", f":{port}"], capture_output=True, text=True, check=False
-            )
+            result = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, check=False)
             if result.stdout.strip():
                 for pid_str in result.stdout.strip().splitlines():
                     try:
@@ -240,6 +236,7 @@ def _pid_exists(pid: int) -> bool:
         return False
     try:
         import psutil
+
         return psutil.pid_exists(pid)
     except ImportError:
         pass
@@ -251,19 +248,21 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
-def _read_runtime_registry() -> List[dict]:
+def _read_runtime_registry() -> list[dict]:
     _ensure_runtime_registry_dir()
-    items: List[dict] = []
+    items: list[dict] = []
     try:
         for name in os.listdir(RUNTIME_REGISTRY_DIR):
             if not name.endswith(".json"):
                 continue
             path = os.path.join(RUNTIME_REGISTRY_DIR, name)
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     payload = json.load(f)
                 payload["_registry_file"] = path
-                payload["_kind"] = "agent" if name.startswith("agent_") else "plugin" if name.startswith("plugin_") else "unknown"
+                payload["_kind"] = (
+                    "agent" if name.startswith("agent_") else "plugin" if name.startswith("plugin_") else "unknown"
+                )
                 items.append(payload)
             except Exception:
                 continue
@@ -299,25 +298,28 @@ def _cleanup_runtime_registry(force_kill: bool = False) -> dict:
         # (e.g. Launcher was force-killed, crashed, or user closed terminal).
         # Kill it and clean up the registry to avoid port conflicts.
         if alive and not managed:
-            _log.info(f"[Launcher] Found stale {kind} process (identifier={identifier}, pid={pid}) from previous run, terminating...")
+            _log.info(
+                f"[Launcher] Found stale {kind} process (identifier={identifier}, pid={pid}) from previous run, terminating..."
+            )
             if _terminate_pid_tree(int(pid)):
                 _remove_runtime_registry(kind, identifier)
                 cleaned += 1
                 killed += 1
                 _log.info(f"[Launcher] Stale {kind} process (pid={pid}) terminated and cleaned up.")
             else:
-                _log.warning(f"[Launcher] WARNING: Could not terminate stale {kind} process (pid={pid}), may cause port conflicts.")
+                _log.warning(
+                    f"[Launcher] WARNING: Could not terminate stale {kind} process (pid={pid}), may cause port conflicts."
+                )
                 entry["alive"] = True
                 entry["managed"] = False
                 remaining.append(entry)
             continue
 
-        if force_kill and not managed:
-            if _terminate_pid_tree(int(pid)):
-                killed += 1
-                _remove_runtime_registry(kind, identifier)
-                cleaned += 1
-                continue
+        if force_kill and not managed and _terminate_pid_tree(int(pid)):
+            killed += 1
+            _remove_runtime_registry(kind, identifier)
+            cleaned += 1
+            continue
 
         entry["alive"] = alive
         entry["managed"] = managed
@@ -334,8 +336,8 @@ class AgentProcess:
     """Manages a single Agent child process"""
 
     # P0-2: Health check config
-    HEALTH_CHECK_INTERVAL = 10      # seconds between probes
-    HEALTH_CHECK_TIMEOUT = 5        # seconds before probe is considered failed
+    HEALTH_CHECK_INTERVAL = 10  # seconds between probes
+    HEALTH_CHECK_TIMEOUT = 5  # seconds before probe is considered failed
     HEALTH_CHECK_FAIL_THRESHOLD = 3  # consecutive failures before restart
     HEALTH_CHECK_INITIAL_DELAY = 20  # let health server register before first probe
 
@@ -345,24 +347,24 @@ class AgentProcess:
         self.config = config
         self.agent_id = config.get("agent_id", self.dir_name)
         self.agent_name = config.get("agent_name", self.agent_id)
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.restart_count = 0
         self.should_run = False  # Changed to False; explicitly set by start()
-        self._log_thread: Optional[threading.Thread] = None
+        self._log_thread: threading.Thread | None = None
         self.log_buffer: deque = deque(maxlen=LOG_BUFFER_SIZE)
-        self.started_at: Optional[str] = None
+        self.started_at: str | None = None
         self.actual_port = config.get("web_server", {}).get("port")
         self._last_stable_time: float = 0.0  # Timestamp when agent last became stable (for restart_count reset)
 
         # P0-2: Health check state
-        self._health_port: Optional[int] = None
-        self._health_thread: Optional[threading.Thread] = None
+        self._health_port: int | None = None
+        self._health_thread: threading.Thread | None = None
         self._stop_health = threading.Event()
         self._health_fail_count = 0
-        self._last_health_ok: Optional[bool] = None
-        self._last_health_time: Optional[float] = None
+        self._last_health_ok: bool | None = None
+        self._last_health_time: float | None = None
 
-    def start(self, allocated_ports: List[int] = None):
+    def start(self, allocated_ports: list[int] | None = None):
         """Start the child process"""
         if self.process and self.process.poll() is None:
             _log.warning(f"[Launcher] {self.agent_name} already running (PID: {self.process.pid})")
@@ -375,14 +377,17 @@ class AgentProcess:
                 _log.warning(f"[Launcher] Port {target_port} in use, auto-assigning for {self.agent_name}")
             new_port = find_available_port(8001, exclude_ports=allocated_ports)
             target_port = new_port
-        
+
         self.actual_port = target_port
 
         cmd = [
             sys.executable,
-            "-m", BOOT_MODULE,
-            "--agent-dir", self.agent_dir,
-            "--port", str(target_port) # Force override port
+            "-m",
+            BOOT_MODULE,
+            "--agent-dir",
+            self.agent_dir,
+            "--port",
+            str(target_port),  # Force override port
         ]
 
         # Build child process environment: inherit current env, force UTF-8 IO encoding to prevent garbled output
@@ -419,23 +424,23 @@ class AgentProcess:
         self.restart_count = 0
         self.started_at = datetime.now().isoformat()
 
-        _write_runtime_registry("agent", self.agent_id, {
-            "agent_id": self.agent_id,
-            "agent_name": self.agent_name,
-            "pid": self.process.pid,
-            "port": target_port,
-            "agent_dir": self.agent_dir,
-            "started_at": self.started_at,
-        })
+        _write_runtime_registry(
+            "agent",
+            self.agent_id,
+            {
+                "agent_id": self.agent_id,
+                "agent_name": self.agent_name,
+                "pid": self.process.pid,
+                "port": target_port,
+                "agent_dir": self.agent_dir,
+                "started_at": self.started_at,
+            },
+        )
 
         _log.info(f"[Launcher] Started {self.agent_name} on Port {target_port} (PID: {self.process.pid})")
 
         # Start log forwarding thread
-        self._log_thread = threading.Thread(
-            target=self._forward_logs,
-            daemon=True,
-            name=f"log-{self.agent_id}"
-        )
+        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-{self.agent_id}")
         self._log_thread.start()
 
         # P0-2: Start health-check monitor after a brief delay (let Agent boot its health server)
@@ -467,10 +472,8 @@ class AgentProcess:
             try:
                 self.process.wait(timeout=8)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self.process.kill()
-                except Exception:
-                    pass
                 self.process.wait()
             _remove_runtime_registry("agent", self.agent_id)
             _log.info(f"[Launcher] {self.agent_name} stopped.")
@@ -494,7 +497,9 @@ class AgentProcess:
         # Exponential backoff: use schedule or cap at last value
         backoff_idx = min(self.restart_count - 1, len(RESTART_BACKOFF_SCHEDULE) - 1)
         wait_seconds = RESTART_BACKOFF_SCHEDULE[backoff_idx]
-        _log.info(f"[Launcher] Restarting {self.agent_name} (attempt {self.restart_count}/{MAX_RESTART_ATTEMPTS}, backoff {wait_seconds}s)...")
+        _log.info(
+            f"[Launcher] Restarting {self.agent_name} (attempt {self.restart_count}/{MAX_RESTART_ATTEMPTS}, backoff {wait_seconds}s)..."
+        )
         time.sleep(wait_seconds)
         # Get all currently allocated dynamic ports to avoid conflicts on restart
         with _launcher_state_lock:
@@ -511,7 +516,7 @@ class AgentProcess:
             "agent_name": self.agent_name,
             "alive": self.is_alive(),
             "pid": self.process.pid if self.process and self.process.poll() is None else None,
-            "port": self.actual_port, # Return actual port
+            "port": self.actual_port,  # Return actual port
             "should_run": self.should_run,
             "restart_count": self.restart_count,
             "started_at": self.started_at,
@@ -520,7 +525,7 @@ class AgentProcess:
             "health_port": self._health_port,
         }
 
-    def get_logs(self, lines: int = 200) -> List[str]:
+    def get_logs(self, lines: int = 200) -> list[str]:
         """Return the last N lines of logs"""
         buf = list(self.log_buffer)
         return buf[-lines:]
@@ -553,7 +558,7 @@ class AgentProcess:
         prefix = f"[{self.agent_id}]"
         try:
             for line in self.process.stdout:
-                line = line.rstrip('\n\r')
+                line = line.rstrip("\n\r")
                 if line:
                     ts = datetime.now().strftime("%H:%M:%S")
                     log_line = f"[{ts}] {line}"
@@ -565,7 +570,7 @@ class AgentProcess:
 
     # ── P0-2: Health check for Agent processes ──
 
-    def _discover_health_port(self) -> Optional[int]:
+    def _discover_health_port(self) -> int | None:
         """Discover the Agent's health-check port from its stdout or registry."""
         # Strategy 1: Check runtime registry for health_port field (written by Agent)
         registry = _read_runtime_registry()
@@ -587,6 +592,7 @@ class AgentProcess:
             return False  # Not discovered yet
         try:
             import urllib.request
+
             url = f"http://127.0.0.1:{self._health_port}/health"
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=self.HEALTH_CHECK_TIMEOUT) as resp:
@@ -610,13 +616,19 @@ class AgentProcess:
 
             if healthy:
                 if self._health_fail_count > 0:
-                    _log.info(f"[Launcher] {self.agent_name} health recovered after {self._health_fail_count} failure(s)")
+                    _log.info(
+                        f"[Launcher] {self.agent_name} health recovered after {self._health_fail_count} failure(s)"
+                    )
                 self._health_fail_count = 0
             else:
                 self._health_fail_count += 1
-                _log.warning(f"[Launcher] {self.agent_name} health check failed ({self._health_fail_count}/{self.HEALTH_CHECK_FAIL_THRESHOLD})")
+                _log.warning(
+                    f"[Launcher] {self.agent_name} health check failed ({self._health_fail_count}/{self.HEALTH_CHECK_FAIL_THRESHOLD})"
+                )
                 if self._health_fail_count >= self.HEALTH_CHECK_FAIL_THRESHOLD:
-                    _log.error(f"[Launcher] {self.agent_name} health check FAILED {self.HEALTH_CHECK_FAIL_THRESHOLD} times — triggering restart")
+                    _log.error(
+                        f"[Launcher] {self.agent_name} health check FAILED {self.HEALTH_CHECK_FAIL_THRESHOLD} times — triggering restart"
+                    )
                     # Trigger restart on the main thread (avoid blocking this monitor)
                     threading.Thread(
                         target=self._trigger_restart,
@@ -650,49 +662,45 @@ class PluginServiceProcess:
         self.plugin_id = plugin_id
         self.plugin_dir = plugin_dir
         self.service_cfg = service_cfg
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.restart_count = 0
         self.should_run = False
-        self._log_thread: Optional[threading.Thread] = None
+        self._log_thread: threading.Thread | None = None
         self.log_buffer: deque = deque(maxlen=LOG_BUFFER_SIZE)
-        self.started_at: Optional[str] = None
+        self.started_at: str | None = None
         self.port = self._resolve_port()
 
         # Health check
         self.health_endpoint = service_cfg.get("health_endpoint", "/health")
         self.health_check_interval = service_cfg.get("health_check_interval", 30)
-        self._health_thread: Optional[threading.Thread] = None
+        self._health_thread: threading.Thread | None = None
         self._stop_health = threading.Event()
-        self._last_health_ok: Optional[bool] = None
-        self._last_health_time: Optional[float] = None
+        self._last_health_ok: bool | None = None
+        self._last_health_time: float | None = None
 
         # Auto-restart backoff
-        self._restart_backoff = service_cfg.get("restart_policy", {}).get(
-            "backoff", [3, 6, 12, 30, 60]
-        )
-        self._max_restarts = service_cfg.get("restart_policy", {}).get(
-            "max_retries", MAX_RESTART_ATTEMPTS
-        )
+        self._restart_backoff = service_cfg.get("restart_policy", {}).get("backoff", [3, 6, 12, 30, 60])
+        self._max_restarts = service_cfg.get("restart_policy", {}).get("max_retries", MAX_RESTART_ATTEMPTS)
 
         # Log file persistence
-        self._log_file_path: Optional[str] = None
-        self._log_file_handle: Optional[object] = None
+        self._log_file_path: str | None = None
+        self._log_file_handle: object | None = None
 
         # Plugin metadata (populated after discover)
-        self.display_name: Optional[str] = None
-        self.plugin_type: Optional[str] = None
+        self.display_name: str | None = None
+        self.plugin_type: str | None = None
         self.auto_start: bool = service_cfg.get("auto_start", False)
         self.dependencies: dict = {}  # Populated by main() from discover_plugin_services()
 
         # ── Circuit breaker state ──
-        self._circuit_state: str = "closed"            # closed / open / half-open
-        self._circuit_fail_count: int = 0              # consecutive failures
-        self._circuit_open_until: Optional[float] = None  # time.time threshold
-        self._circuit_half_open_retries: int = 0       # half-open retry count
-        self._circuit_last_failure_time: Optional[float] = None
+        self._circuit_state: str = "closed"  # closed / open / half-open
+        self._circuit_fail_count: int = 0  # consecutive failures
+        self._circuit_open_until: float | None = None  # time.time threshold
+        self._circuit_half_open_retries: int = 0  # half-open retry count
+        self._circuit_last_failure_time: float | None = None
         self._circuit_last_failure_reason: str = ""
-        self._circuit_permanent: bool = False          # True = permanent failure, never retry
-        self._circuit_was_alive: bool = False          # track alive state transitions for stable timer
+        self._circuit_permanent: bool = False  # True = permanent failure, never retry
+        self._circuit_was_alive: bool = False  # track alive state transitions for stable timer
 
     def _resolve_port(self) -> int:
         """Port priority: data/plugins/{id}/config.json > system_config ports > plugin.json default_port"""
@@ -733,7 +741,7 @@ class PluginServiceProcess:
 
     def _install_dependencies(self):
         """Install pip dependencies declared in plugin.json before launching the service.
-        
+
         Reads plugin.json fresh each time (not cached), so updated deps
         take effect on next start without requiring a Launcher restart.
         """
@@ -742,7 +750,7 @@ class PluginServiceProcess:
         pip_deps = []
         if os.path.isfile(plugin_json_path):
             try:
-                with open(plugin_json_path, "r", encoding="utf-8") as f:
+                with open(plugin_json_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 pip_deps = meta.get("dependencies", {}).get("pip", [])
             except Exception:
@@ -751,6 +759,7 @@ class PluginServiceProcess:
             return
         try:
             import importlib
+
             missing = []
             for dep in pip_deps:
                 # Normalize: strip extras, handle common naming differences
@@ -789,24 +798,26 @@ class PluginServiceProcess:
             _kill_port_owner(self.port)
             time.sleep(1)
             if is_port_in_use(self.port):
-                _log.error(f"[Launcher] Port {self.port} still in use after kill for {self.plugin_id}. Circuit breaker: permanent failure.")
+                _log.error(
+                    f"[Launcher] Port {self.port} still in use after kill for {self.plugin_id}. Circuit breaker: permanent failure."
+                )
                 self._circuit_permanent = True
                 self._circuit_last_failure_reason = f"Port {self.port} in use and could not be freed"
                 return False
 
         cmd_str = self.service_cfg.get("cmd", "")
-        entry   = self.service_cfg.get("entry", "")
+        entry = self.service_cfg.get("entry", "")
 
         if cmd_str:
             # Shell command mode: supports npx / node / any executable command
-            popen_args   = cmd_str
+            popen_args = cmd_str
             popen_kwargs = {"shell": True}
         elif entry:
             abs_entry = os.path.join(self.plugin_dir, entry)
             if not os.path.isfile(abs_entry):
                 _log.info(f"[Launcher] Plugin service entry not found: {abs_entry}")
                 return False
-            popen_args   = [sys.executable, abs_entry]
+            popen_args = [sys.executable, abs_entry]
             popen_kwargs = {}
         else:
             _log.info(f"[Launcher] Plugin service {self.plugin_id}: neither 'cmd' nor 'entry' defined")
@@ -842,24 +853,24 @@ class PluginServiceProcess:
             env=child_env,
             bufsize=1,
             creationflags=creationflags,
-            **popen_kwargs
+            **popen_kwargs,
         )
         self.should_run = True
         self.restart_count = 0
         self.started_at = datetime.now().isoformat()
-        _write_runtime_registry("plugin", self.plugin_id, {
-            "plugin_id": self.plugin_id,
-            "pid": self.process.pid,
-            "port": self.port,
-            "plugin_dir": self.plugin_dir,
-            "started_at": self.started_at,
-        })
-        _log.info(f"[Launcher] Started plugin service {self.plugin_id} on port {self.port} (PID: {self.process.pid})")
-        self._log_thread = threading.Thread(
-            target=self._forward_logs,
-            daemon=True,
-            name=f"log-svc-{self.plugin_id}"
+        _write_runtime_registry(
+            "plugin",
+            self.plugin_id,
+            {
+                "plugin_id": self.plugin_id,
+                "pid": self.process.pid,
+                "port": self.port,
+                "plugin_dir": self.plugin_dir,
+                "started_at": self.started_at,
+            },
         )
+        _log.info(f"[Launcher] Started plugin service {self.plugin_id} on port {self.port} (PID: {self.process.pid})")
+        self._log_thread = threading.Thread(target=self._forward_logs, daemon=True, name=f"log-svc-{self.plugin_id}")
         self._log_thread.start()
 
         # Start health check monitor (only for services that have a port)
@@ -882,10 +893,8 @@ class PluginServiceProcess:
             try:
                 self.process.wait(timeout=8)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self.process.kill()
-                except Exception:
-                    pass
                 self.process.wait()
             # Safety net: kill the port owner in case the process escaped the tree
             if self.port:
@@ -959,10 +968,7 @@ class PluginServiceProcess:
 
     def _circuit_check_permanent_failure(self, error_text: str) -> bool:
         """Check if an error indicates a permanent failure."""
-        for signal in PERMANENT_FAILURE_SIGNALS:
-            if signal.lower() in error_text.lower():
-                return True
-        return False
+        return any(signal.lower() in error_text.lower() for signal in PERMANENT_FAILURE_SIGNALS)
 
     def try_restart(self) -> bool:
         """Attempt to restart (with circuit breaker)."""
@@ -973,10 +979,14 @@ class PluginServiceProcess:
             return False
         # Check max retries
         if self.restart_count >= MAX_RESTART_ATTEMPTS:
-            _log.info(f"[Launcher] Plugin service {self.plugin_id} exceeded max restarts ({MAX_RESTART_ATTEMPTS}), giving up.")
+            _log.info(
+                f"[Launcher] Plugin service {self.plugin_id} exceeded max restarts ({MAX_RESTART_ATTEMPTS}), giving up."
+            )
             return False
         self.restart_count += 1
-        _log.info(f"[Launcher] Restarting plugin service {self.plugin_id} (attempt {self.restart_count}/{MAX_RESTART_ATTEMPTS})...")
+        _log.info(
+            f"[Launcher] Restarting plugin service {self.plugin_id} (attempt {self.restart_count}/{MAX_RESTART_ATTEMPTS})..."
+        )
         time.sleep(RESTART_COOLDOWN)
         success = self.start()
         if not success:
@@ -1023,7 +1033,7 @@ class PluginServiceProcess:
         try:
             status_path = syscfg.workspace_data_dir("plugins", self.plugin_id, "status.json")
             if os.path.isfile(status_path):
-                with open(status_path, "r", encoding="utf-8") as f:
+                with open(status_path, encoding="utf-8") as f:
                     extra = json.load(f)
                 if isinstance(extra, dict):
                     status["plugin_status"] = extra
@@ -1031,7 +1041,7 @@ class PluginServiceProcess:
             pass
         return status
 
-    def get_logs(self, lines: int = 200) -> List[str]:
+    def get_logs(self, lines: int = 200) -> list[str]:
         """Return the last N lines of logs"""
         buf = list(self.log_buffer)
         return buf[-lines:]
@@ -1041,7 +1051,7 @@ class PluginServiceProcess:
         prefix = f"[svc:{self.plugin_id}]"
         try:
             for line in self.process.stdout:
-                line = line.rstrip('\n\r')
+                line = line.rstrip("\n\r")
                 if line:
                     ts = datetime.now().strftime("%H:%M:%S")
                     log_line = f"[{ts}] {line}"
@@ -1063,6 +1073,7 @@ class PluginServiceProcess:
         """Check whether the service is healthy via its /health endpoint."""
         try:
             import urllib.request
+
             url = f"http://127.0.0.1:{self.port}{self.health_endpoint}"
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=3) as resp:
@@ -1108,7 +1119,9 @@ class PluginServiceProcess:
 
                 # Circuit breaker auto-reset: if running stably for CIRCUIT_BREAKER_RESET_SECONDS
                 if self._circuit_state != "closed" and (time.time() - _stable_since) >= CIRCUIT_BREAKER_RESET_SECONDS:
-                    _log.info(f"[Launcher] Plugin service {self.plugin_id} stable for {CIRCUIT_BREAKER_RESET_SECONDS}s, resetting circuit breaker")
+                    _log.info(
+                        f"[Launcher] Plugin service {self.plugin_id} stable for {CIRCUIT_BREAKER_RESET_SECONDS}s, resetting circuit breaker"
+                    )
                     self._circuit_report_success()
                     self.restart_count = 0
                 # Update stable timer only when the process first comes up or was previously dead
@@ -1129,14 +1142,18 @@ class PluginServiceProcess:
         if not self._circuit_allow_retry():
             return
         if self.restart_count >= self._max_restarts:
-            _log.info(f"[Launcher] Plugin service {self.plugin_id} exceeded max restarts ({self._max_restarts}), giving up.")
+            _log.info(
+                f"[Launcher] Plugin service {self.plugin_id} exceeded max restarts ({self._max_restarts}), giving up."
+            )
             self.should_run = False
             self._circuit_trip(f"exceeded {self._max_restarts} restarts", permanent=True)
             return
         self.restart_count += 1
         idx = min(self.restart_count - 1, len(self._restart_backoff) - 1)
         delay = self._restart_backoff[idx]
-        _log.info(f"[Launcher] Restarting plugin service {self.plugin_id} (attempt {self.restart_count}/{self._max_restarts}) in {delay}s...")
+        _log.info(
+            f"[Launcher] Restarting plugin service {self.plugin_id} (attempt {self.restart_count}/{self._max_restarts}) in {delay}s..."
+        )
         time.sleep(delay)
         # Stop existing process
         if self.process and self.process.poll() is None:
@@ -1144,10 +1161,8 @@ class PluginServiceProcess:
                 self.process.terminate()
                 self.process.wait(timeout=5)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     self.process.kill()
-                except Exception:
-                    pass
         self._close_log_file()
         # Retry
         success = self.start()
@@ -1176,10 +1191,8 @@ class PluginServiceProcess:
     def _close_log_file(self):
         """Close the log file handle."""
         if self._log_file_handle:
-            try:
+            with contextlib.suppress(Exception):
                 self._log_file_handle.close()
-            except Exception:
-                pass
             self._log_file_handle = None
 
 
@@ -1222,9 +1235,11 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     try:
         r = subprocess.run(
             [sys.executable, "-m", "pip", "--version"],
-            capture_output=True, check=False, timeout=10,
+            capture_output=True,
+            check=False,
+            timeout=10,
         )
-        pip_available = (r.returncode == 0)
+        pip_available = r.returncode == 0
     except Exception:
         pip_available = False
 
@@ -1233,12 +1248,18 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
         try:
             r = subprocess.run(
                 [sys.executable, "-m", "ensurepip", "--default-pip"],
-                capture_output=True, check=False, timeout=60,
+                capture_output=True,
+                check=False,
+                timeout=60,
             )
             if r.returncode != 0:
-                _log.info(f"[Launcher] {label_prefix}ensurepip failed (exit {r.returncode}), trying get-pip.py fallback...")
+                _log.info(
+                    f"[Launcher] {label_prefix}ensurepip failed (exit {r.returncode}), trying get-pip.py fallback..."
+                )
                 # Fallback: download and run get-pip.py
-                import urllib.request, tempfile
+                import tempfile
+                import urllib.request
+
                 get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
                 with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as tmp:
                     tmp_path = tmp.name
@@ -1246,20 +1267,22 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
                     urllib.request.urlretrieve(get_pip_url, tmp_path)
                     r2 = subprocess.run(
                         [sys.executable, tmp_path],
-                        capture_output=True, check=False, timeout=120,
+                        capture_output=True,
+                        check=False,
+                        timeout=120,
                     )
                     if r2.returncode != 0:
                         _log.info(f"[Launcher] {label_prefix}get-pip.py also failed (exit {r2.returncode})")
                         return False
                 finally:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(tmp_path)
-                    except OSError:
-                        pass
             # Verify pip works now
             r3 = subprocess.run(
                 [sys.executable, "-m", "pip", "--version"],
-                capture_output=True, check=False, timeout=10,
+                capture_output=True,
+                check=False,
+                timeout=10,
             )
             if r3.returncode != 0:
                 _log.info(f"[Launcher] {label_prefix}pip still not available after bootstrapping")
@@ -1271,8 +1294,10 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
 
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet"] + packages,
-            capture_output=True, check=False, timeout=300,
+            [sys.executable, "-m", "pip", "install", "--quiet", *packages],
+            capture_output=True,
+            check=False,
+            timeout=300,
         )
         if r.returncode != 0:
             stderr = r.stderr.decode(errors="replace").strip() if r.stderr else ""
@@ -1284,7 +1309,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
         return False
 
 
-def _install_builtin_plugin_deps(svc_infos: List[dict]):
+def _install_builtin_plugin_deps(svc_infos: list[dict]):
     """Install all built-in plugin pip dependencies in one batch at startup.
 
     Scans all discovered plugin services, collects their dependencies.pip entries,
@@ -1309,11 +1334,14 @@ def _install_builtin_plugin_deps(svc_infos: List[dict]):
     # (e.g. openai-whisper) that calls ctypes.CDLL(None) on startup.
     if sys.platform == "win32":
         import ctypes.util
+
         _orig_find_library = ctypes.util.find_library
+
         def _patched_find_library(name):
-            if name in ('c', 'libc'):
-                return 'msvcrt'
+            if name in ("c", "libc"):
+                return "msvcrt"
             return _orig_find_library(name)
+
         ctypes.util.find_library = _patched_find_library
 
     pkg_import_map = {
@@ -1338,10 +1366,8 @@ def _install_builtin_plugin_deps(svc_infos: List[dict]):
     if missing:
         _log.info(f"[Launcher] Installing built-in plugin dependencies ({len(missing)} package(s)): {missing}")
         if _ensure_pip_and_install(missing, label="builtin"):
-            _log.info(f"[Launcher] All plugin dependencies installed.")
+            _log.info("[Launcher] All plugin dependencies installed.")
         else:
-            _log.warning(f"[Launcher] Warning: Batch dependency install failed.")
+            _log.warning("[Launcher] Warning: Batch dependency install failed.")
     else:
         _log.info(f"[Launcher] All built-in plugin dependencies already installed ({len(all_deps)} packages).")
-
-

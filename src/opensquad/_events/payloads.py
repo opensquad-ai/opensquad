@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Typed payload schemas for EventBus events.
 
@@ -10,12 +9,12 @@ catches payload structure errors at the call site.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
 
 
 @dataclass
 class ToolCallEvent:
     """Payload for ``tool_call`` events."""
+
     id: str
     name: str
     args: str
@@ -24,6 +23,7 @@ class ToolCallEvent:
 @dataclass
 class TokenStatsEvent:
     """Payload for ``token_stats`` events."""
+
     agent_id: str
     input_tokens: int
     output_tokens: int
@@ -33,6 +33,7 @@ class TokenStatsEvent:
 @dataclass
 class StateChangeEvent:
     """Payload for ``state_change`` events."""
+
     old_state: str
     new_state: str
     agent_id: str
@@ -41,12 +42,14 @@ class StateChangeEvent:
 @dataclass
 class AgentReadyEvent:
     """Payload for ``agent_ready`` events."""
+
     agent_id: str
 
 
 @dataclass
 class StatusEvent:
     """Payload for ``status`` updates."""
+
     status: str
     agent_id: str = ""
 
@@ -54,6 +57,7 @@ class StatusEvent:
 @dataclass
 class InfoEvent:
     """Payload for ``info`` messages."""
+
     text: str
     event: str = ""
     agent_id: str = ""
@@ -62,16 +66,18 @@ class InfoEvent:
 @dataclass
 class SessionEvent:
     """Payload for ``current_session`` / ``session_list`` events."""
+
     id: str = ""
     title: str = ""
-    sessions: Optional[List[dict]] = None
+    sessions: list[dict] | None = None
 
 
 @dataclass
 class HistorySyncEvent:
     """Payload for ``history_sync`` events."""
-    messages: List[dict] = None
-    events: List[dict] = None
+
+    messages: list[dict] = None
+    events: list[dict] = None
     session_id: str = ""
     is_working_session: bool = True
 
@@ -79,6 +85,7 @@ class HistorySyncEvent:
 @dataclass
 class UserMessageEvent:
     """Payload for ``user_msg`` events."""
+
     content: str
     sid: str = ""
     channel: str = ""
@@ -87,6 +94,7 @@ class UserMessageEvent:
 @dataclass
 class TurnStartEvent:
     """Payload for ``turn_start`` events."""
+
     turn: int = 0
     started_ms: int = 0
 
@@ -94,6 +102,7 @@ class TurnStartEvent:
 @dataclass
 class TurnElapsedEvent:
     """Payload for ``turn_elapsed`` events."""
+
     started_ms: int = 0
     ended_ms: int = 0
 

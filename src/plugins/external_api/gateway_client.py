@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Gateway WebSocket Client
 
@@ -8,12 +7,14 @@ responsible for sending messages and receiving Agent response events.
 Protocol: reuses the /ai-web/ws/{agent_id}?token=xxx endpoint,
 sharing the same message format as the Web UI.
 """
+
 import asyncio
+import contextlib
 import json
 import logging
-import uuid
 import time
-from typing import Dict, Optional, AsyncGenerator
+import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
 import websockets
@@ -36,8 +37,9 @@ def _ws_is_closed(ws) -> bool:
 @dataclass
 class AgentEvent:
     """A single event returned by the Agent"""
-    event_type: str          # message / stream / thought / tool_call / tool_result / error / connected
-    content: object = None   # content (string or dict)
+
+    event_type: str  # message / stream / thought / tool_call / tool_result / error / connected
+    content: object = None  # content (string or dict)
     timestamp: float = 0.0
 
     def to_dict(self) -> dict:
@@ -51,6 +53,7 @@ class AgentEvent:
 @dataclass
 class PendingRequest:
     """A pending request awaiting a reply"""
+
     request_id: str
     event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     done: bool = False
@@ -72,13 +75,13 @@ class GatewayWSClient:
         self.gateway_ws_url = gateway_ws_url
         self.gateway_token = gateway_token
         # agent_id -> WebSocket connection
-        self._connections: Dict[str, websockets.WebSocketClientProtocol] = {}
+        self._connections: dict[str, websockets.WebSocketClientProtocol] = {}
         # agent_id -> background reader task
-        self._reader_tasks: Dict[str, asyncio.Task] = {}
+        self._reader_tasks: dict[str, asyncio.Task] = {}
         # agent_id -> current active PendingRequest (single conversation round per Agent)
-        self._pending: Dict[str, PendingRequest] = {}
+        self._pending: dict[str, PendingRequest] = {}
         # connection lock to prevent concurrent connections to the same Agent
-        self._connect_locks: Dict[str, asyncio.Lock] = {}
+        self._connect_locks: dict[str, asyncio.Lock] = {}
 
     def _get_lock(self, agent_id: str) -> asyncio.Lock:
         if agent_id not in self._connect_locks:
@@ -180,9 +183,7 @@ class GatewayWSClient:
             # Notify current pending request that the connection was closed
             pending = self._pending.get(agent_id)
             if pending and not pending.done:
-                await pending.event_queue.put(
-                    AgentEvent(event_type="error", content="Gateway connection closed")
-                )
+                await pending.event_queue.put(AgentEvent(event_type="error", content="Gateway connection closed"))
                 pending.done = True
 
     async def send_and_wait(
@@ -190,7 +191,7 @@ class GatewayWSClient:
         agent_id: str,
         message: str,
         user_id: str = "external-user",
-        images: list = None,
+        images: list | None = None,
         timeout: float = 120.0,
         channel: str = "external",
         sender_name: str = "",
@@ -205,9 +206,7 @@ class GatewayWSClient:
             req = PendingRequest(request_id=str(uuid.uuid4()))
             req.done = True
             req.final_text = ""
-            req.all_events.append(
-                AgentEvent(event_type="error", content=f"Agent '{agent_id}' is not available")
-            )
+            req.all_events.append(AgentEvent(event_type="error", content=f"Agent '{agent_id}' is not available"))
             return req
 
         ws = self._connections.get(agent_id)
@@ -215,9 +214,7 @@ class GatewayWSClient:
             req = PendingRequest(request_id=str(uuid.uuid4()))
             req.done = True
             req.final_text = ""
-            req.all_events.append(
-                AgentEvent(event_type="error", content="WebSocket connection lost")
-            )
+            req.all_events.append(AgentEvent(event_type="error", content="WebSocket connection lost"))
             return req
 
         # Create PendingRequest
@@ -244,9 +241,7 @@ class GatewayWSClient:
             logger.info(f"[GW] Sent message to '{agent_id}': {message[:80]}...")
         except Exception as e:
             req.done = True
-            req.all_events.append(
-                AgentEvent(event_type="error", content=f"Failed to send: {e}")
-            )
+            req.all_events.append(AgentEvent(event_type="error", content=f"Failed to send: {e}"))
             return req
 
         # Wait for completion
@@ -255,9 +250,7 @@ class GatewayWSClient:
             while not req.done:
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    req.all_events.append(
-                        AgentEvent(event_type="error", content="Request timed out")
-                    )
+                    req.all_events.append(AgentEvent(event_type="error", content="Request timed out"))
                     req.done = True
                     break
                 try:
@@ -277,7 +270,7 @@ class GatewayWSClient:
         agent_id: str,
         message: str,
         user_id: str = "external-user",
-        images: list = None,
+        images: list | None = None,
         timeout: float = 120.0,
         channel: str = "external",
         sender_name: str = "",
@@ -332,9 +325,7 @@ class GatewayWSClient:
                     yield AgentEvent(event_type="error", content="Request timed out")
                     break
                 try:
-                    event = await asyncio.wait_for(
-                        req.event_queue.get(), timeout=min(remaining, 5.0)
-                    )
+                    event = await asyncio.wait_for(req.event_queue.get(), timeout=min(remaining, 5.0))
                     yield event
                 except asyncio.TimeoutError:
                     continue
@@ -344,13 +335,11 @@ class GatewayWSClient:
 
     async def close_all(self):
         """Close all connections"""
-        for agent_id, task in list(self._reader_tasks.items()):
+        for _agent_id, task in list(self._reader_tasks.items()):
             task.cancel()
-        for agent_id, ws in list(self._connections.items()):
-            try:
+        for _agent_id, ws in list(self._connections.items()):
+            with contextlib.suppress(Exception):
                 await ws.close()
-            except Exception:
-                pass
         self._connections.clear()
         self._reader_tasks.clear()
         self._pending.clear()

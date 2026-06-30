@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 MCP Query Tool Plugin (New-style Decorator API)
 
@@ -6,11 +5,12 @@ Tool implementation lives in plugins/mcp_query/mcp_query.py.
 mcp_query depends on opensquad.tools.mcp_adapter which remains in
 opensquad/tools/ as it is also used by runner.py and boot.py.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.mcp_query")
 
@@ -33,17 +33,19 @@ class McpQueryPlugin(Plugin):
     def on_load(self) -> None:
         logger.info("[McpQueryPlugin] loaded (new-style).")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         tools = []
         try:
             module = importlib.import_module("plugins.mcp_query.mcp_query")
-            tools.append({
-                "name": "mcp_query",
-                "module": module,
-                "level": "extended",
-                "auto_register": True,
-                "requires_agent_id": False,
-            })
+            tools.append(
+                {
+                    "name": "mcp_query",
+                    "module": module,
+                    "level": "extended",
+                    "auto_register": True,
+                    "requires_agent_id": False,
+                }
+            )
         except ImportError as e:
             logger.error(f"[McpQueryPlugin] Cannot import mcp_query module: {e}")
         return tools

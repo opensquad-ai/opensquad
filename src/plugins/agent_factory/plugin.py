@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Agent Factory Plugin
 
@@ -15,12 +14,13 @@ Dynamically create, configure, and manage Agents via the Launcher HTTP API:
   10. assign_model_card — Assign a model card to an Agent
   11. create_model_card — Create a new model card configuration
 """
+
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 import requests
 
-from opensquad.plugin_api import register, tool, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register, tool
 
 logger = logging.getLogger("plugins.agent_factory")
 
@@ -43,12 +43,13 @@ class AgentFactoryPlugin(Plugin):
 
     def on_load(self) -> None:
         from opensquad.system_config import syscfg
+
         self._launcher_url = syscfg.launcher_url()
         logger.info(f"[AgentFactoryPlugin] Loaded, Launcher={self._launcher_url}")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _get(self, path: str, params: dict = None) -> Dict[str, Any]:
+    def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         try:
             r = requests.get(f"{self._launcher_url}{path}", params=params, timeout=15)
             if r.status_code >= 400:
@@ -60,7 +61,7 @@ class AgentFactoryPlugin(Plugin):
         except Exception as e:
             return {"error": str(e)}
 
-    def _post(self, path: str, body: dict = None) -> Dict[str, Any]:
+    def _post(self, path: str, body: dict | None = None) -> dict[str, Any]:
         try:
             r = requests.post(f"{self._launcher_url}{path}", json=body or {}, timeout=15)
             if r.status_code >= 400:
@@ -72,7 +73,7 @@ class AgentFactoryPlugin(Plugin):
         except Exception as e:
             return {"error": str(e)}
 
-    def _put(self, path: str, body: dict = None) -> Dict[str, Any]:
+    def _put(self, path: str, body: dict | None = None) -> dict[str, Any]:
         try:
             r = requests.put(f"{self._launcher_url}{path}", json=body or {}, timeout=15)
             if r.status_code >= 400:
@@ -93,7 +94,7 @@ class AgentFactoryPlugin(Plugin):
         agent_name: str,
         agent_type: str = "general",
         description: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a new Agent under the agents/ directory, generating a default config.json, role.md, and mcp_config.json.
 
@@ -106,12 +107,15 @@ class AgentFactoryPlugin(Plugin):
         Returns:
             {"success": true, "dir_name": "my_agent", "message": "..."}
         """
-        result = self._post("/api/agents/create", {
-            "name": dir_name,
-            "agent_name": agent_name,
-            "agent_type": agent_type,
-            "description": description,
-        })
+        result = self._post(
+            "/api/agents/create",
+            {
+                "name": dir_name,
+                "agent_name": agent_name,
+                "agent_type": agent_type,
+                "description": description,
+            },
+        )
         if "error" in result:
             return {"success": False, "error": result["error"]}
         logger.info(f"[AgentFactoryPlugin] Created agent: {dir_name}")
@@ -121,8 +125,8 @@ class AgentFactoryPlugin(Plugin):
     def configure_agent(
         self,
         dir_name: str,
-        config: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
         """
         Write the Agent's full config.json. This overwrites the existing configuration; pass the complete structure.
 
@@ -175,7 +179,7 @@ class AgentFactoryPlugin(Plugin):
         self,
         dir_name: str,
         role_content: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Write the Agent's role.md (role/persona definition file).
 
@@ -196,7 +200,7 @@ class AgentFactoryPlugin(Plugin):
         return {"success": True, "dir_name": dir_name, "message": result.get("message", "OK")}
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def start_agent(self, dir_name: str) -> Dict[str, Any]:
+    def start_agent(self, dir_name: str) -> dict[str, Any]:
         """
         Start the specified Agent process. The Agent directory must exist and have a valid config.json.
 
@@ -219,7 +223,7 @@ class AgentFactoryPlugin(Plugin):
         }
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def stop_agent(self, dir_name: str) -> Dict[str, Any]:
+    def stop_agent(self, dir_name: str) -> dict[str, Any]:
         """
         Stop the specified Agent process.
 
@@ -236,7 +240,7 @@ class AgentFactoryPlugin(Plugin):
         return {"success": True, "dir_name": dir_name, "message": result.get("message", "OK")}
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def restart_agent(self, dir_name: str) -> Dict[str, Any]:
+    def restart_agent(self, dir_name: str) -> dict[str, Any]:
         """
         Restart the specified Agent process (stop then start).
         Call this after modifying configuration to apply changes immediately.
@@ -265,7 +269,7 @@ class AgentFactoryPlugin(Plugin):
         }
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def list_agents(self) -> Dict[str, Any]:
+    def list_agents(self) -> dict[str, Any]:
         """
         List all discovered Agents and their real-time runtime status.
 
@@ -299,12 +303,13 @@ class AgentFactoryPlugin(Plugin):
                 "pid": a.get("pid"),
                 "port": a.get("actual_port") or a.get("port"),
             }
-            for a in agents_raw if isinstance(a, dict)
+            for a in agents_raw
+            if isinstance(a, dict)
         ]
         return {"success": True, "count": len(agents), "agents": agents}
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def list_model_cards(self) -> Dict[str, Any]:
+    def list_model_cards(self) -> dict[str, Any]:
         """
         List all available model cards in the model card library.
 
@@ -341,7 +346,7 @@ class AgentFactoryPlugin(Plugin):
         return {"success": True, "count": len(cards), "cards": cards}
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def get_model_card(self, card_name: str) -> Dict[str, Any]:
+    def get_model_card(self, card_name: str) -> dict[str, Any]:
         """
         Get the full configuration of a specific model card.
 
@@ -375,7 +380,7 @@ class AgentFactoryPlugin(Plugin):
         return {"success": True, "name": card_name, "card": result.get("card", {})}
 
     @tool(name="agent_factory", level="extended", auto_register=False)
-    def assign_model_card(self, dir_name: str, card_name: str) -> Dict[str, Any]:
+    def assign_model_card(self, dir_name: str, card_name: str) -> dict[str, Any]:
         """
         Assign a model card to the specified Agent.
 
@@ -396,7 +401,7 @@ class AgentFactoryPlugin(Plugin):
         Example:
             # Assign DeepSeek model card to coder Agent
             result = agent_factory.assign_model_card("coder", "deepseek_chat")
-            
+
             # Restart Agent to apply changes
             agent_factory.restart_agent("coder")
         """
@@ -404,17 +409,17 @@ class AgentFactoryPlugin(Plugin):
         card_result = self._get(f"/api/model-cards/{card_name}")
         if "error" in card_result:
             return {"success": False, "error": f"Model card not found: {card_name}"}
-        
+
         card = card_result.get("card", {})
-        
+
         # Assign the model card via the Launcher API
         result = self._put(f"/api/agents/{dir_name}/model-card", card)
         if "error" in result:
             return {"success": False, "error": result["error"]}
-        
+
         return {
             "success": True,
-            "message": f"Model card '{card_name}' assigned to Agent '{dir_name}'. Agent restart required to take effect."
+            "message": f"Model card '{card_name}' assigned to Agent '{dir_name}'. Agent restart required to take effect.",
         }
 
     @tool(name="agent_factory", level="extended", auto_register=False)
@@ -433,7 +438,7 @@ class AgentFactoryPlugin(Plugin):
         is_think: bool = False,
         is_image: bool = False,
         is_video: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a new model card configuration.
 
@@ -487,9 +492,9 @@ class AgentFactoryPlugin(Plugin):
             "is_image": is_image,
             "is_video": is_video,
         }
-        
+
         result = self._put(f"/api/model-cards/{card_name}", card)
         if "error" in result:
             return {"success": False, "error": result["error"]}
-        
+
         return {"success": True, "message": f"Model card '{card_name}' created successfully"}

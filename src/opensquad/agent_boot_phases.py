@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -89,25 +88,47 @@ class AgentBootPhases:
             except Exception as exc:
                 logging.error(f"[Boot] Failed to register built-in tool '{name}': {exc}")
         from opensquad.structured_log import perf_event
-        perf_event("boot", "builtin_tools_ready", agent_id=agent_id, elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000), tool_count=len(tool_names))
+
+        perf_event(
+            "boot",
+            "builtin_tools_ready",
+            agent_id=agent_id,
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+            tool_count=len(tool_names),
+        )
 
     async def initialize_runtime_infrastructure(self, config: dict[str, Any], registry: Any, agent_dir: str) -> None:
         from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         await self._initialize_mcp_runtime(config, registry, agent_dir)
-        perf_event("boot", "mcp_runtime_ready", agent_id=config.get("agent_id", ""), elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000))
+        perf_event(
+            "boot",
+            "mcp_runtime_ready",
+            agent_id=config.get("agent_id", ""),
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+        )
 
     async def setup_connections(self, config: dict[str, Any], logger: Any, data_dir: str = "") -> None:
         boot_t0 = __import__("time").perf_counter()
         from opensquad.structured_log import perf_event
+
         await self._setup_web_server(config, logger)
         await self._setup_gateway_adapter(config, logger, boot_t0)
         self._setup_group_chat_bridge(config, logger, data_dir)
-        perf_event("boot", "connections_scheduled", agent_id=config.get("agent_id", ""), elapsed_ms=int((__import__("time").perf_counter() - boot_t0) * 1000))
+        perf_event(
+            "boot",
+            "connections_scheduled",
+            agent_id=config.get("agent_id", ""),
+            elapsed_ms=int((__import__("time").perf_counter() - boot_t0) * 1000),
+        )
 
-    async def initialize_agent_runtime(self, config: dict[str, Any], agent_dir: str, input_hub: Any, agent_logger: Any) -> BootRuntimeArtifacts:
-        from opensquad.structured_log import perf_event
+    async def initialize_agent_runtime(
+        self, config: dict[str, Any], agent_dir: str, input_hub: Any, agent_logger: Any
+    ) -> BootRuntimeArtifacts:
         from opensquad._context import get_current_context
+        from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         input_hub.set_agent_context(agent_dir)
         data_dir = os.path.join(agent_dir, "data")
@@ -148,7 +169,13 @@ class AgentBootPhases:
         if default_wake_mode in ("strict", "normal"):
             await state_manager.set_wake_mode(default_wake_mode)
         agent_logger.info(f"[Boot] State reset to idle, wake_mode={default_wake_mode}, has_history={has_history}")
-        perf_event("boot", "agent_runtime_ready", agent_id=config.get("agent_id", ""), elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000), has_history=has_history)
+        perf_event(
+            "boot",
+            "agent_runtime_ready",
+            agent_id=config.get("agent_id", ""),
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+            has_history=has_history,
+        )
 
         # ── Phase 1b: Populate AgentContext with runtime managers ──
         ctx = get_current_context()
@@ -158,6 +185,7 @@ class AgentBootPhases:
             from opensquad.event_pipeline import event_pipeline
             from opensquad.message_router import message_router
             from opensquad.sleep_controller import sleep_controller
+
             ctx.event_pipeline = event_pipeline
             ctx.message_router = message_router
             ctx.sleep_controller = sleep_controller
@@ -170,8 +198,11 @@ class AgentBootPhases:
             default_wake_mode=default_wake_mode,
         )
 
-    def initialize_chat_runtime(self, config: dict[str, Any], system_prompt: str, history_dir: str, agent_logger: Any) -> ChatRuntimeArtifacts:
+    def initialize_chat_runtime(
+        self, config: dict[str, Any], system_prompt: str, history_dir: str, agent_logger: Any
+    ) -> ChatRuntimeArtifacts:
         from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         model_cfg = config.get("model", {})
         parser = StreamingTagParser({})
@@ -209,7 +240,13 @@ class AgentBootPhases:
         os.makedirs(history_dir, exist_ok=True)
         chat_api.history_dir = history_dir
         chat_api.output_media_dir = syscfg.workspace_uploads_dir()
-        perf_event("boot", "chat_runtime_ready", agent_id=config.get("agent_id", ""), elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000), provider=provider)
+        perf_event(
+            "boot",
+            "chat_runtime_ready",
+            agent_id=config.get("agent_id", ""),
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+            provider=provider,
+        )
         return ChatRuntimeArtifacts(
             chat_api=chat_api,
             provider=provider,
@@ -219,7 +256,9 @@ class AgentBootPhases:
             vision_config={"is_img_mode": model_cfg.get("is_image", False)},
         )
 
-    def initialize_delegate_tool(self, provider: str, model_cfg: dict[str, Any], system_prompt: str, tool_registry: Any, agent_logger: Any) -> None:
+    def initialize_delegate_tool(
+        self, provider: str, model_cfg: dict[str, Any], system_prompt: str, tool_registry: Any, agent_logger: Any
+    ) -> None:
         try:
             from opensquad.tools.delegate import init_delegate_tool
 
@@ -272,6 +311,7 @@ class AgentBootPhases:
             session_manager=session_manager,
             state_manager=state_manager,
         )
+
         async def _runner_with_crash_handler():
             try:
                 await early_runner.run()
@@ -280,8 +320,10 @@ class AgentBootPhases:
             except Exception as exc:
                 agent_logger.exception(
                     "[Runner] CRASHED (agent=%s): %s. The runner task has died.",
-                    agent_id, exc,
+                    agent_id,
+                    exc,
                 )
+
         runner_task = asyncio.create_task(_runner_with_crash_handler())
         agent_logger.info(
             "[BootPerf] phase_runner_started=%dms agent_id=%s",
@@ -319,7 +361,8 @@ class AgentBootPhases:
         if plugin_tool_count:
             agent_logger.info(f"[Boot] Plugin system registered {plugin_tool_count} tool(s)")
         perf_event(
-            "boot", "plugins_ready",
+            "boot",
+            "plugins_ready",
             agent_id=config.get("agent_id", ""),
             elapsed_ms=int((t_plugin_register - t_plugin_discovery) * 1000),
             discovery_ms=int((t_plugin_discovery - t0) * 1000),
@@ -328,7 +371,7 @@ class AgentBootPhases:
         early_runner._plugin_manager = plugin_manager
         # Phase 1d: sync plugin_manager back to AgentContext so downstream
         # consumers (AgentRunner, tests) can access it consistently.
-        if getattr(early_runner, '_ctx', None) is not None:
+        if getattr(early_runner, "_ctx", None) is not None:
             early_runner._ctx.plugin_manager = plugin_manager
 
         t_skills = __import__("time").perf_counter()
@@ -341,7 +384,8 @@ class AgentBootPhases:
             skills = []
         init_skill_runtime(skills, tool_registry)
         perf_event(
-            "boot", "skills_ready",
+            "boot",
+            "skills_ready",
             agent_id=config.get("agent_id", ""),
             elapsed_ms=int((__import__("time").perf_counter() - t_skills) * 1000),
             skill_count=len(skills),
@@ -356,12 +400,18 @@ class AgentBootPhases:
             agent_logger=agent_logger,
         )
         perf_event(
-            "boot", "long_memory_ready",
+            "boot",
+            "long_memory_ready",
             agent_id=config.get("agent_id", ""),
             elapsed_ms=int((__import__("time").perf_counter() - t_mem) * 1000),
             has_memory=memory_manager is not None,
         )
-        perf_event("boot", "plugin_runtime_total", agent_id=config.get("agent_id", ""), elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000))
+        perf_event(
+            "boot",
+            "plugin_runtime_total",
+            agent_id=config.get("agent_id", ""),
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+        )
         return PluginRuntimeArtifacts(
             plugin_manager=plugin_manager,
             skills=skills,
@@ -383,6 +433,7 @@ class AgentBootPhases:
         agent_logger: Any,
     ) -> ContextRuntimeArtifacts:
         from opensquad.structured_log import perf_event
+
         t0 = __import__("time").perf_counter()
         from opensquad.context_base import init_standard_context
 
@@ -427,7 +478,12 @@ class AgentBootPhases:
                 agent_logger.info("[Boot] context.before_input() registered as hook")
         else:
             agent_logger.info("[Boot] No context.py found, using defaults")
-        perf_event("boot", "context_runtime_ready", agent_id=agent_id, elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000))
+        perf_event(
+            "boot",
+            "context_runtime_ready",
+            agent_id=agent_id,
+            elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+        )
         return ContextRuntimeArtifacts(context_module=context_module, hooks=hooks)
 
     def finalize_runner_runtime(
@@ -440,10 +496,11 @@ class AgentBootPhases:
         agent_logger: Any,
     ) -> None:
         from opensquad.structured_log import perf_event
+
         early_runner._hooks = hooks
         early_runner._memory_manager = memory_manager
         # Phase 1d: sync memory_manager back to AgentContext
-        if getattr(early_runner, '_ctx', None) is not None:
+        if getattr(early_runner, "_ctx", None) is not None:
             early_runner._ctx.memory_manager = memory_manager
         total_ms = int((__import__("time").perf_counter() - boot_main_t0) * 1000)
         perf_event("boot", "agent_ready", agent_id=agent_id, elapsed_ms=total_ms)
@@ -477,7 +534,7 @@ class AgentBootPhases:
         agent_dirs = fs_cfg.get("workspace_dirs", [])
         merged: list[str] = []
         seen: set[str] = set()
-        for path in [workspace_root] + global_dirs + agent_dirs:
+        for path in [workspace_root, *global_dirs, *agent_dirs]:
             resolved = path if os.path.isabs(path) else os.path.abspath(os.path.join(workspace_root, path))
             if resolved not in seen:
                 seen.add(resolved)
@@ -494,6 +551,7 @@ class AgentBootPhases:
         global_disabled: set[str] = set()
         try:
             from opensquad.json_cache import load_json_cached
+
             global_mcp_path = syscfg.workspace_data_dir("mcp_global.json")
             global_data = load_json_cached(global_mcp_path)
             for server_name, server_cfg in global_data.get("servers", {}).items():
@@ -526,6 +584,7 @@ class AgentBootPhases:
             return
 
         import socket
+
         import uvicorn
 
         for attempt in range(max_retries):
@@ -533,7 +592,7 @@ class AgentBootPhases:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     if sock.connect_ex(("localhost", current_port)) == 0:
-                        logger.warning(f"[Boot] Port {current_port} is busy, trying {current_port+1}...")
+                        logger.warning(f"[Boot] Port {current_port} is busy, trying {current_port + 1}...")
                         continue
                 web_config = uvicorn.Config(web_app, host="0.0.0.0", port=current_port, log_level="error")
                 web_server = uvicorn.Server(web_config)
@@ -615,7 +674,8 @@ class AgentBootPhases:
         try:
             display_name = getattr(agent_bridge, "nickname", None) or config.get("agent_name", "")
             avatar_url = getattr(agent_bridge, "avatar", None) or ""
-            from opensquad.json_cache import load_json_cached, invalidate_json_cache
+            from opensquad.json_cache import invalidate_json_cache, load_json_cached
+
             old = load_json_cached(profile_path, default=None)
             if old is not None and old.get("name") == display_name and old.get("avatar") == avatar_url:
                 return  # unchanged, skip write
@@ -643,6 +703,7 @@ class AgentBootPhases:
             memory_data_dir = os.path.join(data_dir, "long_memory")
             os.makedirs(memory_data_dir, exist_ok=True)
             from opensquad.json_cache import load_json_cached
+
             plugin_cfg_path = os.path.join(project_root, "data", "plugins", "long_memory", "config.json")
             plugin_cfg: dict[str, Any] = {}
             plugin_cfg = load_json_cached(plugin_cfg_path)

@@ -1,12 +1,13 @@
 import asyncio
-import json
 import logging
-from opensquad.system_config import syscfg
-from opensquad.sdk import BaseAgent, AgentConfig
-from opensquad.input_hub import input_hub
+
 from opensquad import bus
+from opensquad.input_hub import input_hub
+from opensquad.sdk import AgentConfig, BaseAgent
+from opensquad.system_config import syscfg
 
 logger = logging.getLogger(__name__)
+
 
 class GatewayAdapter(BaseAgent):
     """
@@ -18,6 +19,7 @@ class GatewayAdapter(BaseAgent):
     - Has current_user_id (work triggered by a Web user) -> directed push to that user
     - No current_user_id (triggered by group chat/wakeup) -> broadcast to all Web users connected to this agent
     """
+
     def __init__(self, config: AgentConfig):
         super().__init__(config)
         self.current_user_id = None
@@ -123,7 +125,9 @@ class GatewayAdapter(BaseAgent):
             sid = self._extract_sid(data)
             content = self._unwrap(data)
             # content may be a string (e.g. "working") or a dict (e.g. {"state": "working", ...})
-            state_value = content if isinstance(content, str) else (content.get("state") if isinstance(content, dict) else "")
+            state_value = (
+                content if isinstance(content, str) else (content.get("state") if isinstance(content, dict) else "")
+            )
             if state_value == "working":
                 self._load_percent = 100
             else:
@@ -133,20 +137,23 @@ class GatewayAdapter(BaseAgent):
 
     def on_generic_event(self, event_type):
         """Generic event forwarder."""
+
         async def handler(data):
             if self.connected:
                 sid = self._extract_sid(data)
                 content = self._unwrap(data)
                 logger.debug(f"[GatewayAdapter] Event {event_type}: {str(content)[:50]}...")
                 await self._send_event(content, event_type, sid=sid)
+
         return handler
 
-    async def send_files_to_chat(self, files: list, message: str = "", user_id: str = None):
+    async def send_files_to_chat(self, files: list, message: str = "", user_id: str | None = None):
         """
         Push local files to the AI Chat panel (via Gateway /agent-push/chat).
         files: [{path, original_name, size, content_type, is_image, is_audio, is_video}, ...]
         """
         import httpx
+
         try:
             payload = {
                 "agent_id": self.config.agent_id,
@@ -227,8 +234,9 @@ class GatewayAdapter(BaseAgent):
 
     async def _try_wake_agent(self, reason: str = "urgent-command"):
         try:
-            from opensquad.state_manager import state_manager
             from opensquad.sleep_controller import sleep_controller
+            from opensquad.state_manager import state_manager
+
             ai_state = await state_manager.get_state()
             if ai_state == "sleeping":
                 sleep_controller.wake_up(reason)
@@ -248,17 +256,29 @@ class GatewayAdapter(BaseAgent):
         chat_name = data.get("chat_name", "")
         source_chat_id = data.get("source_chat_id", "")
         self.current_user_id = user_id
-        
-        logger.info(f"[Adapter] Received from Gateway ({user_id}, channel={channel}): {content}" + (f" images={len(images)}" if images else "") + (f" attachments={len(attachments)}" if attachments else ""))
-        
+
+        logger.info(
+            f"[Adapter] Received from Gateway ({user_id}, channel={channel}): {content}"
+            + (f" images={len(images)}" if images else "")
+            + (f" attachments={len(attachments)}" if attachments else "")
+        )
+
         # Push message to InputHub; Runner in main.py handles it uniformly.
         await self._try_wake_agent("web-message")
 
         logger.debug(f"[Adapter] About to push to input_hub: content_len={len(content)}, channel={channel}")
-        input_hub.push(content, source="gateway", images=images if images else None, attachments=attachments if attachments else None,
-                       channel=channel, sender_name=sender_name, chat_name=chat_name,
-                       source_chat_id=source_chat_id, user_id=user_id or "")
-        logger.debug(f"[Adapter] Push to input_hub DONE")
+        input_hub.push(
+            content,
+            source="gateway",
+            images=images if images else None,
+            attachments=attachments if attachments else None,
+            channel=channel,
+            sender_name=sender_name,
+            chat_name=chat_name,
+            source_chat_id=source_chat_id,
+            user_id=user_id or "",
+        )
+        logger.debug("[Adapter] Push to input_hub DONE")
 
     async def on_runner_output(self, data):
         """When Runner finishes a reply (final text response; content should be a string)."""
@@ -267,12 +287,14 @@ class GatewayAdapter(BaseAgent):
             sid = self._extract_sid(data)
             content = self._unwrap(data)
             if content:
-                logger.info(f"[GatewayAdapter] Sending final response (user={self.current_user_id or 'broadcast'}), content_len={len(str(content))}, content_preview={str(content)[:100]}")
+                logger.info(
+                    f"[GatewayAdapter] Sending final response (user={self.current_user_id or 'broadcast'}), content_len={len(str(content))}, content_preview={str(content)[:100]}"
+                )
                 await self._send_event(content, "message", sid=sid)
             else:
-                logger.warning(f"[GatewayAdapter] on_runner_output called but content is empty")
+                logger.warning("[GatewayAdapter] on_runner_output called but content is empty")
         else:
-            logger.warning(f"[GatewayAdapter] on_runner_output called but not connected, discarding response")
+            logger.warning("[GatewayAdapter] on_runner_output called but not connected, discarding response")
 
     async def on_runner_thought(self, data):
         """When Runner is thinking (content may be a {"text":...,"final":...} object)."""
@@ -339,6 +361,7 @@ class GatewayAdapter(BaseAgent):
             content = self._unwrap(data)
             await self._send_event(content, "tool_result", sid=sid)
 
+
 async def start_gateway_adapter():
     config = AgentConfig(
         gateway_url=syscfg.gateway_register_url(),
@@ -350,7 +373,7 @@ async def start_gateway_adapter():
         node_id=syscfg.node_id(),
         node_label=syscfg.node_label(),
     )
-    
+
     adapter = GatewayAdapter(config)
     # Run in the background
     asyncio.create_task(adapter.start())

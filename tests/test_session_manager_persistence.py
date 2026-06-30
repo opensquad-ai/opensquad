@@ -1,10 +1,11 @@
-# -*- coding: utf-8 -*-
 """SessionManager tests — covers persistence, async writer lifecycle, and edge paths."""
-import os
-import json
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+
 import asyncio
+import json
+import os
+
+import pytest
+
 from opensquad.session_manager import SessionManager
 
 
@@ -64,7 +65,7 @@ class TestSessionManagerPersistence:
             save_dir=str(tmp_path / "sessions"),
             history_dir=str(tmp_path / "history"),
         )
-        msgs = sm2.get_messages()
+        sm2.get_messages()
         # The session_data reloads from current_session.json
         assert sm2.session_data is not None
 
@@ -73,7 +74,7 @@ class TestSessionManagerPersistence:
         sm._save_session()
         session_file = tmp_path / "sessions" / "current_session.json"
         assert os.path.exists(session_file)
-        with open(session_file, "r", encoding="utf-8") as f:
+        with open(session_file, encoding="utf-8") as f:
             data = json.load(f)
         assert len(data["messages"]) >= 1
 
@@ -118,9 +119,9 @@ class TestSessionManagerAsyncWriter:
         await asyncio.sleep(0.2)
         session_file = sm.current_session_file
         if os.path.exists(session_file):
-            with open(session_file, "r", encoding="utf-8") as f:
+            with open(session_file, encoding="utf-8") as f:
                 data = json.load(f)
-            user_msgs = [m for m in data.get("messages", []) if m.get("role") == "user" and m.get("content") == "test message"]
+            [m for m in data.get("messages", []) if m.get("role") == "user" and m.get("content") == "test message"]
         # Stop cleanly
         await sm.stop_async_writer(timeout=2)
 
@@ -159,15 +160,12 @@ class TestCompressSession:
         archived = sm.session_data.get("archived_messages") or []
         # Live is trimmed (keep_ratio 0.1 of tokens — for our content size
         # this leaves only the newest few messages).
-        assert len(live) < len(originals), (
-            f"expected live to be trimmed, got live={len(live)} total={len(originals)}"
-        )
+        assert len(live) < len(originals), f"expected live to be trimmed, got live={len(live)} total={len(originals)}"
         # Archived captures the removed messages.
         assert len(archived) > 0, "expected archived_messages to be populated"
         # Live + archived together cover the full original set.
         assert len(live) + len(archived) == len(originals), (
-            f"live({len(live)}) + archived({len(archived)}) should equal "
-            f"total original({len(originals)})"
+            f"live({len(live)}) + archived({len(archived)}) should equal total original({len(originals)})"
         )
         # Return value exposes the counts.
         assert result["archived_messages_count"] == len(archived)
@@ -180,7 +178,7 @@ class TestCompressSession:
 
         sm.compress_current_session(keep_ratio=0.1)
         archive_after_first = list(sm.session_data.get("archived_messages") or [])
-        live_after_first = sm.get_messages()
+        sm.get_messages()
 
         # Add more messages and compress again.
         for i in range(20, 40):
@@ -192,9 +190,7 @@ class TestCompressSession:
         live_after_second = sm.get_messages()
 
         # The archive should have grown, not been reset.
-        assert len(archive_after_second) >= len(archive_after_first), (
-            "repeated compressions must append, not replace"
-        )
+        assert len(archive_after_second) >= len(archive_after_first), "repeated compressions must append, not replace"
         # Live + archive still covers all 40 messages.
         assert len(live_after_second) + len(archive_after_second) == 40
 
@@ -223,6 +219,7 @@ class TestCompressSession:
         existed must still load — _load_session should backfill empty
         arrays rather than raising KeyError."""
         import json as _json
+
         save_dir = tmp_path / "sessions"
         history_dir = tmp_path / "history"
         save_dir.mkdir(parents=True, exist_ok=True)

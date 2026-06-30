@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 Incremental co-occurrence matrix manager
 - Incremental accumulation on the global matrix; replaces deepcopy + list storage
 - Memory reduced from O(N * nnz) to O(nnz)
 """
-from scipy.sparse import dok_matrix, csr_matrix
+
 import numpy as np
+from scipy.sparse import dok_matrix
 
 
 class IncrementalCooccurrence:
@@ -19,8 +19,8 @@ class IncrementalCooccurrence:
     def __init__(self, max_dim=100000):
         self.max_dim = max_dim
         self.matrix = dok_matrix((max_dim, max_dim), dtype=np.float64)
-        self.vocab_dict = {}      # word -> idx
-        self.idx_to_word = {}     # idx -> word
+        self.vocab_dict = {}  # word -> idx
+        self.idx_to_word = {}  # idx -> word
         self.vocab_count = 0
         self.total_docs = 0
 
@@ -97,7 +97,7 @@ class IncrementalCooccurrence:
             "total_docs": self.total_docs,
             "vocab_size": self.vocab_count,
             "nonzero_pairs": csr.nnz,
-            "matrix_density": csr.nnz / (self.vocab_count ** 2) if self.vocab_count > 0 else 0,
+            "matrix_density": csr.nnz / (self.vocab_count**2) if self.vocab_count > 0 else 0,
         }
 
     def remove_words(self, words_to_remove):
@@ -132,14 +132,12 @@ class IncrementalCooccurrence:
             return 0
 
         # Build list of indices to keep (preserving original order)
-        indices_to_keep = [i for i in range(self.vocab_count)
-                           if i not in indices_to_remove]
+        indices_to_keep = [i for i in range(self.vocab_count) if i not in indices_to_remove]
 
         if not indices_to_keep:
             # Remove all = reset
             removed = self.vocab_count
-            self.matrix = dok_matrix(
-                (self.max_dim, self.max_dim), dtype=np.float64)
+            self.matrix = dok_matrix((self.max_dim, self.max_dim), dtype=np.float64)
             self.vocab_dict = {}
             self.idx_to_word = {}
             self.vocab_count = 0
@@ -164,7 +162,7 @@ class IncrementalCooccurrence:
 
         # Fill the sub-matrix data into the new DOK
         sub_coo = sub.tocoo()
-        for r, c, v in zip(sub_coo.row, sub_coo.col, sub_coo.data):
+        for r, c, v in zip(sub_coo.row, sub_coo.col, sub_coo.data, strict=False):
             new_dok[r, c] = v
 
         removed = self.vocab_count - new_count

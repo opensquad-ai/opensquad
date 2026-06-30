@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Generic asynchronous batch writer.
 
@@ -10,9 +9,10 @@ component.
 from __future__ import annotations
 
 import asyncio
-import queue
+import contextlib
 import logging
-from typing import Callable, Optional
+import queue
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,8 @@ class AsyncBatchWriter:
         self._batch_size = batch_size
         self._name = name
 
-        self._queue: Optional[asyncio.Queue] = None
-        self._task: Optional[asyncio.Task] = None
+        self._queue: asyncio.Queue | None = None
+        self._task: asyncio.Task | None = None
         self._running = False
         self._count = 0
 
@@ -86,10 +86,8 @@ class AsyncBatchWriter:
     def mark_dirty(self) -> None:
         """Convenience: enqueue a no-op to trigger the next flush interval."""
         if self._queue is not None:
-            try:
+            with contextlib.suppress(queue.Full):
                 self._queue.put_nowait(lambda: None)
-            except queue.Full:
-                pass
 
     async def stop(self, timeout: float = 5.0) -> None:
         """Stop the writer and flush remaining items."""
@@ -98,10 +96,8 @@ class AsyncBatchWriter:
         self._running = False
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(self._task, timeout=timeout)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
         # Flush any final pending mutations
         if self._queue is not None:
             while not self._queue.empty():
@@ -144,9 +140,7 @@ class AsyncBatchWriter:
                 try:
                     self._flush_fn()
                 except Exception as exc:
-                    logger.error(
-                        "[BatchWriter:%s] Flush error: %s", self._name, exc
-                    )
+                    logger.error("[BatchWriter:%s] Flush error: %s", self._name, exc)
                 self._count = 0
 
             # Sleep for remaining interval

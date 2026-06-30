@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 Result formatting module — functions for formatting tool execution results.
 
 Extracted from runner.py to reduce its size.
 """
+
 from __future__ import annotations
 
-import os
 import logging
+import os
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ def get_tool_output_max_chars(config_path: str) -> int:
     Returns 0 for no limit; defaults to 50000 chars if not configured.
     """
     from opensquad.json_cache import load_json_cached
+
     try:
         if config_path and os.path.isfile(config_path):
             cfg = load_json_cached(config_path, default={})

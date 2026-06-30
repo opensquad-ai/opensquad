@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 """
 WebSearch Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/websearch/websearch.py.
 Service auto-start: launches the WebSearch FastAPI service on plugin load.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Context
+from opensquad.plugin_api import Context, register
 from opensquad.service_plugin import ServicePlugin
 
 logger = logging.getLogger("plugins.websearch")
@@ -49,7 +49,7 @@ class WebSearchPlugin(ServicePlugin):
         # Call ServicePlugin initialization with service configuration parameters
         super().__init__(
             context=context,
-            service_script="main.py",        # WebSearch uses FastAPI (main.py)
+            service_script="main.py",  # WebSearch uses FastAPI (main.py)
             health_endpoint="/health",
             service_name="WebSearchPlugin",
             max_startup_wait=10,
@@ -61,17 +61,19 @@ class WebSearchPlugin(ServicePlugin):
         super().on_unload()
         try:
             import asyncio
+
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = asyncio.get_event_loop()
             if loop and not loop.is_closed():
                 from .service.websearch_api import shutdown_browser
+
                 loop.run_until_complete(shutdown_browser())
         except Exception as e:
             logger.warning(f"[WebSearchPlugin] Browser shutdown error: {e}")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         """
         Proxy pattern: return the existing tool module for ToolRegistry.
 
@@ -81,13 +83,15 @@ class WebSearchPlugin(ServicePlugin):
         tools = []
         try:
             module = importlib.import_module("plugins.websearch.websearch")
-            tools.append({
-                "name": "websearch",
-                "module": module,
-                "level": "core",
-                "auto_register": True,
-                "requires_agent_id": False,
-            })
+            tools.append(
+                {
+                    "name": "websearch",
+                    "module": module,
+                    "level": "core",
+                    "auto_register": True,
+                    "requires_agent_id": False,
+                }
+            )
         except ImportError as e:
             logger.error(f"[WebSearchPlugin] Cannot import websearch module: {e}")
         return tools

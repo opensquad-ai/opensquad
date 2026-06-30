@@ -1,0 +1,10 @@
+title = "OpenSquad gitleaks config"
+
+[extend]
+# Use gitleaks defaults; add repo-specific allowlists below.
+
+[allowlist]
+description = "Documentation examples with placeholder credentials"
+paths = [
+  '''src/skills/agent_management/SKILL\.md''',
+]

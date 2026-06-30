@@ -1,13 +1,13 @@
-# -*- coding: utf-8 -*-
 """opensquad update — check for new versions and upgrade from GitHub Releases."""
-import subprocess
-import sys
-import urllib.request
+
+import contextlib
 import json
-import tempfile
 import os
 import shutil
-
+import subprocess
+import sys
+import tempfile
+import urllib.request
 
 GITHUB_REPO = "opensquad-ai/opensquad"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -40,10 +40,13 @@ def _compare_versions(current: str, latest: str) -> bool:
     """Return True if latest > current."""
     try:
         from packaging.version import Version
+
         return Version(latest) > Version(current)
     except Exception:
+
         def _parts(v: str):
             return tuple(int(x) for x in v.split(".") if x.isdigit())
+
         return _parts(latest) > _parts(current)
 
 
@@ -57,9 +60,8 @@ def _download_asset(url: str, dest: str) -> bool:
                 "User-Agent": "OpenSquad",
             },
         )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            with open(dest, "wb") as f:
-                shutil.copyfileobj(resp, f)
+        with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as f:
+            shutil.copyfileobj(resp, f)
         return True
     except Exception as e:
         print(f"Download failed: {e}")
@@ -68,7 +70,7 @@ def _download_asset(url: str, dest: str) -> bool:
 
 def _pick_asset(assets: list) -> dict | None:
     """Pick the best asset for the current platform from the release assets list.
-    
+
     Priority: wheel matching current platform > source tarball > any wheel.
     """
     if not assets:
@@ -110,6 +112,7 @@ def _pick_asset(assets: list) -> dict | None:
 
 def run_update(args):
     from opensquad import __version__
+
     current = __version__
 
     print(f"Current version: v{current}")
@@ -141,7 +144,7 @@ def run_update(args):
     asset = _pick_asset(assets)
     if not asset:
         print("No suitable release asset found. Try upgrading manually:")
-        print(f"  pip install --upgrade opensquad")
+        print("  pip install --upgrade opensquad")
         sys.exit(1)
 
     asset_name = asset.get("name", "opensquad")
@@ -159,15 +162,11 @@ def run_update(args):
             sys.exit(1)
 
         print("Installing...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--upgrade", tmp_path]
-        )
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", tmp_path])
         print("Upgrade complete! Please restart OpenSquad.")
     except subprocess.CalledProcessError as e:
         print(f"Upgrade failed: {e}")
         sys.exit(1)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.unlink(tmp_path)
-        except Exception:
-            pass

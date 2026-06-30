@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
 """P2/P3 fix verification for opensquad.collab_board.
 
 Run: python -m pytest tests/test_collab_board_p2.py -q
 """
+
 import os
-import tempfile
 import shutil
+import tempfile
 
 import pytest
 
@@ -24,6 +24,7 @@ def tmp_workspace(monkeypatch):
 
 
 # ── _derive_task_status_progress_from_content ─────────────────────────────
+
 
 def test_derive_ignores_code_fence_checkboxes(tmp_workspace):
     """[x] inside a ``` code block must NOT be counted."""
@@ -50,6 +51,7 @@ def test_derive_empty_content(tmp_workspace):
 
 # ── _gen_task_id collision retry ──────────────────────────────────────────
 
+
 def test_gen_task_id_avoids_existing():
     # Generate until we get one not in existing
     existing = set()
@@ -70,6 +72,7 @@ def test_gen_task_id_retries_on_collision():
 
 # ── update_task accepts 'failed' status ───────────────────────────────────
 
+
 def test_update_task_failed_status(tmp_workspace):
     t = cb.create_task(task_name="t", created_by="pm")
     updated = cb.update_task(task_id=t["task_id"], status="failed")
@@ -80,21 +83,29 @@ def test_update_task_failed_status(tmp_workspace):
 
 # ── append_public_discussion unique ids ───────────────────────────────────
 
+
 def test_discussion_unique_ids(tmp_workspace):
     t = cb.create_task(task_name="t", created_by="pm")
     cb.create_task  # noqa
     r1 = cb.append_public_discussion(
-        collab_id=t["task_id"], task_name="t", author_agent_id="a",
-        title="x", content="hello",
+        collab_id=t["task_id"],
+        task_name="t",
+        author_agent_id="a",
+        title="x",
+        content="hello",
     )
     r2 = cb.append_public_discussion(
-        collab_id=t["task_id"], task_name="t", author_agent_id="a",
-        title="x", content="hello",
+        collab_id=t["task_id"],
+        task_name="t",
+        author_agent_id="a",
+        title="x",
+        content="hello",
     )
     assert r1["id"] != r2["id"], "two discussions in the same ms must have unique ids"
 
 
 # ── save_plan_snapshot no same-second overwrite ───────────────────────────
+
 
 def test_plan_snapshot_no_overwrite_same_second(tmp_workspace):
     t = cb.create_task(task_name="t", created_by="pm")
@@ -107,6 +118,7 @@ def test_plan_snapshot_no_overwrite_same_second(tmp_workspace):
 
 
 # ── list_snapshots includes discussion zone ───────────────────────────────
+
 
 def test_list_plan_snapshots_includes_upsert_history(tmp_workspace):
     """Agent board_update plan revisions must appear in plan history UI."""
@@ -131,7 +143,6 @@ def test_list_plan_snapshots_includes_upsert_history(tmp_workspace):
     assert len(snaps) >= 1
     bodies = [s.get("content", "") for s in snaps]
     assert any("version one content" in b for b in bodies)
-
 
     t = cb.create_task(task_name="t", created_by="pm")
     cb.save_snapshot(collab_id=t["task_id"], zone="discussion", content="disc", title="d")

@@ -1,10 +1,11 @@
-# -*- coding: utf-8 -*-
 """
 IM Chat Tools v1.0
 Allows agents to deeply interact with the ChatPro group chat system.
 Supports joining groups, sending messages, retrieving history, and more.
 """
-from typing import Dict, Any, List, Optional
+
+from typing import Any
+
 from .. import bridge as bridge_module
 from ..input_hub import input_hub
 
@@ -13,7 +14,8 @@ def _bridge():
     """Get the currently active bridge instance (supports runtime replacement in boot.py)."""
     return bridge_module.bridge
 
-def list_groups() -> Dict[str, Any]:
+
+def list_groups() -> dict[str, Any]:
     """
     Get a list of all groups the agent has currently joined.
     Returns each group's ID, name, and description.
@@ -29,19 +31,20 @@ def list_groups() -> Dict[str, Any]:
                 {
                     "id": g.get("id", "") if isinstance(g, dict) else str(g),
                     "name": g.get("name", "") if isinstance(g, dict) else "",
-                    "description": g.get("description", "") if isinstance(g, dict) else ""
+                    "description": g.get("description", "") if isinstance(g, dict) else "",
                 }
                 for g in groups
-            ]
+            ],
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def join_group(group_id: str) -> Dict[str, Any]:
+
+def join_group(group_id: str) -> dict[str, Any]:
     """
     Let the agent join a specific group by group ID.
     After joining, the agent will start listening to messages from that group.
-    
+
     Args:
         group_id: Unique identifier of the group (e.g. g1, g2).
     """
@@ -58,17 +61,25 @@ def join_group(group_id: str) -> Dict[str, Any]:
         if result:
             return {"status": "success", "message": f"Successfully joined group {group_id}."}
         else:
-            return {"status": "error", "message": f"Failed to join group {group_id}. Check if ID is correct or group is public."}
+            return {
+                "status": "error",
+                "message": f"Failed to join group {group_id}. Check if ID is correct or group is public.",
+            }
 
-def send_message(content: str, target_id: str, target_type: str = "group",
-                 wakeup_delay: float = 0.0,
-                 file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+
+def send_message(
+    content: str,
+    target_id: str,
+    target_type: str = "group",
+    wakeup_delay: float = 0.0,
+    file_paths: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Proactively send a message to a specific target (non-reply mode), with optional file attachments
     (supports automatic split-archive compression).
     Note: Do NOT auto-call this tool to reply when receiving group messages, unless the web UI user
     explicitly requests it.
-    
+
     Args:
         content: Message text content.
         target_id: Target ID. Pass group ID for groups, or recipient's username (User Name) for DMs.
@@ -102,41 +113,48 @@ def send_message(content: str, target_id: str, target_type: str = "group",
 
         final_files = []
         if file_paths:
-            from ..utils.archive_util import prepare_file_for_sending, cleanup_temp
+            from ..utils.archive_util import cleanup_temp, prepare_file_for_sending
+
             for fp in file_paths:
                 # Auto-handle split-archive compression
                 prepared = prepare_file_for_sending(fp)
                 if prepared:
                     final_files.extend(prepared)
-        
-        success = _bridge().send_message(
-            content, target_id=target_id, target_type=target_type,
-            file_paths=final_files
-        )
-        
+
+        success = _bridge().send_message(content, target_id=target_id, target_type=target_type, file_paths=final_files)
+
         # Clean up temporary split parts
         if file_paths:
             from ..utils.archive_util import cleanup_temp
+
             cleanup_temp()
 
         if success:
             if target_type == "group" and wakeup_delay > 0:
                 from ..message_router import message_router
+
                 message_router.set_wakeup_delay(wakeup_delay)
-            return {"status": "success", "message": f"Message and {len(final_files)} file(s) sent to {target_type} {target_id}."}
+            return {
+                "status": "success",
+                "message": f"Message and {len(final_files)} file(s) sent to {target_type} {target_id}.",
+            }
         else:
-            return {"status": "error", "message": "Failed to send message via bridge (Max retries exceeded or network error). Check agent logs for details."}
+            return {
+                "status": "error",
+                "message": "Failed to send message via bridge (Max retries exceeded or network error). Check agent logs for details.",
+            }
     except Exception as e:
-        return {"status": "error", "message": f"Tool execution error: {str(e)}"}
+        return {"status": "error", "message": f"Tool execution error: {e!s}"}
 
 
-def send_file(file_paths: List[str], target_id: str, target_type: str = "group",
-              message: str = "", cooldown: float = 10) -> Dict[str, Any]:
+def send_file(
+    file_paths: list[str], target_id: str, target_type: str = "group", message: str = "", cooldown: float = 10
+) -> dict[str, Any]:
     """
     Send one or more files to a specific target. Files are first uploaded to the server
     then sent as attachments. Supports images (inline display in group chat), archives,
     documents, and any other file type.
-    
+
     Args:
         file_paths: List of local file paths to send. E.g. ["C:/data/report.pdf", "C:/images/chart.png"].
         target_id: Target ID. Pass group ID for groups, or recipient's username (User Name) for DMs.
@@ -146,38 +164,47 @@ def send_file(file_paths: List[str], target_id: str, target_type: str = "group",
     """
     if not file_paths:
         return {"status": "error", "message": "No file paths provided."}
-    
+
     # Validate files exist
     import os
+
     missing = [fp for fp in file_paths if not os.path.exists(fp)]
     if missing:
         return {"status": "error", "message": f"Files not found: {missing}"}
-    
-    content = message if message else "Sent a file"
-    return send_message(content=content, target_id=target_id, target_type=target_type,
-                        file_paths=file_paths)
 
-def set_cooldown(seconds: float = 10) -> Dict[str, Any]:
+    content = message if message else "Sent a file"
+    return send_message(content=content, target_id=target_id, target_type=target_type, file_paths=file_paths)
+
+
+def set_cooldown(seconds: float = 10) -> dict[str, Any]:
     """
     Set the group message cooldown period. During cooldown, regular group messages are only
     queued and do not trigger AI processing (@mentions are exempt).
     Used to avoid feedback loops in multi-agent group chats. Choose an appropriate duration
     based on current discussion activity and context.
-    
+
     Args:
         seconds: Cooldown seconds, default 10 seconds. Set to 0 to cancel cooldown immediately.
     """
     try:
         from ..message_router import message_router
+
         message_router.set_cooldown(seconds)
         if seconds > 0:
-            return {"status": "success", "message": f"Cooldown set to {seconds}s. Group messages will be queued during this period."}
+            return {
+                "status": "success",
+                "message": f"Cooldown set to {seconds}s. Group messages will be queued during this period.",
+            }
         else:
-            return {"status": "success", "message": "Cooldown cleared. Group messages will trigger processing immediately."}
+            return {
+                "status": "success",
+                "message": "Cooldown cleared. Group messages will trigger processing immediately.",
+            }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def get_history(group_id: str, limit: int = 20) -> Dict[str, Any]:
+
+def get_history(group_id: str, limit: int = 20) -> dict[str, Any]:
     """
     Get message history for a specified group.
 
@@ -204,13 +231,14 @@ def get_history(group_id: str, limit: int = 20) -> Dict[str, Any]:
                 "content": m.get("content", ""),
                 "time": m.get("timestamp", 0),
             }
-            
+
             # Fix relative paths in text content (Markdown images, etc.)
             if "/uploads/" in msg["content"]:
                 # Use InputHub logic; since _fix_path handles a single path, we can do a simple regex replace.
                 # For safety, at least replace /uploads/ with the absolute path prefix.
                 # This assumes input_hub is initialized and knows agent_dir.
                 import os
+
                 # Get project root (where uploads resides)
                 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 # Simple replace /uploads -> C:/.../uploads
@@ -237,13 +265,13 @@ def get_history(group_id: str, limit: int = 20) -> Dict[str, Any]:
             if mentions:
                 msg["mentions"] = mentions
             messages.append(msg)
-        
+
         return {"status": "success", "history": messages}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
-def check_connection() -> Dict[str, Any]:
+def check_connection() -> dict[str, Any]:
     """
     Check the connection status and account information of the current bridge instance.
     For self-diagnostics: verify bridge is correctly initialized, current login account,
@@ -274,7 +302,7 @@ def check_connection() -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-def reconnect() -> Dict[str, Any]:
+def reconnect() -> dict[str, Any]:
     """
     Proactively trigger bridge reconnection: re-login -> re-join configured groups -> restart WebSocket.
     Use for runtime recovery when a connection anomaly is detected (e.g. ws_connected=False, has_token=False).
@@ -289,6 +317,7 @@ def reconnect() -> Dict[str, Any]:
     """
     try:
         import asyncio
+
         b = _bridge()
         config_groups = getattr(b, "_config_groups", [])
         loop = asyncio.get_event_loop()

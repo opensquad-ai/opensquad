@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """Shared service discovery: auto-detect plugin services and their ports."""
+
 import json
 import os
 import socket
@@ -10,7 +10,7 @@ def _port_listening(host, port, timeout=1.0):
         s = socket.create_connection((host, port), timeout=timeout)
         s.close()
         return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (TimeoutError, ConnectionRefusedError, OSError):
         return False
 
 
@@ -21,11 +21,11 @@ def discover_all_services():
 
     services = [
         # Core infrastructure (always present)
-        ("Gateway",       syscfg.port("gateway")),
-        ("Registry",      syscfg.port("plugin_registry")),
-        ("Frontend",      syscfg.port("frontend")),
-        ("Launcher",      syscfg.port("launcher")),
-        ("External API",  syscfg.port("external_adapter")),
+        ("Gateway", syscfg.port("gateway")),
+        ("Registry", syscfg.port("plugin_registry")),
+        ("Frontend", syscfg.port("frontend")),
+        ("Launcher", syscfg.port("launcher")),
+        ("External API", syscfg.port("external_adapter")),
     ]
 
     # Auto-discover plugin services
@@ -40,7 +40,7 @@ def discover_all_services():
         if not os.path.isfile(pj):
             continue
         try:
-            with open(pj, "r", encoding="utf-8-sig") as f:
+            with open(pj, encoding="utf-8-sig") as f:
                 meta = json.load(f)
         except Exception:
             continue
@@ -51,10 +51,7 @@ def discover_all_services():
 
         if svc_cfg:
             port_key = svc_cfg.get("port_key", "")
-            if port_key:
-                port = syscfg.port(port_key)
-            else:
-                port = svc_cfg.get("default_port")
+            port = syscfg.port(port_key) if port_key else svc_cfg.get("default_port")
 
         # Fallback: some plugins (e.g. websearch) use config_schema.default_port
         if port is None:
@@ -87,7 +84,7 @@ def discover_plugin_status():
     svc_cfg = {}
     if os.path.isfile(cfg_path):
         try:
-            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            with open(cfg_path, encoding="utf-8-sig") as f:
                 svc_cfg = json.load(f).get("services", {})
         except Exception:
             pass
@@ -98,7 +95,7 @@ def discover_plugin_status():
         if not os.path.isfile(pj):
             continue
         try:
-            with open(pj, "r", encoding="utf-8-sig") as f:
+            with open(pj, encoding="utf-8-sig") as f:
                 meta = json.load(f)
         except Exception:
             continue
@@ -114,13 +111,15 @@ def discover_plugin_status():
         configured = isinstance(entry, dict) and "enabled" in entry
         enabled = entry.get("enabled", True) if configured else True  # default True for unconfigured
 
-        result.append({
-            "name": name,
-            "display": display,
-            "toggle": has_toggle,
-            "enabled": enabled,
-            "configured": configured,
-        })
+        result.append(
+            {
+                "name": name,
+                "display": display,
+                "toggle": has_toggle,
+                "enabled": enabled,
+                "configured": configured,
+            }
+        )
     return result
 
 

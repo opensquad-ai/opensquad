@@ -21,6 +21,7 @@ Channels:
                      (e.g. ``0.1.0+local.abc``) — local builds
   - ``unknown``      unparseable / missing
 """
+
 from __future__ import annotations
 
 from typing import Literal
@@ -47,11 +48,11 @@ def detect_channel(version: str) -> Channel:
     except Exception:
         return "unknown"
 
-    if v.is_devrelease:           # X.Y.Z.devN  -> dev branch
+    if v.is_devrelease:  # X.Y.Z.devN  -> dev branch
         return "dev"
-    if v.is_prerelease:           # a / b / rc
+    if v.is_prerelease:  # a / b / rc
         return "pre-release"
-    if v.local is not None:       # +local.foo
+    if v.local is not None:  # +local.foo
         return "local"
     return "stable"
 

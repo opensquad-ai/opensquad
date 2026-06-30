@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tool executor module -- tool call dispatch, result handling, truncation, and
 collaboration board sync.
@@ -9,14 +8,13 @@ Extracted from runner.py. Contains:
 - Collaboration board auto-sync
 - Response parsing helpers (_remove_tags, _filter_native_tokens, etc.)
 """
+
 from __future__ import annotations
 
-import json
-import logging
-import os
 import re
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
 from opensquad.tool import logger
 
@@ -100,15 +98,21 @@ class ToolExecutor:
 
         # Silent blocks: remove entirely
         silent_blocks = [
-            "thought", "plan", "think", "tool_call", "tool_result",
-            "to_system", "state", "wake", "sleep", "title", "option",
+            "thought",
+            "plan",
+            "think",
+            "tool_call",
+            "tool_result",
+            "to_system",
+            "state",
+            "wake",
+            "sleep",
+            "title",
+            "option",
             "arguments",
         ]
         for tag in silent_blocks:
-            result = re.sub(
-                rf"<{tag}\b[^>]*>.*?</{tag}>", "", result,
-                flags=re.DOTALL | re.IGNORECASE
-            )
+            result = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", result, flags=re.DOTALL | re.IGNORECASE)
             result = re.sub(rf"<{tag}\b[^>]*/>", "", result, flags=re.IGNORECASE)
 
         # Extract to_user content (keep it)
@@ -190,28 +194,37 @@ class ToolExecutor:
             if s == "{}":
                 return True
             if re.match(r'^\{\s*"[a-zA-Z_][a-zA-Z0-9_]*"\s*:', s):
-                logger.warning(
-                    "[ToolExecutor] Detected leaked JSON parameters "
-                    "without <tool_call> wrapper"
-                )
+                logger.warning("[ToolExecutor] Detected leaked JSON parameters without <tool_call> wrapper")
                 return True
 
         # XML leak detection
         system_tags = {
-            "title", "thought", "think", "plan", "to_user", "to_user_reply",
-            "to_system", "tool_call", "tool_result", "arguments", "state",
-            "wake", "sleep", "option", "forward", "system_reminder", "func",
-            "task_start", "task_complete", "task_failed",
+            "title",
+            "thought",
+            "think",
+            "plan",
+            "to_user",
+            "to_user_reply",
+            "to_system",
+            "tool_call",
+            "tool_result",
+            "arguments",
+            "state",
+            "wake",
+            "sleep",
+            "option",
+            "forward",
+            "system_reminder",
+            "func",
+            "task_start",
+            "task_complete",
+            "task_failed",
         }
 
-        xml_tags = re.findall(
-            r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE
-        )
+        xml_tags = re.findall(r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE)
 
         if xml_tags and "<tool_call" not in text:
-            leaked_tags = [
-                tag for tag in xml_tags if tag.lower() not in system_tags
-            ]
+            leaked_tags = [tag for tag in xml_tags if tag.lower() not in system_tags]
             if leaked_tags:
                 logger.warning(
                     "[ToolExecutor] Detected leaked XML parameter tags: %s",
@@ -276,7 +289,7 @@ class ToolExecutor:
         self,
         name: str,
         result: Any,
-        get_max_chars: "Callable[[], int | None] | None" = None,
+        get_max_chars: Callable[[], int | None] | None = None,
     ) -> str:
         """
         Summarize a tool result for inclusion in the LLM context.
@@ -347,15 +360,22 @@ class ToolExecutor:
                 return
 
             sensitive_tools = {
-                "read_related_files", "glob", "grep", "rg",
-                "filesystem__read", "filesystem__write", "filesystem__edit",
-                "bash", "subprocess", "delegate_task",
-                "system__send_file_to_web", "execute_command",
-                "view_source_code", "find_files",
+                "read_related_files",
+                "glob",
+                "grep",
+                "rg",
+                "filesystem__read",
+                "filesystem__write",
+                "filesystem__edit",
+                "bash",
+                "subprocess",
+                "delegate_task",
+                "system__send_file_to_web",
+                "execute_command",
+                "view_source_code",
+                "find_files",
             }
-            if tool_name.startswith("collaboration.") or tool_name.startswith(
-                "agent_setup."
-            ):
+            if tool_name.startswith("collaboration.") or tool_name.startswith("agent_setup."):
                 sensitive_tools.add(tool_name)
 
             should_sync = tool_name not in sensitive_tools

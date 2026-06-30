@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Cached JSON file loader with mtime-based staleness detection.
 
@@ -6,19 +5,20 @@ Allows hot paths to repeatedly read a config file without paying the cost of
 disk I/O on every call.  The cache entry is invalidated automatically when the
 file's modification time changes.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _cached: dict[str, tuple[float, Any]] = {}  # path -> (mtime, parsed_data)
 
 
-def load_json_cached(path: str, default: Optional[dict] = None) -> dict[str, Any]:
+def load_json_cached(path: str, default: dict | None = None) -> dict[str, Any]:
     """Load a JSON file, returning cached data when the file has not changed.
 
     Args:
@@ -49,7 +49,7 @@ def load_json_cached(path: str, default: Optional[dict] = None) -> dict[str, Any
         # third-party tools on Windows such as Notepad, or by agents using the
         # filesystem tool with utf-8-sig). json.load() with plain "utf-8" would
         # raise "Unexpected UTF-8 BOM" on the first byte.
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         _cached[path] = (current_mtime, data)
         logger.debug("[json_cache] loaded (mtime=%.3f): %s", current_mtime, path)

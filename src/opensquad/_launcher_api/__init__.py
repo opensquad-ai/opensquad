@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Launcher Management API package — __init__.py re-exports the factory + server.
 
@@ -10,36 +9,34 @@ Launcher.py imports _start_management_server from here and passes all required
 runtime state as arguments.  create_management_handler() builds a
 BaseHTTPRequestHandler subclass bound to that state.
 """
+
 from __future__ import annotations
 
-import os
-import sys
-import re
+import base64
+import contextlib
 import io
 import json
-import time
-import shutil
-import hashlib
-import secrets
-import zipfile
-import base64
 import logging
+import os
+import re
+import shutil
 import subprocess
-import threading
-from typing import Any, Dict, Optional, List
+import sys
+import time
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
-from opensquad._launcher_api._types import HandlerState
+from opensquad._launcher_api._agent_handler import AgentHandlerMixin
 from opensquad._launcher_api._auth import (
     check_auth,
     encrypt_password,
-    verify_password,
     get_launcher_token,
+    verify_password,
 )
-from opensquad._launcher_api._agent_handler import AgentHandlerMixin
 from opensquad._launcher_api._plugin_handler import PluginHandlerMixin
 from opensquad._launcher_api._system_handler import SystemHandlerMixin
-
+from opensquad._launcher_api._types import HandlerState
 
 # ── imports that match what launcher.py passes in ──────────────────────────
 # (listed here so py_compile succeeds; in practice all are provided by the caller)
@@ -53,12 +50,12 @@ MANAGEMENT_PORT: int = 9600
 STALL_THRESHOLD: int = 300
 
 BUILTIN_PLUGINS: dict = {}
-_processes: Dict[str, Any] = {}
-_plugin_services: Dict[str, Any] = {}
-_task_watch_heartbeats: Dict[str, Dict] = {}
+_processes: dict[str, Any] = {}
+_plugin_services: dict[str, Any] = {}
+_task_watch_heartbeats: dict[str, dict] = {}
 _task_watch_stalled_notified: set = set()
 _shutdown_event: Any = None
-_workspace_migration_tasks: Dict[str, Any] = {}
+_workspace_migration_tasks: dict[str, Any] = {}
 syscfg: Any = None
 read_json: Any = None
 chk_port: Any = None
@@ -127,11 +124,11 @@ def create_management_handler(
     launcher_lock: Any = None,
     shut_ev: Any,
     logger: Any,
-    procesos: Dict[str, Any],
-    plug_svcs: Dict[str, Any],
-    task_hb: Dict[str, Dict[str, Any]],
+    procesos: dict[str, Any],
+    plug_svcs: dict[str, Any],
+    task_hb: dict[str, dict[str, Any]],
     task_sn: set,
-    ws_mig: Dict[str, Dict[str, Any]],
+    ws_mig: dict[str, dict[str, Any]],
     agents_dir: str,
     plugins_dir: str,
     skills_dir: str,
@@ -160,14 +157,7 @@ def create_management_handler(
     everything it needs without relying on module-level globals.
     """
 
-    class ManagementHandler(BaseHTTPRequestHandler,
-
-                                 AgentHandlerMixin,
-
-                                 PluginHandlerMixin,
-
-                                 SystemHandlerMixin):
-
+    class ManagementHandler(BaseHTTPRequestHandler, AgentHandlerMixin, PluginHandlerMixin, SystemHandlerMixin):
         """Lightweight HTTP handler — no FastAPI/uvicorn dependency, minimal external deps"""
 
         # Runtime state — set by create_management_handler before first request.
@@ -222,10 +212,8 @@ def create_management_handler(
                 except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
                     pass
                 except Exception as e:
-                    try:
-                        self._send_json({"error": f"Internal server error: {str(e)}"}, 500)
-                    except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
-                        pass
+                    with contextlib.suppress(ConnectionAbortedError, BrokenPipeError, ConnectionResetError, OSError):
+                        self._send_json({"error": f"Internal server error: {e!s}"}, 500)
 
         def do_OPTIONS(self):
             self.send_response(204)
@@ -243,6 +231,7 @@ def create_management_handler(
 
         def _do_get_impl(self):
             import urllib.parse
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/")
             qs = urllib.parse.parse_qs(parsed.query)
@@ -288,17 +277,17 @@ def create_management_handler(
             elif path == "/api/role-cards":
                 return self._handle_list_role_cards()
             elif path.startswith("/api/role-cards/"):
-                card_name = path[len("/api/role-cards/"):]
+                card_name = path[len("/api/role-cards/") :]
                 return self._handle_get_role_card(card_name)
             elif path == "/api/collab-cards":
                 return self._handle_list_collab_cards()
             elif path.startswith("/api/collab-cards/"):
-                card_name = path[len("/api/collab-cards/"):]
+                card_name = path[len("/api/collab-cards/") :]
                 return self._handle_get_collab_card(card_name)
             elif path == "/api/model-cards":
                 return self._handle_list_model_cards()
             elif path.startswith("/api/model-cards/"):
-                card_name = path[len("/api/model-cards/"):]
+                card_name = path[len("/api/model-cards/") :]
                 return self._handle_get_model_card(card_name)
 
             # ── MCP endpoints ────────────────────────────────────────────
@@ -324,16 +313,18 @@ def create_management_handler(
 
             # ── Workspace endpoints ───────────────────────────────────────
             elif path == "/api/workspace":
-                return self._send_json({
-                    "workspace": state.syscfg.get_workspace(),
-                    "agents_dir": state.syscfg.workspace_agents_dir(),
-                })
+                return self._send_json(
+                    {
+                        "workspace": state.syscfg.get_workspace(),
+                        "agents_dir": state.syscfg.workspace_agents_dir(),
+                    }
+                )
             elif path == "/api/workspace/list":
                 return self._handle_workspace_list()
             elif path == "/api/workspace/detect-legacy":
                 return self._handle_workspace_detect_legacy()
             elif path.startswith("/api/workspace/migrate/status/"):
-                task_id = path[len("/api/workspace/migrate/status/"):]
+                task_id = path[len("/api/workspace/migrate/status/") :]
                 return self._handle_workspace_migrate_status(task_id)
 
             # ── Service / plugin-service endpoints ────────────────────────
@@ -379,6 +370,7 @@ def create_management_handler(
 
         def do_POST(self):
             import urllib.parse
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/")
             # Internal endpoint: bypass auth (agent → launcher on localhost)
@@ -389,6 +381,7 @@ def create_management_handler(
 
         def _do_post_impl(self):
             import urllib.parse
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/")
 
@@ -475,6 +468,7 @@ def create_management_handler(
 
         def _do_put_impl(self):
             import urllib.parse
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/")
 
@@ -531,15 +525,15 @@ def create_management_handler(
 
             # ── Role/Collab/Model card endpoints ─────────────────────────
             elif path.startswith("/api/role-cards/"):
-                card_name = path[len("/api/role-cards/"):]
+                card_name = path[len("/api/role-cards/") :]
                 body = self._read_body()
                 return self._handle_put_role_card(card_name, body)
             elif path.startswith("/api/collab-cards/"):
-                card_name = path[len("/api/collab-cards/"):]
+                card_name = path[len("/api/collab-cards/") :]
                 body = self._read_body()
                 return self._handle_put_collab_card(card_name, body)
             elif path.startswith("/api/model-cards/"):
-                card_name = path[len("/api/model-cards/"):]
+                card_name = path[len("/api/model-cards/") :]
                 body = self._read_body()
                 return self._handle_put_model_card(card_name, body)
 
@@ -555,6 +549,7 @@ def create_management_handler(
 
         def _do_delete_impl(self):
             import urllib.parse
+
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/")
             parts = path.split("/")
@@ -606,9 +601,9 @@ def create_management_handler(
             except Exception as e:
                 return self._send_json({"error": str(e)}, 500)
 
-        # ════════════════════════════════════════════════════════════════════
-        #  Agent handlers
-        # ════════════════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════════
+            #  Agent handlers
+            # ════════════════════════════════════════════════════════════════════
 
             result = []
             with launcher_lock:
@@ -627,19 +622,21 @@ def create_management_handler(
                             "_config_error": f"Invalid config type: {type(info.get('config')).__name__}",
                             "_raw_config": str(info.get("config")),
                         }
-                    result.append({
-                        "dir_name": info["name"],
-                        "agent_id": cfg.get("agent_id", info["name"]),
-                        "agent_name": cfg.get("agent_name", info["name"]),
-                        "alive": False,
-                        "pid": None,
-                        "should_run": False,
-                        "restart_count": 0,
-                        "started_at": None,
-                        "config": cfg,
-                        "token_stats": None,
-                        "chat_profile": self._read_chat_profile(info["name"]),
-                    })
+                    result.append(
+                        {
+                            "dir_name": info["name"],
+                            "agent_id": cfg.get("agent_id", info["name"]),
+                            "agent_name": cfg.get("agent_name", info["name"]),
+                            "alive": False,
+                            "pid": None,
+                            "should_run": False,
+                            "restart_count": 0,
+                            "started_at": None,
+                            "config": cfg,
+                            "token_stats": None,
+                            "chat_profile": self._read_chat_profile(info["name"]),
+                        }
+                    )
             for item in result:
                 cfg = item.get("config") or {}
                 prompt_cfg = cfg.get("prompt", {})
@@ -663,7 +660,10 @@ def create_management_handler(
                 errs = self.state.val_cfg(ap.config)
                 if errs:
                     detail = "\n".join(f"- {e}" for e in errs)
-                    return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                    return self._send_json(
+                        {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                        400,
+                    )
                 port_err = self.state.chk_port(ap.config)
                 if port_err:
                     return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -680,7 +680,9 @@ def create_management_handler(
             errs = self.state.val_cfg(config)
             if errs:
                 detail = "\n".join(f"- {e}" for e in errs)
-                return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                return self._send_json(
+                    {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400
+                )
             port_err = self.state.chk_port(config)
             if port_err:
                 return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -709,7 +711,10 @@ def create_management_handler(
                 errs = self.state.val_cfg(config)
                 if errs:
                     detail = "\n".join(f"- {e}" for e in errs)
-                    return self._send_json({"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                    return self._send_json(
+                        {"error": f"Start failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                        400,
+                    )
                 port_err = self.state.chk_port(config)
                 if port_err:
                     return self._send_json({"error": f"Start failed: {port_err}"}, 400)
@@ -728,7 +733,10 @@ def create_management_handler(
             errs = self.state.val_cfg(ap.config)
             if errs:
                 detail = "\n".join(f"- {e}" for e in errs)
-                return self._send_json({"error": f"Restart failed: config.json validation failed with {len(errs)} error(s):\n{detail}"}, 400)
+                return self._send_json(
+                    {"error": f"Restart failed: config.json validation failed with {len(errs)} error(s):\n{detail}"},
+                    400,
+                )
             port_err = self.state.chk_port(ap.config)
             if port_err:
                 return self._send_json({"error": f"Restart failed: {port_err}"}, 400)
@@ -762,10 +770,11 @@ def create_management_handler(
                 out = []
                 if value is None:
                     return out
+
                 def _walk(v):
                     if v is None:
                         return
-                    if isinstance(v, (list, tuple, set)):
+                    if isinstance(v, list | tuple | set):
                         for item in v:
                             _walk(item)
                         return
@@ -779,6 +788,7 @@ def create_management_handler(
                                 out.append(p)
                     else:
                         out.append(s)
+
                 _walk(value)
                 return list(dict.fromkeys(out))
 
@@ -802,7 +812,7 @@ def create_management_handler(
             config_path = os.path.join(agent_dir, "config.json")
             if os.path.isfile(config_path):
                 try:
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     role_filename = cfg.get("prompt", {}).get("role", "role.md") or "role.md"
                 except (OSError, ValueError):
@@ -812,7 +822,7 @@ def create_management_handler(
                 role_path = os.path.join(agent_dir, "role.md")
             if not os.path.isfile(role_path):
                 return self._send_json({"agent": name, "content": ""})
-            with open(role_path, "r", encoding="utf-8") as f:
+            with open(role_path, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"agent": name, "content": content})
 
@@ -824,7 +834,7 @@ def create_management_handler(
             config_path = os.path.join(agent_dir, "config.json")
             if os.path.isfile(config_path):
                 try:
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         cfg = json.load(f)
                     role_filename = cfg.get("prompt", {}).get("role", "role.md") or "role.md"
                 except (OSError, ValueError):
@@ -837,7 +847,7 @@ def create_management_handler(
             name = (body.get("name") or "").strip()
             if not name:
                 return self._send_json({"error": "Missing 'name'"}, 400)
-            if not all(c.isalnum() or c == '_' for c in name):
+            if not all(c.isalnum() or c == "_" for c in name):
                 return self._send_json({"error": "Name must be alphanumeric/underscore"}, 400)
             agent_dir = os.path.join(self.agents_dir, name)
             if os.path.exists(agent_dir):
@@ -863,9 +873,19 @@ def create_management_handler(
                     "tool_filter": "high",
                 },
                 "tools": [
-                    "system", "filesystem", "agent_setup", "im",
-                    "collaboration", "delegate_task", "workspace", "task_watch",
-                    "websearch", "reminder", "vision", "mcp_query", "plugin_admin",
+                    "system",
+                    "filesystem",
+                    "agent_setup",
+                    "im",
+                    "collaboration",
+                    "delegate_task",
+                    "workspace",
+                    "task_watch",
+                    "websearch",
+                    "reminder",
+                    "vision",
+                    "mcp_query",
+                    "plugin_admin",
                 ],
                 "group_chat": {
                     "enabled": group_chat_enabled,
@@ -885,19 +905,23 @@ def create_management_handler(
             default_mcp_config = {
                 "mcpServers": {
                     "filesystem": {
-                        "enabled": True, "command": "npx",
+                        "enabled": True,
+                        "command": "npx",
                         "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
                         "timeout": 30,
                     },
                     "sequential-thinking": {
-                        "enabled": True, "command": "npx",
+                        "enabled": True,
+                        "command": "npx",
                         "args": ["-y", "@langgpt/sequential-thinking-mcp"],
                         "timeout": 30,
                     },
                     "windows-cli": {
-                        "enabled": True, "command": "npx",
+                        "enabled": True,
+                        "command": "npx",
                         "args": ["-y", "@simonb97/server-win-cli"],
-                        "timeout": 30, "autoApprove": ["execute_command"],
+                        "timeout": 30,
+                        "autoApprove": ["execute_command"],
                     },
                 }
             }
@@ -907,11 +931,13 @@ def create_management_handler(
             with open(os.path.join(agent_dir, "role.md"), "w", encoding="utf-8") as f:
                 f.write(f"# {body.get('agent_name', name)}\n\nWrite the role definition here.\n")
 
-            return self._send_json({
-                "message": f"Agent '{name}' created",
-                "dir": name,
-                "mcp_config": "Created with lightweight services enabled",
-            })
+            return self._send_json(
+                {
+                    "message": f"Agent '{name}' created",
+                    "dir": name,
+                    "mcp_config": "Created with lightweight services enabled",
+                }
+            )
 
             all_discovered = self.state.disc_agents(self.state.agents_dir)
             new_count = 0
@@ -922,7 +948,7 @@ def create_management_handler(
                     new_count += 1
             return self._send_json({"message": f"Rescan complete, {new_count} new agent(s) found"})
 
-            if not all(c.isalnum() or c == '_' for c in name):
+            if not all(c.isalnum() or c == "_" for c in name):
                 return self._send_json({"error": "Invalid agent name"}, 400)
             agent_dir = os.path.join(self.agents_dir, name)
             if not os.path.isdir(agent_dir):
@@ -950,7 +976,7 @@ def create_management_handler(
             for path in candidates:
                 if os.path.isfile(path):
                     try:
-                        with open(path, "r", encoding="utf-8") as f:
+                        with open(path, encoding="utf-8") as f:
                             return json.load(f)
                     except (OSError, ValueError):
                         pass
@@ -959,7 +985,7 @@ def create_management_handler(
             path = os.path.join(self.agents_dir, name, "data", "profile.json")
             if os.path.isfile(path):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
+                    with open(path, encoding="utf-8") as f:
                         return json.load(f)
                 except (OSError, ValueError):
                     pass
@@ -987,7 +1013,7 @@ def create_management_handler(
                     manifest = os.path.join(plugin_dir, "plugin.json")
                     if os.path.isfile(manifest):
                         try:
-                            with open(manifest, "r", encoding="utf-8") as f:
+                            with open(manifest, encoding="utf-8") as f:
                                 meta = json.load(f)
                             if meta.get("name") == plugin_name:
                                 return plugin_dir, entry
@@ -1008,7 +1034,7 @@ def create_management_handler(
                 plugin_json_path = os.path.join(plugin_dir, "plugin.json")
                 if os.path.isfile(plugin_json_path):
                     try:
-                        with open(plugin_json_path, "r", encoding="utf-8") as f:
+                        with open(plugin_json_path, encoding="utf-8") as f:
                             meta = json.load(f)
                     except (OSError, ValueError):
                         meta = {}
@@ -1018,28 +1044,30 @@ def create_management_handler(
                 if is_builtin and not meta:
                     bp_cfg = self.state.builtin_plugins[name]
                     meta["enabled"] = bp_cfg.get("default_enabled", True)
-                plugins.append({
-                    "name": meta.get("name", name),
-                    "dir_name": name,
-                    "display_name": meta.get("display_name", name),
-                    "version": meta.get("version", "0.0.0"),
-                    "type": meta.get("type", "tool"),
-                    "enabled": meta.get("enabled", True),
-                    "description": meta.get("description", ""),
-                    "author": meta.get("author", ""),
-                    "tags": meta.get("tags", []),
-                    "category": meta.get("category", ""),
-                    "tools": meta.get("tools", []),
-                    "hooks": meta.get("hooks", []),
-                    "config": meta.get("config", {}),
-                    "config_schema": meta.get("config_schema", {}),
-                    "contributes": meta.get("contributes", {}),
-                    "dependencies": meta.get("dependencies", {}),
-                    "service": meta.get("service"),
-                    "service_only": meta.get("service_only", False),
-                    "service_toggle": meta.get("service_toggle", False),
-                    "builtin": is_builtin,
-                })
+                plugins.append(
+                    {
+                        "name": meta.get("name", name),
+                        "dir_name": name,
+                        "display_name": meta.get("display_name", name),
+                        "version": meta.get("version", "0.0.0"),
+                        "type": meta.get("type", "tool"),
+                        "enabled": meta.get("enabled", True),
+                        "description": meta.get("description", ""),
+                        "author": meta.get("author", ""),
+                        "tags": meta.get("tags", []),
+                        "category": meta.get("category", ""),
+                        "tools": meta.get("tools", []),
+                        "hooks": meta.get("hooks", []),
+                        "config": meta.get("config", {}),
+                        "config_schema": meta.get("config_schema", {}),
+                        "contributes": meta.get("contributes", {}),
+                        "dependencies": meta.get("dependencies", {}),
+                        "service": meta.get("service"),
+                        "service_only": meta.get("service_only", False),
+                        "service_toggle": meta.get("service_toggle", False),
+                        "builtin": is_builtin,
+                    }
+                )
             return self._send_json({"plugins": plugins})
 
             plugin_dir, _dir_name = self._find_plugin_dir(name)
@@ -1048,7 +1076,7 @@ def create_management_handler(
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                 except (OSError, ValueError):
                     meta = {}
@@ -1066,7 +1094,7 @@ def create_management_handler(
             if meta.get("service_toggle"):
                 try:
                     sys_cfg_path = state.syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     if "services" not in full_cfg:
                         full_cfg["services"] = {}
@@ -1076,6 +1104,7 @@ def create_management_handler(
                     with open(sys_cfg_path, "w", encoding="utf-8") as f:
                         json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                     from opensquad import system_config as _syscfg_mod
+
                     _syscfg_mod._cache = None
                 except Exception as e:
                     state.logger.warning(f"[Launcher] Failed to sync services config: {e}", exc_info=True)
@@ -1108,7 +1137,7 @@ def create_management_handler(
             plugin_type = "tool"
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                     schema = meta.get("config_schema", {})
                     section = meta.get("config", {}).get("section")
@@ -1118,7 +1147,7 @@ def create_management_handler(
             if section and plugin_type == "platform":
                 try:
                     sys_cfg_path = state.syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     sec_data = full_cfg.get(section, {})
                     values = {
@@ -1132,7 +1161,7 @@ def create_management_handler(
                 values = {}
                 if os.path.isfile(config_path):
                     try:
-                        with open(config_path, "r", encoding="utf-8") as f:
+                        with open(config_path, encoding="utf-8") as f:
                             values = json.load(f)
                     except (OSError, ValueError):
                         pass
@@ -1157,7 +1186,7 @@ def create_management_handler(
             plugin_type = "tool"
             if os.path.isfile(plugin_json_path):
                 try:
-                    with open(plugin_json_path, "r", encoding="utf-8") as f:
+                    with open(plugin_json_path, encoding="utf-8") as f:
                         meta = json.load(f)
                     section = meta.get("config", {}).get("section")
                     plugin_type = meta.get("type", "tool")
@@ -1166,7 +1195,7 @@ def create_management_handler(
             if section and plugin_type == "platform":
                 try:
                     sys_cfg_path = state.syscfg.workspace_config_path()
-                    with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                    with open(sys_cfg_path, encoding="utf-8") as f:
                         full_cfg = json.load(f)
                     if section not in full_cfg:
                         full_cfg[section] = {}
@@ -1188,6 +1217,7 @@ def create_management_handler(
                     with open(sys_cfg_path, "w", encoding="utf-8") as f:
                         json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                     from opensquad import system_config as _syscfg_mod
+
                     _syscfg_mod._cache = None
                 except (OSError, ValueError) as e:
                     return self._send_json({"error": f"Failed to write system config: {e}"}, 500)
@@ -1215,6 +1245,7 @@ def create_management_handler(
             if not os.path.isfile(query_module_path):
                 return self._send_json({"error": f"Plugin '{name}' has no data query module (query.py)"}, 404)
             import importlib
+
             module_name = f"plugins.{name}.query"
             try:
                 if module_name in sys.modules:
@@ -1233,6 +1264,7 @@ def create_management_handler(
                 return self._send_json({"error": f"Query failed: {e}"}, 500)
 
             import datetime as _dt
+
             plugin_name = body.get("plugin_name", "unknown")
             view_key = body.get("view_key", "")
             error_msg = body.get("error", "")
@@ -1241,12 +1273,7 @@ def create_management_handler(
             try:
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                entry = (
-                    f"[{ts}] view={view_key}\n"
-                    f"  error: {error_msg}\n"
-                    f"  stack: {stack[:800]}\n"
-                    f"{'─' * 60}\n"
-                )
+                entry = f"[{ts}] view={view_key}\n  error: {error_msg}\n  stack: {stack[:800]}\n{'─' * 60}\n"
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(entry)
                 return self._send_json({"ok": True, "log": log_path})
@@ -1282,11 +1309,13 @@ def create_management_handler(
                     reload_ts_path = os.path.join(base_dir, ".reload_ts")
                     with open(reload_ts_path, "w") as rf:
                         rf.write(str(time.time()))
-                return self._send_json({
-                    "success": True,
-                    "message": f"Successfully uploaded {len(files)} files to {resource_type}",
-                    "resources": list(resource_names),
-                })
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": f"Successfully uploaded {len(files)} files to {resource_type}",
+                        "resources": list(resource_names),
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": str(e)}, 500)
 
@@ -1324,6 +1353,7 @@ def create_management_handler(
                 return self._send_json({"error": f"Plugin '{name}' does not support actions"}, 400)
             try:
                 import importlib.util as _ilu
+
                 spec = _ilu.spec_from_file_location(f"plugins.{name}.query", query_module_path)
                 mod = _ilu.module_from_spec(spec)
                 spec.loader.exec_module(mod)
@@ -1350,10 +1380,10 @@ def create_management_handler(
             existing_enabled = True
             existing_version = None
             existing_category = None
-            existing_plugin_py: Optional[bytes] = None
+            existing_plugin_py: bytes | None = None
             if os.path.isfile(existing_manifest):
                 try:
-                    with open(existing_manifest, "r", encoding="utf-8") as f:
+                    with open(existing_manifest, encoding="utf-8") as f:
                         existing_data = json.load(f)
                     existing_enabled = existing_data.get("enabled", True)
                     existing_version = existing_data.get("version")
@@ -1394,7 +1424,7 @@ def create_management_handler(
                     pass
             if os.path.isfile(existing_manifest):
                 try:
-                    with open(existing_manifest, "r", encoding="utf-8") as f:
+                    with open(existing_manifest, encoding="utf-8") as f:
                         new_manifest = json.load(f)
                     new_manifest["enabled"] = existing_enabled
                     if existing_category and not new_manifest.get("category"):
@@ -1412,9 +1442,9 @@ def create_management_handler(
             action = "updated" if existing_version else "installed"
             return self._send_json({"ok": True, "action": action, "plugin_id": plugin_id})
 
-        # ════════════════════════════════════════════════════════════════════
-        #  Plugin service handlers
-        # ════════════════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════════
+            #  Plugin service handlers
+            # ════════════════════════════════════════════════════════════════════
 
             with launcher_lock:
                 result = [psp.get_status() for psp in self.state.plug_svcs.values()]
@@ -1452,34 +1482,40 @@ def create_management_handler(
             cleanup_result = self.state.cln_reg(force_kill=False)
             managed_agents = []
             for ap in list(self.state.procesos.values()):
-                managed_agents.append({
-                    "agent_id": ap.agent_id,
-                    "agent_name": ap.agent_name,
-                    "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
-                    "port": ap.actual_port,
-                    "alive": ap.is_alive(),
-                    "should_run": ap.should_run,
-                })
+                managed_agents.append(
+                    {
+                        "agent_id": ap.agent_id,
+                        "agent_name": ap.agent_name,
+                        "pid": ap.process.pid if ap.process and ap.process.poll() is None else None,
+                        "port": ap.actual_port,
+                        "alive": ap.is_alive(),
+                        "should_run": ap.should_run,
+                    }
+                )
             managed_plugins = []
             for psp in list(self.state.plug_svcs.values()):
-                managed_plugins.append({
-                    "plugin_id": psp.plugin_id,
-                    "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
-                    "port": psp.port,
-                    "alive": psp.is_alive(),
-                    "should_run": psp.should_run,
-                })
-            return self._send_json({
-                "runtime_registry": cleanup_result.get("remaining", []),
-                "cleanup": {
-                    "cleaned": cleanup_result.get("cleaned", 0),
-                    "killed": cleanup_result.get("killed", 0),
-                },
-                "managed": {
-                    "agents": managed_agents,
-                    "plugins": managed_plugins,
-                },
-            })
+                managed_plugins.append(
+                    {
+                        "plugin_id": psp.plugin_id,
+                        "pid": psp.process.pid if psp.process and psp.process.poll() is None else None,
+                        "port": psp.port,
+                        "alive": psp.is_alive(),
+                        "should_run": psp.should_run,
+                    }
+                )
+            return self._send_json(
+                {
+                    "runtime_registry": cleanup_result.get("remaining", []),
+                    "cleanup": {
+                        "cleaned": cleanup_result.get("cleaned", 0),
+                        "killed": cleanup_result.get("killed", 0),
+                    },
+                    "managed": {
+                        "agents": managed_agents,
+                        "plugins": managed_plugins,
+                    },
+                }
+            )
 
             if plugin_id not in plug_svcs:
                 return self._send_json({"error": f"Plugin service '{plugin_id}' not found"}, 404)
@@ -1510,7 +1546,7 @@ def create_management_handler(
         def _set_service_enabled_in_config_OLD(self, plugin_id: str, enabled: bool):
             try:
                 sys_cfg_path = state.syscfg.workspace_config_path()
-                with open(sys_cfg_path, "r", encoding="utf-8") as f:
+                with open(sys_cfg_path, encoding="utf-8") as f:
                     full_cfg = json.load(f)
                 if "services" not in full_cfg:
                     full_cfg["services"] = {}
@@ -1520,13 +1556,14 @@ def create_management_handler(
                 with open(sys_cfg_path, "w", encoding="utf-8") as f:
                     json.dump(full_cfg, f, indent=2, ensure_ascii=False)
                 from opensquad import system_config as _syscfg_mod
+
                 _syscfg_mod._cache = None
             except Exception as e:
                 state.logger.warning(f"[Launcher] Failed to sync services.{plugin_id}.enabled: {e}", exc_info=True)
 
             timeout = body.get("timeout", 10) if isinstance(body, dict) else 10
             stopped = 0
-            for name, ap in list(self.state.procesos.items()):
+            for _name, ap in list(self.state.procesos.items()):
                 if ap.is_alive():
                     try:
                         ap.should_run = False
@@ -1539,7 +1576,7 @@ def create_management_handler(
                             stopped += 1
                     except (OSError, ValueError):
                         pass
-            for pid, psp in list(self.state.plug_svcs.items()):
+            for _pid, psp in list(self.state.plug_svcs.items()):
                 if psp.is_alive():
                     try:
                         psp.stop()
@@ -1579,13 +1616,16 @@ def create_management_handler(
         def _get_session_reader_OLD(self, agent_id: str):
             try:
                 import importlib.util as _ilu
+
                 _mod_path = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
-                    "gateway", "backend", "app", "ai_web", "agent_sessions.py"
+                    "gateway",
+                    "backend",
+                    "app",
+                    "ai_web",
+                    "agent_sessions.py",
                 )
-                _spec = _ilu.spec_from_file_location(
-                    "opensquad._agent_sessions_standalone", _mod_path
-                )
+                _spec = _ilu.spec_from_file_location("opensquad._agent_sessions_standalone", _mod_path)
                 _mod = _ilu.module_from_spec(_spec)
                 _spec.loader.exec_module(_mod)
                 return _mod.get_reader(agent_id)
@@ -1601,9 +1641,12 @@ def create_management_handler(
                 current_id = reader.get_current_session_id()
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
-                    return self._send_json({"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504)
-                return self._send_json({"error": f"Failed to get sessions: {str(e)}"}, 500)
+                    return self._send_json(
+                        {"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504
+                    )
+                return self._send_json({"error": f"Failed to get sessions: {e!s}"}, 500)
             return self._send_json({"sessions": sessions, "current_session_id": current_id})
 
             reader = self._get_session_reader(agent_id)
@@ -1614,9 +1657,10 @@ def create_management_handler(
                 session = reader.get_session_history_paged(current_id, offset, limit)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get current session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get current session: {e!s}"}, 500)
             return self._send_json({"current_session_id": current_id, "session": session})
 
             reader = self._get_session_reader(agent_id)
@@ -1626,9 +1670,10 @@ def create_management_handler(
                 session = reader.get_session_history_paged(session_id, offset, limit)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
             if session is None:
                 return self._send_json({"error": f"Session not found: {session_id}"}, 404)
             return self._send_json({"session": session})
@@ -1640,9 +1685,10 @@ def create_management_handler(
                 session = reader.get_session_history(session_id)
             except Exception as e:
                 import httpx
+
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json({"error": "Agent session request timed out"}, 504)
-                return self._send_json({"error": f"Failed to get session: {str(e)}"}, 500)
+                return self._send_json({"error": f"Failed to get session: {e!s}"}, 500)
             if session is None:
                 return self._send_json({"error": f"Session not found: {session_id}"}, 404)
             return self._send_json({"session": session})
@@ -1653,9 +1699,9 @@ def create_management_handler(
             ok = reader.delete_session(session_id)
             return self._send_json({"ok": ok})
 
-        # ════════════════════════════════════════════════════════════════════
-        #  MCP handlers (central + per-agent)
-        # ════════════════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════════
+            #  MCP handlers (central + per-agent)
+            # ════════════════════════════════════════════════════════════════════
 
             central_path = syscfg.workspace_data_dir("mcp_config.json")
             if not os.path.isfile(central_path):
@@ -1665,7 +1711,7 @@ def create_management_handler(
                         agent_mcp = os.path.join(self.agents_dir, dname, "mcp_config.json")
                         if os.path.isfile(agent_mcp):
                             try:
-                                with open(agent_mcp, "r", encoding="utf-8-sig") as f:
+                                with open(agent_mcp, encoding="utf-8-sig") as f:
                                     data = json.load(f)
                                 for k, v in (data.get("mcpServers") or {}).items():
                                     if k not in merged:
@@ -1679,7 +1725,7 @@ def create_management_handler(
                         json.dump({"mcpServers": merged}, f, ensure_ascii=False, indent=2)
                 return self._send_json({"mcpServers": merged})
             try:
-                with open(central_path, "r", encoding="utf-8-sig") as f:
+                with open(central_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"mcpServers": data.get("mcpServers", {})})
             except (OSError, ValueError) as e:
@@ -1714,12 +1760,14 @@ def create_management_handler(
                             restarted.append(name)
                         except (OSError, ValueError):
                             pass
-                return self._send_json({
-                    "ok": True,
-                    "message": f"Central MCP config saved, synced to {len(synced)} agents",
-                    "synced_agents": synced,
-                    "restarted_agents": restarted,
-                })
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "message": f"Central MCP config saved, synced to {len(synced)} agents",
+                        "synced_agents": synced,
+                        "restarted_agents": restarted,
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to write central mcp_config.json: {e}"}, 500)
 
@@ -1730,7 +1778,7 @@ def create_management_handler(
             if not os.path.isfile(mcp_path):
                 return self._send_json({"agent": name, "mcpServers": {}})
             try:
-                with open(mcp_path, "r", encoding="utf-8-sig") as f:
+                with open(mcp_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"agent": name, "mcpServers": data.get("mcpServers", {})})
             except Exception as e:
@@ -1753,7 +1801,9 @@ def create_management_handler(
                         restarted = True
                     except (OSError, ValueError):
                         pass
-                return self._send_json({"ok": True, "message": f"MCP config saved for '{name}'", "restarted": restarted})
+                return self._send_json(
+                    {"ok": True, "message": f"MCP config saved for '{name}'", "restarted": restarted}
+                )
             except (OSError, ValueError) as e:
                 return self._send_json({"error": f"Failed to write mcp_config.json: {e}"}, 500)
 
@@ -1761,7 +1811,7 @@ def create_management_handler(
             if not os.path.isfile(global_path):
                 return self._send_json({"servers": {}})
             try:
-                with open(global_path, "r", encoding="utf-8-sig") as f:
+                with open(global_path, encoding="utf-8-sig") as f:
                     data = json.load(f)
                 return self._send_json({"servers": data.get("servers", {})})
             except (OSError, ValueError) as e:
@@ -1772,7 +1822,7 @@ def create_management_handler(
             global_path = os.path.join(data_dir, "mcp_global.json")
             try:
                 if os.path.isfile(global_path):
-                    with open(global_path, "r", encoding="utf-8-sig") as f:
+                    with open(global_path, encoding="utf-8-sig") as f:
                         data = json.load(f)
                 else:
                     data = {}
@@ -1782,16 +1832,20 @@ def create_management_handler(
                 with open(global_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
                 action = "enabled" if enabled else "disabled"
-                return self._send_json({
-                    "ok": True, "server": server_name, "enabled": enabled,
-                    "message": f"MCP server '{server_name}' globally {action}",
-                })
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "server": server_name,
+                        "enabled": enabled,
+                        "message": f"MCP server '{server_name}' globally {action}",
+                    }
+                )
             except (OSError, ValueError) as e:
                 return self._send_json({"error": f"Failed to write mcp_global.json: {e}"}, 500)
 
-        # ════════════════════════════════════════════════════════════════════
-        #  Skills handlers
-        # ════════════════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════════
+            #  Skills handlers
+            # ════════════════════════════════════════════════════════════════════
 
             skills = []
             if not os.path.isdir(self.state.skills_dir):
@@ -1804,28 +1858,30 @@ def create_management_handler(
                 skill_md_path = os.path.join(skill_dir, "SKILL.md")
                 if os.path.isfile(skill_json_path):
                     try:
-                        with open(skill_json_path, "r", encoding="utf-8") as f:
+                        with open(skill_json_path, encoding="utf-8") as f:
                             meta = json.load(f)
                     except (OSError, ValueError):
                         meta = {}
-                    skills.append({
-                        "name": meta.get("name", skill_name),
-                        "display_name": meta.get("name", skill_name),
-                        "version": meta.get("version", ""),
-                        "description": meta.get("description", ""),
-                        "author": meta.get("author", ""),
-                        "license": meta.get("license", ""),
-                        "keywords": meta.get("keywords", []),
-                        "requires": meta.get("requires", {}),
-                        "install": meta.get("install", []),
-                        "entry": meta.get("entry", {}),
-                        "has_skill_json": True,
-                        "dir": skill_name,
-                    })
+                    skills.append(
+                        {
+                            "name": meta.get("name", skill_name),
+                            "display_name": meta.get("name", skill_name),
+                            "version": meta.get("version", ""),
+                            "description": meta.get("description", ""),
+                            "author": meta.get("author", ""),
+                            "license": meta.get("license", ""),
+                            "keywords": meta.get("keywords", []),
+                            "requires": meta.get("requires", {}),
+                            "install": meta.get("install", []),
+                            "entry": meta.get("entry", {}),
+                            "has_skill_json": True,
+                            "dir": skill_name,
+                        }
+                    )
                 elif os.path.isfile(skill_md_path):
                     fm = {}
                     try:
-                        with open(skill_md_path, "r", encoding="utf-8") as f:
+                        with open(skill_md_path, encoding="utf-8") as f:
                             content = f.read()
                         if content.startswith("---"):
                             end = content.find("\n---", 3)
@@ -1837,20 +1893,22 @@ def create_management_handler(
                                         fm[k.strip()] = v.strip()
                     except (OSError, ValueError):
                         pass
-                    skills.append({
-                        "name": fm.get("name", skill_name),
-                        "display_name": fm.get("name", skill_name),
-                        "version": "",
-                        "description": fm.get("description", ""),
-                        "author": "",
-                        "license": "",
-                        "keywords": [],
-                        "requires": {},
-                        "install": [],
-                        "entry": {},
-                        "has_skill_json": False,
-                        "dir": skill_name,
-                    })
+                    skills.append(
+                        {
+                            "name": fm.get("name", skill_name),
+                            "display_name": fm.get("name", skill_name),
+                            "version": "",
+                            "description": fm.get("description", ""),
+                            "author": "",
+                            "license": "",
+                            "keywords": [],
+                            "requires": {},
+                            "install": [],
+                            "entry": {},
+                            "has_skill_json": False,
+                            "dir": skill_name,
+                        }
+                    )
             return self._send_json({"skills": skills})
 
             if not re.match(r"^[a-zA-Z0-9_\-]+$", name):
@@ -1867,7 +1925,7 @@ def create_management_handler(
             skill_md_path = os.path.join(skill_dir, "SKILL.md")
             if os.path.isfile(skill_md_path):
                 try:
-                    with open(skill_md_path, "r", encoding="utf-8") as f:
+                    with open(skill_md_path, encoding="utf-8") as f:
                         skill_md = f.read()
                 except (OSError, ValueError):
                     skill_md = "(Failed to read SKILL.md)"
@@ -1875,13 +1933,26 @@ def create_management_handler(
             skill_json_path = os.path.join(skill_dir, "skill.json")
             if os.path.isfile(skill_json_path):
                 try:
-                    with open(skill_json_path, "r", encoding="utf-8") as f:
+                    with open(skill_json_path, encoding="utf-8") as f:
                         skill_json_data = json.load(f)
                 except (OSError, ValueError):
                     pass
             py_sources = {}
             other_sources = {}
-            _TEXT_EXTS = {".py", ".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini", ".sh", ".bat", ".ps1"}
+            _TEXT_EXTS = {
+                ".py",
+                ".md",
+                ".txt",
+                ".yaml",
+                ".yml",
+                ".json",
+                ".toml",
+                ".cfg",
+                ".ini",
+                ".sh",
+                ".bat",
+                ".ps1",
+            }
             for fi in files_info:
                 ext = os.path.splitext(fi["name"])[1].lower()
                 fpath = os.path.join(skill_dir, fi["name"])
@@ -1889,24 +1960,26 @@ def create_management_handler(
                     continue
                 if ext == ".py":
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
+                        with open(fpath, encoding="utf-8") as f:
                             py_sources[fi["name"]] = f.read()
                     except (OSError, ValueError):
                         py_sources[fi["name"]] = "(Failed to read)"
                 elif ext in _TEXT_EXTS:
                     try:
-                        with open(fpath, "r", encoding="utf-8") as f:
+                        with open(fpath, encoding="utf-8") as f:
                             other_sources[fi["name"]] = f.read()
                     except (OSError, ValueError):
                         other_sources[fi["name"]] = "(Failed to read)"
-            return self._send_json({
-                "name": name,
-                "files": files_info,
-                "skill_md": skill_md,
-                "skill_json": skill_json_data,
-                "py_sources": py_sources,
-                "other_sources": other_sources,
-            })
+            return self._send_json(
+                {
+                    "name": name,
+                    "files": files_info,
+                    "skill_md": skill_md,
+                    "skill_json": skill_json_data,
+                    "py_sources": py_sources,
+                    "other_sources": other_sources,
+                }
+            )
 
         # ════════════════════════════════════════════════════════════════════
         #  Role/Collab/Model card handlers
@@ -1922,9 +1995,9 @@ def create_management_handler(
                 card_name = fname[:-3]
                 fpath = os.path.join(cards_dir, fname)
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         content = f.read()
-                except Exception as e:
+                except Exception:
                     content = ""
                 fm = {}
                 body = content
@@ -1936,7 +2009,7 @@ def create_management_handler(
                             if ":" in line:
                                 k, _, v = line.partition(":")
                                 fm[k.strip()] = v.strip()
-                        body = content[end + 4:].lstrip("\n")
+                        body = content[end + 4 :].lstrip("\n")
                 title = fm.get("name", card_name)
                 for line in body.splitlines():
                     stripped = line.strip()
@@ -1946,13 +2019,15 @@ def create_management_handler(
                 tags_raw = fm.get("tags", "")
                 tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
                 description = fm.get("description", "") or " ".join(body.split())[:100]
-                cards.append({
-                    "name": card_name,
-                    "title": title,
-                    "description": description,
-                    "tags": tags,
-                    "char_count": len(content),
-                })
+                cards.append(
+                    {
+                        "name": card_name,
+                        "title": title,
+                        "description": description,
+                        "tags": tags,
+                        "char_count": len(content),
+                    }
+                )
             return cards
 
             return self._send_json({"cards": self._list_cards(self.state.role_cards_dir)})
@@ -1960,7 +2035,7 @@ def create_management_handler(
             fpath = os.path.join(self.role_cards_dir, f"{card_name}.md")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
 
@@ -1982,7 +2057,7 @@ def create_management_handler(
             fpath = os.path.join(self.collab_cards_dir, f"{card_name}.md")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 content = f.read()
             return self._send_json({"name": card_name, "content": content})
 
@@ -2032,7 +2107,7 @@ def create_management_handler(
                 self.state.procesos[name].reload_config()
             return self._send_json({"ok": True})
 
-        # ── Model Cards ──────────────────────────────────────────────────────
+            # ── Model Cards ──────────────────────────────────────────────────────
 
             cards = []
             if not os.path.isdir(self.state.model_cards_dir):
@@ -2042,38 +2117,40 @@ def create_management_handler(
                     continue
                 fpath = os.path.join(self.model_cards_dir, fname)
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
+                    with open(fpath, encoding="utf-8") as f:
                         data = json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
+                except (json.JSONDecodeError, OSError):
                     data = {}
                 card_name = fname[:-5]
-                cards.append({
-                    "name": card_name,
-                    "title": data.get("title", card_name),
-                    "api_protocol": data.get("api_protocol", ""),
-                    "provider": data.get("provider", ""),
-                    "model_name": data.get("model_name", ""),
-                    "base_url": data.get("base_url", ""),
-                    "token_max": data.get("token_max", 0),
-                    "temperature": data.get("temperature", 0),
-                    "frequency_penalty": data.get("frequency_penalty", 0.0),
-                    "presence_penalty": data.get("presence_penalty", 0.0),
-                    "top_k": data.get("top_k", 0),
-                    "is_think": data.get("is_think", False),
-                    "is_image": data.get("is_image", False),
-                    "is_audio": data.get("is_audio", False),
-                    "is_video": data.get("is_video", False),
-                    "is_audio_output": data.get("is_audio_output", False),
-                    "is_image_output": data.get("is_image_output", False),
-                    "audio_output_voice": data.get("audio_output_voice", "alloy"),
-                    "render_mode": data.get("render_mode", "strict"),
-                })
+                cards.append(
+                    {
+                        "name": card_name,
+                        "title": data.get("title", card_name),
+                        "api_protocol": data.get("api_protocol", ""),
+                        "provider": data.get("provider", ""),
+                        "model_name": data.get("model_name", ""),
+                        "base_url": data.get("base_url", ""),
+                        "token_max": data.get("token_max", 0),
+                        "temperature": data.get("temperature", 0),
+                        "frequency_penalty": data.get("frequency_penalty", 0.0),
+                        "presence_penalty": data.get("presence_penalty", 0.0),
+                        "top_k": data.get("top_k", 0),
+                        "is_think": data.get("is_think", False),
+                        "is_image": data.get("is_image", False),
+                        "is_audio": data.get("is_audio", False),
+                        "is_video": data.get("is_video", False),
+                        "is_audio_output": data.get("is_audio_output", False),
+                        "is_image_output": data.get("is_image_output", False),
+                        "audio_output_voice": data.get("audio_output_voice", "alloy"),
+                        "render_mode": data.get("render_mode", "strict"),
+                    }
+                )
             return self._send_json({"cards": cards})
 
             fpath = os.path.join(self.model_cards_dir, f"{card_name}.json")
             if not os.path.isfile(fpath):
                 return self._send_json({"error": "Card not found"}, 404)
-            with open(fpath, "r", encoding="utf-8") as f:
+            with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
             if "render_mode" not in data:
                 data["render_mode"] = "strict"
@@ -2159,18 +2236,19 @@ def create_management_handler(
                 self.state.procesos[name].reload_config()
             return self._send_json({"ok": True})
 
-        # ════════════════════════════════════════════════════════════════════
-        #  Workspace handlers
-        # ════════════════════════════════════════════════════════════════════
+            # ════════════════════════════════════════════════════════════════════
+            #  Workspace handlers
+            # ════════════════════════════════════════════════════════════════════
 
             current = syscfg.get_workspace()
             from opensquad.workspace_utils import get_default_workspace_path
+
             default_path = get_default_workspace_path()
             record_file = os.path.expanduser("~/.opensquad/last_workspace.json")
             recent_paths: list = []
             if os.path.exists(record_file):
                 try:
-                    with open(record_file, "r", encoding="utf-8") as f:
+                    with open(record_file, encoding="utf-8") as f:
                         data = json.load(f)
                     rw = data.get("recent_workspaces", [])
                     r = data.get("recent", [])
@@ -2188,26 +2266,32 @@ def create_management_handler(
                 meta_file = os.path.join(p, ".opensquad", "workspace.json")
                 if os.path.exists(meta_file):
                     try:
-                        with open(meta_file, "r", encoding="utf-8") as f:
+                        with open(meta_file, encoding="utf-8") as f:
                             meta = json.load(f)
                     except Exception as e:
                         self.state.logger.debug(f"[LauncherAPI] Suppressed: {e}")
-                workspaces.append({
-                    "path": p,
-                    "name": os.path.basename(p),
-                    "is_current": os.path.normpath(p) == os.path.normpath(current),
-                    "exists": os.path.exists(p),
-                    "created_at": meta.get("created_at"),
-                    "last_used": meta.get("last_used"),
-                })
-            return self._send_json({
-                "workspaces": workspaces,
-                "current": current,
-                "default_path": default_path,
-            })
+                workspaces.append(
+                    {
+                        "path": p,
+                        "name": os.path.basename(p),
+                        "is_current": os.path.normpath(p) == os.path.normpath(current),
+                        "exists": os.path.exists(p),
+                        "created_at": meta.get("created_at"),
+                        "last_used": meta.get("last_used"),
+                    }
+                )
+            return self._send_json(
+                {
+                    "workspaces": workspaces,
+                    "current": current,
+                    "default_path": default_path,
+                }
+            )
+
+            from datetime import datetime as _dt
 
             from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace
-            from datetime import datetime as _dt
+
             raw_path = (body.get("path") or "").strip()
             name = (body.get("name") or "").strip()
             if raw_path:
@@ -2220,31 +2304,45 @@ def create_management_handler(
                 meta_dir = os.path.join(workspace_path, ".opensquad")
                 if os.path.exists(meta_dir):
                     save_last_workspace(workspace_path, set_as_current=False)
-                    return self._send_json({
-                        "success": True, "message": "Existing workspace added",
-                        "path": workspace_path, "action": "added",
-                    })
+                    return self._send_json(
+                        {
+                            "success": True,
+                            "message": "Existing workspace added",
+                            "path": workspace_path,
+                            "action": "added",
+                        }
+                    )
                 try:
                     state.syscfg.init_workspace(workspace_path, copy_config=True)
                     save_last_workspace(workspace_path, set_as_current=False)
-                    return self._send_json({
-                        "success": True, "message": "Existing directory initialized as workspace",
-                        "path": workspace_path, "action": "initialized",
-                    })
+                    return self._send_json(
+                        {
+                            "success": True,
+                            "message": "Existing directory initialized as workspace",
+                            "path": workspace_path,
+                            "action": "initialized",
+                        }
+                    )
                 except Exception as e:
                     return self._send_json({"error": f"Failed to initialize workspace: {e}"}, 500)
             try:
                 state.syscfg.init_workspace(workspace_path, copy_config=True)
                 save_last_workspace(workspace_path, set_as_current=False)
-                return self._send_json({
-                    "success": True, "message": "Workspace created successfully",
-                    "path": workspace_path, "action": "created",
-                })
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": "Workspace created successfully",
+                        "path": workspace_path,
+                        "action": "created",
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to create workspace: {e}"}, 500)
 
-            from opensquad.workspace_utils import save_last_workspace
             from datetime import datetime as _dt
+
+            from opensquad.workspace_utils import save_last_workspace
+
             raw_path = (body.get("path") or "").strip()
             if not raw_path:
                 return self._send_json({"error": "Missing 'path'"}, 400)
@@ -2253,37 +2351,51 @@ def create_management_handler(
                 return self._send_json({"error": f"Workspace does not exist: {workspace_path}"}, 404)
             meta_dir = os.path.join(workspace_path, ".opensquad")
             if not os.path.exists(meta_dir):
-                return self._send_json({"error": f"Invalid workspace (missing .opensquad directory): {workspace_path}"}, 400)
+                return self._send_json(
+                    {"error": f"Invalid workspace (missing .opensquad directory): {workspace_path}"}, 400
+                )
             try:
                 ws_json = os.path.join(meta_dir, "workspace.json")
                 if not os.path.exists(ws_json):
                     with open(ws_json, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "name": os.path.basename(workspace_path),
-                            "created_at": _dt.utcnow().isoformat() + "Z",
-                            "last_used": _dt.utcnow().isoformat() + "Z",
-                        }, f, indent=2, ensure_ascii=False)
+                        json.dump(
+                            {
+                                "name": os.path.basename(workspace_path),
+                                "created_at": _dt.utcnow().isoformat() + "Z",
+                                "last_used": _dt.utcnow().isoformat() + "Z",
+                            },
+                            f,
+                            indent=2,
+                            ensure_ascii=False,
+                        )
                 save_last_workspace(workspace_path)
-                return self._send_json({
-                    "success": True,
-                    "message": "Workspace switched; please restart the Launcher for the change to take effect",
-                    "path": workspace_path,
-                    "requires_restart": True,
-                })
+                return self._send_json(
+                    {
+                        "success": True,
+                        "message": "Workspace switched; please restart the Launcher for the change to take effect",
+                        "path": workspace_path,
+                        "requires_restart": True,
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to switch workspace: {e}"}, 500)
 
             install_dir = syscfg.get_builtin_root()
             current_workspace = syscfg.get_workspace()
             if current_workspace and os.path.normpath(current_workspace) == os.path.normpath(install_dir):
-                return self._send_json({
-                    "has_legacy_data": False,
-                    "legacy_location": install_dir,
-                    "detected_items": {
-                        "database": False, "agents": False,
-                        "uploads": False, "sessions": False, "logs": False,
-                    },
-                })
+                return self._send_json(
+                    {
+                        "has_legacy_data": False,
+                        "legacy_location": install_dir,
+                        "detected_items": {
+                            "database": False,
+                            "agents": False,
+                            "uploads": False,
+                            "sessions": False,
+                            "logs": False,
+                        },
+                    }
+                )
 
             def _has(p):
                 return os.path.exists(p) and bool(os.listdir(p))
@@ -2295,13 +2407,16 @@ def create_management_handler(
                 "sessions": _has(os.path.join(install_dir, "data", "sessions")),
                 "logs": _has(os.path.join(install_dir, "data", "logs")),
             }
-            return self._send_json({
-                "has_legacy_data": any(detected.values()),
-                "legacy_location": install_dir,
-                "detected_items": detected,
-            })
+            return self._send_json(
+                {
+                    "has_legacy_data": any(detected.values()),
+                    "legacy_location": install_dir,
+                    "detected_items": detected,
+                }
+            )
 
             import uuid
+
             source = (body.get("source") or "").strip()
             target = (body.get("target") or "").strip()
             mode = body.get("mode", "copy")
@@ -2323,6 +2438,7 @@ def create_management_handler(
 
                     def _progress(msg: str):
                         import re as _re
+
                         m = _re.search(r"\[(\d+)/(\d+)\]", msg)
                         if m:
                             cur, tot = int(m.group(1)), int(m.group(2))
@@ -2330,6 +2446,7 @@ def create_management_handler(
                         ws_mig[task_id]["message"] = msg
 
                     from opensquad.migration_tool import LegacyDataMigrator
+
                     migrator = LegacyDataMigrator(
                         install_dir=source,
                         target_workspace=target,
@@ -2347,22 +2464,26 @@ def create_management_handler(
 
             _threading = __import__("threading")
             _threading.Thread(target=_run, daemon=True, name=f"ws-migrate-{task_id[:8]}").start()
-            return self._send_json({
-                "success": True,
-                "task_id": task_id,
-                "message": "Migration task started",
-            })
+            return self._send_json(
+                {
+                    "success": True,
+                    "task_id": task_id,
+                    "message": "Migration task started",
+                }
+            )
 
             task = ws_mig.get(task_id)
             if task is None:
                 return self._send_json({"error": f"Task not found: {task_id}"}, 404)
-            return self._send_json({
-                "task_id": task_id,
-                "status": task["status"],
-                "progress": task["progress"],
-                "message": task["message"],
-                "report": task.get("report"),
-            })
+            return self._send_json(
+                {
+                    "task_id": task_id,
+                    "status": task["status"],
+                    "progress": task["progress"],
+                    "message": task["message"],
+                    "report": task.get("report"),
+                }
+            )
 
     # ── Build HandlerState and attach to class ──
     ManagementHandler.state = HandlerState(
@@ -2402,12 +2523,12 @@ def _start_management_server(
     port: int,
     *,
     launcher_lock: Any = None,
-    procesos: Dict[str, Any],
-    plug_svcs: Dict[str, Any],
-    task_hb: Dict[str, Dict[str, Any]],
+    procesos: dict[str, Any],
+    plug_svcs: dict[str, Any],
+    task_hb: dict[str, dict[str, Any]],
     task_sn: set,
     shut_ev: Any,
-    ws_mig: Dict[str, Any],
+    ws_mig: dict[str, Any],
     agents_dir: str,
     plugins_dir: str,
     skills_dir: str,
@@ -2442,7 +2563,7 @@ def _start_management_server(
     _builtin_plugins_path = os.path.join(plugins_dir, "builtin_plugins.json")
     if os.path.isfile(_builtin_plugins_path):
         try:
-            with open(_builtin_plugins_path, "r", encoding="utf-8") as _bf:
+            with open(_builtin_plugins_path, encoding="utf-8") as _bf:
                 _bp_data = json.load(_bf)
                 _builtin_plugins = _bp_data.get("plugins", {})
         except Exception as e:

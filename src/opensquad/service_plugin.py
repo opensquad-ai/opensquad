@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 [DEPRECATED] Generic plugin service auto-start base class.
 
@@ -24,10 +23,10 @@ Usage (legacy):
            +-- ...
 
 2. Inherit ServicePlugin in plugin.py:
-   
+
    from opensquad.service_plugin import ServicePlugin
    from opensquad.plugin_api import register, Context
-   
+
    @register(
        name="my_plugin",
        config_schema={
@@ -45,16 +44,18 @@ Usage (legacy):
            )
 """
 
+import contextlib
 import logging
 import os
 import subprocess
 import sys
 import threading
 import time
-import requests
-from typing import Any, Optional
+from typing import Any
 
-from opensquad.plugin_api import Plugin, Context
+import requests
+
+from opensquad.plugin_api import Context, Plugin
 
 
 class _RotatingLogWriter:
@@ -103,6 +104,7 @@ class _RotatingLogWriter:
 
 class _ServiceRegistry:
     """Global singleton registry: ensures one service process per port across all agents."""
+
     _lock = threading.Lock()
     _services: dict[int, dict] = {}  # port -> {"process": Popen, "refcount": int, "plugin_names": set}
 
@@ -136,7 +138,7 @@ class _ServiceRegistry:
             return False
 
     @classmethod
-    def get_process(cls, port: int) -> Optional[subprocess.Popen]:
+    def get_process(cls, port: int) -> subprocess.Popen | None:
         with cls._lock:
             svc = cls._services.get(port)
             return svc["process"] if svc else None
@@ -147,7 +149,7 @@ class _ServiceRegistry:
             return port in cls._services
 
 
-def _acquire_service_lock(port: int, timeout: float = 6.0) -> Optional[Any]:
+def _acquire_service_lock(port: int, timeout: float = 6.0) -> Any | None:
     """Acquire a file-based lock for a service port (cross-process safe).
 
     Returns the lock object if acquired, or None on timeout.
@@ -155,11 +157,13 @@ def _acquire_service_lock(port: int, timeout: float = 6.0) -> Optional[Any]:
     process attempts to start the service subprocess at a time.
     """
     import tempfile
+
     lock_path = os.path.join(tempfile.gettempdir(), f"opensquad_svc_{port}.lock")
     lock_file = open(lock_path, "w")
     try:
         if sys.platform == "win32":
             import msvcrt
+
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -171,6 +175,7 @@ def _acquire_service_lock(port: int, timeout: float = 6.0) -> Optional[Any]:
             return None
         else:
             import fcntl
+
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -190,17 +195,17 @@ def _release_service_lock(lock_file: Any) -> None:
     try:
         if sys.platform == "win32":
             import msvcrt
+
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception:
         pass
     finally:
-        try:
+        with contextlib.suppress(Exception):
             lock_file.close()
-        except Exception:
-            pass
 
 
 class ServicePlugin(Plugin):
@@ -240,11 +245,11 @@ class ServicePlugin(Plugin):
         self.max_startup_wait = max_startup_wait
         self.health_check_interval = health_check_interval
 
-        self._service_process: Optional[subprocess.Popen] = None
-        self._health_check_thread: Optional[threading.Thread] = None
-        self._startup_thread: Optional[threading.Thread] = None
+        self._service_process: subprocess.Popen | None = None
+        self._health_check_thread: threading.Thread | None = None
+        self._startup_thread: threading.Thread | None = None
         self._stop_health_check = threading.Event()
-        self._log_writer: Optional[_RotatingLogWriter] = None
+        self._log_writer: _RotatingLogWriter | None = None
         self._port: int = 0
         self._is_owner: bool = False  # True if this instance owns the service process
 
@@ -277,19 +282,19 @@ class ServicePlugin(Plugin):
             if should_stop:
                 self._stop_service()
             else:
-                self.logger.info(f"[{self.service_name}] Service on port {self._port} still in use by other agents, keeping alive.")
+                self.logger.info(
+                    f"[{self.service_name}] Service on port {self._port} still in use by other agents, keeping alive."
+                )
         else:
             self._stop_service()
         self.logger.info(f"[{self.service_name}] unloaded.")
-    
+
     def _start_service_async(self) -> None:
         """Start service in a daemon thread to avoid blocking plugin load."""
         if self._startup_thread and self._startup_thread.is_alive():
             return
         self._startup_thread = threading.Thread(
-            target=self._start_service,
-            daemon=True,
-            name=f"{self.service_name.lower()}_startup"
+            target=self._start_service, daemon=True, name=f"{self.service_name.lower()}_startup"
         )
         self._startup_thread.start()
 
@@ -383,19 +388,21 @@ class ServicePlugin(Plugin):
                         )
                         break
                     if self._check_service_health(port):
-                        self.logger.info(f"[{self.service_name}] Service started successfully on port {port} ({elapsed:.1f}s)")
+                        self.logger.info(
+                            f"[{self.service_name}] Service started successfully on port {port} ({elapsed:.1f}s)"
+                        )
                         self._start_health_monitor(port)
                         return
 
                 self.logger.error(f"[{self.service_name}] Service failed to start after {self.max_startup_wait}s")
                 self._stop_service()
-                
+
             except Exception as e:
                 self.logger.error(f"[{self.service_name}] Failed to start service: {e}")
                 self._stop_service()
         finally:
             _release_service_lock(svc_lock)
-    
+
     def _stop_service(self) -> None:
         """Stop the service process."""
         # Stop startup / health-check threads
@@ -417,21 +424,17 @@ class ServicePlugin(Plugin):
                 self.logger.info(f"[{self.service_name}] Service stopped")
             except Exception as e:
                 self.logger.warning(f"[{self.service_name}] Failed to stop service gracefully: {e}")
-                try:
+                with contextlib.suppress(Exception):
                     self._service_process.kill()
-                except Exception:
-                    pass
             finally:
                 self._service_process = None
 
         # Close log writer
         if self._log_writer:
-            try:
+            with contextlib.suppress(Exception):
                 self._log_writer.close()
-            except Exception:
-                pass
             self._log_writer = None
-    
+
     def _check_service_health(self, port: int) -> bool:
         """Check whether the service is healthy."""
         try:
@@ -439,9 +442,10 @@ class ServicePlugin(Plugin):
             return resp.status_code == 200
         except Exception:
             return False
-    
+
     def _start_health_monitor(self, port: int) -> None:
         """Start the health-monitoring thread (checks service status periodically)."""
+
         def monitor():
             while not self._stop_health_check.wait(self.health_check_interval):
                 if not self._check_service_health(port):
@@ -452,23 +456,19 @@ class ServicePlugin(Plugin):
                             self._service_process.terminate()
                             self._service_process.wait(timeout=5)
                         except Exception:
-                            try:
+                            with contextlib.suppress(Exception):
                                 self._service_process.kill()
-                            except Exception:
-                                pass
                         finally:
                             self._service_process = None
-                    
+
                     # Restart service
                     time.sleep(2)
                     self._start_service()
                     break  # Exit this thread after restart; a new thread is created inside _start_service
-        
+
         self._stop_health_check.clear()
         self._health_check_thread = threading.Thread(
-            target=monitor,
-            daemon=True,
-            name=f"{self.service_name.lower()}_health_monitor"
+            target=monitor, daemon=True, name=f"{self.service_name.lower()}_health_monitor"
         )
         self._health_check_thread.start()
         self.logger.info(f"[{self.service_name}] Health monitor started")

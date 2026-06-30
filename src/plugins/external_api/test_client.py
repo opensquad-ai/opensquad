@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 External Adapter Test Client
 
@@ -47,14 +46,15 @@ def headers():
 
 # ── Mode 1: Sync ──
 
+
 def test_sync(message: str, agent_id: str = "default-001"):
     """Sync mode test"""
-    print(f"\n{'='*50}")
-    print(f"  Sync mode - POST /api/chat")
-    print(f"{'='*50}")
+    print(f"\n{'=' * 50}")
+    print("  Sync mode - POST /api/chat")
+    print(f"{'=' * 50}")
     print(f"  Sending: {message}")
     print(f"  Agent: {agent_id}")
-    print(f"  Waiting for reply...\n")
+    print("  Waiting for reply...\n")
 
     start = time.time()
     with httpx.Client(timeout=180) as client:
@@ -84,17 +84,19 @@ def test_sync(message: str, agent_id: str = "default-001"):
 
 # ── Mode 2: SSE Stream ──
 
+
 def test_stream(message: str, agent_id: str = "default-001"):
     """SSE streaming mode test"""
-    print(f"\n{'='*50}")
-    print(f"  SSE streaming mode - POST /api/chat/stream")
-    print(f"{'='*50}")
+    print(f"\n{'=' * 50}")
+    print("  SSE streaming mode - POST /api/chat/stream")
+    print(f"{'=' * 50}")
     print(f"  Sending: {message}")
     print(f"  Agent: {agent_id}")
     print()
 
-    with httpx.Client(timeout=180) as client:
-        with client.stream(
+    with (
+        httpx.Client(timeout=180) as client,
+        client.stream(
             "POST",
             f"{BASE_URL}/api/chat/stream",
             headers=headers(),
@@ -102,44 +104,46 @@ def test_stream(message: str, agent_id: str = "default-001"):
                 "agent_id": agent_id,
                 "message": message,
             },
-        ) as resp:
-            print(f"  HTTP {resp.status_code}")
-            print(f"  --- Event stream ---")
-            for line in resp.iter_lines():
-                if line.startswith("data: "):
-                    payload = line[6:]
-                    try:
-                        event = json.loads(payload)
-                        etype = event.get("type", "?")
-                        content = event.get("content", "")
+        ) as resp,
+    ):
+        print(f"  HTTP {resp.status_code}")
+        print("  --- Event stream ---")
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                payload = line[6:]
+                try:
+                    event = json.loads(payload)
+                    etype = event.get("type", "?")
+                    content = event.get("content", "")
 
-                        if etype == "stream":
-                            print(f"  [stream] {content}", end="", flush=True)
-                        elif etype == "message":
-                            print(f"\n  [done] {str(content)[:200]}")
-                        elif etype == "thought":
-                            print(f"  [thought] {str(content)[:100]}")
-                        elif etype == "tool_call":
-                            print(f"  [tool] {str(content)[:100]}")
-                        elif etype == "tool_result":
-                            print(f"  [result] {str(content)[:100]}")
-                        elif etype == "done":
-                            print(f"  --- End ---")
-                        elif etype == "error":
-                            print(f"  [error] {content}")
-                        else:
-                            print(f"  [{etype}] {str(content)[:100]}")
-                    except json.JSONDecodeError:
-                        print(f"  [raw] {payload}")
+                    if etype == "stream":
+                        print(f"  [stream] {content}", end="", flush=True)
+                    elif etype == "message":
+                        print(f"\n  [done] {str(content)[:200]}")
+                    elif etype == "thought":
+                        print(f"  [thought] {str(content)[:100]}")
+                    elif etype == "tool_call":
+                        print(f"  [tool] {str(content)[:100]}")
+                    elif etype == "tool_result":
+                        print(f"  [result] {str(content)[:100]}")
+                    elif etype == "done":
+                        print("  --- End ---")
+                    elif etype == "error":
+                        print(f"  [error] {content}")
+                    else:
+                        print(f"  [{etype}] {str(content)[:100]}")
+                except json.JSONDecodeError:
+                    print(f"  [raw] {payload}")
 
 
 # ── Mode 3: Async ──
 
+
 def test_async(message: str, agent_id: str = "default-001"):
     """Async mode test"""
-    print(f"\n{'='*50}")
-    print(f"  Async mode - POST /api/chat/async")
-    print(f"{'='*50}")
+    print(f"\n{'=' * 50}")
+    print("  Async mode - POST /api/chat/async")
+    print(f"{'=' * 50}")
     print(f"  Sending: {message}")
     print(f"  Agent: {agent_id}")
     print()
@@ -159,7 +163,7 @@ def test_async(message: str, agent_id: str = "default-001"):
         print(f"  Submitted: task_id = {task_id}")
 
         # Poll
-        print(f"  Polling", end="", flush=True)
+        print("  Polling", end="", flush=True)
         for _ in range(60):
             time.sleep(2)
             print(".", end="", flush=True)
@@ -184,15 +188,16 @@ def test_async(message: str, agent_id: str = "default-001"):
 
 # ── Mode 4: WebSocket ──
 
+
 async def test_ws(message: str, agent_id: str = "default-001", interactive: bool = False):
     """WebSocket full-duplex mode test"""
     if websockets is None:
         print("Please install websockets first: pip install websockets")
         return
 
-    print(f"\n{'='*50}")
-    print(f"  WebSocket mode - /ws/chat")
-    print(f"{'='*50}")
+    print(f"\n{'=' * 50}")
+    print("  WebSocket mode - /ws/chat")
+    print(f"{'=' * 50}")
 
     url = f"{WS_URL}/ws/chat?agent_id={agent_id}&api_key={API_KEY}"
     print(f"  Connecting: {url}")
@@ -207,7 +212,7 @@ async def test_ws(message: str, agent_id: str = "default-001", interactive: bool
             return
 
         if interactive:
-            print(f"\n  Interactive mode - type a message, type 'quit' to exit")
+            print("\n  Interactive mode - type a message, type 'quit' to exit")
             while True:
                 try:
                     user_input = input("\n  You: ").strip()
@@ -228,7 +233,7 @@ async def test_ws(message: str, agent_id: str = "default-001", interactive: bool
                     content = event.get("content", "")
 
                     if etype == "stream":
-                        print(f"  ", end="", flush=True)
+                        print("  ", end="", flush=True)
                         print(content, end="", flush=True)
                     elif etype == "message":
                         print(f"\n  Agent: {str(content)[:500]}")
@@ -263,7 +268,7 @@ async def test_ws(message: str, agent_id: str = "default-001", interactive: bool
                 elif etype == "tool_call":
                     print(f"  [tool] {str(content)[:100]}")
                 elif etype == "turn_end":
-                    print(f"\n  --- End ---")
+                    print("\n  --- End ---")
                     break
                 elif etype == "error":
                     print(f"  [error] {content}")
@@ -271,23 +276,19 @@ async def test_ws(message: str, agent_id: str = "default-001", interactive: bool
                 else:
                     print(f"  [{etype}] {str(content)[:100]}")
 
-    print(f"\n  WebSocket disconnected")
+    print("\n  WebSocket disconnected")
 
 
 # ── Entry point ──
 
+
 def main():
     parser = argparse.ArgumentParser(description="External Adapter Test Client")
-    parser.add_argument("--mode", choices=["sync", "stream", "async", "ws"], default="sync",
-                        help="Communication mode")
-    parser.add_argument("--message", "-m", default="Hello, please briefly introduce yourself",
-                        help="Message to send")
-    parser.add_argument("--agent", default="default-001",
-                        help="Agent ID")
-    parser.add_argument("--key", default="",
-                        help="API Key")
-    parser.add_argument("--interactive", "-i", action="store_true",
-                        help="WebSocket interactive mode")
+    parser.add_argument("--mode", choices=["sync", "stream", "async", "ws"], default="sync", help="Communication mode")
+    parser.add_argument("--message", "-m", default="Hello, please briefly introduce yourself", help="Message to send")
+    parser.add_argument("--agent", default="default-001", help="Agent ID")
+    parser.add_argument("--key", default="", help="API Key")
+    parser.add_argument("--interactive", "-i", action="store_true", help="WebSocket interactive mode")
 
     args = parser.parse_args()
 

@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Vision Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/vision/vision.py.
 """
+
 import importlib
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
-from opensquad.plugin_api import register, Plugin, Context
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.vision")
 
@@ -31,17 +31,19 @@ class VisionPlugin(Plugin):
     def on_load(self) -> None:
         logger.info("[VisionPlugin] loaded (new-style).")
 
-    def get_tool_modules(self) -> List[Dict[str, Any]]:
+    def get_tool_modules(self) -> list[dict[str, Any]]:
         tools = []
         try:
             module = importlib.import_module("plugins.vision.vision")
-            tools.append({
-                "name": "vision",
-                "module": module,
-                "level": "extended",
-                "auto_register": True,
-                "requires_agent_id": False,
-            })
+            tools.append(
+                {
+                    "name": "vision",
+                    "module": module,
+                    "level": "extended",
+                    "auto_register": True,
+                    "requires_agent_id": False,
+                }
+            )
         except ImportError as e:
             logger.error(f"[VisionPlugin] Cannot import vision module: {e}")
         return tools

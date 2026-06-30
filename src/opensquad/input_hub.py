@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
 import asyncio
-import queue
 import logging
-from typing import Dict, Any, Optional, List
+import queue
+from typing import Any
+
 from opensquad.message_queue import get_message_queue
 
 logger = logging.getLogger(__name__)
+
 
 class InputHub:
     """
@@ -17,14 +18,15 @@ class InputHub:
     - push() and push_urgent() attempt up to 3 retries with 0.1s sleep intervals.
     - If still full after retries, the oldest item is evicted to make room.
     """
+
     def __init__(self):
-        self._queue: Optional[asyncio.Queue] = None
-        self._urgent_queue: Optional[asyncio.Queue] = None  # urgent command queue (for interrupts)
+        self._queue: asyncio.Queue | None = None
+        self._urgent_queue: asyncio.Queue | None = None  # urgent command queue (for interrupts)
         self.last_message_source = None  # records the source of the last message, used for replies
         self._stop_requested = False  # stop request flag
         self.agent_dir = None  # Agent root directory (e.g. agents/ai002)
         # ── Event-driven notification (P0 perf: replaces 1s polling) ──
-        self._new_input_event: Optional[asyncio.Event] = None
+        self._new_input_event: asyncio.Event | None = None
 
     def set_agent_context(self, agent_dir: str):
         """Set Agent context for localizing multi-modal resources."""
@@ -40,7 +42,7 @@ class InputHub:
             self._urgent_queue = asyncio.Queue(maxsize=10000)
         return self._urgent_queue
 
-    async def get_user_response(self) -> Dict[str, Any]:
+    async def get_user_response(self) -> dict[str, Any]:
         """
         Wait for user input while automatically checking the message pipeline.
         Supports reading from both the normal queue and the urgent queue.
@@ -51,38 +53,43 @@ class InputHub:
         """
         queue = self._get_queue()
         urgent_queue = self._get_urgent_queue()
-        logger.debug(f"[InputHub] get_user_response ENTER - queue_size={queue.qsize()}, urgent_size={urgent_queue.qsize()}")
+        logger.debug(
+            f"[InputHub] get_user_response ENTER - queue_size={queue.qsize()}, urgent_size={urgent_queue.qsize()}"
+        )
 
         # Check urgent queue first
         if not urgent_queue.empty():
             item = await urgent_queue.get()
-            logger.info(f"[InputHub] get_user_response EXIT (urgent) - source={item.get('source')}, content={str(item.get('content',''))[:80]}")
+            logger.info(
+                f"[InputHub] get_user_response EXIT (urgent) - source={item.get('source')}, content={str(item.get('content', ''))[:80]}"
+            )
             return item
 
         # If the normal queue is non-empty, return immediately
         if not queue.empty():
             user_input = await queue.get()
-            logger.debug(f"[InputHub] get_user_response EXIT (immediate) - source={user_input.get('source')}, content={str(user_input.get('content',''))[:60]}")
+            logger.debug(
+                f"[InputHub] get_user_response EXIT (immediate) - source={user_input.get('source')}, content={str(user_input.get('content', ''))[:60]}"
+            )
         else:
-            logger.debug(f"[InputHub] get_user_response WAITING (blocking) - both queues empty, awaiting...")
+            logger.debug("[InputHub] get_user_response WAITING (blocking) - both queues empty, awaiting...")
             # Wait on both the normal input and the urgent command simultaneously
             q_get = asyncio.create_task(queue.get())
             u_get = asyncio.create_task(urgent_queue.get())
 
             try:
-                done, pending = await asyncio.wait(
-                    [q_get, u_get],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
+                done, pending = await asyncio.wait([q_get, u_get], return_when=asyncio.FIRST_COMPLETED)
 
                 # Cancel tasks that have not yet completed
                 for task in pending:
                     task.cancel()
 
                 # Retrieve the result
-                user_input = list(done)[0].result()
-                logger.debug(f"[InputHub] get_user_response EXIT (awaited) - source={user_input.get('source')}, content={str(user_input.get('content',''))[:60]}")
-            except (asyncio.CancelledError, Exception) as exc:
+                user_input = next(iter(done)).result()
+                logger.debug(
+                    f"[InputHub] get_user_response EXIT (awaited) - source={user_input.get('source')}, content={str(user_input.get('content', ''))[:60]}"
+                )
+            except (asyncio.CancelledError, Exception):
                 # wait_for timeout cancelled this coroutine -- must clean up subtasks!
                 # If not cancelled, orphan tasks will steal the next push's message
                 rescued = 0
@@ -94,7 +101,9 @@ class InputHub:
                         try:
                             item = task.result()
                             qname = "urgent_queue" if target_q is urgent_queue else "queue"
-                            logger.info(f"[InputHub] RESCUED orphaned item during cancel: content={str(item.get('content',''))[:80]}, putting back into {qname}")
+                            logger.info(
+                                f"[InputHub] RESCUED orphaned item during cancel: content={str(item.get('content', ''))[:80]}, putting back into {qname}"
+                            )
                             target_q.put_nowait(item)
                             rescued += 1
                         except Exception:
@@ -115,7 +124,9 @@ class InputHub:
         # Check message pipeline (non-blocking, drain all accumulated messages)
         pending_messages = get_message_queue().get_all()
         # Change INFO to DEBUG for frequent polling log
-        logger.debug(f"[InputHub] get_user_response: source={user_input.get('source')}, content_len={len(content)}, pending_msgs={len(pending_messages)}")
+        logger.debug(
+            f"[InputHub] get_user_response: source={user_input.get('source')}, content_len={len(content)}, pending_msgs={len(pending_messages)}"
+        )
 
         # Key: clear stale message source on every new input.
         # Only re-set it when the current input actually carries group messages.
@@ -137,18 +148,18 @@ class InputHub:
                 self.last_message_source = {
                     "type": "group",
                     "target_id": last_msg.source_id,
-                    "sender_id": last_msg.sender_id
+                    "sender_id": last_msg.sender_id,
                 }
             elif last_msg.type == "dm":
                 self.last_message_source = {
                     "type": "dm",
                     "target_id": last_msg.sender_id,
-                    "sender_name": last_msg.sender_name
+                    "sender_name": last_msg.sender_name,
                 }
 
         return user_input
 
-    def _format_messages(self, messages: List) -> str:
+    def _format_messages(self, messages: list) -> str:
         """Format messages into a text context."""
         formatted = []
         for msg in messages:
@@ -174,6 +185,7 @@ class InputHub:
         logger.info(f"[InputHub] _fix_path input: {path}")
 
         from opensquad.system_config import syscfg
+
         workspace_root = syscfg.project_root()
         # Uploads are stored in data/uploads/ in the workspace
         uploads_dir = os.path.join(workspace_root, "data", "uploads")
@@ -209,9 +221,18 @@ class InputHub:
         logger.info(f"[InputHub] _fix_path passthrough: {path} (exists={os.path.exists(path)})")
         return path
 
-    def push(self, content: str, source: str = "web", images: list = None,
-             attachments: list = None, channel: str = "", sender_name: str = "", chat_name: str = "",
-             source_chat_id: str = "", user_id: str = ""):
+    def push(
+        self,
+        content: str,
+        source: str = "web",
+        images: list | None = None,
+        attachments: list | None = None,
+        channel: str = "",
+        sender_name: str = "",
+        chat_name: str = "",
+        source_chat_id: str = "",
+        user_id: str = "",
+    ):
         """Push a new command, optionally with image path list, attachments, and channel identifier.
 
         Backpressure: when the queue is at maxsize=10000, the oldest item is
@@ -219,8 +240,11 @@ class InputHub:
         plugins, and async handlers all use it without await.
         """
         import os
+
         q = self._get_queue()
-        logger.debug(f"[InputHub] PUSH from {source} (channel={channel}): content_len={len(content)}, queue_size_before={q.qsize()}, queue_id={id(q)}")
+        logger.debug(
+            f"[InputHub] PUSH from {source} (channel={channel}): content_len={len(content)}, queue_size_before={q.qsize()}, queue_id={id(q)}"
+        )
 
         # NOTE: event_pipeline push removed from here — it caused the trigger message
         # to be processed twice (once as role=user, once re-injected via role=tool).
@@ -258,7 +282,9 @@ class InputHub:
             # Bug 5 fix: use the same path as _fix_path (workspace/data/uploads)
             # instead of the previously hardcoded gateway/backend/uploads.
             import os
+
             from opensquad.system_config import syscfg
+
             uploads_abs = os.path.join(syscfg.project_root(), "data", "uploads").replace("\\", "/")
             # Replace /uploads with full path (normalized to forward slashes for consistency in text)
             content = content.replace("/uploads", uploads_abs)
@@ -286,7 +312,8 @@ class InputHub:
         except asyncio.QueueFull:
             logger.warning(
                 "[InputHub] Queue full (size=%d), evicting oldest item for push from %s",
-                q.qsize(), source,
+                q.qsize(),
+                source,
             )
             try:
                 q.get_nowait()  # evict oldest
@@ -299,8 +326,14 @@ class InputHub:
             self._new_input_event.set()
         logger.debug(f"[InputHub] PUSH DONE - queue_size_after={self._get_queue().qsize()}")
 
-    def push_urgent(self, content: str, source: str = "web", images: list = None,
-                    attachments: list = None, channel: str = ""):
+    def push_urgent(
+        self,
+        content: str,
+        source: str = "web",
+        images: list | None = None,
+        attachments: list | None = None,
+        channel: str = "",
+    ):
         """Push an urgent command (interrupts the current task), optionally with image paths,
         attachments, and channel identifier.
 
@@ -343,7 +376,8 @@ class InputHub:
         except asyncio.QueueFull:
             logger.warning(
                 "[InputHub] Urgent queue full (size=%d), evicting oldest item for push_urgent from %s",
-                uq.qsize(), source,
+                uq.qsize(),
+                source,
             )
             try:
                 uq.get_nowait()  # evict oldest
@@ -354,7 +388,9 @@ class InputHub:
         # Signal event-driven waiters
         if self._new_input_event is not None:
             self._new_input_event.set()
-        logger.info(f"[InputHub] PUSH_URGENT: content={str(content)[:80]}, source={source}, urgent_queue_size_after={uq.qsize()}, queue_id={id(uq)}")
+        logger.info(
+            f"[InputHub] PUSH_URGENT: content={str(content)[:80]}, source={source}, urgent_queue_size_after={uq.qsize()}, queue_id={id(uq)}"
+        )
 
     def check_urgent_commands(self) -> list:
         """Non-blocking check for all pending urgent commands."""
@@ -420,6 +456,7 @@ class InputHub:
         except asyncio.TimeoutError:
             return False
 
+
 # Global singleton
 input_hub = InputHub()
 
@@ -430,5 +467,6 @@ def get_input_hub(ctx=None):
     if ctx is not None:
         return ctx.input_hub
     from opensquad._context import get_current_context
+
     ctx = get_current_context()
     return ctx.input_hub if ctx is not None else input_hub

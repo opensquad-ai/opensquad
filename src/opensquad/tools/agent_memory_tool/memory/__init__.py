@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Agent long-term associative memory module (SQLite edition)
 
@@ -35,12 +34,18 @@ Core components:
 
 # Unified API (recommended entry point)
 from .agent_memory import AgentMemory
+from .chain import discover_hidden_chain, discover_hidden_chain_with_evidence
 
 # Low-level modules (for advanced users)
 from .cooccurrence import IncrementalCooccurrence
-from .probability import compute_ppmi_matrix, compute_conditional_prob_matrix
 from .decay import DecayManager
-from .inference import find_top_inference_paths, find_group_inference_paths, beam_search_inference
-from .storage import MemoryStore, extract_keywords_jieba, extract_nouns_jieba, extract_keywords_weighted, parse_time_expression
-from .chain import discover_hidden_chain, discover_hidden_chain_with_evidence
+from .inference import beam_search_inference, find_group_inference_paths, find_top_inference_paths
+from .probability import compute_conditional_prob_matrix, compute_ppmi_matrix
 from .retriever import MemoryRetriever, count_tokens
+from .storage import (
+    MemoryStore,
+    extract_keywords_jieba,
+    extract_keywords_weighted,
+    extract_nouns_jieba,
+    parse_time_expression,
+)

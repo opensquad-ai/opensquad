@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,7 +35,11 @@ class TurnResultHandler:
         self.runner = runner
 
     async def parse_and_persist_tags(self, full_response: str) -> ResponseTagState:
-        thought_text = ResponseParser.extract_tag(full_response, "thought") or ResponseParser.extract_tag(full_response, "think") or ""
+        thought_text = (
+            ResponseParser.extract_tag(full_response, "thought")
+            or ResponseParser.extract_tag(full_response, "think")
+            or ""
+        )
         if thought_text:
             self.runner._session_manager.add_event(
                 "thought",
@@ -128,7 +131,7 @@ class TurnResultHandler:
             await self.runner._emit("sleep", seconds)
             await self.runner._state_manager.set_state("sleeping")
             await self.runner._emit("state", "sleeping")
-            wake_info = await sleep_controller.sleep(seconds)
+            await sleep_controller.sleep(seconds)
             await self.runner._state_manager.set_state("idle")
             await self.runner._emit("state", "idle")
             return False, "", True
@@ -182,10 +185,15 @@ class TurnResultHandler:
             saved_output_media=None,
         )
 
-    async def emit_user_facing_message(self, user_message: UserFacingMessage, output_media: list[Any] | None) -> UserFacingMessage:
+    async def emit_user_facing_message(
+        self, user_message: UserFacingMessage, output_media: list[Any] | None
+    ) -> UserFacingMessage:
         saved_msg = None
         saved_output_media = None
-        print(f"[DIAG_EMIT] emit_user_facing_message ENTER: user_msg={user_message.user_msg!r}, strip={user_message.user_msg.strip()!r}", flush=True)
+        print(
+            f"[DIAG_EMIT] emit_user_facing_message ENTER: user_msg={user_message.user_msg!r}, strip={user_message.user_msg.strip()!r}",
+            flush=True,
+        )
         if user_message.user_msg.strip():
             send_msg = user_message.user_msg
             if self.runner._plugin_manager:
@@ -200,7 +208,7 @@ class TurnResultHandler:
                 event_type = "to_user_reply" if user_message.user_msg_from_tag == "to_user_reply" else "to_user_final"
                 print(f"[DIAG_EMIT] CALLING _emit(event_type={event_type}, send_msg={send_msg!r})", flush=True)
                 await self.runner._emit(event_type, send_msg)
-                print(f"[DIAG_EMIT] _emit DONE", flush=True)
+                print("[DIAG_EMIT] _emit DONE", flush=True)
                 if output_media:
                     await self.runner._emit("output_media", output_media)
                 saved_msg = send_msg
@@ -231,7 +239,10 @@ class TurnResultHandler:
         needs_tool = clean_full.endswith(":") or clean_full.endswith("：")
         if needs_tool and not tool_data_from_api:
             if finish_reason == "stop" and not stream_error:
-                if self.runner._max_auto_continue_retries is None or self.runner._auto_continue_retries < self.runner._max_auto_continue_retries:
+                if (
+                    self.runner._max_auto_continue_retries is None
+                    or self.runner._auto_continue_retries < self.runner._max_auto_continue_retries
+                ):
                     self.runner._auto_continue_retries += 1
                     return (
                         False,

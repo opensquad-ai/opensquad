@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 task_supervisor.py — Active Task Supervision Engine ("打卡制度")
 
@@ -22,11 +21,13 @@ The key insight: this catches failures where the agent is technically alive
 but the task silently stalled (malformed tool call → text output → turn ends →
 agent goes idle without completing the task).
 """
+
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,8 @@ def _emit(event: str, **kwargs):
     """Emit a task_supervisor event on the EventBus (best-effort, never raises)."""
     if _event_bus is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         _event_bus.emit("task_supervisor", {"event": event, **kwargs})
-    except Exception:
-        pass
 
 
 class _SupervisedTask:
@@ -64,9 +63,9 @@ class _SupervisedTask:
         self.stall_count = 0  # consecutive stalls without agent progress
         self.created_at = time.time()
         self.last_activity_time = time.time()
-        self.progress_log: List[Dict[str, Any]] = []
+        self.progress_log: list[dict[str, Any]] = []
         self.status = "active"  # active | completed | abandoned
-        self.monitor_task: Optional[asyncio.Task] = None
+        self.monitor_task: asyncio.Task | None = None
         self._monitor_future = None  # concurrent.futures.Future from run_coroutine_threadsafe
 
 
@@ -84,9 +83,9 @@ class TaskSupervisor:
     """
 
     def __init__(self):
-        self._current: Optional[_SupervisedTask] = None
-        self._history: List[Dict[str, Any]] = []  # completed/abandoned tasks
-        self._loop: Optional[asyncio.AbstractEventLoop] = None  # main event loop ref
+        self._current: _SupervisedTask | None = None
+        self._history: list[dict[str, Any]] = []  # completed/abandoned tasks
+        self._loop: asyncio.AbstractEventLoop | None = None  # main event loop ref
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         """
@@ -101,23 +100,31 @@ class TaskSupervisor:
         return self._current is not None and self._current.status == "active"
 
     @property
-    def current_task(self) -> Optional[_SupervisedTask]:
+    def current_task(self) -> _SupervisedTask | None:
         return self._current
 
     def _send_heartbeat(self, event: str, task_id: str, detail: str = ""):
         """Send lightweight heartbeat HTTP POST to the parent launcher process."""
         try:
-            import urllib.request, json, os
-            launcher_url = f"http://127.0.0.1:{os.environ.get('OPENSQUAD_LAUNCHER_PORT', '9600')}/_internal/task_watch_heartbeat"
-            data = json.dumps({
-                "agent_id": os.environ.get("OPENSQUAD_AGENT_ID", ""),
-                "event": event,
-                "task_id": task_id,
-                "detail": detail,
-                "timestamp": time.time(),
-            }).encode("utf-8")
-            req = urllib.request.Request(launcher_url, data=data, method="POST",
-                                         headers={"Content-Type": "application/json"})
+            import json
+            import os
+            import urllib.request
+
+            launcher_url = (
+                f"http://127.0.0.1:{os.environ.get('OPENSQUAD_LAUNCHER_PORT', '9600')}/_internal/task_watch_heartbeat"
+            )
+            data = json.dumps(
+                {
+                    "agent_id": os.environ.get("OPENSQUAD_AGENT_ID", ""),
+                    "event": event,
+                    "task_id": task_id,
+                    "detail": detail,
+                    "timestamp": time.time(),
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                launcher_url, data=data, method="POST", headers={"Content-Type": "application/json"}
+            )
             urllib.request.urlopen(req, timeout=2)
         except Exception:
             pass  # Non-critical — launcher may be restarting
@@ -136,16 +143,16 @@ class TaskSupervisor:
         """
         # Auto-abandon previous task if still active
         if self._current and self._current.status == "active":
-            logger.warning(
-                f"[TaskSupervisor] Auto-abandoning previous task "
-                f"'{self._current.task_id}' to start new one"
-            )
+            logger.warning(f"[TaskSupervisor] Auto-abandoning previous task '{self._current.task_id}' to start new one")
             self._current.status = "abandoned"
-            _emit("abandon", task_id=self._current.task_id,
-                  description=self._current.description,
-                  detail="auto-abandoned: new task started",
-                  elapsed_sec=round(time.time() - self._current.created_at, 1))
-            self._cancel_monitor()   # Cancel monitor BEFORE archiving (archive sets _current = None)
+            _emit(
+                "abandon",
+                task_id=self._current.task_id,
+                description=self._current.description,
+                detail="auto-abandoned: new task started",
+                elapsed_sec=round(time.time() - self._current.created_at, 1),
+            )
+            self._cancel_monitor()  # Cancel monitor BEFORE archiving (archive sets _current = None)
             self._archive_current()
 
         task_id = f"tw_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -171,27 +178,17 @@ class TaskSupervisor:
                 pass
 
         if loop is not None and loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(
-                self._monitor_loop(task_id), loop
-            )
+            future = asyncio.run_coroutine_threadsafe(self._monitor_loop(task_id), loop)
             # Wrap the concurrent.futures.Future so we can cancel it later
             self._current._monitor_future = future
-            logger.info(
-                f"[TaskSupervisor] Monitor loop scheduled via "
-                f"run_coroutine_threadsafe for {task_id}"
-            )
+            logger.info(f"[TaskSupervisor] Monitor loop scheduled via run_coroutine_threadsafe for {task_id}")
         else:
-            logger.warning(
-                f"[TaskSupervisor] No running event loop available, "
-                f"monitor NOT started for {task_id}"
-            )
+            logger.warning(f"[TaskSupervisor] No running event loop available, monitor NOT started for {task_id}")
 
         logger.info(
-            f"[TaskSupervisor] Started supervision: {task_id} "
-            f"(interval={check_interval}s, max_stalls={max_stalls})"
+            f"[TaskSupervisor] Started supervision: {task_id} (interval={check_interval}s, max_stalls={max_stalls})"
         )
-        _emit("start", task_id=task_id, description=description,
-              check_interval=check_interval, max_stalls=max_stalls)
+        _emit("start", task_id=task_id, description=description, check_interval=check_interval, max_stalls=max_stalls)
         self._send_heartbeat("start", task_id, description)
         return task_id
 
@@ -206,8 +203,7 @@ class TaskSupervisor:
             # Reset stall count on any activity
             if self._current.stall_count > 0:
                 logger.info(
-                    f"[TaskSupervisor] Activity detected, resetting stall count "
-                    f"({self._current.stall_count} -> 0)"
+                    f"[TaskSupervisor] Activity detected, resetting stall count ({self._current.stall_count} -> 0)"
                 )
                 self._current.stall_count = 0
 
@@ -221,23 +217,25 @@ class TaskSupervisor:
 
         self._current.last_activity_time = time.time()
         self._current.stall_count = 0
-        self._current.progress_log.append({
-            "time": datetime.now().isoformat(),
-            "elapsed": time.time() - self._current.created_at,
-            "text": progress_text[:500],
-        })
-        logger.info(
-            f"[TaskSupervisor] Progress update on {self._current.task_id}: "
-            f"{progress_text[:100]}"
+        self._current.progress_log.append(
+            {
+                "time": datetime.now().isoformat(),
+                "elapsed": time.time() - self._current.created_at,
+                "text": progress_text[:500],
+            }
         )
-        _emit("update", task_id=self._current.task_id,
-              description=self._current.description,
-              detail=progress_text[:500],
-              elapsed_sec=round(time.time() - self._current.created_at, 1))
+        logger.info(f"[TaskSupervisor] Progress update on {self._current.task_id}: {progress_text[:100]}")
+        _emit(
+            "update",
+            task_id=self._current.task_id,
+            description=self._current.description,
+            detail=progress_text[:500],
+            elapsed_sec=round(time.time() - self._current.created_at, 1),
+        )
         self._send_heartbeat("update", self._current.task_id, progress_text[:100])
         return True
 
-    def complete(self, summary: str = "") -> Dict[str, Any]:
+    def complete(self, summary: str = "") -> dict[str, Any]:
         """
         Mark the current task as completed. Stops the monitor.
         Returns a summary dict.
@@ -253,9 +251,7 @@ class TaskSupervisor:
             "status": "completed",
             "elapsed_seconds": round(elapsed, 1),
             "progress_updates": len(self._current.progress_log),
-            "stalls_recovered": sum(
-                1 for _ in self._current.progress_log
-            ),  # approximate
+            "stalls_recovered": sum(1 for _ in self._current.progress_log),  # approximate
             "summary": summary[:500],
         }
 
@@ -263,17 +259,20 @@ class TaskSupervisor:
             f"[TaskSupervisor] Task completed: {self._current.task_id} "
             f"({elapsed:.0f}s, {len(self._current.progress_log)} updates)"
         )
-        _emit("complete", task_id=self._current.task_id,
-              description=self._current.description,
-              detail=summary[:500],
-              elapsed_sec=round(elapsed, 1),
-              stall_count=self._current.stall_count)
+        _emit(
+            "complete",
+            task_id=self._current.task_id,
+            description=self._current.description,
+            detail=summary[:500],
+            elapsed_sec=round(elapsed, 1),
+            stall_count=self._current.stall_count,
+        )
         self._send_heartbeat("complete", self._current.task_id, summary[:100])
-        self._cancel_monitor()   # Cancel monitor BEFORE archiving (archive sets _current = None)
+        self._cancel_monitor()  # Cancel monitor BEFORE archiving (archive sets _current = None)
         self._archive_current()
         return result
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Get current supervision status (for diagnostics)."""
         if not self._current:
             return {"active": False, "history_count": len(self._history), "agent_state": "unknown"}
@@ -297,6 +296,7 @@ class TaskSupervisor:
         """Get current agent state from state_manager (best-effort)."""
         try:
             from opensquad.state_manager import state_manager
+
             # state_manager.get_state() is async, but we're in sync context
             # Use the internal state dict directly
             return state_manager._state.get("ai_state", "unknown")
@@ -316,11 +316,7 @@ class TaskSupervisor:
 
         while True:
             # Check if task still active
-            if (
-                not self._current
-                or self._current.task_id != task_id
-                or self._current.status != "active"
-            ):
+            if not self._current or self._current.task_id != task_id or self._current.status != "active":
                 logger.info(f"[TaskSupervisor] Monitor loop ending for {task_id} (task no longer active)")
                 break
 
@@ -328,11 +324,7 @@ class TaskSupervisor:
             await asyncio.sleep(self._current.check_interval)
 
             # Re-check after sleep
-            if (
-                not self._current
-                or self._current.task_id != task_id
-                or self._current.status != "active"
-            ):
+            if not self._current or self._current.task_id != task_id or self._current.status != "active":
                 break
 
             # Check inactivity
@@ -344,15 +336,15 @@ class TaskSupervisor:
 
                 if stall > max_s:
                     # Too many stalls — escalate: abandon and notify
-                    logger.warning(
-                        f"[TaskSupervisor] Task {task_id} exceeded max stalls "
-                        f"({stall}/{max_s}), abandoning"
-                    )
+                    logger.warning(f"[TaskSupervisor] Task {task_id} exceeded max stalls ({stall}/{max_s}), abandoning")
                     self._current.status = "abandoned"
-                    _emit("abandon", task_id=task_id,
-                          description=self._current.description,
-                          stall_count=stall,
-                          elapsed_sec=round(time.time() - self._current.created_at, 1))
+                    _emit(
+                        "abandon",
+                        task_id=task_id,
+                        description=self._current.description,
+                        stall_count=stall,
+                        elapsed_sec=round(time.time() - self._current.created_at, 1),
+                    )
                     self._inject_message(
                         f"[TASK_SUPERVISOR] Task '{self._current.description[:100]}' "
                         f"has been ABANDONED after {stall} consecutive check-ins "
@@ -364,13 +356,15 @@ class TaskSupervisor:
 
                 # Inject wake-up message
                 logger.info(
-                    f"[TaskSupervisor] Stall #{stall}/{max_s} on {task_id} "
-                    f"(inactive {elapsed_since_activity:.0f}s)"
+                    f"[TaskSupervisor] Stall #{stall}/{max_s} on {task_id} (inactive {elapsed_since_activity:.0f}s)"
                 )
-                _emit("stall", task_id=task_id,
-                      description=self._current.description,
-                      stall_count=stall,
-                      elapsed_sec=round(time.time() - self._current.created_at, 1))
+                _emit(
+                    "stall",
+                    task_id=task_id,
+                    description=self._current.description,
+                    stall_count=stall,
+                    elapsed_sec=round(time.time() - self._current.created_at, 1),
+                )
                 self._inject_checkin_message(stall, max_s)
 
         logger.info(f"[TaskSupervisor] Monitor loop ended for {task_id}")
@@ -387,10 +381,7 @@ class TaskSupervisor:
         # Build progressively more urgent messages
         if stall_count <= 2:
             urgency = "REMINDER"
-            tone = (
-                f"No tool activity detected for {interval}s. "
-                f"Please report your current status and continue working."
-            )
+            tone = f"No tool activity detected for {interval}s. Please report your current status and continue working."
         elif stall_count <= 4:
             urgency = "WARNING"
             tone = (
@@ -409,7 +400,7 @@ class TaskSupervisor:
 
         message = (
             f"[TASK_SUPERVISOR:{urgency}] "
-            f"Active task: \"{desc}\"\n"
+            f'Active task: "{desc}"\n'
             f"Task elapsed: {elapsed:.0f}s | Stall #{stall_count}/{max_stalls}\n"
             f"{tone}\n\n"
             f"Actions: call task_watch.update(progress) to report progress, "
@@ -427,6 +418,7 @@ class TaskSupervisor:
         """
         try:
             from opensquad.input_hub import input_hub
+
             input_hub.push(message, source="task_supervisor")
             logger.info(f"[TaskSupervisor] Injected message ({len(message)} chars)")
         except Exception as e:
@@ -449,32 +441,30 @@ class TaskSupervisor:
             self._current.status = "completed"
         # Cancel asyncio.Task (if created directly)
         if self._current.monitor_task:
-            try:
+            with contextlib.suppress(Exception):
                 self._current.monitor_task.cancel()
-            except Exception:
-                pass
             self._current.monitor_task = None
         # Cancel concurrent.futures.Future (from run_coroutine_threadsafe)
-        if hasattr(self._current, '_monitor_future') and self._current._monitor_future:
-            try:
+        if hasattr(self._current, "_monitor_future") and self._current._monitor_future:
+            with contextlib.suppress(Exception):
                 self._current._monitor_future.cancel()
-            except Exception:
-                pass
             self._current._monitor_future = None
 
     def _archive_current(self):
         """Move the current task to history."""
         if not self._current:
             return
-        self._history.append({
-            "task_id": self._current.task_id,
-            "description": self._current.description[:200],
-            "status": self._current.status,
-            "created_at": datetime.fromtimestamp(self._current.created_at).isoformat(),
-            "elapsed_seconds": round(time.time() - self._current.created_at, 1),
-            "progress_updates": len(self._current.progress_log),
-            "stall_count": self._current.stall_count,
-        })
+        self._history.append(
+            {
+                "task_id": self._current.task_id,
+                "description": self._current.description[:200],
+                "status": self._current.status,
+                "created_at": datetime.fromtimestamp(self._current.created_at).isoformat(),
+                "elapsed_seconds": round(time.time() - self._current.created_at, 1),
+                "progress_updates": len(self._current.progress_log),
+                "stall_count": self._current.stall_count,
+            }
+        )
         # Keep only last 20 tasks in history
         if len(self._history) > 20:
             self._history = self._history[-20:]
