@@ -30,6 +30,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 > Desktop UX: clearer Release asset names and visible update progress.
 
+### Fixed
+
+- **desktop: blank window on startup.** Wait for backend `ready` before
+  loading the UI; disable Vite reverse-proxy in frozen/desktop builds; bundle
+  tray/window icons; start Launcher after Gateway init to avoid workspace
+  bootstrap races.
+
 ### Added
 
 - **desktop: full-screen update progress overlay.** In-app updates now show

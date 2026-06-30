@@ -33,11 +33,17 @@ const APP_URL       = DEV_MODE
 const STARTUP_TIMEOUT_MS = 45_000   // 后端最长等待时间
 const APP_DISPLAY_NAME = 'OpenSquad'
 
+function resolvePackagedAsset(name: string): string {
+  const devPath = path.join(__dirname, '..', 'assets', name)
+  if (!app.isPackaged) return devPath
+  const extraPath = path.join(process.resourcesPath, 'assets', name)
+  return fs.existsSync(extraPath) ? extraPath : devPath
+}
+
 // Application icon — Windows expects an .ico, other platforms accept PNG.
-// Path is resolved relative to the compiled main.cjs (dist-electron/).
 const APP_ICON_PATH = process.platform === 'win32'
-  ? path.join(__dirname, '..', 'assets', 'icon.ico')
-  : path.join(__dirname, '..', 'assets', 'icon.png')
+  ? resolvePackagedAsset('icon.ico')
+  : resolvePackagedAsset('icon.png')
 
 // Two backend processes share one PyInstaller binary:
 //   gatewayProcess  → run.exe                      (FastAPI on BACKEND_PORT)
@@ -143,6 +149,8 @@ function getBackendEnv(): { cwd: string; env: NodeJS.ProcessEnv } {
       OPENSQUAD_USER_DATA: workspaceDir,
       // 禁用 uvicorn 热重载（打包环境不支持）
       OPENSQUAD_RELOAD: '0',
+      // 强制 gateway 提供 dist/，避免误检测 Vite 端口导致空白页
+      OPENSQUAD_DISABLE_VITE_PROXY: '1',
     },
   }
 }
@@ -207,6 +215,43 @@ function waitForUrl(url: string, label: string): Promise<void> {
     const schedule = () => {
       if (Date.now() >= deadline) {
         return reject(new Error(`${label} startup timeout (${url})`))
+      }
+      setTimeout(check, 600)
+    }
+
+    check()
+  })
+}
+
+/** Packaged app: wait until DB/init finished (``ready`` in /health JSON). */
+function waitForBackendFullyReady(): Promise<void> {
+  const url = `http://127.0.0.1:${BACKEND_PORT}/health`
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS
+
+    const check = () => {
+      const req = http.get(url, (res) => {
+        let body = ''
+        res.on('data', (chunk: Buffer | string) => { body += chunk.toString() })
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode < 500) {
+            try {
+              const data = JSON.parse(body) as { ready?: boolean }
+              if (data.ready === true) return resolve()
+            } catch {
+              /* keep polling */
+            }
+          }
+          schedule()
+        })
+      })
+      req.on('error', schedule)
+      req.setTimeout(2000, () => { req.destroy(); schedule() })
+    }
+
+    const schedule = () => {
+      if (Date.now() >= deadline) {
+        return reject(new Error(`Backend not fully ready (${url})`))
       }
       setTimeout(check, 600)
     }
@@ -280,19 +325,31 @@ async function createWindow(): Promise<void> {
   )
   mainWindow.show()
 
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    if (!mainWindow || validatedURL.startsWith('data:')) return
+    console.error(`[electron] did-fail-load ${validatedURL}: ${errorCode} ${errorDescription}`)
+    void mainWindow.loadURL(
+      `data:text/html,` +
+      `<html><head><meta charset="utf-8"></head>` +
+      `<body style="background:#0f0f1a;color:#e2e8f0;font-family:sans-serif;padding:2rem">` +
+      `<h2>Failed to load ${APP_DISPLAY_NAME}</h2>` +
+      `<p>${errorDescription} (${errorCode})</p>` +
+      `<p style="color:#94a3b8">URL: ${validatedURL}</p>` +
+      `</body></html>`,
+    )
+  })
+
   try {
     const readyLabel = DEV_MODE ? 'Vite dev server' : 'Backend'
     await waitForUrl(HEALTH_URL, readyLabel)
-    // In packaged mode, also wait for the launcher management port so the
-    // Agent Workstation page doesn't load before the launcher is reachable
-    // (it would otherwise flash "Launcher is not running"). In DEV_MODE the
-    // user runs `opensquad start` themselves, so we don't wait for 9600 here.
     if (!DEV_MODE) {
+      await waitForBackendFullyReady()
+      if (!launcherProcess) {
+        startLauncher()
+      }
       try {
         await waitForPort(LAUNCHER_PORT, 'Launcher')
       } catch {
-        // Non-fatal: gateway is up, the UI just won't show agents yet. Don't
-        // quit — the launcher may still come up, or the user can restart it.
         console.error(`[electron] Launcher did not bind port ${LAUNCHER_PORT} in time; Agent Workstation will be unavailable.`)
       }
     }
@@ -316,12 +373,13 @@ async function createWindow(): Promise<void> {
 
 // ── 系统托盘 ────────────────────────────────────────────────────────────────
 function createTray(): void {
-  // 开发时 assets/ 在项目根，打包后由 extraResources 提供
-  const iconPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'assets', 'tray.png')
-    : path.join(__dirname, '..', 'assets', 'tray.png')
-  const icon = fs.existsSync(iconPath)
-    ? nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+  const trayPath = resolvePackagedAsset('tray.png')
+  const fallbackPath = APP_ICON_PATH
+  const iconSource = fs.existsSync(trayPath)
+    ? trayPath
+    : (fs.existsSync(fallbackPath) ? fallbackPath : trayPath)
+  const icon = fs.existsSync(iconSource)
+    ? nativeImage.createFromPath(iconSource).resize({ width: 16, height: 16 })
     : nativeImage.createEmpty()
 
   tray = new Tray(icon)
@@ -342,9 +400,8 @@ app.whenReady().then(async () => {
   }
   if (!DEV_MODE) {
     startBackend()
-    // Spawn the launcher right after the gateway (auto-starts plugin services).
-    // createWindow() waits for both to be ready.
-    startLauncher()
+    // Launcher starts after gateway is fully ready (see createWindow) to avoid
+    // parallel bootstrap_desktop_workspace() races on first launch.
   } else {
     console.log(
       '[electron] DEV_MODE enabled — skipping backend spawn; loading Vite at',

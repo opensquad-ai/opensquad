@@ -62,6 +62,9 @@
     "files": [
       "dist/**",
       "dist-electron/**/*.cjs",
+      "assets/icon.ico",
+      "assets/icon.png",
+      "assets/tray.png",
       "!dist-electron/**/*.map"
     ],
     "extraResources": [
@@ -84,6 +87,15 @@
         "to": "backend-linux",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "icon.ico",
+          "icon.png",
+          "tray.png"
         ]
       }
     ],

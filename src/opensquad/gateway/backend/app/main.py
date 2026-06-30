@@ -440,8 +440,8 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
 # Health check
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "service": "OpenSquad API"}
+    """Health check endpoint (returns before full init; check ``ready`` for UI load)."""
+    return {"status": "ok", "service": "OpenSquad API", "ready": _app_ready}
 
 
 # Static file serving (frontend application)
@@ -515,8 +515,19 @@ def _is_vite_running(host: str = _VITE_HOST, port: int = _VITE_PORT) -> bool:
         return False
 
 
-_VITE_AVAILABLE = _is_vite_running()
-if _VITE_AVAILABLE:
+# Desktop / PyInstaller builds must serve bundled dist/, never proxy to Vite.
+# A false-positive on the frontend port (e.g. 9530) would proxy to a non-Vite
+# listener and leave the Electron window blank.
+_disable_vite_proxy = _IS_FROZEN or os.environ.get("OPENSQUAD_DISABLE_VITE_PROXY") == "1"
+_VITE_AVAILABLE = (not _disable_vite_proxy) and _is_vite_running()
+if _disable_vite_proxy:
+    _startup_log.info(
+        "[Frontend] Vite proxy disabled (frozen=%s, env=%s) — serving dist/ at %s",
+        _IS_FROZEN,
+        os.environ.get("OPENSQUAD_DISABLE_VITE_PROXY", ""),
+        FRONTEND_DIST,
+    )
+elif _VITE_AVAILABLE:
     _startup_log.info(
         "[Frontend] Vite dev server detected at %s:%d — enabling reverse proxy "
         "(HMR hot-reload active via single port %d)",
@@ -654,9 +665,10 @@ if _VITE_AVAILABLE:
             )
 
 elif os.path.exists(FRONTEND_DIST):
+    _startup_log.info("[Frontend] Serving static dist from %s", FRONTEND_DIST)
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
-    _startup_log.warning("Frontend dist directory not found: %s", FRONTEND_DIST)
+    _startup_log.error("[Frontend] dist directory not found: %s — UI will be blank", FRONTEND_DIST)
 
 
 if __name__ == "__main__":
