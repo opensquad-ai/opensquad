@@ -126,7 +126,11 @@
         }
       ],
       "icon": "assets/icon.icns",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "signIgnore": [
+        "backend-mac/.*",
+        "Contents/Resources/backend-mac/.*"
+      ]
     },
     "linux": {
       "target": [
