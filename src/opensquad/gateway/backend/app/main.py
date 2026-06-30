@@ -343,9 +343,7 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI application
-app = FastAPI(
-    title="NexusChat Pro API", description="Real-time chat application backend API", version="1.0.0", lifespan=lifespan
-)
+app = FastAPI(title="OpenSquad API", description="OpenSquad gateway backend API", version="1.0.0", lifespan=lifespan)
 
 # Configure CORS - read allowed origins from system_config.json's gateway.cors_origins
 # (falls back to security.cors_allow_origins for backward compatibility).
@@ -443,7 +441,7 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "ok", "service": "NexusChat Pro API"}
+    return {"status": "ok", "service": "OpenSquad API"}
 
 
 # Static file serving (frontend application)

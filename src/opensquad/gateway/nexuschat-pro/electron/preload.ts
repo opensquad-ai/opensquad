@@ -13,6 +13,25 @@ contextBridge.exposeInMainWorld('electronEnv', {
   pickWorkspaceFolder: () =>
     ipcRenderer.invoke('electron:pick-workspace-folder') as Promise<string | null>,
   restartApp: () => ipcRenderer.invoke('electron:restart-app') as Promise<void>,
+  downloadAndInstallUpdate: (payload: { url: string; fileName: string }) =>
+    ipcRenderer.invoke('electron:download-and-install-update', payload) as Promise<
+      { ok: true } | { ok: false; error: string }
+    >,
+  onUpdateDownloadProgress: (
+    callback: (progress: { percent: number; transferred: number; total: number }) => void,
+  ) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      progress: { percent: number; transferred: number; total: number },
+    ) => callback(progress)
+    ipcRenderer.on('electron:update-download-progress', listener)
+    return () => ipcRenderer.removeListener('electron:update-download-progress', listener)
+  },
+  onUpdateInstalling: (callback: () => void) => {
+    const listener = () => callback()
+    ipcRenderer.on('electron:update-installing', listener)
+    return () => ipcRenderer.removeListener('electron:update-installing', listener)
+  },
   onMaximizedChanged: (callback: (maximized: boolean) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, maximized: boolean) => callback(maximized)
     ipcRenderer.on('electron:maximized-changed', listener)

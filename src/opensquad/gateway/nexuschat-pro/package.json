@@ -52,8 +52,8 @@
     "vite-plugin-electron-renderer": "^0.14.6"
   },
   "build": {
-    "appId": "com.opensquad.nexuschat-pro",
-    "productName": "NexusChat Pro",
+    "appId": "com.opensquad.desktop",
+    "productName": "OpenSquad",
     "copyright": "Copyright © 2025-present OpenSquad",
     "directories": {
       "buildResources": "assets",

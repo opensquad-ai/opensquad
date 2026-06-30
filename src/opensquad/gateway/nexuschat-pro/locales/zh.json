@@ -90,7 +90,7 @@
     "scrollToBottom": "滚动到底部"
   },
   "chat": {
-    "welcome": "欢迎使用 NexusChat Pro",
+    "welcome": "欢迎使用 OpenSquad",
     "selectGroup": "请选择一个群组开始聊天",
     "newGroup": "新建群组",
     "joinGroup": "加入群组",
@@ -772,6 +772,13 @@
       "alreadyLatest": "已是最新版本",
       "checkSkippedTitle": "更新检查已停用",
       "checkSkippedGeneric": "当前构建不在稳定发布渠道上,无需推送更新通知。",
+      "desktopUpdateNow": "下载并安装更新",
+      "desktopUpdateConfirm": "发现新版本 v{{version}}，是否立即下载并安装？安装过程中应用将自动关闭。",
+      "desktopUpdateDownloading": "正在下载更新…",
+      "desktopUpdateInstalling": "正在安装更新，应用即将关闭…",
+      "desktopUpdateFailed": "自动更新失败",
+      "desktopUpdateUnavailable": "仅打包版桌面应用支持应用内更新",
+      "desktopUpdateAssetMissing": "发布页未找到适用于当前平台的安装包，请手动下载。",
       "channel": {
         "stable": "稳定版",
         "dev": "开发版",

@@ -38,7 +38,7 @@ The desktop app separates two directories:
 
 | Directory | Purpose | Example (Windows) |
 |-----------|---------|-------------------|
-| **App data** (`OPENSQUAD_APP_DATA`) | Fixed Electron userData; stores app prefs such as `desktop-workspace.json` | `%APPDATA%\nexuschat-pro\` |
+| **App data** (`OPENSQUAD_APP_DATA`) | Fixed Electron userData; stores app prefs such as `desktop-workspace.json` | `%APPDATA%\OpenSquad\` (older builds used `nexuschat-pro\`) |
 | **Workspace** (`OPENSQUAD_USER_DATA`) | Chat DB, uploads, agents, logs — user data | Defaults to app data on first run; can be changed |
 
 On first launch the workspace defaults to the app data dir. The gateway/launcher
