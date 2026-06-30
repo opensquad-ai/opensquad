@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.4.2] | 2026-06-30 | [0.4.1 → 0.4.2](https://github.com/opensquad-ai/opensquad/compare/v0.4.1...v0.4.2) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.2) |
 | [0.4.1] | 2026-06-30 | [0.4.0 → 0.4.1](https://github.com/opensquad-ai/opensquad/compare/v0.4.0...v0.4.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1) |
 | [0.4.0] | 2026-06-29 | (initial release) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0) |
 
@@ -20,7 +21,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.1]. Will be folded into the next release section when cut.
+> Changes since [0.4.2]. Will be folded into the next release section when cut.
+
+---
+
+## [0.4.2] — 2026-06-30
+
+> Desktop polish: OpenSquad branding, first-launch system settings, plugin
+> auto-start, and in-app updates from GitHub Releases.
+
+### Added
+
+- **desktop: in-app auto-update.** Stable desktop builds can download the
+  platform installer from GitHub Releases and run it after quitting the
+  current app (silent NSIS upgrade on Windows).
+- **desktop: OpenSquad product branding.** Installers, window title, tray,
+  and About menu now show **OpenSquad** instead of the legacy NexusChat Pro
+  codename (`appId`: `com.opensquad.desktop`).
+
+### Fixed
+
+- **desktop: System Settings 500 on first launch.** Bootstrap
+  `system_config.json` in the workspace before the admin API reads it.
+- **desktop: plugin services auto-start in frozen builds.** Spawn plugin
+  `service/main.py` with the system Python interpreter; remove
+  `--no-services` from the Electron launcher.
+- **CI (fast):** pytest dev extras, ruff pin/format, frontend types, and
+  gitleaks allowlist fixes so the daily gate stays green.
+
+### Changed
+
+- **chore:** ignore local `.coverage`, `htmlcov/`, and generated audit
+  report artifacts in `.gitignore`.
 
 ---
 
@@ -145,5 +177,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The pre-commit hook chain (ruff, ruff-format, commitlint,
   detect-secrets) is recommended for contributors.
 
+[0.4.2]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.2
 [0.4.1]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1
 [0.4.0]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0
