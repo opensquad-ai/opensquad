@@ -146,6 +146,7 @@ ignore = [
     "UP035",    # deprecated-import (typing.Dict etc.)
     "RUF100",   # unused-noqa
     "RUF059",   # unused-unpacked-variable (legacy tuple unpack)
+    "RUF005",   # collection-literal-concatenation (legacy)
 ]
 
 [tool.ruff.lint.per-file-ignores]
