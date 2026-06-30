@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, Menu, Tray, nativeImage, ipcMain } from 'electron'
 import { spawn, ChildProcess } from 'child_process'
+import net from 'net'
 import path from 'path'
 import http from 'http'
 import fs from 'fs'
@@ -15,6 +16,11 @@ const FRONTEND_PORT = parseInt(
   process.env.OPENSQUAD_FRONTEND_PORT || process.env.VITE_DEV_PORT || '5173',
   10,
 )
+// Launcher (agent process manager) management port. The desktop app spawns a
+// second run.exe instance with `--service launcher` so the Agent Workstation
+// page can list/configure agents. Without this, the UI shows
+// "Launcher is not running (cannot connect to http://127.0.0.1:9600)".
+const LAUNCHER_PORT = parseInt(process.env.OPENSQUAD_LAUNCHER_PORT || '9600', 10)
 const DEV_MODE      = process.env.ELECTRON_DEV === '1' || process.env.ELECTRON_DEV === 'true'
 const HEALTH_URL    = DEV_MODE
   ? `http://127.0.0.1:${FRONTEND_PORT}/`
@@ -30,9 +36,14 @@ const APP_ICON_PATH = process.platform === 'win32'
   ? path.join(__dirname, '..', 'assets', 'icon.ico')
   : path.join(__dirname, '..', 'assets', 'icon.png')
 
-let backendProcess: ChildProcess | null = null
-let mainWindow:     BrowserWindow | null = null
-let tray:           Tray | null = null
+// Two backend processes share one PyInstaller binary:
+//   gatewayProcess  → run.exe                      (FastAPI on BACKEND_PORT)
+//   launcherProcess → run.exe --service launcher   (mgmt API on LAUNCHER_PORT)
+// In DEV_MODE both stay null — the user runs `opensquad start` separately.
+let gatewayProcess:  ChildProcess | null = null
+let launcherProcess: ChildProcess | null = null
+let mainWindow:      BrowserWindow | null = null
+let tray:            Tray | null = null
 const USE_CUSTOM_TITLEBAR = process.platform === 'win32'
 let popupMenus = buildElectronPopupMenus()
 
@@ -76,25 +87,13 @@ function getBackendExe(): string {
 }
 
 // ── 启动 Python 后端 ──────────────────────────────────────────────────────────
-function startBackend(): void {
-  const exe = getBackendExe()
-
-  if (!fs.existsSync(exe)) {
-    dialog.showErrorBox(
-      'Backend not found',
-      `Expected binary at:\n${exe}\n\nPlease rebuild the backend.`
-    )
-    app.quit()
-    return
-  }
-
-  // userData 作为运行时数据根目录（chat.db、logs 等写入此处）
+// userData 作为运行时数据根目录（chat.db、logs 等写入此处）。两个服务共享同一
+// userData，保证 gateway 与 launcher 看到同一份 workspace/config。
+function getBackendEnv(): { cwd: string; env: NodeJS.ProcessEnv } {
   const userDataDir = app.getPath('userData')
   fs.mkdirSync(userDataDir, { recursive: true })
-
-  backendProcess = spawn(exe, [], {
+  return {
     cwd: userDataDir,
-    detached: false,
     env: {
       ...process.env,
       // 告知后端使用哪个目录写运行时数据
@@ -102,14 +101,50 @@ function startBackend(): void {
       // 禁用 uvicorn 热重载（打包环境不支持）
       OPENSQUAD_RELOAD: '0',
     },
-  })
+  }
+}
 
-  backendProcess.stdout?.on('data', (d: Buffer) =>
-    console.log('[backend]', d.toString().trimEnd()))
-  backendProcess.stderr?.on('data', (d: Buffer) =>
-    console.error('[backend:err]', d.toString().trimEnd()))
-  backendProcess.on('exit', (code, signal) =>
-    console.log(`[backend] exited  code=${code} signal=${signal}`))
+function spawnBackend(args: string[], label: string): ChildProcess | null {
+  const exe = getBackendExe()
+  if (!fs.existsSync(exe)) {
+    dialog.showErrorBox(
+      'Backend not found',
+      `Expected binary at:\n${exe}\n\nPlease rebuild the backend.`
+    )
+    app.quit()
+    return null
+  }
+  const { cwd, env } = getBackendEnv()
+  const proc = spawn(exe, args, { cwd, detached: false, env })
+  proc.stdout?.on('data', (d: Buffer) =>
+    console.log(`[${label}]`, d.toString().trimEnd()))
+  proc.stderr?.on('data', (d: Buffer) =>
+    console.error(`[${label}:err]`, d.toString().trimEnd()))
+  proc.on('exit', (code, signal) =>
+    console.log(`[${label}] exited  code=${code} signal=${signal}`))
+  return proc
+}
+
+// Gateway: FastAPI backend on BACKEND_PORT (plain `run.exe`, no --service).
+function startBackend(): void {
+  gatewayProcess = spawnBackend([], 'backend')
+}
+
+// Launcher: agent process manager on LAUNCHER_PORT. Spawned as a second
+// `run.exe` instance with `--service launcher`. `--no-auto-start` + `--no-services`
+// keep it from spawning child processes (a frozen EXE can't `sys.executable -m`
+// an agent or run a plugin's adapter.py) — it only opens the management API so
+// the Agent Workstation UI can list/configure agents.
+function startLauncher(): void {
+  launcherProcess = spawnBackend(
+    [
+      '--service', 'launcher',
+      '--mgmt-port', String(LAUNCHER_PORT),
+      '--no-auto-start',
+      '--no-services',
+    ],
+    'launcher',
+  )
 }
 
 // ── 轮询 URL 直到服务就绪 ─────────────────────────────────────────────────────
@@ -130,6 +165,33 @@ function waitForUrl(url: string, label: string): Promise<void> {
     const schedule = () => {
       if (Date.now() >= deadline) {
         return reject(new Error(`${label} startup timeout (${url})`))
+      }
+      setTimeout(check, 600)
+    }
+
+    check()
+  })
+}
+
+// ── 轮询 TCP 端口直到服务监听 ────────────────────────────────────────────────
+// The launcher's management API has no /health endpoint (its routes start at
+// /api/agents), so probe the port directly with a TCP connect instead.
+function waitForPort(port: number, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + STARTUP_TIMEOUT_MS
+
+    const check = () => {
+      const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
+        sock.destroy()
+        resolve()
+      })
+      sock.on('error', schedule)
+      sock.setTimeout(1000, () => { sock.destroy(); schedule() })
+    }
+
+    const schedule = () => {
+      if (Date.now() >= deadline) {
+        return reject(new Error(`${label} startup timeout (port ${port})`))
       }
       setTimeout(check, 600)
     }
@@ -179,6 +241,19 @@ async function createWindow(): Promise<void> {
   try {
     const readyLabel = DEV_MODE ? 'Vite dev server' : 'Backend'
     await waitForUrl(HEALTH_URL, readyLabel)
+    // In packaged mode, also wait for the launcher management port so the
+    // Agent Workstation page doesn't load before the launcher is reachable
+    // (it would otherwise flash "Launcher is not running"). In DEV_MODE the
+    // user runs `opensquad start` themselves, so we don't wait for 9600 here.
+    if (!DEV_MODE) {
+      try {
+        await waitForPort(LAUNCHER_PORT, 'Launcher')
+      } catch {
+        // Non-fatal: gateway is up, the UI just won't show agents yet. Don't
+        // quit — the launcher may still come up, or the user can restart it.
+        console.error(`[electron] Launcher did not bind port ${LAUNCHER_PORT} in time; Agent Workstation will be unavailable.`)
+      }
+    }
     await mainWindow.loadURL(APP_URL)
     if (!USE_CUSTOM_TITLEBAR) {
       mainWindow.setTitle('NexusChat Pro')
@@ -225,11 +300,15 @@ app.whenReady().then(async () => {
   }
   if (!DEV_MODE) {
     startBackend()
+    // Spawn the launcher right after the gateway. It shares the same userData
+    // dir and binary; `--no-auto-start --no-services` make it open only the
+    // management port. createWindow() waits for both to be ready.
+    startLauncher()
   } else {
     console.log(
       '[electron] DEV_MODE enabled — skipping backend spawn; loading Vite at',
       APP_URL,
-      `(gateway API expected on port ${BACKEND_PORT})`,
+      `(gateway API expected on port ${BACKEND_PORT}, launcher on ${LAUNCHER_PORT})`,
     )
   }
   createTray()
@@ -246,16 +325,24 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  if (backendProcess && !backendProcess.killed) {
-    console.log('[electron] Terminating backend process…')
-    // Windows 用 taskkill 确保子进程树全部结束
-    if (process.platform === 'win32') {
-      try {
-        spawn('taskkill', ['/pid', String(backendProcess.pid), '/f', '/t'])
-      } catch { /* ignore */ }
-    } else {
-      backendProcess.kill('SIGTERM')
+  // Tear down both backend processes. On Windows use taskkill /T so the whole
+  // child tree (e.g. launcher-spawned agents) is cleaned up.
+  const procs: Array<[string, ChildProcess | null]> = [
+    ['backend',  gatewayProcess],
+    ['launcher', launcherProcess],
+  ]
+  for (const [label, proc] of procs) {
+    if (proc && !proc.killed) {
+      console.log(`[electron] Terminating ${label} process…`)
+      if (process.platform === 'win32') {
+        try {
+          spawn('taskkill', ['/pid', String(proc.pid), '/f', '/t'])
+        } catch { /* ignore */ }
+      } else {
+        proc.kill('SIGTERM')
+      }
     }
-    backendProcess = null
   }
+  gatewayProcess  = null
+  launcherProcess = null
 })

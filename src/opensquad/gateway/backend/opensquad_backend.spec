@@ -70,6 +70,15 @@ def _is_runtime_data(src):
 datas += [pair for pair in collect_data_files("opensquad") if _is_runtime_data(pair[0])]
 print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build metadata excluded)")
 
+# launcher.py — the standalone launcher module (opensquad/launcher.py, ~3.4k
+# lines, holds main()). It is shadowed by the opensquad/launcher/ PACKAGE, so
+# PyInstaller's collect_submodules("opensquad") picks up the package but NOT
+# this .py file. The frozen run.py --service launcher loads it by file path
+# (importlib.util.spec_from_file_location) to reach main(), so it must ship as
+# a data file at _internal/opensquad/launcher.py. Source lives at
+# GATEWAY_DIR.parent = src/opensquad/ (same dir as the opensquad package root).
+datas += [(str(GATEWAY_DIR.parent / "launcher.py"), "opensquad")]
+
 # alembic 迁移脚本
 alembic_dir = BACKEND_DIR / "alembic"
 if alembic_dir.exists():
@@ -167,6 +176,14 @@ hiddenimports += ["watchfiles"]
 
 # httpx
 hiddenimports += collect_submodules("httpx")
+
+# Launcher dependencies (lazy-imported inside opensquad/launcher.py and
+# opensquad/launcher/process_manager.py). PyInstaller can't see lazy imports,
+# so list them explicitly. The launcher's management server is stdlib
+# http.server, but the node-registration WS tunnel uses `websockets` and the
+# port-owner lookup uses `psutil`.
+hiddenimports += collect_submodules("websockets")
+hiddenimports += ["psutil"]
 
 # ── 收集完整包数据 ─────────────────────────────────────────────────────────────
 for pkg in ("uvicorn", "fastapi", "starlette", "sqlalchemy", "httpx", "h11"):

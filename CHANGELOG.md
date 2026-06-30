@@ -21,7 +21,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 > Changes since [0.4.0]. Will be folded into the next release section when cut.
 
-_No unreleased changes yet._
+### Fixed
+
+- **desktop: Launcher not running in the packaged app.** The Electron app
+  only spawned the Gateway (`run.exe`, port 9555); the Launcher (port 9600)
+  was a separate process the desktop bundle never started, so the Agent
+  Workstation showed "Launcher is not running (cannot connect to
+  http://127.0.0.1:9600)". `run.py` now dispatches on `--service` and the
+  Electron `main.ts` spawns a second `run.exe --service launcher` instance
+  (management-port-only, `--no-auto-start --no-services` to stay safe inside
+  a frozen bundle). The PyInstaller spec now ships the standalone
+  `opensquad/launcher.py` as a data file so the launcher's `main()` is
+  reachable — it was previously shadowed by the `opensquad/launcher/`
+  package and dropped from the bundle.
+
+### Known limitations (desktop)
+
+- Agent **start** from the Agent Workstation UI is not yet supported in the
+  packaged app (a frozen EXE cannot `sys.executable -m` an agent). Listing
+  and configuring agents works. See
+  [docs/desktop-known-issues.md](docs/desktop-known-issues.md).
+- Images uploaded in dev mode (`opensquad start`) are stored under the
+  workspace and are not visible in the desktop app (which uses
+  `userData/uploads/`). Re-upload inside the desktop app.
 
 ---
 
