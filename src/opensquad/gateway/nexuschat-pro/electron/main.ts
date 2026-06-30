@@ -155,17 +155,16 @@ function startBackend(): void {
 }
 
 // Launcher: agent process manager on LAUNCHER_PORT. Spawned as a second
-// `run.exe` instance with `--service launcher`. `--no-auto-start` + `--no-services`
-// keep it from spawning child processes (a frozen EXE can't `sys.executable -m`
-// an agent or run a plugin's adapter.py) — it only opens the management API so
-// the Agent Workstation UI can list/configure agents.
+// `run.exe` instance with `--service launcher`.
+// `--no-auto-start`: agents still need a dedicated frozen entry (see docs).
+// Plugin services with `service/main.py` auto-start here; the launcher uses
+// system Python when bundled (see process_manager._plugin_python_executable).
 function startLauncher(): void {
   launcherProcess = spawnBackend(
     [
       '--service', 'launcher',
       '--mgmt-port', String(LAUNCHER_PORT),
       '--no-auto-start',
-      '--no-services',
     ],
     'launcher',
   )
@@ -324,9 +323,8 @@ app.whenReady().then(async () => {
   }
   if (!DEV_MODE) {
     startBackend()
-    // Spawn the launcher right after the gateway. It shares the same userData
-    // dir and binary; `--no-auto-start --no-services` make it open only the
-    // management port. createWindow() waits for both to be ready.
+    // Spawn the launcher right after the gateway (auto-starts plugin services).
+    // createWindow() waits for both to be ready.
     startLauncher()
   } else {
     console.log(

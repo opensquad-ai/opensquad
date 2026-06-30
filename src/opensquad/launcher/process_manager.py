@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -19,6 +20,22 @@ from collections import deque
 from datetime import datetime
 
 _log = logging.getLogger("launcher.process_manager")
+
+
+def _plugin_python_executable() -> str:
+    """Python interpreter for plugin service scripts.
+
+    In a PyInstaller bundle ``sys.executable`` is ``run.exe`` and cannot run
+    arbitrary ``service/main.py`` files. Prefer a system Python when packaged.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    for name in ("python", "python3", "py"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return sys.executable
+
 
 from opensquad._storage.json_io import read_json as _read_json
 from opensquad.system_config import syscfg
@@ -817,7 +834,7 @@ class PluginServiceProcess:
             if not os.path.isfile(abs_entry):
                 _log.info(f"[Launcher] Plugin service entry not found: {abs_entry}")
                 return False
-            popen_args = [sys.executable, abs_entry]
+            popen_args = [_plugin_python_executable(), abs_entry]
             popen_kwargs = {}
         else:
             _log.info(f"[Launcher] Plugin service {self.plugin_id}: neither 'cmd' nor 'entry' defined")

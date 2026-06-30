@@ -389,23 +389,46 @@ from opensquad.system_config import syscfg as _syscfg
 _GATEWAY_LOG_DIR = os.path.join(_syscfg.project_root(), "data", "logs", "gateway")
 
 
+def _fill_logging_defaults(data: dict) -> dict:
+    """Fill missing logging keys so the settings UI shows effective values."""
+    if not isinstance(data.get("logging"), dict):
+        data["logging"] = {}
+    logging_cfg = data["logging"]
+    if "log_dir" not in logging_cfg:
+        logging_cfg["log_dir"] = syscfg.log_dir()
+    if "max_size_mb" not in logging_cfg:
+        logging_cfg["max_size_mb"] = syscfg.log_max_size_mb()
+    if "backup_count" not in logging_cfg:
+        logging_cfg["backup_count"] = syscfg.log_backup_count()
+    if "tool_call_debug" not in logging_cfg:
+        logging_cfg["tool_call_debug"] = syscfg.tool_call_debug()
+    if "log_level" not in logging_cfg:
+        logging_cfg["log_level"] = syscfg.log_level()
+    return data
+
+
 @admin_router.get("/admin/system/config")
 async def admin_get_system_config(current_user: User = Depends(get_current_user_dep)):
-    """Read full contents of system_config.json"""
+    """Read full contents of system_config.json (with effective logging defaults)."""
     import opensquad.system_config as _sc
+    from opensquad._syscfg._config import ensure_workspace_config_file
 
-    config_path = _sc._CONFIG_PATH
-    with open(config_path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data
+    ensure_workspace_config_file()
+    data = _sc.raw()
+    if not data:
+        config_path = _sc._CONFIG_PATH
+        with open(config_path, encoding="utf-8") as f:
+            data = json.load(f)
+    return _fill_logging_defaults(data)
 
 
 @admin_router.put("/admin/system/config")
 async def admin_update_system_config(body: dict, current_user: User = Depends(get_current_user_dep)):
     """Write back system_config.json, reload syscfg cache, and dynamically apply new log level"""
     import opensquad.system_config as _sc
+    from opensquad._syscfg._config import ensure_workspace_config_file
 
-    config_path = _sc._CONFIG_PATH
+    config_path = ensure_workspace_config_file()
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False, indent=2)
     _sc._cache = None  # Clear cache, force reload on next access
