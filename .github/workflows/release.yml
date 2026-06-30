@@ -23,9 +23,14 @@ jobs:
                       print(line.split('=',1)[1].strip().strip('\"').strip(\"'\"))
                       break
           ")
-          echo "Tag version: $TAG_VERSION"
-          echo "pyproject.toml version: $PYPROJECT_VERSION"
-          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+          # Tag uses human-friendly prerelease suffix (-rc1, -beta1, -alpha1)
+          # but PEP 440 requires no hyphen in the version itself. Normalize
+          # both sides by stripping hyphens before comparing.
+          TAG_NORM=$(echo "$TAG_VERSION" | tr -d '-')
+          PYPROJECT_NORM=$(echo "$PYPROJECT_VERSION" | tr -d '-')
+          echo "Tag version: $TAG_VERSION (normalized: $TAG_NORM)"
+          echo "pyproject.toml version: $PYPROJECT_VERSION (normalized: $PYPROJECT_NORM)"
+          if [ "$TAG_NORM" != "$PYPROJECT_NORM" ]; then
             echo "::error::Version mismatch! Tag=$TAG_VERSION, pyproject.toml=$PYPROJECT_VERSION"
             exit 1
           fi
@@ -69,9 +74,17 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ── Step 3: Publish to PyPI ──
+  # Skipped for prerelease tags (rc / beta / alpha) — those would pollute
+  # the production PyPI index and show up as candidate Latest for users
+  # running `pip install opensquad`. Add TestPyPI trusted-publishing config
+  # to a separate job if rc/beta/alpha artifacts are wanted externally.
   pypi:
     name: Publish to PyPI
     needs: validate
+    if: |
+      !contains(github.ref_name, '-rc') &&
+      !contains(github.ref_name, '-beta') &&
+      !contains(github.ref_name, '-alpha')
     runs-on: ubuntu-latest
     permissions:
       contents: read
