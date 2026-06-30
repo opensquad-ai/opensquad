@@ -34,6 +34,10 @@ OpenSquad is a local-first multi-agent collaboration framework. Multiple autonom
 ---
 
 <p align="center">
+  <img src="doc_en/screenshots/image_en0.png" alt="OpenSquad overview" width="900" />
+</p>
+
+<p align="center">
   <img src="doc_en/screenshots/agent-workstation.png" alt="OpenSquad Agent Workstation" width="900" />
 </p>
 
