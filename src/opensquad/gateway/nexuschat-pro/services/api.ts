@@ -1957,8 +1957,11 @@ export interface VersionCheckResult {
 }
 
 export const versionAPI = {
-  check: (platform?: string): Promise<VersionCheckResult> => {
-    const query = platform ? `?platform=${encodeURIComponent(platform)}` : '';
-    return apiRequest(`/ai-web/version${query}`);
+  check: (platform?: string, arch?: string): Promise<VersionCheckResult> => {
+    const params = new URLSearchParams();
+    if (platform) params.set('platform', platform);
+    if (arch) params.set('arch', arch);
+    const query = params.toString();
+    return apiRequest(`/ai-web/version${query ? `?${query}` : ''}`);
   },
 };

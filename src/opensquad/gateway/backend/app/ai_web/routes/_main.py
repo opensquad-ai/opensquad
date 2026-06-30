@@ -432,7 +432,7 @@ def _detect_channel(version: str) -> str:
 
 
 @router.get("/version")
-async def check_version(platform: str | None = None):
+async def check_version(platform: str | None = None, arch: str | None = None):
     """Get current version and check for updates from GitHub.
 
     Returns ``{current, channel, latest, url, update_available,
@@ -492,7 +492,11 @@ async def check_version(platform: str | None = None):
                         result["update_available"] = tag != current
 
                 if result["update_available"] and normalized_platform:
-                    picked = pick_desktop_installer_asset(data.get("assets"), normalized_platform)
+                    picked = pick_desktop_installer_asset(
+                        data.get("assets"),
+                        normalized_platform,
+                        arch=arch,
+                    )
                     if picked:
                         result["download_url"] = picked["url"]
                         result["download_name"] = picked["name"]

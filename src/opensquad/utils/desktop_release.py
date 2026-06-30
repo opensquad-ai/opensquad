@@ -19,9 +19,22 @@ def normalize_desktop_platform(platform: str | None) -> str | None:
     return None
 
 
+def normalize_desktop_arch(arch: str | None) -> str | None:
+    """Normalize client CPU arch strings (``x64``, ``arm64``, …)."""
+    if not arch:
+        return None
+    key = arch.strip().lower()
+    if key in {"x64", "amd64", "x86_64"}:
+        return "x64"
+    if key in {"arm64", "aarch64"}:
+        return "arm64"
+    return key or None
+
+
 def pick_desktop_installer_asset(
     assets: list[dict[str, Any]] | None,
     platform: str,
+    arch: str | None = None,
 ) -> dict[str, Any] | None:
     """Return ``{name, url, size}`` for the best installer on *platform*."""
     if not assets:
@@ -35,6 +48,9 @@ def pick_desktop_installer_asset(
             continue
         size = asset.get("size")
         entries.append((name, url, int(size) if isinstance(size, int) else 0))
+
+    normalized_arch = normalize_desktop_arch(arch)
+    entries = _prefer_platform_marked(entries, platform, normalized_arch)
 
     if platform == "win32":
         exe = [(n, u, s) for n, u, s in entries if n.lower().endswith(".exe")]
@@ -67,6 +83,28 @@ def pick_desktop_installer_asset(
         return None
 
     return None
+
+
+def _prefer_platform_marked(
+    entries: list[tuple[str, str, int]],
+    platform: str,
+    arch: str | None,
+) -> list[tuple[str, str, int]]:
+    """Prefer new-style filenames that include ``-win-`` / ``-mac-`` / ``-linux-``."""
+    marker = {"win32": "-win-", "darwin": "-mac-", "linux": "-linux-"}.get(platform)
+    if not marker:
+        return entries
+
+    marked = [item for item in entries if marker in item[0].lower()]
+    pool = marked if marked else entries
+
+    if arch:
+        arch_tag = f"-{arch.lower()}"
+        arch_matches = [item for item in pool if arch_tag in item[0].lower()]
+        if arch_matches:
+            return arch_matches
+
+    return pool
 
 
 def _asset_dict(name: str, url: str, size: int) -> dict[str, Any]:

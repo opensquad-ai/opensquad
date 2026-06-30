@@ -6,7 +6,7 @@ import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace } from './desktop-workspace'
-import { downloadInstaller, installDownloadedUpdate } from './desktop-updater'
+import { runDesktopUpdate, type UpdateStatus } from './desktop-updater'
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 // Backend port: read from environment variable (set by docker-entrypoint.sh or
@@ -91,13 +91,11 @@ function registerElectronIpc(): void {
     'electron:download-and-install-update',
     async (event, payload: { url: string; fileName: string }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
-      const sendProgress = (progress: { percent: number; transferred: number; total: number }) => {
-        win?.webContents.send('electron:update-download-progress', progress)
+      const sendStatus = (status: UpdateStatus) => {
+        win?.webContents.send('electron:update-status', status)
       }
       try {
-        const installerPath = await downloadInstaller(payload.url, payload.fileName, sendProgress)
-        win?.webContents.send('electron:update-installing')
-        await installDownloadedUpdate(installerPath)
+        await runDesktopUpdate(payload.url, payload.fileName, sendStatus)
         return { ok: true as const }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
