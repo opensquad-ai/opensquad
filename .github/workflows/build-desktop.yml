@@ -53,11 +53,11 @@ jobs:
 
       - name: Run PyInstaller
         working-directory: .
-        run: |
-          pyinstaller src/opensquad/gateway/backend/opensquad_backend.spec \
-            --distpath build/${{ matrix.artifact }} \
-            --workpath build/.pyinstaller-work \
-            --clean --noconfirm
+        # Single-line command — the backslash-continuation form below works
+        # on bash (Linux/macOS runners) but breaks on Windows PowerShell,
+        # which interprets the leading '--' of --distpath / --workpath as
+        # the unary decrement operator.
+        run: pyinstaller src/opensquad/gateway/backend/opensquad_backend.spec --distpath build/${{ matrix.artifact }} --workpath build/.pyinstaller-work --clean --noconfirm
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
