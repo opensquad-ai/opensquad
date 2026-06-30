@@ -1,5 +1,5 @@
 import { app, net } from 'electron'
-import { spawn } from 'child_process'
+import { spawn, ChildProcess } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
@@ -9,7 +9,19 @@ export interface DownloadProgress {
   total: number
 }
 
+export type UpdateStatusPhase = 'downloading' | 'preparing' | 'launching' | 'shutting-down'
+
+export interface UpdateStatus extends Partial<DownloadProgress> {
+  phase: UpdateStatusPhase
+}
+
 const TRUSTED_DOWNLOAD_HOSTS = new Set(['github.com', 'objects.githubusercontent.com'])
+const UI_SETTLE_MS = 1200
+const SHUTDOWN_SETTLE_MS = 900
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 export function assertTrustedDownloadUrl(rawUrl: string): void {
   let parsed: URL
@@ -87,7 +99,7 @@ function downloadOnce(
   })
 }
 
-export async function downloadInstaller(
+async function downloadInstaller(
   url: string,
   fileName: string,
   onProgress: (progress: DownloadProgress) => void,
@@ -100,25 +112,27 @@ export async function downloadInstaller(
   return dest
 }
 
-export async function installDownloadedUpdate(installerPath: string): Promise<void> {
+async function launchInstaller(installerPath: string): Promise<void> {
   if (!fs.existsSync(installerPath)) {
     throw new Error('Installer file not found')
   }
 
   if (process.platform === 'win32') {
-    // electron-builder NSIS: silent install upgrades in place (same appId).
-    spawn(installerPath, ['/S'], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    }).unref()
-    app.quit()
+    await new Promise<void>((resolve, reject) => {
+      const child: ChildProcess = spawn(installerPath, ['/S'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      child.once('error', reject)
+      child.once('spawn', () => resolve())
+      child.unref()
+    })
     return
   }
 
   if (process.platform === 'darwin') {
     spawn('open', [installerPath], { detached: true, stdio: 'ignore' }).unref()
-    app.quit()
     return
   }
 
@@ -126,15 +140,37 @@ export async function installDownloadedUpdate(installerPath: string): Promise<vo
     if (installerPath.toLowerCase().endsWith('.appimage')) {
       await fs.promises.chmod(installerPath, 0o755)
       spawn(installerPath, [], { detached: true, stdio: 'ignore' }).unref()
-      app.quit()
       return
     }
     if (installerPath.toLowerCase().endsWith('.deb')) {
       spawn('xdg-open', [installerPath], { detached: true, stdio: 'ignore' }).unref()
-      app.quit()
       return
     }
   }
 
   throw new Error(`Automatic install is not supported for ${process.platform}`)
+}
+
+export async function runDesktopUpdate(
+  url: string,
+  fileName: string,
+  onStatus: (status: UpdateStatus) => void,
+): Promise<void> {
+  onStatus({ phase: 'downloading', percent: 0, transferred: 0, total: 0 })
+
+  const installerPath = await downloadInstaller(url, fileName, (progress) => {
+    onStatus({ phase: 'downloading', ...progress })
+  })
+
+  onStatus({ phase: 'preparing' })
+  await delay(UI_SETTLE_MS)
+
+  onStatus({ phase: 'launching' })
+  await delay(UI_SETTLE_MS)
+
+  await launchInstaller(installerPath)
+
+  onStatus({ phase: 'shutting-down' })
+  await delay(SHUTDOWN_SETTLE_MS)
+  app.quit()
 }

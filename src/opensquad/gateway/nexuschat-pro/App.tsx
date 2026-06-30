@@ -9,6 +9,7 @@ import { RightPanel } from './components/RightPanel';
 import { AuthScreen } from './components/AuthScreen';
 import { LanguageSelectScreen } from './components/LanguageSelectScreen';
 import { ElectronShell } from './components/ElectronShell';
+import { DesktopUpdateOverlay } from './components/DesktopUpdateOverlay';
 import { ChatState, Message, MessageType, Attachment, Group, User } from './types';
 import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
@@ -1460,6 +1461,7 @@ const App: React.FC = () => {
       <Suspense fallback={null}>
         <SystemConfigPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
       </Suspense>
+      <DesktopUpdateOverlay />
     </div>
     </ElectronShell>
   );

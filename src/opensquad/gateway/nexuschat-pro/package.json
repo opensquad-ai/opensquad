@@ -87,6 +87,7 @@
         ]
       }
     ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "win": {
       "target": [
         {
@@ -105,12 +106,17 @@
       "icon": "assets/icon.ico"
     },
     "nsis": {
+      "artifactName": "${productName}-${version}-win-${arch}-Setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
+    "portable": {
+      "artifactName": "${productName}-${version}-win-${arch}-Portable.${ext}"
+    },
     "mac": {
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "target": [
         {
           "target": "dmg",
@@ -135,6 +141,7 @@
       ]
     },
     "linux": {
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
       "target": [
         {
           "target": "AppImage",
