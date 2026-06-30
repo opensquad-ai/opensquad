@@ -3319,7 +3319,7 @@ def _parse_args_and_discover_agents():
     _ARGS = args
 
     _log.info("=" * 60)
-    _log.info("  NexusChat Pro - Multi-Agent Launcher")
+    _log.info("  OpenSquad - Multi-Agent Launcher")
     _log.info("=" * 60)
 
     discovered_all = discover_agents(AGENTS_DIR, exclude=args.exclude)

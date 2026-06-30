@@ -1951,8 +1951,14 @@ export interface VersionCheckResult {
   check_skipped: boolean;
   /** Human-readable explanation when ``check_skipped`` is true. */
   skip_reason: string | null;
+  download_url?: string | null;
+  download_name?: string | null;
+  download_size?: number | null;
 }
 
 export const versionAPI = {
-  check: (): Promise<VersionCheckResult> => apiRequest('/ai-web/version'),
+  check: (platform?: string): Promise<VersionCheckResult> => {
+    const query = platform ? `?platform=${encodeURIComponent(platform)}` : '';
+    return apiRequest(`/ai-web/version${query}`);
+  },
 };

@@ -206,7 +206,7 @@ if __name__ == "__main__":
         host = backend_config.get("host", "0.0.0.0")
 
     print("==========================================")
-    print("   NexusChat Backend Starting...")
+    print("   OpenSquad Backend Starting...")
     print(f"   Host: {host}")
     print(f"   Port: {port}")
     print(f"   Frozen: {IS_FROZEN}")

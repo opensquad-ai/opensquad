@@ -39,13 +39,13 @@ export function buildElectronPopupMenus(): Record<ElectronMenuId, Menu> {
     ]),
     help: Menu.buildFromTemplate([
       {
-        label: 'About NexusChat Pro',
+        label: 'About OpenSquad',
         click: () => {
           dialog.showMessageBox({
             type: 'info',
-            title: 'About',
-            message: 'NexusChat Pro',
-            detail: `OpenSquad Desktop Client\nVersion ${app.getVersion()}`,
+            title: 'About OpenSquad',
+            message: 'OpenSquad',
+            detail: `Desktop application\nVersion ${app.getVersion()}`,
           })
         },
       },

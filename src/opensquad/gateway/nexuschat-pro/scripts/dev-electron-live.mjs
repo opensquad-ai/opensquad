@@ -92,7 +92,7 @@ const env = {
 
 console.log('')
 console.log('============================================================')
-console.log('  NexusChat Pro — Electron Live Dev')
+console.log('  OpenSquad — Electron Live Dev')
 console.log('============================================================')
 console.log(`  Vite (window) : http://127.0.0.1:${frontendPort}`)
 console.log(`  Gateway (API) : http://127.0.0.1:${gatewayPort}`)

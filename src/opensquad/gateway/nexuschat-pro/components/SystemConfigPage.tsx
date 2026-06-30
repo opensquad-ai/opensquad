@@ -232,10 +232,28 @@ interface VersionInfoState {
   update_available: boolean;
   check_skipped: boolean;
   skip_reason: string | null;
+  download_url: string | null;
+  download_name: string | null;
+  download_size: number | null;
+}
+
+type UpdatePhase = 'idle' | 'downloading' | 'installing';
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 const AboutTab: React.FC = () => {
   const { t } = useTranslation();
+  const isDesktopApp = Boolean(window.electronEnv?.isElectron) && !import.meta.env.DEV;
   const [versionInfo, setVersionInfo] = useState<VersionInfoState>(() => {
     try {
       const cached = sessionStorage.getItem(VERSION_CHECK_CACHE_KEY);
@@ -249,6 +267,9 @@ const AboutTab: React.FC = () => {
           update_available: Boolean(parsed.update_available),
           check_skipped: Boolean(parsed.check_skipped),
           skip_reason: parsed.skip_reason ?? null,
+          download_url: parsed.download_url ?? null,
+          download_name: parsed.download_name ?? null,
+          download_size: parsed.download_size ?? null,
         };
       }
     } catch {}
@@ -260,10 +281,15 @@ const AboutTab: React.FC = () => {
       update_available: false,
       check_skipped: false,
       skip_reason: null,
+      download_url: null,
+      download_name: null,
+      download_size: null,
     };
   });
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
+  const [downloadProgress, setDownloadProgress] = useState({ percent: 0, transferred: 0, total: 0 });
   const [updateChecked, setUpdateChecked] = useState(() => {
     try {
       return Boolean(sessionStorage.getItem(VERSION_CHECK_CACHE_KEY));
@@ -272,15 +298,60 @@ const AboutTab: React.FC = () => {
     }
   });
 
+  const runDesktopUpdate = useCallback(async (downloadUrl: string, downloadName: string) => {
+    const updater = window.electronEnv?.downloadAndInstallUpdate;
+    if (!updater) {
+      setError(t('systemConfig.about.desktopUpdateUnavailable'));
+      return;
+    }
+
+    setError(null);
+    setUpdatePhase('downloading');
+    setDownloadProgress({ percent: 0, transferred: 0, total: 0 });
+
+    const offProgress = window.electronEnv?.onUpdateDownloadProgress?.((progress) => {
+      setDownloadProgress(progress);
+    });
+    const offInstalling = window.electronEnv?.onUpdateInstalling?.(() => {
+      setUpdatePhase('installing');
+    });
+
+    try {
+      const result = await updater({ url: downloadUrl, fileName: downloadName });
+      if (!result.ok) {
+        setError(result.error || t('systemConfig.about.desktopUpdateFailed'));
+        setUpdatePhase('idle');
+      }
+    } catch (e: any) {
+      setError(e?.message || t('systemConfig.about.desktopUpdateFailed'));
+      setUpdatePhase('idle');
+    } finally {
+      offProgress?.();
+      offInstalling?.();
+    }
+  }, [t]);
+
+  const promptAndInstallUpdate = useCallback(async (info: VersionInfoState) => {
+    if (!info.download_url || !info.download_name) {
+      setError(t('systemConfig.about.desktopUpdateAssetMissing'));
+      return;
+    }
+    const confirmed = window.confirm(
+      t('systemConfig.about.desktopUpdateConfirm', { version: info.latest ?? '' }),
+    );
+    if (!confirmed) return;
+    await runDesktopUpdate(info.download_url, info.download_name);
+  }, [runDesktopUpdate, t]);
+
   const handleCheck = async () => {
     if (versionInfo.check_skipped) {
-      // Server already told us the channel disables checks; don't even try.
       return;
     }
     setChecking(true);
     setError(null);
     try {
-      const data = await versionAPI.check();
+      const platform = window.electronEnv?.platform;
+      const data = await versionAPI.check(isDesktopApp ? platform : undefined);
       const next: VersionInfoState = {
         current: data.current || APP_VERSION,
         channel: data.channel,
@@ -289,10 +360,22 @@ const AboutTab: React.FC = () => {
         update_available: data.update_available,
         check_skipped: data.check_skipped,
         skip_reason: data.skip_reason,
+        download_url: data.download_url ?? null,
+        download_name: data.download_name ?? null,
+        download_size: data.download_size ?? null,
       };
       setVersionInfo(next);
       setUpdateChecked(true);
       sessionStorage.setItem(VERSION_CHECK_CACHE_KEY, JSON.stringify(next));
+
+      if (
+        isDesktopApp &&
+        next.update_available &&
+        next.download_url &&
+        next.download_name
+      ) {
+        await promptAndInstallUpdate(next);
+      }
     } catch (e: any) {
       setError(e?.message || t('systemConfig.about.checkUpdateFailed'));
     } finally {
@@ -338,12 +421,35 @@ const AboutTab: React.FC = () => {
         <p className="text-xs font-bold text-textMuted uppercase mb-4">{t('systemConfig.about.versionCheck')}</p>
         <button
           onClick={handleCheck}
-          disabled={checking || versionInfo.check_skipped}
+          disabled={checking || versionInfo.check_skipped || updatePhase !== 'idle'}
           className="w-full py-2.5 bg-primary/10 text-primary rounded-lg font-medium hover:bg-primary/20 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
         >
           <RefreshCw size={16} className={checking ? 'animate-spin' : ''} />
           {checking ? t('systemConfig.about.checking') : t('systemConfig.about.checkUpdate')}
         </button>
+
+        {updatePhase === 'downloading' && (
+          <div className="mt-3 px-4 py-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800 space-y-2">
+            <div>{t('systemConfig.about.desktopUpdateDownloading')}</div>
+            <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-200"
+                style={{ width: `${Math.max(downloadProgress.percent, 4)}%` }}
+              />
+            </div>
+            <div className="text-xs text-blue-700">
+              {downloadProgress.total > 0
+                ? `${formatBytes(downloadProgress.transferred)} / ${formatBytes(downloadProgress.total)}`
+                : formatBytes(downloadProgress.transferred)}
+            </div>
+          </div>
+        )}
+
+        {updatePhase === 'installing' && (
+          <div className="mt-3 px-4 py-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+            {t('systemConfig.about.desktopUpdateInstalling')}
+          </div>
+        )}
 
         {error && (
           <div className="mt-3 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">
@@ -364,18 +470,30 @@ const AboutTab: React.FC = () => {
         {updateChecked && !checking && !error && !versionInfo.check_skipped && (
           <div className="mt-4 space-y-3">
             {versionInfo.update_available ? (
-              <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg">
-                <div className="flex items-center gap-2 text-amber-700 font-medium text-sm mb-1">
+              <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+                <div className="flex items-center gap-2 text-amber-700 font-medium text-sm">
                   <AlertCircle size={16} />
                   {t('systemConfig.about.newVersion', { version: versionInfo.latest })}
                 </div>
                 <p className="text-xs text-amber-600">{t('systemConfig.about.updateHint')}</p>
+                {isDesktopApp && versionInfo.download_url && versionInfo.download_name && updatePhase === 'idle' && (
+                  <button
+                    type="button"
+                    onClick={() => promptAndInstallUpdate(versionInfo)}
+                    className="w-full py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary/90 transition-colors"
+                  >
+                    {t('systemConfig.about.desktopUpdateNow')}
+                  </button>
+                )}
+                {isDesktopApp && !versionInfo.download_url && (
+                  <p className="text-xs text-amber-600">{t('systemConfig.about.desktopUpdateAssetMissing')}</p>
+                )}
                 {versionInfo.url && (
                   <a
                     href={versionInfo.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                   >
                     {t('systemConfig.about.viewRelease')} <ExternalLink size={12} />
                   </a>
@@ -439,7 +557,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
     return 'about';
   });
   const [config, setConfig] = useState<Record<string, any> | null>(() => peekSystemConfig());
-  
+
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);

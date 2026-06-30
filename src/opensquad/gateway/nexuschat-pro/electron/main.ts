@@ -6,6 +6,7 @@ import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace } from './desktop-workspace'
+import { downloadInstaller, installDownloadedUpdate } from './desktop-updater'
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 // Backend port: read from environment variable (set by docker-entrypoint.sh or
@@ -30,6 +31,7 @@ const APP_URL       = DEV_MODE
   ? `http://127.0.0.1:${FRONTEND_PORT}`
   : `http://127.0.0.1:${BACKEND_PORT}`
 const STARTUP_TIMEOUT_MS = 45_000   // 后端最长等待时间
+const APP_DISPLAY_NAME = 'OpenSquad'
 
 // Application icon — Windows expects an .ico, other platforms accept PNG.
 // Path is resolved relative to the compiled main.cjs (dist-electron/).
@@ -84,6 +86,25 @@ function registerElectronIpc(): void {
     app.relaunch()
     app.exit(0)
   })
+
+  ipcMain.handle(
+    'electron:download-and-install-update',
+    async (event, payload: { url: string; fileName: string }) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      const sendProgress = (progress: { percent: number; transferred: number; total: number }) => {
+        win?.webContents.send('electron:update-download-progress', progress)
+      }
+      try {
+        const installerPath = await downloadInstaller(payload.url, payload.fileName, sendProgress)
+        win?.webContents.send('electron:update-installing')
+        await installDownloadedUpdate(installerPath)
+        return { ok: true as const }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { ok: false as const, error: message }
+      }
+    },
+  )
 }
 
 // ── 获取各平台后端二进制路径 ──────────────────────────────────────────────────
@@ -230,7 +251,7 @@ async function createWindow(): Promise<void> {
     height:    800,
     minWidth:  900,
     minHeight: 600,
-    title:     USE_CUSTOM_TITLEBAR ? '' : 'NexusChat Pro',
+    title:     USE_CUSTOM_TITLEBAR ? '' : APP_DISPLAY_NAME,
     show:      false,
     frame:     !USE_CUSTOM_TITLEBAR,
     autoHideMenuBar: USE_CUSTOM_TITLEBAR,
@@ -256,7 +277,7 @@ async function createWindow(): Promise<void> {
     `align-items:center;justify-content:center;height:100vh;margin:0;` +
     `font-family:sans-serif;color:#aaa">` +
     `<div style="font-size:2rem;margin-bottom:.5rem">⚡</div>` +
-    `<div>Starting NexusChat Pro…</div>` +
+    `<div>Starting ${APP_DISPLAY_NAME}…</div>` +
     `</body></html>`
   )
   mainWindow.show()
@@ -279,7 +300,7 @@ async function createWindow(): Promise<void> {
     }
     await mainWindow.loadURL(APP_URL)
     if (!USE_CUSTOM_TITLEBAR) {
-      mainWindow.setTitle('NexusChat Pro')
+      mainWindow.setTitle(APP_DISPLAY_NAME)
     }
   } catch {
     dialog.showErrorBox(
@@ -306,7 +327,7 @@ function createTray(): void {
     : nativeImage.createEmpty()
 
   tray = new Tray(icon)
-  tray.setToolTip('NexusChat Pro')
+  tray.setToolTip(APP_DISPLAY_NAME)
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Show',  click: () => mainWindow?.show() },
     { type: 'separator' },

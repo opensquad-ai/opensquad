@@ -90,7 +90,7 @@
     "scrollToBottom": "Scroll to bottom"
   },
   "chat": {
-    "welcome": "Welcome to NexusChat Pro",
+    "welcome": "Welcome to OpenSquad",
     "selectGroup": "Select a group to start messaging.",
     "newGroup": "New Group",
     "joinGroup": "Join Group",
@@ -772,6 +772,13 @@
       "alreadyLatest": "Already the latest version",
       "checkSkippedTitle": "Update check disabled",
       "checkSkippedGeneric": "This build is not on the stable release channel; update notifications are not applicable.",
+      "desktopUpdateNow": "Download and Install Update",
+      "desktopUpdateConfirm": "A new version (v{{version}}) is available. Download and install it now? The app will close during installation.",
+      "desktopUpdateDownloading": "Downloading update…",
+      "desktopUpdateInstalling": "Installing update… The app will close shortly.",
+      "desktopUpdateFailed": "Automatic update failed",
+      "desktopUpdateUnavailable": "In-app updates are only available in the packaged desktop app",
+      "desktopUpdateAssetMissing": "No installer asset found for this platform on the release page. Please download manually.",
       "channel": {
         "stable": "stable",
         "dev": "dev",
