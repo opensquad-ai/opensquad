@@ -5,6 +5,7 @@ import path from 'path'
 import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
+import { resolveDesktopWorkspace } from './desktop-workspace'
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 // Backend port: read from environment variable (set by docker-entrypoint.sh or
@@ -65,6 +66,24 @@ function registerElectronIpc(): void {
   })
 
   ipcMain.handle('electron:is-maximized', async () => mainWindow?.isMaximized() ?? false)
+
+  ipcMain.handle('electron:pick-workspace-folder', async () => {
+    const win = mainWindow ?? BrowserWindow.getFocusedWindow()
+    const opts = {
+      title: 'Select workspace folder',
+      properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
+    }
+    const result = win
+      ? await dialog.showOpenDialog(win, opts)
+      : await dialog.showOpenDialog(opts)
+    if (result.canceled || !result.filePaths[0]) return null
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('electron:restart-app', async () => {
+    app.relaunch()
+    app.exit(0)
+  })
 }
 
 // ── 获取各平台后端二进制路径 ──────────────────────────────────────────────────
@@ -87,17 +106,22 @@ function getBackendExe(): string {
 }
 
 // ── 启动 Python 后端 ──────────────────────────────────────────────────────────
-// userData 作为运行时数据根目录（chat.db、logs 等写入此处）。两个服务共享同一
-// userData，保证 gateway 与 launcher 看到同一份 workspace/config。
+// Electron userData holds app prefs (desktop-workspace.json). The active
+// workspace (chat.db, uploads, agents) may live elsewhere after the user
+// switches it in System Settings → Workspace.
 function getBackendEnv(): { cwd: string; env: NodeJS.ProcessEnv } {
-  const userDataDir = app.getPath('userData')
-  fs.mkdirSync(userDataDir, { recursive: true })
+  const appDataDir = app.getPath('userData')
+  fs.mkdirSync(appDataDir, { recursive: true })
+  const workspaceDir = resolveDesktopWorkspace(appDataDir)
+  fs.mkdirSync(workspaceDir, { recursive: true })
   return {
-    cwd: userDataDir,
+    cwd: workspaceDir,
     env: {
       ...process.env,
-      // 告知后端使用哪个目录写运行时数据
-      OPENSQUAD_USER_DATA: userDataDir,
+      // Fixed Electron config dir (writable prefs, never moves)
+      OPENSQUAD_APP_DATA: appDataDir,
+      // Active workspace root (may differ from appDataDir)
+      OPENSQUAD_USER_DATA: workspaceDir,
       // 禁用 uvicorn 热重载（打包环境不支持）
       OPENSQUAD_RELOAD: '0',
     },

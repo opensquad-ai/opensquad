@@ -2950,7 +2950,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """Create or register a workspace on the Launcher server (does not auto-switch)"""
             from datetime import datetime as _dt
 
-            from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace
+            from opensquad.workspace_utils import get_default_workspace_path, save_last_workspace, _copy_default_resources
 
             raw_path = (body.get("path") or "").strip()
             name = (body.get("name") or "").strip()
@@ -2976,6 +2976,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     )
                 try:
                     syscfg.init_workspace(workspace_path, copy_config=True)
+                    _copy_default_resources(workspace_path, syscfg.get_builtin_root())
                     save_last_workspace(workspace_path, set_as_current=False)
                     return self._send_json(
                         {
@@ -2990,6 +2991,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             try:
                 syscfg.init_workspace(workspace_path, copy_config=True)
+                _copy_default_resources(workspace_path, syscfg.get_builtin_root())
                 save_last_workspace(workspace_path, set_as_current=False)
                 return self._send_json(
                     {
@@ -3006,7 +3008,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """Switch the current workspace (recorded to config; requires Launcher restart to fully take effect)"""
             from datetime import datetime as _dt
 
-            from opensquad.workspace_utils import save_last_workspace
+            from opensquad.workspace_utils import save_last_workspace, persist_desktop_workspace_switch
 
             raw_path = (body.get("path") or "").strip()
             if not raw_path:
@@ -3037,12 +3039,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             ensure_ascii=False,
                         )
                 save_last_workspace(workspace_path)
+                persist_desktop_workspace_switch(workspace_path)
                 return self._send_json(
                     {
                         "success": True,
-                        "message": "Workspace switched; please restart the Launcher for the change to take effect",
+                        "message": "Workspace switched; please restart the app for the change to take effect",
                         "path": workspace_path,
                         "requires_restart": True,
+                        "desktop_restart": bool(os.environ.get("OPENSQUAD_APP_DATA")),
                     }
                 )
             except Exception as e:

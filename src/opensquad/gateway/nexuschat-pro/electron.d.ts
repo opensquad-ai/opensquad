@@ -8,6 +8,8 @@ declare global {
       popupMenu?: (menuId: string) => Promise<void>
       windowControl?: (action: 'minimize' | 'maximize' | 'close') => Promise<void>
       isMaximized?: () => Promise<boolean>
+      pickWorkspaceFolder?: () => Promise<string | null>
+      restartApp?: () => Promise<void>
       onMaximizedChanged?: (callback: (maximized: boolean) => void) => () => void
     }
   }

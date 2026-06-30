@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('electronEnv', {
   windowControl: (action: 'minimize' | 'maximize' | 'close') =>
     ipcRenderer.invoke('electron:window-control', action),
   isMaximized: () => ipcRenderer.invoke('electron:is-maximized') as Promise<boolean>,
+  pickWorkspaceFolder: () =>
+    ipcRenderer.invoke('electron:pick-workspace-folder') as Promise<string | null>,
+  restartApp: () => ipcRenderer.invoke('electron:restart-app') as Promise<void>,
   onMaximizedChanged: (callback: (maximized: boolean) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, maximized: boolean) => callback(maximized)
     ipcRenderer.on('electron:maximized-changed', listener)

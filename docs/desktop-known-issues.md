@@ -33,21 +33,29 @@ path (it is shadowed by the `opensquad/launcher/` package, so a normal
 
 ## Where the desktop app stores data (workspace)
 
-The desktop app uses Electron's **userData directory** as an independent
-workspace — e.g. `%APPDATA%\nexuschat-pro\` on Windows. This is intentionally
-separate from any dev workspace (`opensquad start` records its workspace in
-`~/.opensquad/last_workspace.json`, but the desktop app ignores that file).
-On first launch the gateway/launcher init the userData workspace: create the
-directory structure (`data/uploads`, `data/logs`, `agents/`, …), copy a
+The desktop app separates two directories:
+
+| Directory | Purpose | Example (Windows) |
+|-----------|---------|-------------------|
+| **App data** (`OPENSQUAD_APP_DATA`) | Fixed Electron userData; stores app prefs such as `desktop-workspace.json` | `%APPDATA%\nexuschat-pro\` |
+| **Workspace** (`OPENSQUAD_USER_DATA`) | Chat DB, uploads, agents, logs — user data | Defaults to app data on first run; can be changed |
+
+On first launch the workspace defaults to the app data dir. The gateway/launcher
+init it: create `data/uploads`, `data/logs`, `agents/`, copy
 `system_config.json` from the bundled template, and seed default model cards
 and the pm/coder/qa agents.
 
+**Changing the workspace:** open **System Settings → Workspace**. You can create
+a workspace at a custom path, switch to an existing one, or use **Migrate
+Workspace Data** to copy/move data between directories. After switching, click
+**Restart app** (or restart the desktop app manually) — the choice is persisted
+in `<app-data>/desktop-workspace.json` and picked up on the next launch.
+
 Builtin resources (plugins, skills, role/model/collab cards, agents, pymcp)
-ship inside the bundle at `_internal/<name>/` and are read-only; the desktop
-app serves them from there. User data (chat.db, uploads, agent configs the
-user edits) lives in the writable userData workspace. Uploads go to
-`<userData>/data/uploads/` and are served at `/uploads/…`, so images sent in
-the desktop app display correctly.
+ship inside the bundle at `_internal/<name>/` and are read-only. User data
+(chat.db, uploads, agent configs the user edits) lives in the writable
+workspace directory. Uploads go to `<workspace>/data/uploads/` and are served
+at `/uploads/…`.
 
 ## Known issues
 

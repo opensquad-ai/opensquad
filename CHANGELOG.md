@@ -54,6 +54,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   (`<workspace>/data/uploads/`) used in dev, so images appeared torn. Both
   modes now use `workspace_uploads_dir()`; since the desktop workspace IS
   userData, uploads persist per-user and are served consistently.
+- **desktop: configurable workspace path in System Settings.** The desktop app
+  now separates Electron app data (`OPENSQUAD_APP_DATA`, fixed userData dir)
+  from the active workspace (`OPENSQUAD_USER_DATA`). Users can create, switch,
+  or migrate workspace data to a custom directory; the choice is persisted in
+  `desktop-workspace.json` and applied after restarting the app.
 
 ### Known limitations (desktop)
 
@@ -61,9 +66,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   packaged app (a frozen EXE cannot `sys.executable -m` an agent). Listing
   and configuring agents works. See
   [docs/desktop-known-issues.md](docs/desktop-known-issues.md).
-- The desktop app uses a fresh, independent workspace (Electron userData).
-  Data from a dev workspace (`opensquad start`) is **not** migrated — the
-  desktop app starts clean. This is by design.
 
 ---
 

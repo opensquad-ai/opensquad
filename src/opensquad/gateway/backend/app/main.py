@@ -43,26 +43,20 @@ if not _console_log.handlers:
 # On startup, attempt to load the last-used workspace; if none exists, use the install directory
 # (user selects/creates workspace via the UI)
 #
-# Frozen (desktop app) exception: use Electron's userData dir as an independent
-# workspace. The desktop app must NOT reuse the dev workspace from
-# last_workspace.json — that path only exists on a developer's machine, so on
-# any other PC load_last_workspace() would return None or a missing dir and the
-# app would fall back to the read-only install dir. OPENSQUAD_USER_DATA is set
-# by Electron's main.ts. First run inits the workspace (structure + config +
-# seed resources); subsequent runs reuse it. This mirrors the frozen branch in
-# workspace_utils.bootstrap_workspace() (used by the launcher).
-_desktop_user_data = os.environ.get("OPENSQUAD_USER_DATA") if _IS_FROZEN else None
-if _desktop_user_data:
-    os.makedirs(_desktop_user_data, exist_ok=True)
-    _syscfg.set_workspace(_desktop_user_data)
-    _ws_meta = os.path.join(_desktop_user_data, ".opensquad", "workspace.json")
-    if not os.path.exists(_ws_meta):
-        _console_log.info("[Workspace] First run — initializing desktop workspace: %s", _desktop_user_data)
-        _syscfg.init_workspace(_desktop_user_data, copy_config=True)
-        from opensquad.workspace_utils import _copy_default_resources
-        _copy_default_resources(_desktop_user_data, _syscfg.get_builtin_root())
-    else:
-        _console_log.info("[Workspace] Reusing desktop workspace: %s", _desktop_user_data)
+# Frozen (desktop app): resolve workspace via Electron env vars.
+# OPENSQUAD_APP_DATA = fixed Electron userData (app prefs).
+# OPENSQUAD_USER_DATA = active workspace path (may differ after user switch).
+if _IS_FROZEN and (
+    os.environ.get("OPENSQUAD_APP_DATA") or os.environ.get("OPENSQUAD_USER_DATA")
+):
+    from opensquad.workspace_utils import bootstrap_desktop_workspace
+
+    try:
+        _ws_path = bootstrap_desktop_workspace()
+        _console_log.info("[Workspace] Desktop workspace ready: %s", _ws_path)
+    except Exception as _ws_err:
+        _console_log.error("[Workspace] Failed to initialize desktop workspace: %s", _ws_err)
+        raise
 else:
     last_workspace = load_last_workspace()
     if last_workspace and os.path.exists(last_workspace):
