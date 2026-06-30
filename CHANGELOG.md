@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.4.1] | 2026-06-30 | [0.4.0 → 0.4.1](https://github.com/opensquad-ai/opensquad/compare/v0.4.0...v0.4.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1) |
 | [0.4.0] | 2026-06-29 | (initial release) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0) |
 
 > This is the first public release of OpenSquad on the recreated
@@ -19,7 +20,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.0]. Will be folded into the next release section when cut.
+> Changes since [0.4.1]. Will be folded into the next release section when cut.
+
+---
+
+## [0.4.1] — 2026-06-30
+
+> Desktop-focused patch: Launcher spawn, bundled resources, workspace paths,
+> and configurable workspace directory in the packaged app.
 
 ### Fixed
 
@@ -66,6 +74,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   packaged app (a frozen EXE cannot `sys.executable -m` an agent). Listing
   and configuring agents works. See
   [docs/desktop-known-issues.md](docs/desktop-known-issues.md).
+
+### Changed
+
+- **CI: desktop Release Assets can be refreshed via workflow_dispatch.**
+  `build-desktop.yml` accepts a `release_tag` input to rebuild installers
+  from any branch and overwrite Assets on an existing GitHub Release.
 
 ---
 
@@ -131,4 +145,5 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The pre-commit hook chain (ruff, ruff-format, commitlint,
   detect-secrets) is recommended for contributors.
 
+[0.4.1]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1
 [0.4.0]: https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.0
