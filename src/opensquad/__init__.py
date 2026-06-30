@@ -4,7 +4,7 @@ OpenSquad - Local-first Multi-Agent Collaboration Framework
 https://github.com/opensquad-ai/opensquad
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2.dev0"
 __author__ = "OpenSquad Contributors"
 
 # Shared runtime context dict - updated by Runner each turn.
