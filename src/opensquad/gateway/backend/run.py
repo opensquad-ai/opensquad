@@ -2,13 +2,15 @@
 Backend service startup script
 Supports both normal Python execution and PyInstaller frozen bundles.
 """
+
 import json
 import os
 import sys
+
 import uvicorn
 
 # ── PyInstaller compatibility: detect whether running in a frozen bundle ──────────────────────────
-IS_FROZEN = getattr(sys, 'frozen', False)
+IS_FROZEN = getattr(sys, "frozen", False)
 
 if IS_FROZEN:
     # Frozen: executable directory is the root for all resources
@@ -37,19 +39,27 @@ if not IS_FROZEN:
     _existing_pythonpath = os.environ.get("PYTHONPATH", "")
     _extra_paths = [p for p in [BACKEND_DIR, PROJECT_ROOT] if p not in _existing_pythonpath]
     if _extra_paths:
-        os.environ["PYTHONPATH"] = os.pathsep.join(_extra_paths + ([_existing_pythonpath] if _existing_pythonpath else []))
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            _extra_paths + ([_existing_pythonpath] if _existing_pythonpath else [])
+        )
 
 
 def load_config():
     """Load config from gateway/config.json"""
     if IS_FROZEN:
-        # Frozen: config.json is next to the executable
-        config_path = os.path.join(BACKEND_DIR, "config.json")
+        # PyInstaller 6.x: COLLECT puts datas under <exe-dir>/_internal/,
+        # not directly next to the exe. The spec bundles config.json as
+        # `datas += [(config.json, ".")]`, so it lives at _internal/config.json.
+        frozen_root = os.path.join(BACKEND_DIR, "_internal")
+        config_path = os.path.join(frozen_root, "config.json")
+        if not os.path.exists(config_path):
+            # Fallback to legacy location (PyInstaller 5.x layout).
+            config_path = os.path.join(BACKEND_DIR, "config.json")
     else:
         root_dir = os.path.dirname(BACKEND_DIR)
         config_path = os.path.join(root_dir, "config.json")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -78,7 +88,7 @@ if __name__ == "__main__":
     try:
         config = load_config()
         backend_config = config.get("backend", {})
-        print(f"[Config] Loaded config from gateway/config.json")
+        print("[Config] Loaded config from gateway/config.json")
     except Exception as e:
         print(f"[Config] Failed to load config: {e}")
         backend_config = {}
@@ -94,19 +104,17 @@ if __name__ == "__main__":
         port = backend_config.get("port", 9555)
         host = backend_config.get("host", "0.0.0.0")
 
-    print(f"==========================================")
-    print(f"   NexusChat Backend Starting...")
+    print("==========================================")
+    print("   NexusChat Backend Starting...")
     print(f"   Host: {host}")
     print(f"   Port: {port}")
     print(f"   Frozen: {IS_FROZEN}")
-    print(f"==========================================")
+    print("==========================================")
 
     # Disable uvicorn hot-reload in frozen mode (reloader forks subprocesses; PyInstaller doesn't support that)
     # Electron can also force-disable reload via OPENSQUAD_RELOAD=0
     enable_reload = (
-        not IS_FROZEN
-        and os.environ.get("OPENSQUAD_RELOAD", "1") != "0"
-        and backend_config.get("reload", True)
+        not IS_FROZEN and os.environ.get("OPENSQUAD_RELOAD", "1") != "0" and backend_config.get("reload", True)
     )
 
     uvicorn.run(
@@ -116,5 +124,5 @@ if __name__ == "__main__":
         reload=enable_reload,
         reload_dirs=[BACKEND_DIR] if enable_reload else None,
         log_level=backend_config.get("log_level", "warning"),
-        access_log=False
+        access_log=False,
     )

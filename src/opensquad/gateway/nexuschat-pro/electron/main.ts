@@ -7,8 +7,10 @@ import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 // Backend port: read from environment variable (set by docker-entrypoint.sh or
-// launcher), fallback to 9510 (the default gateway port in system_config).
-const BACKEND_PORT  = parseInt(process.env.OPENSQUAD_PORT || '9510', 10)
+// launcher), fallback to 9555 (the default in src/opensquad/gateway/config.json).
+// Was 9510 — that didn't match the actual backend port, so health checks timed
+// out and the Electron app showed 'Backend did not start in time'.
+const BACKEND_PORT  = parseInt(process.env.OPENSQUAD_PORT || '9555', 10)
 const FRONTEND_PORT = parseInt(
   process.env.OPENSQUAD_FRONTEND_PORT || process.env.VITE_DEV_PORT || '5173',
   10,
