@@ -2,6 +2,9 @@
 OpenSquad - Local-first Multi-Agent Collaboration Framework
 
 https://github.com/opensquad-ai/opensquad
+
+Version: single source of truth is pyproject.toml [project].version.
+Run ``python scripts/sync_version.py`` after bumping pyproject.toml.
 """
 
 __version__ = "0.4.2.dev0"

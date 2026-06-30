@@ -33,6 +33,15 @@ repos:
   #   pip install conventional-pre-commit
   # and the hook activates automatically on `git commit`.
   # Bypass (NOT recommended): `git commit --no-verify`.
+  - repo: local
+    hooks:
+      - id: sync-version
+        name: sync version from pyproject.toml
+        entry: python scripts/sync_version.py
+        language: system
+        pass_filenames: false
+        files: ^pyproject\.toml$
+
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.0.0
     hooks:
