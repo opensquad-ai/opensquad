@@ -201,6 +201,16 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
         description_zh = agent.get("description_zh") or agent_config.get("description_zh") or description
         description_en = agent.get("description_en") or agent_config.get("description_en") or description
 
+        model_cfg = agent_config.get("model", {})
+        model_card = agent.get("model_card")
+        if not model_card and isinstance(model_cfg, dict):
+            model_card = model_cfg.get("_card")
+        role_card = agent.get("role_card")
+        if not role_card:
+            prompt_cfg = agent_config.get("prompt", {})
+            if isinstance(prompt_cfg, dict):
+                role_card = prompt_cfg.get("role")
+
         registry_online = reg is not None and reg.status != "offline" if reg else False
         merged.append(
             {
@@ -226,6 +236,9 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
                 "token_stats": agent.get("token_stats"),
                 # Group chat account profile (name, avatar)
                 "chat_profile": agent.get("chat_profile"),
+                # Card assignments (from launcher or config fallback)
+                "model_card": model_card,
+                "role_card": role_card,
             }
         )
 

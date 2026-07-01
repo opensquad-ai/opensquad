@@ -21,20 +21,112 @@ from datetime import datetime
 
 _log = logging.getLogger("launcher.process_manager")
 
+_PYINSTALLER_PATH_MARKERS = (
+    os.path.join("backend-win", "run"),
+    os.path.join("backend-mac", "run"),
+    os.path.join("backend-linux", "run"),
+    "_internal",
+)
 
-def _plugin_python_executable() -> str:
-    """Python interpreter for plugin service scripts.
 
-    In a PyInstaller bundle ``sys.executable`` is ``run.exe`` and cannot run
-    arbitrary ``service/main.py`` files. Prefer a system Python when packaged.
-    """
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    for name in ("python", "python3", "py"):
+def _is_pyinstaller_internal_path(path: str) -> bool:
+    if not path:
+        return False
+    norm = os.path.normcase(os.path.normpath(path))
+    return any(marker in norm for marker in _PYINSTALLER_PATH_MARKERS)
+
+
+def _sanitize_path_for_child(path_value: str) -> str:
+    parts = [p for p in path_value.split(os.pathsep) if p and not _is_pyinstaller_internal_path(p)]
+    return os.pathsep.join(parts)
+
+
+def _resolve_packaged_python_executable() -> str | None:
+    """Pick Python for agent/plugin child processes in frozen desktop builds."""
+    from opensquad.agent_runtime import resolve_bundled_agent_python
+
+    bundled = resolve_bundled_agent_python()
+    if bundled:
+        return bundled
+
+    override = os.environ.get("OPENSQUAD_PYTHON") or os.environ.get("OPENSQUAD_AGENT_PYTHON")
+    if override:
+        override = os.path.abspath(override)
+        if os.path.isfile(override):
+            return override
+
+    # Prefer 3.11/3.10/3.12 via py launcher — avoid 3.13+ DLL clashes with PyInstaller (python311.dll).
+    if sys.platform == "win32":
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            for ver in ("3.11", "3.10", "3.12"):
+                try:
+                    proc = subprocess.run(
+                        [py_launcher, f"-{ver}", "-c", "import sys; print(sys.executable)"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except Exception:
+                    continue
+                if proc.returncode == 0:
+                    exe = proc.stdout.strip()
+                    if exe and os.path.isfile(exe):
+                        return exe
+
+    for name in ("python3.11", "python311", "python3.10", "python310", "python3.12", "python3", "python"):
         found = shutil.which(name)
         if found:
             return found
-    return sys.executable
+    return None
+
+
+def _child_python_executable() -> str | None:
+    """Python interpreter for agent/plugin child processes.
+
+    In a PyInstaller bundle ``sys.executable`` is ``run.exe`` and cannot run
+    ``python -m opensquad.agents_boot`` or plugin ``service/main.py`` scripts.
+    Spawning ``run.exe`` without ``--service`` would start another gateway on
+    port 9555, which looks like a backend crash loop and breaks agent startup.
+    Prefer a system Python when packaged.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    return _resolve_packaged_python_executable()
+
+
+def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for agent/plugin subprocesses.
+
+    Strip PyInstaller ``_internal`` dirs from PATH on Windows so a system Python
+    (e.g. 3.13) does not load ``python311.dll`` from the bundled backend and crash
+    with ``Module use of python311.dll conflicts with this version of Python``.
+    """
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
+    if sys.platform == "win32":
+        if child_env.get("PATH"):
+            child_env["PATH"] = _sanitize_path_for_child(child_env["PATH"])
+        child_env.pop("PYTHONHOME", None)
+
+    install_dir = syscfg.get_builtin_root()
+    if getattr(sys, "frozen", False):
+        # Packaged app: bundled opensquad only — do not inherit dev PYTHONPATH.
+        child_env["PYTHONPATH"] = install_dir
+    else:
+        existing_pp = child_env.get("PYTHONPATH", "")
+        child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
+
+    if extra:
+        child_env.update(extra)
+    return child_env
+
+
+# Backward-compatible alias for plugin service spawns.
+def _plugin_python_executable() -> str:
+    return _child_python_executable() or sys.executable
 
 
 from opensquad._storage.json_io import read_json as _read_json
@@ -397,29 +489,48 @@ class AgentProcess:
 
         self.actual_port = target_port
 
-        cmd = [
-            sys.executable,
-            "-m",
-            BOOT_MODULE,
-            "--agent-dir",
-            self.agent_dir,
-            "--port",
-            str(target_port),  # Force override port
-        ]
+        python_exe = _child_python_executable()
+        if python_exe is None and not getattr(sys, "frozen", False):
+            _log.error(
+                "[Launcher] Cannot start %s: install the Agent Python runtime via the "
+                "desktop setup wizard (%%LOCALAPPDATA%%\\OpenSquad\\runtime) or set "
+                "OPENSQUAD_PYTHON to python.exe.",
+                self.agent_name,
+            )
+            return False
 
-        # Build child process environment: inherit current env, force UTF-8 IO encoding to prevent garbled output
-        child_env = os.environ.copy()
-        child_env["PYTHONIOENCODING"] = "utf-8"
-        child_env["PYTHONUTF8"] = "1"
-        # Inject agent identity into child process so tools can resolve "self" deterministically
-        child_env["OPENSQUAD_AGENT_ID"] = self.agent_id
-        child_env["OPENSQUAD_AGENT_DIR"] = self.agent_dir
-        child_env["OPENSQUAD_LAUNCHER_PORT"] = str(MANAGEMENT_PORT)  # for task_watch heartbeat
-        # Ensure subprocess can find the opensquad package (install dir may not be in child process sys.path)
-        install_dir = syscfg.get_builtin_root()
-        existing_pp = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
+        # Frozen mode: use the bundled run.exe itself to run the agent (it has
+        # the full opensquad package in its PYZ).  An external Python cannot
+        # import opensquad because PyInstaller puts .py into the PYZ archive,
+        # not onto disk.  Non-frozen: use the venv/system Python with -m.
+        if getattr(sys, "frozen", False):
+            cmd = [
+                sys.executable,
+                "--service",
+                "agent",
+                "--agent-dir",
+                self.agent_dir,
+                "--port",
+                str(target_port),
+            ]
+        else:
+            cmd = [
+                python_exe,
+                "-m",
+                BOOT_MODULE,
+                "--agent-dir",
+                self.agent_dir,
+                "--port",
+                str(target_port),
+            ]
 
+        child_env = _build_child_process_env(
+            {
+                "OPENSQUAD_AGENT_ID": self.agent_id,
+                "OPENSQUAD_AGENT_DIR": self.agent_dir,
+                "OPENSQUAD_LAUNCHER_PORT": str(MANAGEMENT_PORT),  # for task_watch heartbeat
+            }
+        )
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -843,15 +954,13 @@ class PluginServiceProcess:
         # Install pip dependencies before launching (safety net for hot-installed plugins)
         self._install_dependencies()
 
-        child_env = os.environ.copy()
-        child_env["PYTHONIOENCODING"] = "utf-8"
-        child_env["PYTHONUTF8"] = "1"
-        child_env["OPENSQUAD_WORKSPACE"] = syscfg.get_workspace()
-        child_env["PORT"] = str(self.port)
-        child_env.update(self.service_cfg.get("env", {}))
-        install_dir = syscfg.get_builtin_root()
-        existing_pp = child_env.get("PYTHONPATH", "")
-        child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
+        child_env = _build_child_process_env(
+            {
+                "OPENSQUAD_WORKSPACE": syscfg.get_workspace(),
+                "PORT": str(self.port),
+                **self.service_cfg.get("env", {}),
+            }
+        )
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP

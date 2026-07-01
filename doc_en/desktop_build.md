@@ -242,7 +242,150 @@ After the workflow finishes:
 3. Smoke test: download the installer for your platform, install, launch.
    The app should open to the gateway UI, spawn its bundled backend
    (visible in the system tray), and the backend port should be reachable
-   on `127.0.0.1:9510/health`.
+   on `127.0.0.1:9555/health`.
+
+---
+
+## Frozen-mode quick verification (change → 6 min result)
+
+### Why quick verification is needed
+
+PyInstaller frozen-mode bugs **only reproduce after packaging** — the dev mode
+(`uv run opensquad start`) runs source code with venv Python, which is a
+completely different runtime path from frozen `run.exe`. If every code change
+requires a full cycle of "rebuild backend (5 min) → electron-builder (2.5 min)
+→ install → click UI → find bug", each iteration takes 10+ minutes.
+
+**Key insight**: electron-builder just copies `build/backend-win/run/` into the
+installer — it doesn't change `run.exe` behavior. So **most frozen bugs can be
+reproduced and verified with the backend bundle alone**, no electron-builder,
+no installer.
+
+### Quick verification flow
+
+```
+change code → rebuild backend (5 min) → test with run.exe directly (10 s)
+                                              ↓
+                                         PASS → then run electron-builder
+                                         FAIL → fix code, repeat
+```
+
+#### Step 0: One-time setup
+
+```powershell
+# Ensure Agent Python runtime is installed (first time only)
+build\release\win-unpacked\OpenSquad.exe --setup-runtime
+
+# Or verify manually
+Test-Path "$env:LOCALAPPDATA\OpenSquad\runtime\python311\python.exe"
+```
+
+#### Step 1: Rebuild backend (~5 min)
+
+```powershell
+scripts\build_backend.bat
+
+# Or call PyInstaller directly (skips frontend build, faster):
+uv run --python 3.11 pyinstaller src\opensquad\gateway\backend\opensquad_backend.spec `
+  --distpath build\backend-win --workpath build\.pyinstaller-work --clean --noconfirm
+```
+
+> **Note**: `build_backend.bat` may pass empty arguments due to `^` line
+> continuation + blank lines. If you see
+> `pyinstaller: error: unrecognized arguments`, use the direct PyInstaller
+> command above.
+
+#### Step 2: Smoke test — can agents start? (~10 s)
+
+```powershell
+uv run python scripts\smoke_frozen_agent.py
+```
+
+The script:
+1. Starts `run.exe --service launcher --mgmt-port 9600 --no-auto-start --no-services`
+2. Waits for port 9600
+3. Calls `POST /api/agents/coder/start`
+4. Polls `/api/agents` until `alive=True`
+5. Cleans up processes
+
+**Expected output**:
+```
+[smoke] Launcher up after 1s, agents: ['coder', 'pm', 'qa']
+[smoke] Start response: {'message': 'coder started', 'pid': 123456, 'port': 8001}
+[smoke] 0s: alive=True pid=123456 port=8001 restarts=0
+PASS: coder agent is alive on port 8001
+```
+
+#### Step 3: Smoke test — can agents chat? (~10 s)
+
+Requires Gateway running (start the desktop app or run.exe separately):
+
+```powershell
+Start-Process build\release\win-unpacked\OpenSquad.exe
+Start-Sleep -Seconds 20  # wait for Gateway
+
+uv run python scripts\smoke_chat.py
+```
+
+The script:
+1. `POST /api/auth/login` to get JWT
+2. Connects `ws://127.0.0.1:9555/ai-web/ws/coder-001?token=<JWT>`
+3. Sends `{"type": "chat", "content": "Hello, reply with one sentence to confirm you work"}`
+4. Receives `thought` (thinking stream) + `message` (reply)
+5. Reports SUCCESS / FAIL
+
+#### Step 4: Only after all PASS, run electron-builder
+
+```powershell
+cd src\opensquad\gateway\nexuschat-pro
+$env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+# --dir produces unpacked dir only (~1 min), no installer
+npx electron-builder --win --dir --publish never --config.win.signAndEditExecutable=false
+# Or full installer (~2.5 min)
+npx electron-builder --win --publish never --config.win.signAndEditExecutable=false
+```
+
+### Ultra-fast iteration: patch bundle without rebuild (10 s)
+
+If smoke test reports `ModuleNotFoundError` or `FileNotFoundError`, it usually
+means PyInstaller missed a data file or submodule. **No need to wait 5 min for
+a rebuild** — copy the missing files directly into the bundle and retest:
+
+```powershell
+# Example: prompts directory wasn't bundled
+Copy-Item -Path src\prompts -Destination build\backend-win\run\_internal\prompts -Recurse -Force
+
+# Example: tiktoken_ext submodule wasn't in PYZ
+Copy-Item -Path .venv\Lib\site-packages\tiktoken_ext `
+  -Destination build\backend-win\run\_internal\tiktoken_ext -Recurse -Force
+
+# Immediately retest (10 s)
+uv run python scripts\smoke_frozen_agent.py
+```
+
+After verifying the fix works, add the corresponding `datas` / `hiddenimports`
+to `opensquad_backend.spec` and do a clean rebuild to confirm the spec is
+correct.
+
+### Smoke scripts
+
+| Script | Purpose | Time | Requires |
+|--------|---------|------|----------|
+| `scripts/smoke_frozen_agent.py` | Verify frozen launcher + agent startup | ~10s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_chat.py` | Verify end-to-end chat (login→WS→send→reply) | ~10s | Gateway running on 9555 |
+| `scripts/check_build_python.py --bundle <dir>` | Verify bundle uses Python 3.11 | ~1s | None |
+
+### Common frozen-only bug patterns
+
+These bugs **never appear in dev mode** — only in the frozen bundle:
+
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| `ModuleNotFoundError: opensquad.launcher.process_manager` | `launcher.py` shadowed `launcher/` package | Renamed to `launcher_main.py` |
+| `ModuleNotFoundError: No module named 'opensquad'` | External Python can't import from PYZ | Use `run.exe --service agent` instead of external `python -m` |
+| `FileNotFoundError: base_fc.md` | `prompts/` directory not bundled | Add explicitly to spec `datas` |
+| `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` not in PYZ | Add to spec `hiddenimports` |
+| `Module use of python311.dll conflicts` | System Python 3.13 + PATH polluted with `_internal` | Setup wizard downloads embed Python 3.11 |
 
 ---
 

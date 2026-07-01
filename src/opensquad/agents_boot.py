@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import warnings
+from typing import Any
 
 # Suppress noisy warnings globally
 warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -391,8 +392,11 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
     prompt_root = os.path.join(_builtin_root, "src", "opensquad", "prompts")
     legacy_prompt_root = os.path.join(_builtin_root, "src", "prompts")
     older_legacy_prompt_root = os.path.join(_builtin_root, "prompts")
+    frozen_prompt_root = os.path.join(_builtin_root, "opensquad", "prompts")
     if not os.path.isdir(prompt_root):
-        if os.path.isdir(legacy_prompt_root):
+        if os.path.isdir(frozen_prompt_root):
+            prompt_root = frozen_prompt_root
+        elif os.path.isdir(legacy_prompt_root):
             prompt_root = legacy_prompt_root
         elif os.path.isdir(older_legacy_prompt_root):
             prompt_root = older_legacy_prompt_root
@@ -499,10 +503,41 @@ async def register_tools(config: dict, registry: ToolRegistry, agent_dir: str) -
     Two registration methods are supported:
         1. config.json tools field -- declarative (string list mapped to built-in modules)
         2. context.py init()       -- programmatic (call registry.register directly in init)
+
+    MCP initialization is intentionally deferred to a background task in main() so
+    Gateway WS registration and the Runner can start without waiting on slow MCP
+    servers (e.g. Playwright npx bootstrap).
     """
     BOOT_PHASES.register_builtin_tools(config, registry, agent_dir)
-    await BOOT_PHASES.initialize_runtime_infrastructure(config, registry, agent_dir)
     return registry
+
+
+async def _initialize_mcp_background(
+    config: dict,
+    registry: ToolRegistry,
+    agent_dir: str,
+    agent_logger: logging.Logger,
+    runner: Any | None = None,
+) -> None:
+    """Load MCP tools in the background; hot-reload runner plugin tools when done."""
+    try:
+        await BOOT_PHASES.initialize_runtime_infrastructure(config, registry, agent_dir)
+        agent_logger.info("[Boot] MCP runtime ready (background)")
+        if runner is not None and getattr(runner, "_plugin_manager", None):
+            pm = runner._plugin_manager
+            pm.reload_plugins(
+                registry=runner.tool_registry,
+                agent_id=runner._agent_id,
+                agent_tool_names=runner._agent_tool_names,
+            )
+            pm.register_tools_to_agent(
+                registry=runner.tool_registry,
+                agent_id=runner._agent_id,
+                agent_tool_names=runner._agent_tool_names,
+                agent_tool_levels=runner._agent_tool_levels,
+            )
+    except Exception as exc:
+        agent_logger.warning(f"[Boot] MCP background init failed: {exc}")
 
 
 # ===================================================================
@@ -722,6 +757,16 @@ async def main(agent_dir: str, override_port: int | None = None):
     )
     _early_runner = early_runner_artifacts.runner
     _runner_task = early_runner_artifacts.runner_task
+
+    asyncio.create_task(
+        _initialize_mcp_background(
+            config,
+            tool_registry,
+            agent_dir,
+            agent_logger,
+            runner=_early_runner,
+        )
+    )
 
     plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
         config=config,

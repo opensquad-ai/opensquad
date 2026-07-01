@@ -32,8 +32,11 @@ Usage:
 
 import asyncio
 import sys
+import weakref
 
 _patch_applied = False
+# CancelScope is slotted in anyio 4.14+ — store dedup state externally.
+_cancelled_task_ids_by_scope: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def apply() -> None:
@@ -86,9 +89,7 @@ def _patch_deliver_cancellation(_ba) -> None:
     _orig_deliver = _ba.CancelScope._deliver_cancellation
 
     def _patched_deliver(self, origin):
-        # Initialize the dedup set lazily (once per scope lifecycle)
-        if not hasattr(self, "_cancelled_task_ids"):
-            self._cancelled_task_ids = set()
+        cancelled_ids = _cancelled_task_ids_by_scope.setdefault(self, set())
 
         current = _ba.current_task()
         did_new_cancel = False
@@ -100,10 +101,9 @@ def _patch_deliver_cancellation(_ba) -> None:
             if task is not current and (task is self._host_task or _ba._task_started(task)):
                 waiter = task._fut_waiter  # type: ignore[attr-defined]
                 if not isinstance(waiter, asyncio.Future) or not waiter.done():
-                    # Only cancel each task ONCE per scope lifecycle
                     tid = id(task)
-                    if tid not in self._cancelled_task_ids:
-                        self._cancelled_task_ids.add(tid)
+                    if tid not in cancelled_ids:
+                        cancelled_ids.add(tid)
                         task.cancel(f"Cancelled by cancel scope {id(origin):x}")
                         did_new_cancel = True
                         if task is origin._host_task and origin._pending_uncancellations is not None:

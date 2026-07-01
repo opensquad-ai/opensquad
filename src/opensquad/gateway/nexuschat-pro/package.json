@@ -65,6 +65,7 @@
       "assets/icon.ico",
       "assets/icon.png",
       "assets/tray.png",
+      "assets/setup/**",
       "!dist-electron/**/*.map"
     ],
     "extraResources": [
@@ -95,7 +96,8 @@
         "filter": [
           "icon.ico",
           "icon.png",
-          "tray.png"
+          "tray.png",
+          "setup/**"
         ]
       }
     ],
@@ -122,7 +124,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "include": "build/installer.nsh"
     },
     "portable": {
       "artifactName": "${productName}-${version}-win-${arch}-Portable.${ext}"

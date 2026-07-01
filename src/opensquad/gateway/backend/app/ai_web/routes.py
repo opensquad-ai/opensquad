@@ -687,6 +687,16 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
         agent_type = agent.get("agent_type") or agent_config.get("agent_type", "general")
         description = agent.get("description") or agent_config.get("description", "")
 
+        model_cfg = agent_config.get("model", {})
+        model_card = agent.get("model_card")
+        if not model_card and isinstance(model_cfg, dict):
+            model_card = model_cfg.get("_card")
+        role_card = agent.get("role_card")
+        if not role_card:
+            prompt_cfg = agent_config.get("prompt", {})
+            if isinstance(prompt_cfg, dict):
+                role_card = prompt_cfg.get("role")
+
         merged.append(
             {
                 # launcher process info
@@ -708,6 +718,8 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
                 "token_stats": agent.get("token_stats"),
                 # Group chat account profile (name, avatar)
                 "chat_profile": agent.get("chat_profile"),
+                "model_card": model_card,
+                "role_card": role_card,
             }
         )
 

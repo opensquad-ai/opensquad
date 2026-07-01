@@ -14,6 +14,17 @@ import websockets
 logger = logging.getLogger(__name__)
 
 
+def _drain_task_cancellation() -> int:
+    """Clear leaked cancel counters (anyio/MCP on Python 3.12+) for the current task."""
+    task = asyncio.current_task()
+    if task is None or not hasattr(task, "uncancel"):
+        return 0
+    drained = 0
+    while task.uncancel() > 0:
+        drained += 1
+    return drained
+
+
 @dataclass
 class AgentConfig:
     """Agent configuration."""
@@ -56,6 +67,17 @@ class BaseAgent:
         self._dup_log_time: float = 0.0  # last time we logged duplicate summary
         self._reconnect_attempts: int = 0  # consecutive reconnect attempts for backoff
 
+    async def _disconnect(self) -> None:
+        """Close the current Gateway WS connection (best-effort)."""
+        self.connected = False
+        ws = self.ws
+        self.ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
     async def start(self):
         """Start the agent."""
         logger.info(f"Starting agent {self.config.agent_id}...")
@@ -70,12 +92,28 @@ class BaseAgent:
                 reconnect_delay = 1.0
                 self._reconnect_attempts = 0
                 await self._message_loop()
+            except asyncio.CancelledError:
+                # CancelledError is BaseException — not caught by `except Exception`.
+                # anyio/MCP can leak cancels into this task and kill the WS reader
+                # while Gateway still shows the agent as online (send_text succeeds,
+                # but no chat reaches GatewayAdapter). Drain and reconnect.
+                drained = _drain_task_cancellation()
+                self._reconnect_attempts += 1
+                logger.warning(
+                    "[SDK] CancelledError in agent WS loop (drained=%d), reconnecting in %ds (attempt %d)...",
+                    drained,
+                    reconnect_delay,
+                    self._reconnect_attempts,
+                )
+                await self._disconnect()
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 60.0)
             except websockets.exceptions.ConnectionClosed:
                 self._reconnect_attempts += 1
                 logger.warning(
                     "Connection closed, reconnecting in %ds (attempt %d)...", reconnect_delay, self._reconnect_attempts
                 )
-                self.connected = False
+                await self._disconnect()
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 60.0)
             except Exception as e:
@@ -83,13 +121,19 @@ class BaseAgent:
                 logger.error(
                     f"Error: {e}, reconnecting in %ds (attempt %d)...", reconnect_delay, self._reconnect_attempts
                 )
+                await self._disconnect()
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 60.0)
 
     async def _connect(self):
         """Connect to the Gateway."""
         logger.info(f"Connecting to {self.config.gateway_url}...")
-        self.ws = await websockets.connect(self.config.gateway_url, proxy=None)
+        self.ws = await websockets.connect(
+            self.config.gateway_url,
+            proxy=None,
+            open_timeout=15,
+            close_timeout=5,
+        )
         logger.info("Connected!")
 
     async def _register(self):
@@ -130,63 +174,77 @@ class BaseAgent:
                     await self.ws.send(
                         json.dumps({"action": "heartbeat", "stats": {"load_percent": self._load_percent}})
                     )
+            except asyncio.CancelledError:
+                drained = _drain_task_cancellation()
+                logger.warning("[SDK] CancelledError in heartbeat loop (drained=%d), stopping heartbeat", drained)
+                self.connected = False
+                break
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
                 self.connected = False
                 break
 
+    async def _process_inbound_message(self, message: str) -> None:
+        """Parse and dispatch one inbound Gateway WS frame."""
+        data = json.loads(message)
+        msg_type = data.get("type") or data.get("action")
+
+        # P2-2: Deduplication — skip duplicate messages
+        seq = data.get("seq")
+        if seq is not None:
+            if self._is_duplicate(seq):
+                self._dup_drop_count += 1
+                now = asyncio.get_event_loop().time()
+                if now - self._dup_log_time >= self.DEDUP_LOG_INTERVAL:
+                    logger.warning(
+                        f"[SDK] Dropped {self._dup_drop_count} duplicate message(s) in last {self.DEDUP_LOG_INTERVAL}s"
+                    )
+                    self._dup_drop_count = 0
+                    self._dup_log_time = now
+                return
+            self._record_seq(seq)
+
+            # P2-2: Out-of-order detection
+            if self._last_recv_seq is not None and seq < self._last_recv_seq:
+                logger.warning(
+                    f"[SDK] Out-of-order message detected: seq={seq} < last={self._last_recv_seq}, type={msg_type}"
+                )
+            self._last_recv_seq = max(self._last_recv_seq or 0, seq)
+
+        logger.debug(f"[SDK] Received WS message: type={msg_type}, keys={list(data.keys())}")
+
+        if msg_type == "chat":
+            logger.info(f"Processing chat message from user {data.get('user_id')}")
+            await self._handle_chat(data)
+        elif msg_type == "command":
+            logger.info(f"Processing command: {data}")
+            await self._handle_command(data)
+        elif msg_type == "pong":
+            logger.debug("Received pong")
+        else:
+            logger.warning(f"Unknown message type: {msg_type}, data: {data}")
+
     async def _message_loop(self):
         """Message processing loop (with deduplication and out-of-order detection)."""
         logger.info(f"[SDK] _message_loop STARTED for agent {self.config.agent_id}")
-        async for message in self.ws:
-            try:
-                data = json.loads(message)
-                msg_type = data.get("type") or data.get("action")
-
-                # P2-2: Deduplication — skip duplicate messages
-                seq = data.get("seq")
-                if seq is not None:
-                    if self._is_duplicate(seq):
-                        self._dup_drop_count += 1
-                        now = asyncio.get_event_loop().time()
-                        if now - self._dup_log_time >= self.DEDUP_LOG_INTERVAL:
-                            logger.warning(
-                                f"[SDK] Dropped {self._dup_drop_count} duplicate message(s) in last "
-                                f"{self.DEDUP_LOG_INTERVAL}s"
-                            )
-                            self._dup_drop_count = 0
-                            self._dup_log_time = now
-                        continue  # Skip duplicate
-                    self._record_seq(seq)
-
-                    # P2-2: Out-of-order detection
-                    if self._last_recv_seq is not None and seq < self._last_recv_seq:
-                        logger.warning(
-                            f"[SDK] Out-of-order message detected: seq={seq} < last={self._last_recv_seq}, "
-                            f"type={msg_type}"
-                        )
-                    self._last_recv_seq = max(self._last_recv_seq or 0, seq)
-
-                # Debug log
-                logger.debug(f"[SDK] Received WS message: type={msg_type}, keys={list(data.keys())}")
-
-                if msg_type == "chat":
-                    # Handle user message
-                    logger.info(f"Processing chat message from user {data.get('user_id')}")
-                    await self._handle_chat(data)
-                elif msg_type == "command":
-                    # Handle command
-                    logger.info(f"Processing command: {data}")
-                    await self._handle_command(data)
-                elif msg_type == "pong":
-                    # Heartbeat response
-                    logger.debug("Received pong")
-                    pass
-                else:
-                    logger.warning(f"Unknown message type: {msg_type}, data: {data}")
-
-            except Exception as e:
-                logger.error(f"Message handling error: {e}", exc_info=True)
+        try:
+            async for message in self.ws:
+                try:
+                    await self._process_inbound_message(message)
+                except asyncio.CancelledError:
+                    drained = _drain_task_cancellation()
+                    logger.warning(
+                        "[SDK] CancelledError while handling inbound message (drained=%d), continuing...",
+                        drained,
+                    )
+                    continue
+                except Exception as e:
+                    logger.error(f"Message handling error: {e}", exc_info=True)
+        except asyncio.CancelledError:
+            drained = _drain_task_cancellation()
+            logger.warning("[SDK] CancelledError in message recv loop (drained=%d), will reconnect...", drained)
+            self.connected = False
+            raise
 
     def _is_duplicate(self, seq: int) -> bool:
         """Check if a message sequence number has been seen before."""

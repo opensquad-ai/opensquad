@@ -86,9 +86,11 @@ print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build
 # PyInstaller's collect_submodules("opensquad") picks up the package but NOT
 # this .py file. The frozen run.py --service launcher loads it by file path
 # (importlib.util.spec_from_file_location) to reach main(), so it must ship as
-# a data file at _internal/opensquad/launcher.py. Source lives at
-# GATEWAY_DIR.parent = src/opensquad/ (same dir as the opensquad package root).
-datas += [(str(GATEWAY_DIR.parent / "launcher.py"), "opensquad")]
+# a data file. CRITICAL: do NOT place it at opensquad/launcher.py in the bundle
+# — that path shadows the opensquad.launcher PACKAGE on sys.path and breaks
+# `from opensquad.launcher.process_manager import ...` at launcher startup.
+# Source lives at GATEWAY_DIR.parent = src/opensquad/.
+datas += [(str(GATEWAY_DIR.parent / "launcher_main.py"), "opensquad/_launcher_main")]
 
 # alembic 迁移脚本
 alembic_dir = BACKEND_DIR / "alembic"
@@ -193,8 +195,20 @@ hiddenimports += collect_submodules("httpx")
 # so list them explicitly. The launcher's management server is stdlib
 # http.server, but the node-registration WS tunnel uses `websockets` and the
 # port-owner lookup uses `psutil`.
+# opensquad.launcher.process_manager must be explicit: the source tree also
+# has opensquad/launcher.py (monolith) beside opensquad/launcher/ (package),
+# which makes PyInstaller treat the submodule as "invalid" unless named here.
+hiddenimports += [
+    "opensquad.launcher.process_manager",
+    "opensquad.agent_runtime",
+]
 hiddenimports += collect_submodules("websockets")
 hiddenimports += ["psutil"]
+
+# tiktoken — PyInstaller can't see tiktoken_ext (lazy-loaded by tiktoken).
+# Without this, agents crash with "Unknown encoding cl100k_base" at boot.
+hiddenimports += collect_submodules("tiktoken_ext")
+hiddenimports += collect_submodules("tiktoken_ext.openai_public")
 
 # ── 收集完整包数据 ─────────────────────────────────────────────────────────────
 for pkg in ("uvicorn", "fastapi", "starlette", "sqlalchemy", "httpx", "h11"):
@@ -251,6 +265,18 @@ for _cfg_name in ("system_config.example.json", "system_config.json"):
     if _cfg_src.exists():
         datas += [(str(_cfg_src), ".")]
         print(f"[spec] bundling {_cfg_name} -> _internal/")
+
+# prompts/ — base prompt templates (base_fc.md, thought_xml.md, etc.) loaded
+# by agents_boot.build_system_prompt(). collect_data_files("opensquad") does
+# NOT pick up .md files from this subdirectory reliably, so add it explicitly.
+# Ship to _internal/prompts/ to match the older_legacy_prompt_root fallback in
+# agents_boot.py.
+_prompts_src = _builtin_root / "prompts"  # src/prompts/
+if _prompts_src.exists():
+    datas += [(str(_prompts_src), "prompts")]
+    print(f"[spec] bundling prompts/ -> _internal/prompts/")
+else:
+    print(f"[spec] WARNING: {_prompts_src} not found, skipping")
 
 # ── 分析 ──────────────────────────────────────────────────────────────────────
 a = Analysis(

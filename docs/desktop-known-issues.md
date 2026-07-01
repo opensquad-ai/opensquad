@@ -23,14 +23,19 @@ the gateway, and the Plugin Registry is not yet wired into the desktop bundle).
 Electron's `main.ts` spawns **two** instances of the same `run.exe`:
 
 1. `run.exe` — the Gateway (default mode, no `--service` flag).
-2. `run.exe --service launcher --mgmt-port 9600 --no-auto-start` — the Launcher
-   (auto-starts plugin services that declare `service.auto_start`; agents stay
-   manual until a frozen agent entry exists).
+2. `run.exe --service launcher --mgmt-port 9600 --no-auto-start --no-services` —
+   the Launcher. `--no-services` skips plugin auto-start (frozen `run.exe` cannot
+   spawn plugin `service/main.py` via `sys.executable`).
 
-`run.py` dispatches on `--service`: `gateway` (the default) runs the FastAPI
-app as before; `launcher` loads the standalone `opensquad/launcher.py` by file
-path (it is shadowed by the `opensquad/launcher/` package, so a normal
-`import opensquad.launcher` cannot reach `main()`) and calls its `main()`.
+`run.py` dispatches on `--service`:
+- `gateway` (default) runs the FastAPI app.
+- `launcher` loads the standalone `opensquad/launcher_main.py` by file path
+  (the file was renamed from `launcher.py` to avoid shadowing the
+  `opensquad/launcher/` package, which made PyInstaller mark
+  `opensquad.launcher.process_manager` as invalid).
+- `agent` runs `opensquad.agents_boot.main()` inside the frozen binary — this is
+  how agents are spawned in packaged mode (an external Python cannot
+  `import opensquad` because PyInstaller compiles `.py` into the PYZ archive).
 
 ## Where the desktop app stores data (workspace)
 
@@ -60,29 +65,20 @@ at `/uploads/…`.
 
 ## Known issues
 
-### 1. Agents cannot be started from the Agent Workstation UI (packaged mode)
+### 1. Agents started via `run.exe --service agent` (packaged mode)
 
-**Symptom:** the Agent Workstation page now loads and **lists** agents
-configurations correctly (the "Launcher is not running" error is gone), but
-clicking *Start* on an agent does not launch an agent process.
+**Resolved.** The launcher starts agents with `run.exe --service agent
+--agent-dir <dir> --port <n>` — the frozen binary runs
+`opensquad.agents_boot.main()` directly, using the full `opensquad` package
+from its PYZ archive. This avoids the previous issue where an external Python
+could not `import opensquad`.
 
-**Cause:** the launcher starts agents with `sys.executable -m
-opensquad.agents_boot …`. In a PyInstaller bundle `sys.executable` **is** the
-frozen `run.exe`, which does not honor `-m <module>`.
-
-Plugin services (e.g. websearch, whisper) use `service/main.py` and are
-auto-started on desktop launch when `auto_start` is true. The launcher prefers
-a **system Python** (`python` / `py` on PATH) to run those scripts inside the
-frozen app; if Python is not installed, plugin services may fail to start.
-
-**What works today:** listing agents, reading/writing agent configs, role
-cards, model cards, MCP configs, and plugin services **when system Python is
-available** (or when the plugin uses a `cmd` such as `node`/`npx`).
-
-**What doesn't:** starting an agent process or a plugin service from inside
-the packaged app. To run agents, use `opensquad start` from a Python
-environment (the dev/source layout). A frozen agent entry-point is planned for
-a future release.
+Plugin services (e.g. websearch, whisper) still require an external Python
+interpreter. The desktop setup wizard downloads Python 3.11 embeddable to
+`%LOCALAPPDATA%\OpenSquad\runtime\python311\` and writes a manifest at
+`<app-data>/agent-runtime.json`. The launcher reads this to run plugin
+`service/main.py` scripts. If the runtime is not installed, plugin services
+fail to start (non-fatal — agents still work).
 
 ### 2. Sidebar icons are not OpenSquad-specific (by design)
 
