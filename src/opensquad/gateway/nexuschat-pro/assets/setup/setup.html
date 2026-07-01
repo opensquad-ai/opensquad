@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenSquad 安装程序</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #f5f6f8;
+      color: #1a1a2e;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .header {
+      padding: 20px 24px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #fff;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+    .header p { font-size: 13px; color: #64748b; }
+    .progress-top {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .progress-top .bar-wrap {
+      flex: 1;
+      height: 6px;
+      background: #e2e8f0;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-top .bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #3b82f6, #6366f1);
+      transition: width 0.25s ease;
+    }
+    .progress-top .count {
+      font-size: 12px;
+      color: #64748b;
+      white-space: nowrap;
+    }
+    .main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: 0;
+    }
+    .steps {
+      background: #fff;
+      border-right: 1px solid #e5e7eb;
+      padding: 16px 12px;
+      overflow-y: auto;
+    }
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 4px;
+      font-size: 13px;
+      color: #64748b;
+    }
+    .step.active {
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-weight: 500;
+    }
+    .step.done { color: #059669; }
+    .step .icon {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      margin-top: 1px;
+      text-align: center;
+      font-size: 12px;
+    }
+    .step.active .icon::after { content: "◌"; animation: spin 1s linear infinite; display: inline-block; }
+    .step.done .icon::after { content: "✓"; }
+    .step.pending .icon::after { content: "•"; color: #cbd5e1; }
+    .output-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 16px;
+    }
+    .output-head {
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .output {
+      flex: 1;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      padding: 12px;
+      border-radius: 8px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .footer {
+      padding: 12px 24px;
+      border-top: 1px solid #e5e7eb;
+      background: #fff;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .footer .hint { font-size: 12px; color: #64748b; }
+    button {
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #334155;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #f8fafc; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: #fff;
+    }
+    button.primary:hover { background: #1d4ed8; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 id="title">正在安装 OpenSquad Agent 运行时</h1>
+    <p id="subtitle">下载并配置 Python 3.11，供 Agent 与插件使用（无需单独安装 Python）</p>
+    <div class="progress-top">
+      <div class="bar-wrap"><div class="bar" id="overallBar"></div></div>
+      <div class="count" id="stepCount">0 / 0 步</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="steps" id="steps"></div>
+    <div class="output-panel">
+      <div class="output-head">
+        <span>Live output</span>
+        <span id="lineCount">0 lines</span>
+      </div>
+      <div class="output" id="output"></div>
+    </div>
+  </div>
+  <div class="footer">
+    <span class="hint" id="hint">首次安装需联网下载约 25 MB</span>
+    <div>
+      <button id="cancelBtn">取消</button>
+      <button id="doneBtn" class="primary" style="display:none;margin-left:8px">完成</button>
+    </div>
+  </div>
+  <script>
+    const stepsEl = document.getElementById('steps')
+    const outputEl = document.getElementById('output')
+    const overallBar = document.getElementById('overallBar')
+    const stepCountEl = document.getElementById('stepCount')
+    const lineCountEl = document.getElementById('lineCount')
+    const cancelBtn = document.getElementById('cancelBtn')
+    const doneBtn = document.getElementById('doneBtn')
+    let steps = []
+    let currentIdx = 0
+    let lineCount = 0
+
+    function renderSteps() {
+      stepsEl.innerHTML = steps.map((s, i) => {
+        let cls = 'pending'
+        if (i < currentIdx) cls = 'done'
+        else if (i === currentIdx) cls = 'active'
+        return `<div class="step ${cls}" data-idx="${i}"><span class="icon"></span><span>${s.title}</span></div>`
+      }).join('')
+      stepCountEl.textContent = `${Math.min(currentIdx + 1, steps.length)} / ${steps.length} 步`
+      overallBar.style.width = steps.length ? `${Math.round((currentIdx / steps.length) * 100)}%` : '0%'
+    }
+
+    function appendLog(line) {
+      lineCount += 1
+      outputEl.textContent += (outputEl.textContent ? '\n' : '') + line
+      outputEl.scrollTop = outputEl.scrollHeight
+      lineCountEl.textContent = `${lineCount} lines`
+    }
+
+    window.setupApi.onInit((payload) => {
+      steps = payload.steps || []
+      renderSteps()
+      window.setupApi.start()
+    })
+
+    window.setupApi.onLog((line) => appendLog(line))
+
+    window.setupApi.onStepProgress(({ stepId, pct }) => {
+      const idx = steps.findIndex((s) => s.id === stepId)
+      if (idx >= 0) {
+        currentIdx = idx
+        renderSteps()
+        if (stepId === 'download' && pct > 0) {
+          overallBar.style.width = `${Math.round(((idx + pct / 100) / steps.length) * 100)}%`
+        }
+      }
+    })
+
+    window.setupApi.onComplete(({ ok, error }) => {
+      if (ok) {
+        currentIdx = steps.length
+        renderSteps()
+        overallBar.style.width = '100%'
+        document.getElementById('title').textContent = '安装完成'
+        document.getElementById('subtitle').textContent = 'Agent 运行时已就绪，即将启动 OpenSquad…'
+        cancelBtn.style.display = 'none'
+        doneBtn.style.display = 'inline-block'
+      } else {
+        appendLog(error ? `Failed: ${error}` : 'Installation failed')
+        document.getElementById('subtitle').textContent = error || '安装失败'
+        cancelBtn.textContent = '关闭'
+      }
+    })
+
+    cancelBtn.addEventListener('click', () => window.setupApi.cancel())
+    doneBtn.addEventListener('click', () => window.close())
+  </script>
+</body>
+</html>

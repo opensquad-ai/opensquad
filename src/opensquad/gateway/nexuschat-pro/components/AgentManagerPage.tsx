@@ -584,12 +584,20 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
         <div>
           <div className={sectionTitleCls}><Wrench size={11} /> {t('agentManager.modelSettings')}</div>
           <div className="bg-bgLight rounded-lg p-3 space-y-2.5">
+            {(detailAgent?.model_card || cfgGet(['model', '_card'])) && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-textMuted">{t('agentManager.importFromModelCard')}:</span>
+                <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium truncate">
+                  {detailAgent?.model_card || cfgGet(['model', '_card'])}
+                </span>
+              </div>
+            )}
             {/* 模型卡导入选择器 */}
             {modelCards.length > 0 && (
               <div>
                 <label className="block text-[10px] font-semibold text-textMuted mb-1">{t('agentManager.importFromModelCard')}</label>
                 <select
-                  defaultValue=""
+                  value={cfgGet(['model', '_card'], '') || detailAgent?.model_card || ''}
                   disabled={modelCardLoading}
                   onChange={async e => {
                     const cardName = e.target.value;
@@ -598,6 +606,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     try {
                       const res = await modelCardAPI.getCard(cardName);
                       const c = res.card;
+                      cfgSet(['model', '_card'], cardName);
                       cfgSet(['model', 'api_protocol'], c.api_protocol);
                       cfgSet(['model', 'provider'], c.provider ?? '');
                       cfgSet(['model', 'model_name'], c.model_name);
@@ -622,7 +631,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                       alert(t('agentManager.loadModelCardFailed', { message: err.message }));
                     } finally {
                       setModelCardLoading(false);
-                      e.target.value = '';
                     }
                   }}
                   className={inputCls}
@@ -1221,6 +1229,11 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                         {agent.agent_name || agent.chat_profile?.chat_user_name || key}
                       </h3>
                       <p className="text-[10px] text-textMuted truncate">{agent.agent_type} | {key}</p>
+                      {agent.model_card && (
+                        <p className="text-[10px] text-primary truncate" title={agent.model_card}>
+                          {agent.model_card}
+                        </p>
+                      )}
                     </div>
                   </div>
 

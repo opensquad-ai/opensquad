@@ -646,7 +646,9 @@ class AgentBootPhases:
                 agent_bridge = create_bridge(config)
                 login_ok = False
                 for attempt in range(5):
-                    if agent_bridge.login():
+                    # requests.* is synchronous — must not run on the asyncio loop
+                    # or it blocks Gateway WS registration and the whole boot sequence.
+                    if await asyncio.to_thread(agent_bridge.login):
                         login_ok = True
                         break
                     logger.warning(f"[Boot] ChatPro Bridge login attempt {attempt + 1}/5 failed, retrying in 3s...")
@@ -654,7 +656,7 @@ class AgentBootPhases:
                 if login_ok:
                     self._write_chat_profile(data_dir, agent_bridge, config)
                     for gid in group_cfg.get("groups", []):
-                        agent_bridge.join_group_api(gid)
+                        await asyncio.to_thread(agent_bridge.join_group_api, gid)
                     asyncio.create_task(agent_bridge.connect_ws())
                     logger.info("[Boot] ChatPro Bridge connected")
                     import opensquad.bridge as bridge_module

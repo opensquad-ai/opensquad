@@ -224,11 +224,164 @@ bash scripts/build_backend.sh
    跑的、没创建 release）。
 3. 冒烟测试：下你平台的安装包、装、打开。app 应该能开网关 UI、
    拉起打包好的后端（系统托盘能看到）、后端在
-   `127.0.0.1:9510/health` 应该能访问。
+   `127.0.0.1:9555/health` 应该能访问。
 
 ---
 
-## 常见问题
+## Frozen 模式快速验证（改一行 → 6 分钟出结果）
+
+### 为什么需要快速验证
+
+PyInstaller frozen 模式的 bug **只能在打包后复现**——开发模式（`uv run opensquad start`）
+用 venv Python 直接跑源码，跟 frozen `run.exe` 是两套完全不同的运行路径。
+如果每次改代码都要走「重建 backend (5 min) → 打 electron-builder (2.5 min) →
+安装 → 手动点 UI → 发现 bug」，一轮迭代 10+ 分钟，效率极低。
+
+**关键洞察**：electron-builder 只是把 `build/backend-win/run/` 塞进安装包，
+不会改变 `run.exe` 的行为。所以**绝大多数 frozen bug 只用 backend bundle 就能复现和验证**，
+不需要打 electron-builder、不需要安装。
+
+### 快速验证流程
+
+```
+改代码 → 重建 backend (5 min) → 直接用 run.exe 测试 (10 s)
+                                   ↓
+                              PASS → 才打 electron-builder
+                              FAIL → 改代码，重来
+```
+
+#### 第 0 步：环境准备（一次性）
+
+```powershell
+# 确保 Agent Python 运行时已安装（首次需要，后续跳过）
+# 方式 1：运行安装向导
+build\release\win-unpacked\OpenSquad.exe --setup-runtime
+
+# 方式 2：手动确认
+Test-Path "$env:LOCALAPPDATA\OpenSquad\runtime\python311\python.exe"
+```
+
+#### 第 1 步：重建 backend（~5 分钟）
+
+```powershell
+# 方式 A：用构建脚本（推荐，含 Python 3.11 校验）
+scripts\build_backend.bat
+
+# 方式 B：直接调 PyInstaller（跳过前端 build，更快）
+uv run --python 3.11 pyinstaller src\opensquad\gateway\backend\opensquad_backend.spec `
+  --distpath build\backend-win --workpath build\.pyinstaller-work --clean --noconfirm
+```
+
+> **注意**：`build_backend.bat` 的 `^` 续行符后空行可能导致空参数报错。
+> 如果遇到 `pyinstaller: error: unrecognized arguments`，用方式 B 直接跑。
+
+#### 第 2 步：冒烟测试 — Agent 能否启动（~10 秒）
+
+```powershell
+uv run python scripts\smoke_frozen_agent.py
+```
+
+脚本做的事：
+1. 启动 `run.exe --service launcher --mgmt-port 9600 --no-auto-start --no-services`
+2. 等 9600 端口就绪
+3. 调 `POST /api/agents/coder/start` 启动 coder agent
+4. 轮询 `/api/agents` 确认 `alive=True`
+5. 自动清理进程
+
+**预期输出**：
+```
+[smoke] Launcher up after 1s, agents: ['coder', 'pm', 'qa']
+[smoke] Starting coder agent...
+[smoke] Start response: {'message': 'coder started', 'pid': 123456, 'port': 8001}
+[smoke] 0s: alive=True pid=123456 port=8001 restarts=0
+PASS: coder agent is alive on port 8001
+```
+
+#### 第 3 步：冒烟测试 — Agent 能否对话（~10 秒）
+
+需要 Gateway 在跑（手动启动或用桌面端）：
+
+```powershell
+# 先启动完整桌面端（Gateway + Launcher + UI）
+Start-Process build\release\win-unpacked\OpenSquad.exe
+Start-Sleep -Seconds 20  # 等 Gateway 就绪
+
+# 然后跑对话测试
+uv run python scripts\smoke_chat.py
+```
+
+脚本做的事：
+1. `POST /api/auth/login` 登录获取 JWT
+2. 连接 `ws://127.0.0.1:9555/ai-web/ws/coder-001?token=<JWT>`
+3. 发送 `{"type": "chat", "content": "你好，请回复一句话确认你能正常工作"}`
+4. 接收 `thought`（思考流）+ `message`（回复）
+5. 报告 SUCCESS / FAIL
+
+**预期输出**：
+```
+[chat] Login OK
+[chat] WS connected!
+[chat] [connected] agent_status: online
+[chat] [thought] The user is asking me to confirm...
+[chat] [message] 你好，Coder 正常运行，随时可以执行编程任务。
+[chat] SUCCESS: Got response (25 chars)
+```
+
+#### 第 4 步：全部 PASS 后才打 electron-builder
+
+```powershell
+cd src\opensquad\gateway\nexuschat-pro
+$env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+# --dir 只产 unpacked 目录（~1 min），不产安装包
+npx electron-builder --win --dir --publish never --config.win.signAndEditExecutable=false
+# 或完整安装包（~2.5 min）
+npx electron-builder --win --publish never --config.win.signAndEditExecutable=false
+```
+
+### 超快迭代：不重建，直接补文件（10 秒）
+
+如果冒烟测试报 `ModuleNotFoundError` 或 `FileNotFoundError`，通常是 PyInstaller
+漏打了某个数据文件或子模块。这时**不需要等 5 分钟重建**——直接把缺的文件
+复制进 bundle 目录即可验证：
+
+```powershell
+# 例：prompts 目录没打包
+Copy-Item -Path src\prompts -Destination build\backend-win\run\_internal\prompts -Recurse -Force
+
+# 例：tiktoken_ext 子模块没进 PYZ
+Copy-Item -Path .venv\Lib\site-packages\tiktoken_ext `
+  -Destination build\backend-win\run\_internal\tiktoken_ext -Recurse -Force
+
+# 立即重跑冒烟测试（10 秒）
+uv run python scripts\smoke_frozen_agent.py
+```
+
+验证通过后，再把对应的 `datas` / `hiddenimports` 写进
+`opensquad_backend.spec`，做一次完整重建确认 spec 正确。
+
+### 冒烟脚本一览
+
+| 脚本 | 用途 | 耗时 | 依赖 |
+|------|------|------|------|
+| `scripts/smoke_frozen_agent.py` | 验证 frozen launcher + agent 启动 | ~10s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_chat.py` | 验证端到端对话（登录→WS→发送→回复）| ~10s | Gateway 在 9555 跑着 |
+| `scripts/check_build_python.py --bundle <dir>` | 校验 bundle 用 Python 3.11 | ~1s | 无 |
+
+### 常见的 frozen-only bug 模式
+
+以下 bug 在开发模式下**永远不会出现**，只在 frozen bundle 里复现：
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| `ModuleNotFoundError: opensquad.launcher.process_manager` | `launcher.py` 与 `launcher/` 包名冲突 | 重命名为 `launcher_main.py` |
+| `ModuleNotFoundError: No module named 'opensquad'` | 外部 Python 无法从 PYZ 导入 | 用 `run.exe --service agent` 代替外部 `python -m` |
+| `FileNotFoundError: base_fc.md` | `prompts/` 目录未打包 | spec 显式添加 `datas` |
+| `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` 未进 PYZ | spec 加 `hiddenimports` |
+| `Module use of python311.dll conflicts` | 系统 Python 3.13 + PATH 混入 `_internal` | 安装向导下载 embed Python 3.11 |
+
+---
+
+## 本文没覆盖的内容
 
 ### `electron:dev` 第一次跑白屏
 

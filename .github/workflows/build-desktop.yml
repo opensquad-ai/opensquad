@@ -41,6 +41,9 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Verify Python 3.11 interpreter
+        run: python scripts/check_build_python.py
+
       - name: Install project and backend deps
         working-directory: .
         run: |
@@ -66,6 +69,9 @@ jobs:
         # which interprets the leading '--' of --distpath / --workpath as
         # the unary decrement operator.
         run: pyinstaller src/opensquad/gateway/backend/opensquad_backend.spec --distpath build/${{ matrix.artifact }} --workpath build/.pyinstaller-work --clean --noconfirm
+
+      - name: Verify PyInstaller bundle is Python 3.11
+        run: python scripts/check_build_python.py --bundle build/${{ matrix.artifact }}/run
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4

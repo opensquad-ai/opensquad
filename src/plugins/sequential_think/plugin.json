@@ -10,15 +10,7 @@
   "tags": [
     "reasoning"
   ],
-  "tools": [
-    {
-      "name": "sequential_think",
-      "module": "proxy",
-      "level": "extended",
-      "auto_register": false,
-      "requires_agent_id": false
-    }
-  ],
+  "tools": [],
   "hooks": [],
   "config": {
     "schema": {}

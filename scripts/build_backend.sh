@@ -4,14 +4,16 @@
 #
 # 输出到：项目根目录 build/backend-{mac|linux}/run/
 # 不在源码目录内产生任何构建产物
+# 与 CI / build_backend.bat 一致：固定 Python 3.11
 # ==============================================================
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-BACKEND_DIR="$PROJECT_ROOT/opensquad/gateway/backend"
-FRONTEND_DIR="$PROJECT_ROOT/opensquad/gateway/nexuschat-pro"
+BACKEND_DIR="$PROJECT_ROOT/src/opensquad/gateway/backend"
+FRONTEND_DIR="$PROJECT_ROOT/src/opensquad/gateway/nexuschat-pro"
 SPEC_FILE="$BACKEND_DIR/opensquad_backend.spec"
+PYTHON_VERSION="3.11"
 
 # 根据平台决定输出目录名
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -27,27 +29,33 @@ WORK_PATH="$PROJECT_ROOT/build/.pyinstaller-work"
 echo "============================================================"
 echo " OpenSquad Desktop - $(uname) Backend Build"
 echo " Output: $DIST_PATH/run/"
+echo " Python: $PYTHON_VERSION (required)"
 echo "============================================================"
 echo
 
-echo "[1/4] Installing opensquad package..."
+echo "[1/6] Sync project deps (Python $PYTHON_VERSION, matches CI)..."
 cd "$PROJECT_ROOT"
-pip install -e . --quiet
+uv sync --python "$PYTHON_VERSION" --quiet
 
-echo "[2/4] Installing backend dependencies..."
-pip install -e . --quiet
-pip install pyinstaller --quiet
+echo "[2/6] Installing PyInstaller into project venv..."
+uv pip install pyinstaller --quiet
 
-echo "[3/4] Building frontend (React)..."
+echo "[3/6] Verify Python $PYTHON_VERSION interpreter..."
+uv run --python "$PYTHON_VERSION" python scripts/check_build_python.py
+
+echo "[4/6] Building frontend (React)..."
 cd "$FRONTEND_DIR"
 npm run build
 
-echo "[4/4] Running PyInstaller..."
+echo "[5/6] Running PyInstaller (uv / Python $PYTHON_VERSION)..."
 cd "$PROJECT_ROOT"
-pyinstaller "$SPEC_FILE" \
+uv run --python "$PYTHON_VERSION" pyinstaller "$SPEC_FILE" \
   --distpath "$DIST_PATH" \
   --workpath "$WORK_PATH" \
   --clean --noconfirm
+
+echo "[6/6] Verify PyInstaller bundle is Python $PYTHON_VERSION..."
+uv run --python "$PYTHON_VERSION" python scripts/check_build_python.py --bundle "$DIST_PATH/run"
 
 # 确保可执行权限
 chmod +x "$DIST_PATH/run/run"
@@ -57,7 +65,7 @@ echo "============================================================"
 echo " Backend built successfully!"
 echo " Binary: $DIST_PATH/run/run"
 echo ""
-echo " Next: cd opensquad/gateway/nexuschat-pro"
+echo " Next: cd src/opensquad/gateway/nexuschat-pro"
 if [[ "$(uname)" == "Darwin" ]]; then
   echo "       npm run electron:mac"
 else

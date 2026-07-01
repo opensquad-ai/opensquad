@@ -103,7 +103,9 @@ def run_launcher():
     sockets/subprocesses fire at import time) and call its ``main()``.
 
     Frozen: launcher.py is bundled as a data file at
-    ``<exe-dir>/_internal/opensquad/launcher.py`` (see opensquad_backend.spec).
+    ``<exe-dir>/_internal/opensquad/_launcher_main/launcher.py`` (see
+    opensquad_backend.spec). It must NOT live at ``opensquad/launcher.py`` in
+    the bundle — that path shadows the ``opensquad.launcher`` package.
     Non-frozen: it sits next to the opensquad package at
     ``<project-root>/opensquad/launcher.py``.
 
@@ -114,11 +116,11 @@ def run_launcher():
     ``sys.executable -m`` an agent or run a plugin's adapter.py).
     """
     if IS_FROZEN:
-        launcher_path = os.path.join(BACKEND_DIR, "_internal", "opensquad", "launcher.py")
+        launcher_path = os.path.join(BACKEND_DIR, "_internal", "opensquad", "_launcher_main", "launcher_main.py")
     else:
         # Non-frozen: PROJECT_ROOT is the opensquad package dir (src/opensquad),
-        # so launcher.py is right inside it.
-        launcher_path = os.path.join(PROJECT_ROOT, "launcher.py")
+        # so launcher_main.py is right inside it.
+        launcher_path = os.path.join(PROJECT_ROOT, "launcher_main.py")
 
     if not os.path.isfile(launcher_path):
         print(f"[run] Launcher module not found at {launcher_path}", file=sys.stderr)
@@ -152,6 +154,34 @@ def run_launcher():
     mod.main()
 
 
+def run_agent():
+    """Run an agent boot process (frozen-mode agent spawn target).
+
+    The launcher spawns ``run.exe --service agent --agent-dir <dir> --port <n>``
+    instead of ``<external-python> -m opensquad.agents_boot ...`` because an
+    external Python (embeddable or system) cannot ``import opensquad`` —
+    PyInstaller compiles ``.py`` into the PYZ archive, not onto disk.
+
+    The frozen ``run.exe`` has the full ``opensquad`` package in its PYZ, so
+    it can run ``agents_boot.main()`` directly.  ``--service agent`` is already
+    stripped from argv by ``_parse_service_arg``, leaving ``--agent-dir`` and
+    ``--port`` for agents_boot's own argparse.
+    """
+    import argparse
+    import asyncio
+    import contextlib
+
+    from opensquad.agents_boot import main as agent_main
+
+    parser = argparse.ArgumentParser(description="Boot an AI agent from config")
+    parser.add_argument("--agent-dir", required=True, help="Path to agent directory containing config.json")
+    parser.add_argument("--port", type=int, help="Override web server port")
+    args = parser.parse_args()
+
+    with contextlib.suppress(KeyboardInterrupt, SystemExit):
+        asyncio.run(agent_main(args.agent_dir, override_port=args.port))
+
+
 if __name__ == "__main__":
     # ── Force UTF-8 for stdout/stderr on Windows before any output ──
     # Without this, uvicorn / Python error messages containing Chinese
@@ -183,6 +213,9 @@ if __name__ == "__main__":
     sys.argv = _forward_argv
     if service == "launcher":
         run_launcher()
+        sys.exit(0)
+    if service == "agent":
+        run_agent()
         sys.exit(0)
     # service == "gateway" (or anything else) → fall through to gateway startup
 

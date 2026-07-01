@@ -342,7 +342,7 @@ def run_start(args):
     if not args.no_launcher:
         # Compute launcher port: defaults to (gateway port + 1) or 9600
         launcher_port = (args.port + 1) if args.port else syscfg.port("launcher")
-        launcher_cmd = [python_exe, os.path.join(_root, "src", "opensquad", "launcher.py")]
+        launcher_cmd = [python_exe, os.path.join(_root, "src", "opensquad", "launcher_main.py")]
         launcher_cmd.extend(["--mgmt-port", str(launcher_port)])
 
         print(f"[start] [4/4] Starting Launcher (port {launcher_port})...")

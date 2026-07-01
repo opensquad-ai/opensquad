@@ -7,6 +7,10 @@ import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace } from './desktop-workspace'
 import { runDesktopUpdate, type UpdateStatus } from './desktop-updater'
+import { agentPythonForBackendEnv, isAgentRuntimeReady } from './agent-runtime'
+import { runSetupWizard } from './setup-window'
+
+const SETUP_ONLY = process.argv.includes('--setup-runtime')
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 // Backend port: read from environment variable (set by docker-entrypoint.sh or
@@ -139,19 +143,25 @@ function getBackendEnv(): { cwd: string; env: NodeJS.ProcessEnv } {
   fs.mkdirSync(appDataDir, { recursive: true })
   const workspaceDir = resolveDesktopWorkspace(appDataDir)
   fs.mkdirSync(workspaceDir, { recursive: true })
+  const agentPython = agentPythonForBackendEnv()
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    // Fixed Electron config dir (writable prefs, never moves)
+    OPENSQUAD_APP_DATA: appDataDir,
+    // Active workspace root (may differ from appDataDir)
+    OPENSQUAD_USER_DATA: workspaceDir,
+    // 禁用 uvicorn 热重载（打包环境不支持）
+    OPENSQUAD_RELOAD: '0',
+    // 强制 gateway 提供 dist/，避免误检测 Vite 端口导致空白页
+    OPENSQUAD_DISABLE_VITE_PROXY: '1',
+  }
+  if (agentPython) {
+    env.OPENSQUAD_PYTHON = agentPython
+    env.OPENSQUAD_AGENT_RUNTIME = agentPython
+  }
   return {
     cwd: workspaceDir,
-    env: {
-      ...process.env,
-      // Fixed Electron config dir (writable prefs, never moves)
-      OPENSQUAD_APP_DATA: appDataDir,
-      // Active workspace root (may differ from appDataDir)
-      OPENSQUAD_USER_DATA: workspaceDir,
-      // 禁用 uvicorn 热重载（打包环境不支持）
-      OPENSQUAD_RELOAD: '0',
-      // 强制 gateway 提供 dist/，避免误检测 Vite 端口导致空白页
-      OPENSQUAD_DISABLE_VITE_PROXY: '1',
-    },
+    env,
   }
 }
 
@@ -192,6 +202,9 @@ function startLauncher(): void {
       '--service', 'launcher',
       '--mgmt-port', String(LAUNCHER_PORT),
       '--no-auto-start',
+      // Frozen run.exe cannot spawn plugin services (sys.executable re-enters
+      // the bundle); skip auto-start so mgmt port 9600 binds immediately.
+      '--no-services',
     ],
     'launcher',
   )
@@ -398,6 +411,26 @@ app.whenReady().then(async () => {
     Menu.setApplicationMenu(null)
     popupMenus = buildElectronPopupMenus()
   }
+
+  const needsAgentRuntime = !DEV_MODE && app.isPackaged && process.platform === 'win32'
+  if (needsAgentRuntime && (SETUP_ONLY || !isAgentRuntimeReady())) {
+    const result = await runSetupWizard({ setupOnly: SETUP_ONLY })
+    if (!result.ok) {
+      if (!result.cancelled) {
+        dialog.showErrorBox(
+          'Agent 运行时安装失败',
+          '未能完成 Python 3.11 下载/配置。请检查网络后重试，或联系支持。',
+        )
+      }
+      app.quit()
+      return
+    }
+    if (SETUP_ONLY) {
+      app.quit()
+      return
+    }
+  }
+
   if (!DEV_MODE) {
     startBackend()
     // Launcher starts after gateway is fully ready (see createWindow) to avoid
