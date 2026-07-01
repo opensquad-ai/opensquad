@@ -8,6 +8,12 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+# Strong references to background bridge tasks so they are not garbage-collected
+# before completing. asyncio.create_task() does not hold a strong ref in all
+# Python versions; without this the bridge task can silently vanish.
+_bridge_bg_tasks: set[asyncio.Task] = set()
+_bridge_ws_tasks: set[asyncio.Task] = set()
+
 from opensquad import AgentRunner, bus
 from opensquad.chat_api import ChatAPI
 from opensquad.claude_api import ClaudeAPI
@@ -640,34 +646,70 @@ class AgentBootPhases:
             return
 
         async def bridge_connect_bg() -> None:
-            try:
-                from opensquad.bridge import create_bridge
+            from opensquad.bridge import create_bridge
 
-                agent_bridge = create_bridge(config)
-                login_ok = False
-                for attempt in range(5):
-                    # requests.* is synchronous — must not run on the asyncio loop
-                    # or it blocks Gateway WS registration and the whole boot sequence.
-                    if await asyncio.to_thread(agent_bridge.login):
-                        login_ok = True
-                        break
-                    logger.warning(f"[Boot] ChatPro Bridge login attempt {attempt + 1}/5 failed, retrying in 3s...")
-                    await asyncio.sleep(3)
-                if login_ok:
-                    self._write_chat_profile(data_dir, agent_bridge, config)
-                    for gid in group_cfg.get("groups", []):
-                        await asyncio.to_thread(agent_bridge.join_group_api, gid)
-                    asyncio.create_task(agent_bridge.connect_ws())
-                    logger.info("[Boot] ChatPro Bridge connected")
-                    import opensquad.bridge as bridge_module
+            agent_bridge = create_bridge(config)
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    login_ok = False
+                    for attempt in range(5):
+                        # requests.* is synchronous — must not run on the asyncio loop
+                        # or it blocks Gateway WS registration and the whole boot sequence.
+                        if await asyncio.to_thread(agent_bridge.login):
+                            login_ok = True
+                            break
+                        logger.warning(f"[Boot] ChatPro Bridge login attempt {attempt + 1}/5 failed, retrying in 3s...")
+                        await asyncio.sleep(3)
+                    if login_ok:
+                        logger.info("[Boot] ChatPro Bridge login ok, writing profile + joining groups...")
+                        self._write_chat_profile(data_dir, agent_bridge, config)
+                        for gid in group_cfg.get("groups", []):
+                            logger.info(f"[Boot] ChatPro Bridge joining group {gid}...")
+                            result = await asyncio.to_thread(agent_bridge.join_group_api, gid)
+                            logger.info(f"[Boot] ChatPro Bridge join {gid}: {result}")
+                        ws_task = asyncio.create_task(agent_bridge.connect_ws())
+                        _bridge_ws_tasks.add(ws_task)
+                        ws_task.add_done_callback(_bridge_ws_tasks.discard)
+                        logger.info("[Boot] ChatPro Bridge connected")
+                        import opensquad.bridge as bridge_module
 
-                    bridge_module.bridge = agent_bridge
-                else:
-                    logger.error("[Boot] ChatPro Bridge login failed after 5 attempts")
-            except Exception as exc:
-                logger.error(f"[Boot] ChatPro Bridge failed: {exc}")
+                        bridge_module.bridge = agent_bridge
+                        return  # success — exit retry loop
+                    else:
+                        logger.error("[Boot] ChatPro Bridge login failed after 5 attempts")
+                        return
+                except asyncio.CancelledError:
+                    # During boot, an anyio CancelScope cancellation can fire across
+                    # all tasks (SDK, Runner, Bridge). The SDK/Runner recover via
+                    # uncancel(); the Bridge must too — re-login and reconnect.
+                    logger.warning(
+                        f"[Boot] ChatPro Bridge cancelled during setup (retry {retry + 1}/{max_retries}), recovering..."
+                    )
+                    if retry < max_retries - 1:
+                        await asyncio.sleep(1)
+                        continue
+                    # Last retry failed — try one final shielded connect
+                    logger.warning("[Boot] ChatPro Bridge retries exhausted, attempting shielded connect")
+                    try:
+                        if await asyncio.shield(asyncio.to_thread(agent_bridge.login)):
+                            ws_task = asyncio.create_task(agent_bridge.connect_ws())
+                            _bridge_ws_tasks.add(ws_task)
+                            ws_task.add_done_callback(_bridge_ws_tasks.discard)
+                            import opensquad.bridge as bridge_module
 
-        asyncio.create_task(bridge_connect_bg())
+                            bridge_module.bridge = agent_bridge
+                            logger.info("[Boot] ChatPro Bridge connected (shielded recovery)")
+                    except Exception as exc:
+                        logger.error(f"[Boot] ChatPro Bridge shielded recovery failed: {exc}")
+                    return
+                except Exception as exc:
+                    logger.error(f"[Boot] ChatPro Bridge failed: {exc}", exc_info=True)
+                    return
+
+        task = asyncio.create_task(bridge_connect_bg())
+        _bridge_bg_tasks.add(task)
+        task.add_done_callback(_bridge_bg_tasks.discard)
 
     def _write_chat_profile(self, data_dir: str, agent_bridge: Any, config: dict[str, Any]) -> None:
         profile_dir = os.path.join(data_dir, "group_chat")
