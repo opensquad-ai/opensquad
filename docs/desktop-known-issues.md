@@ -80,7 +80,18 @@ interpreter. The desktop setup wizard downloads Python 3.11 embeddable to
 `service/main.py` scripts. If the runtime is not installed, plugin services
 fail to start (non-fatal — agents still work).
 
-### 2. Sidebar icons are not OpenSquad-specific (by design)
+### 3. `Backend did not start in time` after NSIS install (Windows)
+
+**Resolved in v0.4.5+.** When the app is installed under `Program Files`, the
+PyInstaller bundle's `_internal/` directory is read-only. On import,
+`session_manager` tried to create `data/sessions/` under `_internal/` before
+Electron's workspace bootstrap ran, causing `PermissionError` and immediate
+backend exit.
+
+Fix: `_syscfg/_workspace.py` now initializes the workspace root from
+`OPENSQUAD_USER_DATA` / `OPENSQUAD_APP_DATA` (set by Electron before spawn)
+instead of defaulting to `_internal/`.
+
 
 The sidebar uses the [Lucide](https://lucide.dev) icon set (an open-source
 Feather-style icon library). The OpenSquad logo is used for the app icon

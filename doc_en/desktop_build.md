@@ -386,6 +386,7 @@ These bugs **never appear in dev mode** — only in the frozen bundle:
 | `FileNotFoundError: base_fc.md` | `prompts/` directory not bundled | Add explicitly to spec `datas` |
 | `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` not in PYZ | Add to spec `hiddenimports` |
 | `Module use of python311.dll conflicts` | System Python 3.13 + PATH polluted with `_internal` | Setup wizard downloads embed Python 3.11 |
+| `Backend did not start in time` (NSIS install under Program Files) | Import-time workspace defaults to read-only `_internal/`; `session_manager` hits PermissionError | `_workspace.py` reads `OPENSQUAD_USER_DATA` first |
 
 ---
 

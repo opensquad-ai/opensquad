@@ -207,6 +207,14 @@ if __name__ == "__main__":
     # `run.exe --service launcher ...` alongside the plain `run.exe` gateway.
     # Strip the --service pair from argv so the chosen service sees only its
     # own flags, then hand off. Anything below this block is gateway-only.
+    # Electron sets OPENSQUAD_USER_DATA / OPENSQUAD_APP_DATA before spawn.
+    # Mirror into OPENSQUAD_WORKSPACE so _syscfg/_workspace.py resolves a
+    # writable path before any opensquad import creates data/ under _internal/.
+    if IS_FROZEN:
+        _ws = os.environ.get("OPENSQUAD_USER_DATA", "").strip() or os.environ.get("OPENSQUAD_APP_DATA", "").strip()
+        if _ws:
+            os.environ.setdefault("OPENSQUAD_WORKSPACE", os.path.abspath(_ws))
+
     service, _forward_argv = _parse_service_arg()
     # Make sure the launcher's argparse (which reads sys.argv) doesn't see the
     # --service flag we already consumed.

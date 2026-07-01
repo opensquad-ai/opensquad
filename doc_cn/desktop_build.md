@@ -378,6 +378,7 @@ uv run python scripts\smoke_frozen_agent.py
 | `FileNotFoundError: base_fc.md` | `prompts/` 目录未打包 | spec 显式添加 `datas` |
 | `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` 未进 PYZ | spec 加 `hiddenimports` |
 | `Module use of python311.dll conflicts` | 系统 Python 3.13 + PATH 混入 `_internal` | 安装向导下载 embed Python 3.11 |
+| `Backend did not start in time`（Setup 装到 Program Files）| 导入时 workspace 默认 `_internal/`（只读），`session_manager` 写目录 PermissionError | `_workspace.py` 优先读 `OPENSQUAD_USER_DATA` |
 
 ---
 

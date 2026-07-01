@@ -16,8 +16,25 @@ _PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
 _MODULE_ROOT = os.path.dirname(_PACKAGE_ROOT)
 _DEFAULT_ROOT = os.path.dirname(_MODULE_ROOT)
 
+
+def _resolve_initial_workspace() -> str:
+    """Pick workspace root before ``set_workspace()`` / bootstrap run.
+
+    In a PyInstaller bundle installed under Program Files, ``_DEFAULT_ROOT``
+    points at ``_internal/`` which is read-only.  Electron passes writable
+    paths via ``OPENSQUAD_USER_DATA`` / ``OPENSQUAD_APP_DATA`` before spawning
+    ``run.exe``; honour them here so import-time side effects (e.g.
+    ``session_manager`` creating ``data/sessions/``) never touch the install dir.
+    """
+    for key in ("OPENSQUAD_WORKSPACE", "OPENSQUAD_USER_DATA", "OPENSQUAD_APP_DATA"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return os.path.abspath(raw)
+    return _DEFAULT_ROOT
+
+
 # Workspace root -- mutable via set_workspace()
-_WORKSPACE_ROOT = os.environ.get("OPENSQUAD_WORKSPACE") or _DEFAULT_ROOT
+_WORKSPACE_ROOT = _resolve_initial_workspace()
 _CONFIG_PATH = os.path.join(_WORKSPACE_ROOT, "system_config.json")
 
 
