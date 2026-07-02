@@ -239,12 +239,21 @@ def get_history(group_id: str, limit: int = 20) -> dict[str, Any]:
                 # This assumes input_hub is initialized and knows agent_dir.
                 import os
 
-                # Get project root (where uploads resides)
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Uploads live in the writable workspace (data/uploads), NOT the
+                # install dir. In frozen mode the install dir is read-only and has
+                # no uploads/ at all, so resolving against __file__ would yield a
+                # nonexistent path and images would silently fail to render.
+                try:
+                    from ..system_config import syscfg
+
+                    uploads_abs = syscfg.workspace_uploads_dir().replace("\\", "/")
+                except Exception:
+                    # Last-resort fallback: keep old behaviour for non-syscfg envs.
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    uploads_abs = os.path.join(project_root, "data", "uploads").replace("\\", "/")
                 # Simple replace /uploads -> C:/.../uploads
                 # Note: this does not trigger InputHub file-copy logic (set_agent_context).
                 # To copy, the full path must be parsed and _fix_path called.
-                uploads_abs = os.path.join(project_root, "uploads").replace("\\", "/")
                 msg["content"] = msg["content"].replace("/uploads", uploads_abs)
 
             # Include attachment info (images, files, etc.)

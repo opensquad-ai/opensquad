@@ -24,12 +24,27 @@ try:
 except ImportError:
     logger = logging.getLogger(__name__)
 
-# Project root
+try:
+    from ..system_config import syscfg
+except ImportError:
+    syscfg = None
+
+# Project root (workspace-aware; frozen mode must never write to the read-only
+# install dir, so we resolve against syscfg.workspace_skills_dir).
+# _project_root is kept for read-only fallback discovery (publish_skill walks
+# up to find pyproject.toml), but all *writes* go through syscfg.
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(os.path.dirname(_current_dir))
 
-# Directory for git-cloned skill repos
-_GIT_INSTALLS_DIR = os.path.join(_project_root, "skills", "_git")
+
+# Directory for git-cloned skill repos (writable workspace path).
+def _git_installs_dir() -> str:
+    if syscfg is not None:
+        return syscfg.workspace_skills_dir("_git")
+    # Last-resort fallback: temp dir (never the read-only install dir).
+    import tempfile
+
+    return os.path.join(tempfile.gettempdir(), "opensquad_skills_git")
 
 
 def _is_git_url(s: str) -> bool:
@@ -54,9 +69,10 @@ def _clone_or_update(git_url: str) -> dict:
         {"success": bool, "clone_dir": str, "action": "cloned"|"updated", "error": str}
     """
     repo_name = _repo_name_from_url(git_url)
-    clone_dest = os.path.join(_GIT_INSTALLS_DIR, repo_name)
+    _git_root = _git_installs_dir()
+    clone_dest = os.path.join(_git_root, repo_name)
 
-    os.makedirs(_GIT_INSTALLS_DIR, exist_ok=True)
+    os.makedirs(_git_root, exist_ok=True)
 
     if os.path.isdir(os.path.join(clone_dest, ".git")):
         # Already cloned -- update

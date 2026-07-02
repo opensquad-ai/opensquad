@@ -350,8 +350,15 @@ class ServicePlugin(Plugin):
                 return
 
             try:
-                # Prepare log file path
-                log_dir = os.path.join(os.path.dirname(self.context.plugin_dir), "..", "data", "logs")
+                # Prepare log file path — use the writable workspace logs dir.
+                # The old __file__-relative path landed in the read-only install
+                # dir under Program Files (frozen mode) and crashed on makedirs.
+                try:
+                    from opensquad.system_config import syscfg as _syscfg_svc
+
+                    log_dir = _syscfg_svc.workspace_logs_dir("plugins")
+                except Exception:
+                    log_dir = os.path.join(os.path.dirname(self.context.plugin_dir), "..", "data", "logs")
                 os.makedirs(log_dir, exist_ok=True)
                 plugin_name = os.path.basename(self.context.plugin_dir)
                 log_file = os.path.join(log_dir, f"{plugin_name}_service.log")

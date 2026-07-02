@@ -62,8 +62,25 @@ from plugins.feishu.config import (
 )
 
 # Debug: write config info to file for diagnosis
+# In frozen mode the plugin source dir is read-only (Program Files), so diag
+# logs must go to the writable workspace logs dir, not next to __file__.
 try:
-    _dbg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_config.txt")
+    from opensquad.system_config import syscfg as _syscfg_for_paths
+
+    _FEISHU_LOG_DIR = _syscfg_for_paths.workspace_logs_dir("feishu")
+    os.makedirs(_FEISHU_LOG_DIR, exist_ok=True)
+except Exception:
+    # Fallback for non-syscfg envs: keep legacy source-dir behaviour.
+    _FEISHU_LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _feishu_diag_path() -> str:
+    """Return the writable feishu_diag.log path (workspace logs dir)."""
+    return os.path.join(_FEISHU_LOG_DIR, "feishu_diag.log")
+
+
+try:
+    _dbg_path = os.path.join(_FEISHU_LOG_DIR, "debug_config.txt")
     from opensquad.system_config import _CONFIG_PATH, _WORKSPACE_ROOT
 
     with open(_dbg_path, "w", encoding="utf-8") as _f:
@@ -178,7 +195,7 @@ class FeishuBotRunner:
         """Feishu message receive callback."""
         # Write ALL received events to diag log for debugging
         try:
-            diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
+            diag_path = _feishu_diag_path()
             ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
             with open(diag_path, "a", encoding="utf-8") as f:
                 f.write(
@@ -321,7 +338,7 @@ class FeishuBotRunner:
         source_chat_id: str = "",
     ):
         """Call External Adapter and reply (runs in worker thread)."""
-        diag_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
+        diag_log_path = _feishu_diag_path()
 
         def _diag(msg: str):
             timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -498,7 +515,7 @@ def _run_single_bot(bot_index: int = -1, cfg: FeishuBotConfig = None):
       3. ``load_bot_configs()[bot_index]`` (legacy subprocess mode with --single N)
     """
     # ── Startup diagnostic: write to file immediately ──
-    diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feishu_diag.log")
+    diag_path = _feishu_diag_path()
 
     def _diag(msg: str):
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]

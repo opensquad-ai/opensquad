@@ -96,13 +96,81 @@ def main():
             sys.exit(0)
         if restart_count and restart_count >= 3:
             print(f"FAIL: coder restarted {restart_count} times, giving up")
-            # Show recent launcher output for debugging
-            _cleanup(procs)
-            sys.exit(1)
+            break
 
     print("FAIL: coder did not become alive in 40s")
+    _dump_agent_logs(9600, "coder")
+    _dump_workspace_crash_log(APP_DATA, "coder")
+    _dump_launcher_stdout(launcher)
+    _check_workspace_agent_dir(APP_DATA, "coder")
     _cleanup(procs)
     sys.exit(1)
+
+
+def _dump_workspace_crash_log(app_data: str, name: str) -> None:
+    """Look for agent crash logs written by run_agent()'s exception handler."""
+    crash_dir = os.path.join(app_data, "logs", "agent_crash")
+    if not os.path.isdir(crash_dir):
+        print(f"[smoke] No agent_crash dir at {crash_dir} (agent may have died before crash handler ran)")
+        return
+    crash_files = sorted(
+        (f for f in os.listdir(crash_dir) if name in f),
+        key=lambda f: os.path.getmtime(os.path.join(crash_dir, f)),
+        reverse=True,
+    )
+    if not crash_files:
+        print(f"[smoke] No crash log for {name} in {crash_dir}")
+        return
+    path = os.path.join(crash_dir, crash_files[0])
+    print(f"[smoke] Latest crash log for {name} ({crash_files[0]}):")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f.read().splitlines()[-40:]:
+                print(f"  {line}")
+    except OSError as e:
+        print(f"  (cannot read: {e})")
+
+
+def _dump_launcher_stdout(launcher) -> None:
+    """Drain launcher's stdout pipe to see launcher-side errors."""
+    print("[smoke] Launcher stdout (last 30 lines):")
+    try:
+        launcher.stdout.flush()
+        lines = []
+        # Read whatever is currently buffered without blocking on Windows.
+        # readline() on a closed/EOF pipe returns "" quickly; on an open pipe
+        # with data it returns the line. We cap at 30 lines to stay bounded.
+        for _ in range(30):
+            line = launcher.stdout.readline()
+            if not line:
+                break
+            lines.append(line.rstrip())
+        if not lines:
+            print("  (no buffered output)")
+        for line in lines:
+            print(f"  {line}")
+    except Exception as e:
+        print(f"  (cannot read launcher stdout: {e})")
+
+
+def _check_workspace_agent_dir(app_data: str, name: str) -> None:
+    """Verify the agent dir exists in the workspace (auto-copied from builtin)."""
+    agent_dir = os.path.join(app_data, "agents", name)
+    if os.path.isdir(agent_dir):
+        cfg = os.path.join(agent_dir, "config.json")
+        print(f"[smoke] Workspace agent dir OK: {agent_dir}")
+        print(f"[smoke]   config.json exists: {os.path.isfile(cfg)}")
+    else:
+        print(f"[smoke] Workspace agent dir MISSING: {agent_dir}")
+        print("[smoke]   ensure_agent_in_workspace() may have failed to copy from builtin")
+
+
+def _dump_agent_logs(port: int, name: str) -> None:
+    logs = api(port, f"/api/agents/{name}/logs?lines=40")
+    if isinstance(logs, dict) and logs.get("logs"):
+        print(f"[smoke] Last logs for {name}:")
+        for line in logs["logs"][-20:]:
+            print(f"  {line.rstrip()}")
 
 
 def _cleanup(procs):

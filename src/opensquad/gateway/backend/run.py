@@ -169,7 +169,8 @@ def run_agent():
     """
     import argparse
     import asyncio
-    import contextlib
+    import time
+    import traceback
 
     from opensquad.agents_boot import main as agent_main
 
@@ -178,8 +179,34 @@ def run_agent():
     parser.add_argument("--port", type=int, help="Override web server port")
     args = parser.parse_args()
 
-    with contextlib.suppress(KeyboardInterrupt, SystemExit):
+    try:
         asyncio.run(agent_main(args.agent_dir, override_port=args.port))
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception:
+        # Agent boot crashed before its logger was wired up. The launcher's
+        # _forward_logs captures stdout/stderr, but on a fresh CI runner the
+        # process can exit so fast that the log thread hasn't drained the pipe.
+        # Write the traceback to BOTH stderr (best effort, picked up by the
+        # launcher log buffer) and a workspace crash file so smoke tests and
+        # post-mortem debugging can see why the agent died.
+        tb = traceback.format_exc()
+        print(f"[run_agent] FATAL: agent boot crashed\n{tb}", file=sys.stderr, flush=True)
+        try:
+            from opensquad.system_config import syscfg as _syscfg_for_crash
+
+            crash_dir = _syscfg_for_crash.workspace_logs_dir("agent_crash")
+            os.makedirs(crash_dir, exist_ok=True)
+            crash_file = os.path.join(
+                crash_dir,
+                f"crash_{os.path.basename(args.agent_dir)}_{int(time.time())}.log",
+            )
+            with open(crash_file, "w", encoding="utf-8") as f:
+                f.write(f"agent_dir={args.agent_dir}\nport={args.port}\n\n{tb}")
+            print(f"[run_agent] crash log written to {crash_file}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        raise
 
 
 if __name__ == "__main__":

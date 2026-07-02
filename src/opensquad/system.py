@@ -27,23 +27,20 @@ except ImportError:
     logger = logging.getLogger(__name__)
     sleep_controller = None
 
-# Project root (derived from __file__: opensquad/system.py -> project root)
-_PROJECT_ROOT = os.path.normcase(os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Project root — workspace-aware via the unified path utility.
+# The old __file__-derived _PROJECT_ROOT pointed at the read-only install dir
+# in frozen mode, which made _is_path_safe() reject every legitimate workspace
+# write. Delegate to utils.path_utils so this module stays in sync with
+# tools/filesystem.py and tools/system.py.
+from opensquad.utils.path_utils import is_path_safe as _is_path_safe_unified
 
 
 def _is_path_safe(path: str) -> bool:
     """
     Check path safety.
-    Ensures the path is within the project root directory; supports both absolute and relative paths.
+    Ensures the path is within the workspace root directory; supports both absolute and relative paths.
     """
-    try:
-        if os.path.isabs(path):
-            target_path = os.path.normcase(os.path.abspath(path))
-        else:
-            target_path = os.path.normcase(os.path.abspath(os.path.join(os.getcwd(), path)))
-        return os.path.commonpath([_PROJECT_ROOT, target_path]) == _PROJECT_ROOT
-    except Exception:
-        return False
+    return _is_path_safe_unified(path)
 
 
 # --- Background job management core ---

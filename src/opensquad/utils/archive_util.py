@@ -1,8 +1,7 @@
-import contextlib
 import logging
 import math
 import os
-import shutil
+import tempfile
 import zipfile
 
 logger = logging.getLogger(__name__)
@@ -30,11 +29,11 @@ def prepare_file_for_sending(file_path: str, part_size: int = DEFAULT_PART_SIZE)
     # 2. If file is too large, compress and split into parts
     logger.info(f"[Archive] File too large ({file_size / 1024 / 1024:.1f}MB), processing...")
 
-    # Create a temporary directory for split parts
-    temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp_archives")
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    os.makedirs(temp_dir, exist_ok=True)
+    # Create a temporary directory for split parts.
+    # Use the OS temp dir — never the install dir (read-only under Program Files
+    # in frozen mode). The previous __file__-derived path wrote into the package
+    # tree, which crashed with PermissionError in the desktop app.
+    temp_dir = tempfile.mkdtemp(prefix="opensquad_arch_")
 
     base_name = os.path.basename(file_path)
 
@@ -91,8 +90,13 @@ def split_file(file_path: str, output_dir: str, part_size: int) -> list[str]:
 
 
 def cleanup_temp():
-    """Clean up the temporary directory."""
-    temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp_archives")
-    if os.path.exists(temp_dir):
-        with contextlib.suppress(OSError):
-            shutil.rmtree(temp_dir)
+    """Clean up the temporary directory.
+
+    Deprecated: prepare_file_for_sending() now creates a unique OS temp dir
+    per call (tempfile.mkdtemp) instead of a shared __file__-derived dir, so
+    there is no single shared path to wipe. Kept for backward-compatible call
+    sites; it is a no-op now. Callers that want to clean up should rmtree the
+    directory returned alongside the part list.
+    """
+    # No-op: temp dirs are now per-call and managed by the caller / OS.
+    return

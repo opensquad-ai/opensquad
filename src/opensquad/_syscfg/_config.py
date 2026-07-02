@@ -241,7 +241,11 @@ def skills_dir() -> str:
     cfg_val = get("skills_dir", "")
     if cfg_val:
         return os.path.abspath(cfg_val)
-    return os.path.join(_ws._DEFAULT_ROOT, "skills")
+    # Writable workspace skills dir — never the read-only install dir. In frozen
+    # mode _DEFAULT_ROOT points at _internal/ (Program Files), which would raise
+    # PermissionError on any skill install/upload. Aligns with the SSOT in
+    # _workspace.workspace_skills_dir().
+    return _ws.workspace_skills_dir()
 
 
 def filesystem_workspace_dirs() -> list:

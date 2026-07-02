@@ -667,9 +667,12 @@ class ChatProBridge:
         try:
             from opensquad.system_config import syscfg
 
-            upload_dir = os.path.join(syscfg.project_root(), "data", "uploads")
+            upload_dir = syscfg.workspace_uploads_dir()
         except Exception:
-            upload_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
+            # Fallback: temp dir — never the read-only install dir (frozen mode).
+            import tempfile
+
+            upload_dir = os.path.join(tempfile.gettempdir(), "opensquad_uploads")
         os.makedirs(upload_dir, exist_ok=True)
 
         for att in attachments:

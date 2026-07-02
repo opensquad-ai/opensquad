@@ -31,7 +31,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "plugins_db.json")
+
+def _resolve_db_path() -> str:
+    """Resolve the writable plugins_db.json path.
+
+    In a PyInstaller bundle installed under Program Files, the source dir next
+    to this file is read-only. Write the DB into the writable workspace data
+    dir instead (workspace/data/plugin_registry/plugins_db.json). Falls back to
+    the source-dir path only in non-frozen dev mode for backward compat.
+    """
+    try:
+        from opensquad.system_config import syscfg
+
+        db_dir = syscfg.workspace_data_dir("plugin_registry")
+        os.makedirs(db_dir, exist_ok=True)
+        return os.path.join(db_dir, "plugins_db.json")
+    except Exception:
+        # Dev mode / syscfg unavailable: keep legacy behaviour.
+        return os.path.join(os.path.dirname(__file__), "plugins_db.json")
+
+
+DB_PATH = _resolve_db_path()
 
 # Admin key — MUST be set via OPENSQUAD_REGISTRY_ADMIN_KEY env var in production.
 # There is no hardcoded default; admin endpoints are disabled if the env var is missing.

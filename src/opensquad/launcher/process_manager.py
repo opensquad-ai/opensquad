@@ -104,8 +104,15 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
     with ``Module use of python311.dll conflicts with this version of Python``.
     """
     child_env = os.environ.copy()
-    child_env["PYTHONIOENCODING"] = "utf-8"
-    child_env["PYTHONUTF8"] = "1"
+    if getattr(sys, "frozen", False):
+        # Another ``run.exe`` child (--service agent/launcher).  Do NOT set
+        # PYTHONUTF8/PYTHONIOENCODING here — run.py reconfigures streams directly
+        # and documents that these env vars can crash PyInstaller boot (site.py).
+        child_env.pop("PYTHONUTF8", None)
+        child_env.pop("PYTHONIOENCODING", None)
+    else:
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
     if sys.platform == "win32":
         if child_env.get("PATH"):
             child_env["PATH"] = _sanitize_path_for_child(child_env["PATH"])
@@ -115,6 +122,18 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
     if getattr(sys, "frozen", False):
         # Packaged app: bundled opensquad only — do not inherit dev PYTHONPATH.
         child_env["PYTHONPATH"] = install_dir
+        ws = (
+            os.environ.get("OPENSQUAD_WORKSPACE", "").strip()
+            or os.environ.get("OPENSQUAD_USER_DATA", "").strip()
+            or os.environ.get("OPENSQUAD_APP_DATA", "").strip()
+        )
+        if ws:
+            ws_abs = os.path.abspath(ws)
+            child_env.setdefault("OPENSQUAD_WORKSPACE", ws_abs)
+            child_env.setdefault("OPENSQUAD_USER_DATA", ws_abs)
+            app_data = os.environ.get("OPENSQUAD_APP_DATA", "").strip()
+            if app_data:
+                child_env.setdefault("OPENSQUAD_APP_DATA", os.path.abspath(app_data))
     else:
         existing_pp = child_env.get("PYTHONPATH", "")
         child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
