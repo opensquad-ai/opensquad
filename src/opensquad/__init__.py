@@ -7,7 +7,7 @@ Version: single source of truth is pyproject.toml [project].version.
 Run ``python scripts/sync_version.py`` after bumping pyproject.toml.
 """
 
-__version__ = "0.4.8"
+__version__ = "0.4.9"
 __author__ = "OpenSquad Contributors"
 
 # Shared runtime context dict - updated by Runner each turn.
