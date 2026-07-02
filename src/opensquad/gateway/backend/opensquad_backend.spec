@@ -211,10 +211,65 @@ hiddenimports += collect_submodules("tiktoken_ext")
 hiddenimports += collect_submodules("tiktoken_ext.openai_public")
 
 # ── 收集完整包数据 ─────────────────────────────────────────────────────────────
+# Accumulate binaries too — collect_all() returns C extensions (.pyd) that
+# must be listed in Analysis(binaries=...) or they won't be bundled.
+all_binaries = []
 for pkg in ("uvicorn", "fastapi", "starlette", "sqlalchemy", "httpx", "h11"):
     _datas, _binaries, _hidden = collect_all(pkg)
     datas     += _datas
+    all_binaries += _binaries
     hiddenimports += _hidden
+
+# httptools — uvicorn's default HTTP parser. collect_all is required because
+# the package ships a C extension (parser.pyd) that PyInstaller doesn't pick
+# up via collect_submodules alone. Without this, frozen run.exe has only the
+# empty httptools/__init__.py placeholder, causing `AttributeError: module
+# 'httptools' has no attribute 'HttpRequestParser'` when uvicorn handles
+# the first request.
+_httptools_datas, _httptools_binaries, _httptools_hidden = collect_all("httptools")
+datas += _httptools_datas
+all_binaries += _httptools_binaries
+hiddenimports += _httptools_hidden
+
+# ── MCP SDK (official `mcp` package) + transitive deps ──────────────────────
+# mcp_adapter.py does `from mcp import ClientSession` at module top level.
+# Without this, the agent process (frozen run.exe) crashes with
+# ModuleNotFoundError on import, MCP tools disappear, and mcp_query tool also
+# fails (it imports mcp_adapter).
+# NOTE: cannot use collect_all("mcp") or collect_submodules("mcp") —
+# mcp.cli.__init__ calls sys.exit(1) during import, which crashes PyInstaller.
+# Manually list only the subpackages the agent runtime actually imports
+# (client + shared types, NOT server/cli/auth/experimental).
+hiddenimports += [
+    "mcp",
+    "mcp.types",
+    "mcp.client",
+    "mcp.client.session",
+    "mcp.client.stdio",
+    "mcp.client.sse",
+    "mcp.client.streamable_http",
+    "mcp.client.websocket",
+    "mcp.shared",
+    "mcp.shared.exceptions",
+    "mcp.shared.memory",
+    "mcp.shared.message",
+    "mcp.shared.session",
+    "mcp.shared.version",
+    "mcp.util",
+]
+for _mcp_dep_pkg in (
+    "httpx_sse",
+    "jsonschema",
+    "jsonschema_specifications",
+    "referencing",
+    "rpds",
+    "sse_starlette",
+    "attrs",
+    "anyio",
+    "sniffio",
+):
+    hiddenimports += collect_submodules(_mcp_dep_pkg)
+hiddenimports += ["pyjwt", "jwt"]
 
 # ── Builtin resource packages: plugins, skills ───────────────────────────────
 # These live at src/ top-level (NOT inside the opensquad package), so

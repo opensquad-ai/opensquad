@@ -223,4 +223,10 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         timeout_graceful_shutdown=3,
+        # Force h11 (pure-Python) instead of httptools (C extension). The
+        # Agent Python runtime may have a broken/missing httptools C ext
+        # (parser.pyd), causing `AttributeError: module 'httptools' has no
+        # attribute 'HttpRequestParser'` at request time. h11 is always
+        # available (bundled with uvicorn) and has no native deps.
+        http="h11",
     )

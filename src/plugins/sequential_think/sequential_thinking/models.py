@@ -63,21 +63,24 @@ class ThoughtData(BaseModel):
         return self.id == other.id
 
     @field_validator("thought")
-    def thought_not_empty(self, v: str) -> str:
+    @classmethod
+    def thought_not_empty(cls, v: str) -> str:
         """Validate that thought content is not empty."""
         if not v or not v.strip():
             raise ValueError("Thought content cannot be empty")
         return v
 
     @field_validator("thought_number")
-    def thought_number_positive(self, v: int) -> int:
+    @classmethod
+    def thought_number_positive(cls, v: int) -> int:
         """Validate that thought number is positive."""
         if v < 1:
             raise ValueError("Thought number must be positive")
         return v
 
     @field_validator("total_thoughts")
-    def total_thoughts_valid(self, v: int, values: dict[str, Any]) -> int:
+    @classmethod
+    def total_thoughts_valid(cls, v: int, values: Any) -> int:
         """Validate that total thoughts is valid."""
         thought_number = values.data.get("thought_number")
         if thought_number is not None and v < thought_number:

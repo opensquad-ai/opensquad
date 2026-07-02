@@ -10,7 +10,15 @@
   "tags": [
     "agent"
   ],
-  "tools": [],
+  "tools": [
+    {
+      "name": "mcp_query",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
   "hooks": [],
   "config": {
     "schema": {}

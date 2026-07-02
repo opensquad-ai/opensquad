@@ -482,7 +482,16 @@ class PluginManager:
 
             # 2) Also check get_tool_modules() for proxy-pattern tools
             if hasattr(plugin, "get_tool_modules"):
-                for desc in plugin.get_tool_modules():
+                try:
+                    _proxy_descs = plugin.get_tool_modules()
+                except Exception as _gtm_err:
+                    logger.error(
+                        f"[PluginManager] get_tool_modules() raised for plugin '{plugin_name}': "
+                        f"{type(_gtm_err).__name__}: {_gtm_err}",
+                        exc_info=True,
+                    )
+                    _proxy_descs = []
+                for desc in _proxy_descs:
                     tool_name = desc.get("name", "")
                     module = desc.get("module")
                     # Per-agent level override takes precedence over plugin default
