@@ -50,13 +50,30 @@ except Exception as _import_err:
 
 # ── sys.path setup ─────────────────────────────────────────
 # _here: plugins/whisper/service/
-# _project_root: project root (opensquad/), 3 levels up
+# _project_root: project root (opensquad/), 3 levels up — needed so the
+# Agent Python (which has no opensquad package) can import
+# plugins._service_runtime.
+#
+# In frozen mode, _project_root is the read-only _internal/ dir. APPEND it
+# (not insert(0)) so the Agent Python's site-packages wins for third-party
+# packages (flask, flask-cors, ...). Otherwise `import flask` would load
+# the loose copy under _internal/flask/ but its transitive deps (click,
+# jinja2, etc.) live only in the PYZ archive and crash with
+# ModuleNotFoundError. See websearch/service/main.py for full rationale.
 _here = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
-sys.path.insert(0, _here)  # current dir (reserved for future cross-file imports)
-sys.path.insert(0, _project_root)  # project root, for `from opensquad.system_config import syscfg`
+if _here not in sys.path:
+    sys.path.insert(0, _here)  # current dir (reserved for future cross-file imports)
+if _project_root not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(_project_root)  # site-packages must win over _internal loose copies
+    else:
+        sys.path.insert(0, _project_root)  # for `from plugins._service_runtime import ...`
 
-from opensquad.system_config import syscfg
+# Self-contained runtime helper — does NOT import opensquad (which is not
+# available to the Agent Python that runs plugin services in frozen mode).
+from plugins._service_runtime import port as _runtime_port
+from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -86,8 +103,7 @@ def _resolve_service_port() -> int:
     2. system_config.json ports.whisper (deployment-level override)
     3. Default value 5001
     """
-    config_path = os.path.join(_project_root, "data", "plugins", "whisper", "config.json")
-    config_path = os.path.abspath(config_path)
+    config_path = _runtime_workspace_data_dir("plugins", "whisper", "config.json")
     if os.path.isfile(config_path):
         try:
             import json as _json
@@ -99,7 +115,7 @@ def _resolve_service_port() -> int:
         except Exception:
             pass
     try:
-        return syscfg.port("whisper")
+        return _runtime_port("whisper")
     except Exception:
         pass
     return 5001

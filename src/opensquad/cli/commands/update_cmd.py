@@ -161,6 +161,18 @@ def run_update(args):
         if not _download_asset(asset_url, tmp_path):
             sys.exit(1)
 
+        # In frozen mode sys.executable is run.exe (the PyInstaller bundle),
+        # which cannot run ``-m pip install``. A frozen desktop app is upgraded
+        # by downloading a new installer, not via pip. Detect this and guide
+        # the user instead of crashing.
+        if getattr(sys, "frozen", False):
+            print(
+                "Detected frozen desktop build — cannot self-upgrade via pip.\n"
+                "Please download the latest installer from the GitHub Releases page:\n"
+                f"  https://github.com/{GITHUB_REPO}/releases/latest"
+            )
+            sys.exit(0)
+
         print("Installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", tmp_path])
         print("Upgrade complete! Please restart OpenSquad.")

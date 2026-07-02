@@ -266,6 +266,21 @@ class ServicePlugin(Plugin):
             self.logger.info(f"[{self.service_name}] auto_start=False, service not started.")
             return
 
+        # Frozen-bundle safe mode: in a PyInstaller bundle, sys.executable is
+        # run.exe and cannot execute arbitrary .py files (it only recognizes
+        # --service gateway|launcher|agent). The launcher process owns plugin
+        # service lifecycle in frozen mode (PluginServiceProcess.start() via
+        # _plugin_python_executable), so agent-side auto-start would either
+        # crash (run.exe ignores the .py path and falls through to gateway,
+        # causing a port-9555 conflict) or duplicate the launcher's work.
+        # Skip here and let the Service Manager / launcher handle it.
+        if getattr(sys, "frozen", False):
+            self.logger.info(
+                f"[{self.service_name}] frozen-bundle mode: skipping agent-side service auto-start "
+                "(launcher owns plugin service lifecycle)."
+            )
+            return
+
         # Check if service already running (shared across agents)
         port = self.context.config.get("port")
         if port and _ServiceRegistry.is_running(port):

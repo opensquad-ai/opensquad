@@ -3469,6 +3469,19 @@ def _init_and_start_plugin_services():
             "Services are still discovered so they can be started manually from the Service Manager."
         )
     syscfg.ensure_external_api_key()
+
+    # Ensure the Agent Python embed's _pth file is correctly configured
+    # (import site + Lib\site-packages). Older setup wizards only added
+    # `import site`, which can cause pip-installed packages to not be
+    # importable → services crash with ModuleNotFoundError.
+    try:
+        from opensquad.agent_runtime import ensure_embed_pth_configured
+
+        if ensure_embed_pth_configured():
+            _log.info("[Launcher] Fixed Agent Python _pth file (added Lib\\site-packages).")
+    except Exception as _e:
+        _log.debug(f"[Launcher] _pth check skipped: {_e}")
+
     _log.info("\n[Launcher] Discovering plugin services...")
     plugin_svc_infos = discover_all_plugin_services()
 

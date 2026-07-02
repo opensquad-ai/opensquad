@@ -215,8 +215,21 @@ class PluginManager:
                 pass
 
         # Build Context
-        project_root = os.path.dirname(self.plugins_dir)
-        data_dir = os.path.join(project_root, "data", "plugins", name)
+        # project_root / data_dir MUST resolve to the writable workspace, not
+        # the install dir. In frozen mode self.plugins_dir is
+        # ``_internal/plugins/`` (read-only Program Files), so
+        # ``os.path.dirname(self.plugins_dir)`` = ``_internal/`` — writing
+        # data_dir / project_root there raises PermissionError. Use syscfg
+        # (workspace-aware) for both. Falls back to dirname(plugins_dir) only
+        # in dev mode where the workspace == the project root.
+        try:
+            project_root = syscfg.get_workspace()
+        except Exception:
+            project_root = os.path.dirname(self.plugins_dir)
+        try:
+            data_dir = syscfg.workspace_data_dir("plugins", name)
+        except Exception:
+            data_dir = os.path.join(project_root, "data", "plugins", name)
 
         event_bus = None
         try:

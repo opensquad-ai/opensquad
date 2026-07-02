@@ -20,9 +20,42 @@ import os
 import sys
 from dataclasses import asdict, dataclass
 
-# plugins/feishu/ -> plugins/ -> project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from opensquad.system_config import _CONFIG_PATH, syscfg
+# plugins/feishu/ -> plugins/ -> project root.
+# In frozen mode, APPEND (not insert(0)) so the Agent Python's site-packages
+# wins over _internal/ loose copies of third-party packages whose transitive
+# deps live only in the PYZ archive. See external_api/adapter.py for rationale.
+_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _root not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(_root)
+    else:
+        sys.path.insert(0, _root)
+# Self-contained runtime helper — does NOT import opensquad (which is not
+# available to the Agent Python that runs plugin services in frozen mode).
+from plugins._service_runtime import (
+    config_path as _config_path_fn,
+)
+from plugins._service_runtime import (
+    ensure_external_api_key as _ensure_external_api_key,
+)
+from plugins._service_runtime import (
+    external_adapter_url as _external_adapter_url,
+)
+from plugins._service_runtime import (
+    get as _get,
+)
+from plugins._service_runtime import (
+    get_int as _get_int,
+)
+from plugins._service_runtime import (
+    is_service_enabled as _is_service_enabled,
+)
+
+
+def _CONFIG_PATH() -> str:
+    """Live config path (reflects the active workspace). Replaces the old
+    module-level constant imported from opensquad.system_config."""
+    return _config_path_fn()
 
 
 @dataclass
@@ -40,21 +73,21 @@ class FeishuBotConfig:
 
 
 # ── Section-level shared config ──
-FEISHU_LOG_LEVEL: str = syscfg.get("feishu", "log_level", "INFO")
-FEISHU_DEFAULT_TIMEOUT: int = syscfg.get_int("feishu", "request_timeout", 60)
+FEISHU_LOG_LEVEL: str = _get("feishu", "log_level", "INFO")
+FEISHU_DEFAULT_TIMEOUT: int = _get_int("feishu", "request_timeout", 60)
 
 
 def is_service_enabled() -> bool:
     """Check if feishu service is enabled."""
-    return syscfg.is_service_enabled("feishu")
+    return _is_service_enabled("feishu")
 
 
 # ── External Adapter Connection ──
-EXTERNAL_ADAPTER_URL: str = os.environ.get("EXTERNAL_ADAPTER_URL") or syscfg.external_adapter_url()
+EXTERNAL_ADAPTER_URL: str = os.environ.get("EXTERNAL_ADAPTER_URL") or _external_adapter_url()
 # ensure_external_api_key() (added in issue #41 fix) writes a real key
 # if the workspace still carries the placeholder value, mirroring the
 # runtime-fallback path the other auth tokens use.
-EXTERNAL_API_KEY: str = syscfg.ensure_external_api_key()
+EXTERNAL_API_KEY: str = _ensure_external_api_key()
 if not EXTERNAL_API_KEY or EXTERNAL_API_KEY == "YOUR_EXTERNAL_API_KEY_HERE":
     import logging as _logging
 
@@ -91,18 +124,18 @@ def _bots_from_raw(raw_bots) -> list[FeishuBotConfig]:
 
 
 def load_bot_configs() -> list[FeishuBotConfig]:
-    """Load all enabled bot configs from system_config.json (cached syscfg)."""
-    raw_bots = syscfg.get("feishu", "bots", [])
+    """Load all enabled bot configs from system_config.json (cached)."""
+    raw_bots = _get("feishu", "bots", [])
     return _bots_from_raw(raw_bots)
 
 
 def load_bot_configs_fresh() -> list[FeishuBotConfig]:
-    """Re-read system_config.json from disk, bypassing the syscfg cache.
+    """Re-read system_config.json from disk, bypassing the cache.
 
     Used by the config watcher to detect edits made by the Web UI / launcher.
     """
     try:
-        with open(_CONFIG_PATH, encoding="utf-8-sig") as f:
+        with open(_CONFIG_PATH(), encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []

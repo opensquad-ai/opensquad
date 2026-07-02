@@ -21,9 +21,33 @@ import os
 import sys
 from dataclasses import dataclass
 
-# plugins/telegram/ -> plugins/ -> project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from opensquad.system_config import syscfg
+# plugins/telegram/ -> plugins/ -> project root.
+# In frozen mode, APPEND (not insert(0)) so the Agent Python's site-packages
+# wins over _internal/ loose copies of third-party packages whose transitive
+# deps live only in the PYZ archive. See external_api/adapter.py for rationale.
+_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _root not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(_root)
+    else:
+        sys.path.insert(0, _root)
+# Self-contained runtime helper — does NOT import opensquad (which is not
+# available to the Agent Python that runs plugin services in frozen mode).
+from plugins._service_runtime import (
+    auth as _auth,
+)
+from plugins._service_runtime import (
+    external_adapter_url as _external_adapter_url,
+)
+from plugins._service_runtime import (
+    get as _get,
+)
+from plugins._service_runtime import (
+    get_int as _get_int,
+)
+from plugins._service_runtime import (
+    is_service_enabled as _is_service_enabled,
+)
 
 
 @dataclass
@@ -41,25 +65,25 @@ class TelegramBotConfig:
 
 
 # ── Section-level shared config ──
-TELEGRAM_LOG_LEVEL: str = syscfg.get("telegram", "log_level", "INFO")
-TELEGRAM_DEFAULT_TIMEOUT: int = syscfg.get_int("telegram", "request_timeout", 60)
-TELEGRAM_DEFAULT_CONNECT_TIMEOUT: int = syscfg.get_int("telegram", "connect_timeout", 30)
-TELEGRAM_DEFAULT_PROXY: str = syscfg.get("telegram", "proxy", "") or os.environ.get("TELEGRAM_PROXY", "")
+TELEGRAM_LOG_LEVEL: str = _get("telegram", "log_level", "INFO")
+TELEGRAM_DEFAULT_TIMEOUT: int = _get_int("telegram", "request_timeout", 60)
+TELEGRAM_DEFAULT_CONNECT_TIMEOUT: int = _get_int("telegram", "connect_timeout", 30)
+TELEGRAM_DEFAULT_PROXY: str = _get("telegram", "proxy", "") or os.environ.get("TELEGRAM_PROXY", "")
 
 
 def is_service_enabled() -> bool:
     """Check if telegram service is enabled."""
-    return syscfg.is_service_enabled("telegram")
+    return _is_service_enabled("telegram")
 
 
 # ── External Adapter Connection ──
-EXTERNAL_ADAPTER_URL: str = os.environ.get("EXTERNAL_ADAPTER_URL") or syscfg.external_adapter_url()
-EXTERNAL_API_KEY: str = syscfg.auth("external_api_key")
+EXTERNAL_ADAPTER_URL: str = os.environ.get("EXTERNAL_ADAPTER_URL") or _external_adapter_url()
+EXTERNAL_API_KEY: str = _auth("external_api_key")
 
 
 def load_bot_configs() -> list[TelegramBotConfig]:
     """Load all enabled bot configs from system_config.json."""
-    raw_bots = syscfg.get("telegram", "bots", [])
+    raw_bots = _get("telegram", "bots", [])
     configs = []
     for b in raw_bots:
         if not b.get("enabled", True):

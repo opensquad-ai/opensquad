@@ -244,6 +244,78 @@ After the workflow finishes:
    (visible in the system tray), and the backend port should be reachable
    on `127.0.0.1:9555/health`.
 
+### Release versioning rules (strictly enforced from v0.4.10)
+
+History lesson: we shipped untested versions as stable Releases multiple
+times, and users hit bugs after downloading. To prevent repeats, we
+introduced the beta.N tag + three-stage testing flow.
+
+#### Version format
+
+| Format | Meaning |
+|--------|---------|
+| `vX.Y.Zbeta.N` | CI build package, not yet passed the three-stage test (N starts at 0, increments by 1 after each fix-and-rebuild) |
+| `vX.Y.Z` | Stable release, only tagged after all three stages pass |
+
+#### Three-stage testing (any failure → fix → restart from stage 1)
+
+1. **Local quick verification** (~6 min) —
+   `scripts\build_backend.bat` to rebuild `run.exe`, then
+   `uv run python scripts\smoke_frozen_all.py`.
+   All hard-gate smokes must PASS (path checks, gateway, model/role cards,
+   skills, plugin service discovery, MCP config).
+2. **Local packaging verification** (~3 min) —
+   `cd src\opensquad\gateway\nexuschat-pro && npx electron-builder --win --dir --publish never`
+   to produce the unpacked dir, then manually run
+   `build\release\win-unpacked\OpenSquad.exe` to verify the desktop app
+   opens, UI loads, Service Manager lists services.
+3. **CI build download + manual testing** (~30 min + test time) —
+   Push `vX.Y.Zbeta.N` tag to trigger CI, wait for build to finish,
+   download the installer from GitHub Release, install and test all
+   desktop features (chat, service start/stop, Token Analytics dashboard,
+   MCP, skills).
+
+#### Flow diagram
+
+```
+fix → push vX.Y.Zbeta.0 tag → CI build (~30 min)
+                                ↓
+                          download beta.0 and test
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │ Stage 1 (local quick) │ Stage 2 (local pack)  │ Stage 3 (CI manual) │
+        └───────────────────────┴───────────────────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+                all PASS               any FAIL
+                    │                       │
+                    ▼                       ▼
+        delete beta.0 tag          fix → push vX.Y.Zbeta.1 tag
+        push vX.Y.Z stable tag          → rebuild CI → restart stages
+        → CI produces stable Release         │
+                                            └─ N increments until all pass
+```
+
+#### Command quick reference
+
+```powershell
+# Publish beta.0
+git tag -a v0.4.10beta.0 -m "v0.4.10 beta.0: <fix description>"
+git push origin v0.4.10beta.0
+
+# After all three stages pass, promote to stable (delete beta tag first, then push stable tag)
+git tag -d v0.4.10beta.0
+git push origin :refs/tags/v0.4.10beta.0
+git tag -a v0.4.10 -m "v0.4.10: <release notes>"
+git push origin v0.4.10
+```
+
+#### Historical exception
+
+`v0.4.9` was pushed as a stable tag before this rule was established and is
+left as-is. Strictly enforced from `v0.4.10` onward.
+
 ---
 
 ## Frozen-mode quick verification (change → 6 min result)

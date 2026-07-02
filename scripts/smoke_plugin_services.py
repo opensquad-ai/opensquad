@@ -15,6 +15,11 @@ What this verifies (all against a --no-services launcher on port 9600):
   4. /api/plugins/token_analytics/data → reachable (not 404 for plugin missing)
   5. /api/skills                   → non-empty list (skills discoverable)
   6. /api/mcp/config               → mcpServers non-empty (playwright present)
+  7. POST /api/plugin-services/websearch/start → service actually starts and
+                                     becomes healthy (catches the class of bugs
+                                     where deps are installed to the wrong
+                                     Python interpreter and the service crashes
+                                     with ModuleNotFoundError on import)
 
 Usage: uv run python scripts/smoke_plugin_services.py
 """
@@ -30,14 +35,14 @@ BUILD_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "backend-win"
 APP_DATA = os.path.join(os.environ.get("APPDATA", ""), "nexuschat-pro")
 
 
-def api(port, path, method="GET", data=None):
+def api(port, path, method="GET", data=None, timeout=10):
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method=method)
     if data:
         req.data = json.dumps(data).encode()
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:
@@ -112,6 +117,18 @@ def main():
             print("FAIL: Launcher did not start in 20s")
             _dump_launcher_stdout(launcher)
             sys.exit(1)
+
+        # Wait for plugin service discovery to complete (it runs in a thread
+        # after the management API starts, so /api/agents being up does not
+        # guarantee /api/plugin-services is populated yet).
+        for i in range(15):
+            status, r = api(9600, "/api/plugin-services")
+            if status == 200 and r.get("plugin_services"):
+                print(f"[smoke] Plugin service discovery complete after {i + 1}s")
+                break
+            time.sleep(1)
+        else:
+            print("[smoke] WARNING: plugin service discovery not complete after 15s")
 
         # ── Check 1: /api/plugin-services ──
         print("\n[smoke] Check 1: GET /api/plugin-services (service discovery under --no-services)")
@@ -204,6 +221,52 @@ def main():
             else:
                 pw = servers["playwright"]
                 print(f"  OK: playwright present, enabled={pw.get('enabled')}, command={pw.get('command')}")
+
+        # ── Check 7: POST /api/plugin-services/websearch/start (actual start) ──
+        # This is the regression test for the "deps installed to wrong Python"
+        # bug: the launcher's _ensure_pip_and_install used sys.executable (frozen
+        # run.exe) instead of the Agent Python, so ModuleNotFoundError crashed
+        # the service on import. Discovery (checks 1-6) passed but the service
+        # was unstartable.
+        print("\n[smoke] Check 7: POST /api/plugin-services/websearch/start (actually start it)")
+        # Use a long timeout: the start endpoint waits for the background
+        # _install_builtin_plugin_deps thread to finish (up to 300s on a cold
+        # cache — pip bootstrap via get-pip.py + ~13 deps), then does a
+        # per-service dep check, then spawns the service. 360s gives margin.
+        status, r = api(9600, "/api/plugin-services/websearch/start", method="POST", timeout=360)
+        if status not in (200, 409):
+            failures.append(f"check7: start returned HTTP {status}: {r}")
+            print(f"  FAIL: HTTP {status} {r}")
+        else:
+            print(f"  OK: start returned HTTP {status} (200=started, 409=already running)")
+            # Poll health endpoint on the service port (websearch default = 9001)
+            svc_port = 9001
+            healthy = False
+            # First launch needs to bootstrap pip in the Agent Python embed via
+            # get-pip.py (no ensurepip in embed builds), then install ~13 deps.
+            # That can take 2-3 min on a cold cache. 120s + status prints.
+            for i in range(120):
+                status_h, r_h = api(svc_port, "/health")
+                if status_h == 200:
+                    healthy = True
+                    break
+                if i % 10 == 0 and i > 0:
+                    print(f"  ...waiting for service health ({i}s elapsed)")
+                time.sleep(1)
+            if healthy:
+                print(f"  OK: websearch service healthy on port {svc_port} after {i + 1}s")
+            else:
+                failures.append(
+                    "check7: websearch service did not become healthy within 120s "
+                    "(likely pip bootstrap in Agent Python embed still in progress, "
+                    "or ModuleNotFoundError — deps installed to wrong Python)"
+                )
+                print(f"  FAIL: websearch not healthy on port {svc_port} within 120s")
+                print("        Possible causes:")
+                print("        1. Agent Python embed has no pip — get-pip.py bootstrap slow/failed")
+                print("        2. Deps installed to wrong Python (frozen run.exe instead of Agent Python)")
+            # Stop the service so the smoke test doesn't leave it running
+            api(9600, "/api/plugin-services/websearch/stop", method="POST")
 
         # ── Summary ──
         print("\n" + "=" * 70)

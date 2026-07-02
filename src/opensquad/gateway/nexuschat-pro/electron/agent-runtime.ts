@@ -123,10 +123,29 @@ function configureEmbedPython(installDir: string, log: (line: string) => void): 
   if (!pthName) return
   const pthPath = path.join(installDir, pthName)
   let content = fs.readFileSync(pthPath, 'utf-8')
+  let changed = false
+
+  // 1. Enable `import site` so site-packages processing runs (needed for pip
+  //    and for installed packages to be importable).
   if (!content.includes('import site')) {
     content = content.trimEnd() + '\nimport site\n'
+    changed = true
+  }
+
+  // 2. Explicitly add `Lib\site-packages` to the _pth file. When a ._pth file
+  //    is present, Python **ignores PYTHONPATH** — only paths listed in the
+  //    _pth are searched. `import site` alone should add site-packages, but
+  //    being explicit is a belt-and-suspenders fix: some embed builds have a
+  //    site.py that doesn't add Lib\site-packages when _pth is active, which
+  //    causes pip to install packages that are then not importable.
+  if (!content.includes('Lib\\site-packages')) {
+    content = content.trimEnd() + '\nLib\\site-packages\n'
+    changed = true
+  }
+
+  if (changed) {
     fs.writeFileSync(pthPath, content, 'utf-8')
-    log(`Updated ${pthName} (enabled import site)`)
+    log(`Updated ${pthName} (enabled import site + Lib\\site-packages)`)
   }
 }
 

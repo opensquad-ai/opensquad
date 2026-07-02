@@ -35,9 +35,18 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Add project root to path
+# Add project root to path.
+# In frozen mode, APPEND (not insert(0)): the Agent Python's site-packages
+# must win over _internal/ loose copies of uvicorn/fastapi. Otherwise
+# `import uvicorn` loads the loose copy but its transitive deps (click,
+# annotated_doc) live only in the PYZ archive and crash with
+# ModuleNotFoundError. In dev mode, insert(0) for project source priority.
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT_DIR)
+if ROOT_DIR not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(ROOT_DIR)
+    else:
+        sys.path.insert(0, ROOT_DIR)
 
 
 import uvicorn

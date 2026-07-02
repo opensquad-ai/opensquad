@@ -59,3 +59,52 @@ def resolve_bundled_agent_python() -> str | None:
     if default:
         return default
     return None
+
+
+def ensure_embed_pth_configured(python_exe: str | None = None) -> bool:
+    """Ensure the Agent Python embed's ``._pth`` file has ``import site`` and
+    ``Lib\\site-packages`` entries.
+
+    Older setup wizards only added ``import site`` — without an explicit
+    ``Lib\\site-packages`` line, some embed builds don't put site-packages on
+    ``sys.path`` even with ``import site``, so ``pip install`` succeeds but
+    the installed packages are not importable (silent failure → services crash
+    with ``ModuleNotFoundError``).
+
+    This is called at launcher startup to fix existing installations created
+    by older setup wizards. Returns True if the _pth was modified.
+    """
+    if sys.platform != "win32":
+        return False
+    exe = python_exe or resolve_bundled_agent_python()
+    if not exe:
+        return False
+    install_dir = os.path.dirname(exe)
+    try:
+        pth_name = next(
+            (f for f in os.listdir(install_dir) if f.endswith("._pth")),
+            None,
+        )
+    except Exception:
+        return False
+    if not pth_name:
+        return False
+    pth_path = os.path.join(install_dir, pth_name)
+    try:
+        content = open(pth_path, encoding="utf-8").read()
+    except Exception:
+        return False
+    changed = False
+    if "import site" not in content:
+        content = content.rstrip("\n") + "\nimport site\n"
+        changed = True
+    if "Lib\\site-packages" not in content:
+        content = content.rstrip("\n") + "\nLib\\site-packages\n"
+        changed = True
+    if changed:
+        try:
+            with open(pth_path, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception:
+            return False
+    return changed

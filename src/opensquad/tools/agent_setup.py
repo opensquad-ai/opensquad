@@ -127,8 +127,14 @@ def _install_pip_deps_from_skill_json(skill_dir: str) -> list:
             packages = [p for p in step.get("packages", []) if p]
             if packages:
                 logger.info(f"[install_skill] pip install {packages}")
+                # In frozen mode, sys.executable is run.exe (the frozen
+                # PyInstaller bundle) which cannot run ``-m pip`` usefully —
+                # pip would either fail or install into the read-only _internal/
+                # tree. Resolve the Agent Python (same one used for plugin
+                # services) so skill deps land in the right interpreter.
+                target_python = _resolve_skill_install_python()
                 proc = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", *packages],
+                    [target_python, "-m", "pip", "install", *packages],
                     capture_output=True,
                     text=True,
                     timeout=300,
@@ -138,6 +144,32 @@ def _install_pip_deps_from_skill_json(skill_dir: str) -> list:
                 else:
                     logger.warning(f"[install_skill] pip install {packages} failed: {proc.stderr.strip()}")
     return installed
+
+
+def _resolve_skill_install_python() -> str:
+    """Return the Python interpreter for pip-installing skill dependencies.
+
+    In frozen mode this is the Agent Python embed (same one plugin services
+    use), NOT ``sys.executable`` (which is the frozen run.exe). In dev mode
+    ``sys.executable`` is correct.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    # Frozen: resolve Agent Python via the same path as process_manager.
+    try:
+        from opensquad.agent_runtime import resolve_bundled_agent_python
+
+        bundled = resolve_bundled_agent_python()
+        if bundled and os.path.isfile(bundled):
+            return bundled
+    except Exception:
+        pass
+    override = os.environ.get("OPENSQUAD_PYTHON") or os.environ.get("OPENSQUAD_AGENT_RUNTIME")
+    if override and os.path.isfile(override):
+        return override
+    # Last resort: sys.executable (will likely fail in frozen mode, but at
+    # least the error message will be visible).
+    return sys.executable
 
 
 def _find_public_skills_dir() -> tuple:

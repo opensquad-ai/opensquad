@@ -226,6 +226,74 @@ bash scripts/build_backend.sh
    拉起打包好的后端（系统托盘能看到）、后端在
    `127.0.0.1:9555/health` 应该能访问。
 
+### 发版版本号规则（从 v0.4.10 起严格执行）
+
+历史教训：多次把未充分测试的版本直接推为正式 Release，用户下载后才发现
+bug 不可用。为避免重复，引入 beta.N 标记 + 三环节测试流程。
+
+#### 版本号格式
+
+| 格式 | 含义 |
+|------|------|
+| `vX.Y.Zbeta.N` | CI 构建包，未通过三环节测试（N 从 0 递增，每次修复重 CI 加 1） |
+| `vX.Y.Z` | 正式版，三环节测试全过才打此 tag |
+
+#### 三环节测试（任何一环失败都修复后从环节 1 重新开始）
+
+1. **本地快速验证**（~6 分钟）—
+   `scripts\build_backend.bat` 重建 `run.exe`，再跑
+   `uv run python scripts\smoke_frozen_all.py`。
+   全套 hard-gate 冒烟必须 PASS（含路径检查、gateway、模型卡/角色卡/技能、
+   插件服务发现、MCP 配置、skills）。
+2. **本地打包验证**（~3 分钟）—
+   `cd src\opensquad\gateway\nexuschat-pro && npx electron-builder --win --dir --publish never`
+   产 unpacked 目录，手动跑 `build\release\win-unpacked\OpenSquad.exe`
+   验证桌面端能开、UI 能加载、Service Manager 能列服务。
+3. **CI 构建下载人工测试**（~30 分钟 + 测试时间）—
+   推 `vX.Y.Zbeta.N` tag 触发 CI，等 build 完成后从 GitHub Release
+   下载安装包，实际安装并测试桌面端全部功能（对话、服务启停、
+   Token Analytics dashboard、MCP、技能）。
+
+#### 流程图
+
+```
+修复 → 推 vX.Y.Zbeta.0 tag → CI 构建（~30 min）
+                              ↓
+                        下载 beta.0 测试
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │ 环节 1 (本地快速)   │ 环节 2 (本地打包)   │ 环节 3 (CI 人工) │
+        └─────────────────────┴─────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │                   │
+                 全过 PASS           任一环 FAIL
+                    │                   │
+                    ▼                   ▼
+        删 beta.0 tag          修复 → 推 vX.Y.Zbeta.1 tag
+        推 vX.Y.Z 正式 tag           → 重新 CI → 重新三环节
+        → CI 出正式 Release              │
+                                          └─ N 递增直到全过
+```
+
+#### 命令速查
+
+```powershell
+# 发 beta.0
+git tag -a v0.4.10beta.0 -m "v0.4.10 beta.0: <修复说明>"
+git push origin v0.4.10beta.0
+
+# 测试全过后升正式版（先删 beta tag 再推正式 tag）
+git tag -d v0.4.10beta.0
+git push origin :refs/tags/v0.4.10beta.0
+git tag -a v0.4.10 -m "v0.4.10: <release 说明>"
+git push origin v0.4.10
+```
+
+#### 历史例外
+
+`v0.4.9` 在此规则制定前已推正式 tag，保留不改正。从 `v0.4.10` 起严格执行。
+
 ---
 
 ## Frozen 模式快速验证（改一行 → 6 分钟出结果）

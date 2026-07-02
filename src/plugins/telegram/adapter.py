@@ -32,9 +32,17 @@ import sys
 
 import requests
 
-# Add project root to path
+# Add project root to path.
+# In frozen mode, APPEND (not insert(0)): the Agent Python's site-packages
+# must win over _internal/ loose copies of third-party packages, whose
+# transitive deps (e.g. click) live only in the PYZ archive and would crash
+# with ModuleNotFoundError. See external_api/adapter.py for full rationale.
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT_DIR)
+if ROOT_DIR not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(ROOT_DIR)
+    else:
+        sys.path.insert(0, ROOT_DIR)
 
 from plugins.telegram.config import (
     EXTERNAL_ADAPTER_URL,

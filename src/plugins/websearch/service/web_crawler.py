@@ -72,7 +72,17 @@ async def search_with_bing_playwright(browser: Browser, query: str, max_results:
                 print(f"--- ❌ Critical Error on page {page_num} for '{query}': Could not find visible results. ---")
                 print("--- Saving debug info to help diagnose... ---")
 
-                debug_dir = "debug_output"
+                # Write debug artifacts to the writable workspace logs dir, not a
+                # relative "debug_output" (which would resolve to the read-only
+                # _internal/ in frozen mode and raise PermissionError).
+                try:
+                    from plugins._service_runtime import workspace_logs_dir
+
+                    debug_dir = workspace_logs_dir("websearch_debug")
+                except Exception:
+                    import tempfile
+
+                    debug_dir = os.path.join(tempfile.gettempdir(), "opensquad_websearch_debug")
                 os.makedirs(debug_dir, exist_ok=True)
 
                 # Sanitize query string to make it a valid filename

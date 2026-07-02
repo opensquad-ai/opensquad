@@ -120,8 +120,15 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
 
     install_dir = syscfg.get_builtin_root()
     if getattr(sys, "frozen", False):
-        # Packaged app: bundled opensquad only — do not inherit dev PYTHONPATH.
-        child_env["PYTHONPATH"] = install_dir
+        # Do NOT put _internal/ on PYTHONPATH. The Agent Python's _pth file
+        # ignores PYTHONPATH anyway, and a system-Python fallback would pick
+        # up the loose uvicorn/fastapi copies under _internal/ WITHOUT their
+        # transitive deps (click, annotated_doc, ...), crashing the service
+        # with ModuleNotFoundError. Service entry scripts manage sys.path
+        # themselves (append _project_root in frozen mode so site-packages
+        # wins). Frozen run.exe children (agent processes) get their imports
+        # from the PYZ archive, not from PYTHONPATH.
+        child_env["PYTHONPATH"] = ""
         ws = (
             os.environ.get("OPENSQUAD_WORKSPACE", "").strip()
             or os.environ.get("OPENSQUAD_USER_DATA", "").strip()
@@ -221,6 +228,12 @@ RUNTIME_REGISTRY_DIR = syscfg.workspace_metadata_dir("runtime")
 
 # Workspace migration background task status table (shared across requests)
 _workspace_migration_tasks: dict = {}
+
+# Event signaled when the background _install_builtin_plugin_deps thread finishes
+# (success or failure). PluginServiceProcess.start() waits on this so a service
+# is not spawned before its dependencies are ready — otherwise the service
+# crashes with ModuleNotFoundError on import while pip is still bootstrapping.
+_plugin_deps_ready = threading.Event()
 
 
 def is_port_in_use(port: int) -> bool:
@@ -886,11 +899,17 @@ class PluginServiceProcess:
         """Auto-start priority: system_config services.X.enabled > plugin.json service.auto_start > True"""
         return syscfg.is_service_enabled(self.plugin_id)
 
-    def _install_dependencies(self):
+    def _install_dependencies(self) -> bool:
         """Install pip dependencies declared in plugin.json before launching the service.
 
         Reads plugin.json fresh each time (not cached), so updated deps
         take effect on next start without requiring a Launcher restart.
+
+        Returns True if all declared deps are importable in the plugin Python
+        (either already installed or just installed). Returns False if pip
+        install failed or deps are still missing — the caller should NOT
+        spawn the service process in that case (it would crash with
+        ModuleNotFoundError on import).
         """
         # Read fresh from plugin.json
         plugin_json_path = os.path.join(self.plugin_dir, "plugin.json")
@@ -903,35 +922,47 @@ class PluginServiceProcess:
             except Exception:
                 pass
         if not pip_deps:
-            return
-        try:
-            import importlib
+            return True
 
-            missing = []
+        pkg_import_map = {
+            "beautifulsoup4": "bs4",
+            "opencv-python": "cv2",
+            "PyMuPDF": "fitz",
+            "python-dotenv": "dotenv",
+            "scikit-learn": "sklearn",
+            "flask-cors": "flask_cors",
+            "lark-oapi": "lark_oapi",
+            "playwright-stealth": "playwright_stealth",
+        }
+
+        def _check_all() -> list[str]:
+            """Return list of deps still missing (not importable in plugin Python)."""
+            still_missing = []
             for dep in pip_deps:
-                # Normalize: strip extras, handle common naming differences
                 pkg = dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].strip()
-                # Map common import names that differ from pip names
-                pkg_import_map = {
-                    "beautifulsoup4": "bs4",
-                    "opencv-python": "cv2",
-                    "PyMuPDF": "fitz",
-                    "python-dotenv": "dotenv",
-                    "scikit-learn": "sklearn",
-                    "flask-cors": "flask_cors",
-                    "lark-oapi": "lark_oapi",
-                    "playwright-stealth": "playwright_stealth",
-                }
                 import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
-                try:
-                    importlib.import_module(import_name)
-                except ImportError:
-                    missing.append(dep)
+                if not _plugin_python_has_module(import_name):
+                    still_missing.append(dep)
+            return still_missing
+
+        try:
+            missing = _check_all()
             if missing:
                 _log.info(f"[Launcher] Installing dependencies for {self.plugin_id}: {missing}")
                 _ensure_pip_and_install(missing, label=self.plugin_id)
+                # Verify: pip may have failed silently or partially installed
+                still_missing = _check_all()
+                if still_missing:
+                    _log.error(
+                        f"[Launcher] {self.plugin_id}: dependencies still missing after install: {still_missing}"
+                    )
+                    self._circuit_last_failure_reason = f"Dependencies not installed: {still_missing}"
+                    return False
+            return True
         except Exception as e:
             _log.warning(f"[Launcher] Warning: Failed to install dependencies for {self.plugin_id}: {e}")
+            self._circuit_last_failure_reason = f"pip install exception: {e}"
+            return False
 
     def start(self) -> bool:
         """Start the plugin service child process"""
@@ -970,8 +1001,33 @@ class PluginServiceProcess:
             _log.info(f"[Launcher] Plugin service {self.plugin_id}: neither 'cmd' nor 'entry' defined")
             return False
 
-        # Install pip dependencies before launching (safety net for hot-installed plugins)
-        self._install_dependencies()
+        # Wait for the background _install_builtin_plugin_deps thread to finish
+        # before doing per-service dep check. Without this, a user clicking
+        # "Start" in the Service Manager UI right after launcher boot would
+        # spawn the service while pip is still bootstrapping in the Agent
+        # Python embed (get-pip.py + ~13 deps = 2-3 min on cold cache), and
+        # the service crashes with ModuleNotFoundError on import.
+        if not _plugin_deps_ready.is_set():
+            _log.info(f"[Launcher] {self.plugin_id}: waiting for background plugin dependency install to finish...")
+            _plugin_deps_ready.wait(timeout=300)  # 5 min max
+            if not _plugin_deps_ready.is_set():
+                _log.error(
+                    f"[Launcher] {self.plugin_id}: background dependency install did not finish in 300s, aborting start"
+                )
+                self._circuit_last_failure_reason = "Background dep install timeout (300s)"
+                return False
+
+        # Install pip dependencies before launching (safety net for hot-installed plugins).
+        # Returns False if deps are still missing after install attempt — do NOT
+        # spawn the service in that case (it would crash immediately with
+        # ModuleNotFoundError and trigger the circuit breaker restart loop).
+        if not self._install_dependencies():
+            _log.error(
+                f"[Launcher] {self.plugin_id}: dependencies not available, refusing to start "
+                "(would crash with ModuleNotFoundError). Check Agent Python pip install logs."
+            )
+            self._circuit_trip("dependencies not installed", permanent=False)
+            return False
 
         child_env = _build_child_process_env(
             {
@@ -1369,17 +1425,31 @@ def _resolve_discovery_port(info: dict) -> int:
 
 
 def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
-    """Install pip packages, bootstrapping pip itself if needed. Returns True on success."""
+    """Install pip packages, bootstrapping pip itself if needed. Returns True on success.
+
+    Targets the *plugin service Python* (``_plugin_python_executable()``), NOT
+    ``sys.executable``. In a PyInstaller bundle ``sys.executable`` is the frozen
+    ``run.exe`` and pip would install into the read-only ``_internal/`` tree
+    (or silently no-op because importlib already sees the bundled copies).
+    Plugin services are spawned with the Agent Python runtime, so dependencies
+    must land in *that* interpreter's site-packages.
+    """
     if not packages:
         return True
 
     label_prefix = f"[{label}] " if label else ""
+    target_python = _plugin_python_executable()
+
+    # If the target Python differs from sys.executable (frozen-bundle mode),
+    # log it so the operator can see where deps are going.
+    if os.path.normcase(target_python) != os.path.normcase(sys.executable):
+        _log.info(f"[Launcher] {label_prefix}Installing to plugin Python: {target_python}")
 
     # Check if pip is available; if not, bootstrap it
     pip_available = False
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "--version"],
+            [target_python, "-m", "pip", "--version"],
             capture_output=True,
             check=False,
             timeout=10,
@@ -1392,7 +1462,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
         _log.info(f"[Launcher] {label_prefix}pip not found, bootstrapping via ensurepip...")
         try:
             r = subprocess.run(
-                [sys.executable, "-m", "ensurepip", "--default-pip"],
+                [target_python, "-m", "ensurepip", "--default-pip"],
                 capture_output=True,
                 check=False,
                 timeout=60,
@@ -1411,7 +1481,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
                 try:
                     urllib.request.urlretrieve(get_pip_url, tmp_path)
                     r2 = subprocess.run(
-                        [sys.executable, tmp_path],
+                        [target_python, tmp_path],
                         capture_output=True,
                         check=False,
                         timeout=120,
@@ -1424,7 +1494,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
                         os.unlink(tmp_path)
             # Verify pip works now
             r3 = subprocess.run(
-                [sys.executable, "-m", "pip", "--version"],
+                [target_python, "-m", "pip", "--version"],
                 capture_output=True,
                 check=False,
                 timeout=10,
@@ -1439,7 +1509,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
 
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", *packages],
+            [target_python, "-m", "pip", "install", "--quiet", *packages],
             capture_output=True,
             check=False,
             timeout=300,
@@ -1454,6 +1524,29 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
         return False
 
 
+def _plugin_python_has_module(import_name: str) -> bool:
+    """Check if a module is importable in the *plugin service Python*.
+
+    Uses a subprocess instead of in-process ``importlib.import_module`` because
+    the launcher process (frozen ``run.exe``) has its own bundled copy of
+    fastapi/uvicorn/click/etc. in ``_internal/``; importing them in-process
+    would always succeed and hide the fact that the Agent Python runtime is
+    missing them, leading to ``ModuleNotFoundError`` when the service actually
+    starts.
+    """
+    target_python = _plugin_python_executable()
+    try:
+        r = subprocess.run(
+            [target_python, "-c", f"import {import_name}"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _install_builtin_plugin_deps(svc_infos: list[dict]):
     """Install all built-in plugin pip dependencies in one batch at startup.
 
@@ -1463,56 +1556,72 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
     This is the primary install path for built-in plugins.
     Per-service _install_dependencies() in PluginServiceProcess serves as a
     safety net for hot-installed plugins (installed while launcher is running).
+
+    Signals ``_plugin_deps_ready`` when done (success or failure) so that
+    ``PluginServiceProcess.start()`` can stop waiting and proceed.
     """
-    all_deps: set = set()
-    for info in svc_infos:
-        deps = info.get("dependencies", {}).get("pip", [])
-        for d in deps:
-            all_deps.add(d)
+    try:
+        all_deps: set = set()
+        for info in svc_infos:
+            deps = info.get("dependencies", {}).get("pip", [])
+            for d in deps:
+                all_deps.add(d)
 
-    if not all_deps:
-        return
+        if not all_deps:
+            _plugin_deps_ready.set()
+            return
 
-    import importlib
+        # Heavy packages that pull in huge transitive deps (torch ~2GB for
+        # whisper, etc.). These are skipped in the batch install so they don't
+        # block ALL service starts — the per-service _install_dependencies()
+        # safety net handles them when the specific service is actually started.
+        # Without this, `pip install whisper` (which pulls torch) can take 10+
+        # minutes and every PluginServiceProcess.start() waits on
+        # _plugin_deps_ready, making websearch/external_api unstartable.
+        _HEAVY_PACKAGES = {"whisper", "torch", "torchvision", "torchaudio"}
 
-    # Patch ctypes.util.find_library for Windows before importing any package
-    # (e.g. openai-whisper) that calls ctypes.CDLL(None) on startup.
-    if sys.platform == "win32":
-        import ctypes.util
+        # NOTE: Dependency presence is checked via ``_plugin_python_has_module()``
+        # (subprocess against the Agent Python), NOT in-process ``importlib``.
+        # The launcher process (frozen ``run.exe``) bundles its own copies of
+        # fastapi/uvicorn/click/etc. in ``_internal/``; importing them in-process
+        # would always succeed and hide missing deps in the Agent Python runtime,
+        # causing ``ModuleNotFoundError`` when the service actually starts.
+        pkg_import_map = {
+            "beautifulsoup4": "bs4",
+            "PyMuPDF": "fitz",
+            "python-dotenv": "dotenv",
+            "scikit-learn": "sklearn",
+            "flask-cors": "flask_cors",
+            "lark-oapi": "lark_oapi",
+            "playwright-stealth": "playwright_stealth",
+        }
 
-        _orig_find_library = ctypes.util.find_library
+        missing = []
+        skipped_heavy = []
+        for dep in sorted(all_deps):
+            pkg = dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].strip()
+            if pkg in _HEAVY_PACKAGES:
+                skipped_heavy.append(dep)
+                continue
+            import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
+            if not _plugin_python_has_module(import_name):
+                missing.append(dep)
 
-        def _patched_find_library(name):
-            if name in ("c", "libc"):
-                return "msvcrt"
-            return _orig_find_library(name)
+        if skipped_heavy:
+            _log.info(
+                f"[Launcher] Skipping heavy packages in batch install (will install per-service on start): {skipped_heavy}"
+            )
 
-        ctypes.util.find_library = _patched_find_library
-
-    pkg_import_map = {
-        "beautifulsoup4": "bs4",
-        "PyMuPDF": "fitz",
-        "python-dotenv": "dotenv",
-        "scikit-learn": "sklearn",
-        "flask-cors": "flask_cors",
-        "lark-oapi": "lark_oapi",
-        "playwright-stealth": "playwright_stealth",
-    }
-
-    missing = []
-    for dep in sorted(all_deps):
-        pkg = dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].strip()
-        import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
-        try:
-            importlib.import_module(import_name)
-        except (ImportError, TypeError, OSError):
-            missing.append(dep)
-
-    if missing:
-        _log.info(f"[Launcher] Installing built-in plugin dependencies ({len(missing)} package(s)): {missing}")
-        if _ensure_pip_and_install(missing, label="builtin"):
-            _log.info("[Launcher] All plugin dependencies installed.")
+        if missing:
+            _log.info(f"[Launcher] Installing built-in plugin dependencies ({len(missing)} package(s)): {missing}")
+            if _ensure_pip_and_install(missing, label="builtin"):
+                _log.info("[Launcher] All plugin dependencies installed.")
+            else:
+                _log.warning("[Launcher] Warning: Batch dependency install failed.")
         else:
-            _log.warning("[Launcher] Warning: Batch dependency install failed.")
-    else:
-        _log.info(f"[Launcher] All built-in plugin dependencies already installed ({len(all_deps)} packages).")
+            _log.info(f"[Launcher] All built-in plugin dependencies already installed ({len(all_deps)} packages).")
+    finally:
+        # Always signal — even on failure — so PluginServiceProcess.start()
+        # doesn't block forever. Per-service _install_dependencies() will do
+        # a retry and report the actual missing deps.
+        _plugin_deps_ready.set()

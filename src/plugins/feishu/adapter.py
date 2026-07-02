@@ -43,9 +43,17 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import requests
 
-# Add project root to path
+# Add project root to path.
+# In frozen mode, APPEND (not insert(0)): the Agent Python's site-packages
+# must win over _internal/ loose copies of third-party packages, whose
+# transitive deps (e.g. click) live only in the PYZ archive and would crash
+# with ModuleNotFoundError. See external_api/adapter.py for full rationale.
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT_DIR)
+if ROOT_DIR not in sys.path:
+    if getattr(sys, "frozen", False):
+        sys.path.append(ROOT_DIR)
+    else:
+        sys.path.insert(0, ROOT_DIR)
 
 import contextlib
 
@@ -64,14 +72,22 @@ from plugins.feishu.config import (
 # Debug: write config info to file for diagnosis
 # In frozen mode the plugin source dir is read-only (Program Files), so diag
 # logs must go to the writable workspace logs dir, not next to __file__.
+# Use the self-contained _service_runtime helper (no opensquad import — the
+# Agent Python that runs this service in frozen mode does not have opensquad).
 try:
-    from opensquad.system_config import syscfg as _syscfg_for_paths
+    from plugins._service_runtime import config_path as _rt_config_path
+    from plugins._service_runtime import get_workspace as _rt_get_workspace
+    from plugins._service_runtime import workspace_logs_dir as _rt_workspace_logs_dir
 
-    _FEISHU_LOG_DIR = _syscfg_for_paths.workspace_logs_dir("feishu")
+    _FEISHU_LOG_DIR = _rt_workspace_logs_dir("feishu")
     os.makedirs(_FEISHU_LOG_DIR, exist_ok=True)
 except Exception:
-    # Fallback for non-syscfg envs: keep legacy source-dir behaviour.
-    _FEISHU_LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+    # Fallback: use temp dir (NOT __file__ dir — in frozen mode that's the
+    # read-only _internal/plugins/feishu/ and makedirs/open would fail).
+    import tempfile as _tempfile_feishu
+
+    _FEISHU_LOG_DIR = os.path.join(_tempfile_feishu.gettempdir(), "opensquad_feishu")
+    os.makedirs(_FEISHU_LOG_DIR, exist_ok=True)
 
 
 def _feishu_diag_path() -> str:
@@ -81,7 +97,8 @@ def _feishu_diag_path() -> str:
 
 try:
     _dbg_path = os.path.join(_FEISHU_LOG_DIR, "debug_config.txt")
-    from opensquad.system_config import _CONFIG_PATH, _WORKSPACE_ROOT
+    _WORKSPACE_ROOT = _rt_get_workspace()
+    _CONFIG_PATH = _rt_config_path()
 
     with open(_dbg_path, "w", encoding="utf-8") as _f:
         _f.write(f"OPENSQUAD_WORKSPACE={os.environ.get('OPENSQUAD_WORKSPACE', 'NOT SET')}\n")
@@ -743,9 +760,18 @@ def main():
 # app_id (sanitized) to keep the file name filesystem-safe.
 def _bot_sidecar_path(app_id: str) -> str:
     safe = "".join(c if c.isalnum() else "_" for c in app_id)
-    base_dir = os.path.join(
-        os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(), "data", "plugins", "feishu", "bot_status"
-    )
+    # Use _rt_get_workspace() (self-contained, no opensquad import) instead of
+    # os.getcwd() — in frozen mode cwd = read-only _internal/, which would
+    # make makedirs/open fail with PermissionError.
+    try:
+        ws = _rt_get_workspace()
+    except Exception:
+        ws = os.environ.get("OPENSQUAD_WORKSPACE") or ""
+    if not ws:
+        import tempfile
+
+        ws = os.path.join(tempfile.gettempdir(), "opensquad")
+    base_dir = os.path.join(ws, "data", "plugins", "feishu", "bot_status")
     return os.path.join(base_dir, f"{safe}.json")
 
 
@@ -839,14 +865,23 @@ def _spawn_bot_subprocess(cfg: FeishuBotConfig) -> subprocess.Popen | None:
 
     The bot config is passed via the FEISHU_BOT_CONFIG_JSON env var so the
     subprocess does not need to re-read system_config.json.
+
+    NOTE: We run the adapter by *file path* (``sys.executable adapter.py``)
+    rather than ``-m plugins.feishu.adapter`` because the Agent Python embed
+    uses a ``python311._pth`` file which makes Python **ignore PYTHONPATH**.
+    With ``-m``, the child cannot find the ``plugins`` package (it lives in
+    the frozen ``_internal/`` dir, which is only reachable via PYTHONPATH).
+    Running by path lets the script's own ``sys.path.insert(0, ROOT_DIR)``
+    set up imports correctly.
     """
     try:
         env = os.environ.copy()
         env["FEISHU_BOT_CONFIG_JSON"] = bot_config_to_json(cfg)
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        adapter_path = os.path.join(ROOT_DIR, "plugins", "feishu", "adapter.py")
         proc = subprocess.Popen(
-            [sys.executable, "-m", "plugins.feishu.adapter", "--single", "-1"],
+            [sys.executable, adapter_path, "--single", "-1"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -987,9 +1022,18 @@ def _config_watcher_loop(bot_processes: dict, stop_event: threading.Event):
 #  Status writer (P1.4)
 # ══════════════════════════════════════════════
 
-_STATUS_PATH = os.path.join(
-    os.environ.get("OPENSQUAD_WORKSPACE") or os.getcwd(), "data", "plugins", "feishu", "status.json"
-)
+# Use _rt_get_workspace() for the writable workspace root (self-contained,
+# no opensquad import). os.getcwd() fallback would resolve to the read-only
+# _internal/ dir in frozen mode and cause PermissionError on status writes.
+try:
+    _STATUS_WS = _rt_get_workspace()
+except Exception:
+    _STATUS_WS = os.environ.get("OPENSQUAD_WORKSPACE") or ""
+if not _STATUS_WS:
+    import tempfile as _tempfile_status
+
+    _STATUS_WS = os.path.join(_tempfile_status.gettempdir(), "opensquad")
+_STATUS_PATH = os.path.join(_STATUS_WS, "data", "plugins", "feishu", "status.json")
 
 
 def _status_writer_loop(bot_processes: dict, stop_event: threading.Event):
