@@ -176,8 +176,15 @@ _MODELS_DEV_PROVIDER_MAP: dict[str, str] = {
 MODELS_DEV_URL = "https://models.dev/api.json"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
 
-# Persistent cache file path (same directory as this file)
-_CACHE_FILE = os.path.join(os.path.dirname(__file__), "preset_cache.json")
+from opensquad.system_config import syscfg
+
+
+# Writable cache under workspace data/ (never next to this module in frozen bundles).
+def _cache_file_path() -> str:
+    path = os.path.join(syscfg.workspace_data_dir(), "model_preset_cache.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
 
 # ── Module-level state ────────────────────────────────────────────────────────────────
 _cached_presets: dict = {"providers": []}  # Loaded from disk on startup, updated after refresh
@@ -459,21 +466,23 @@ def _assemble_presets(vendor_data: dict[str, dict]) -> dict:
 def _save_cache_to_disk(presets: dict) -> None:
     """Write current preset data to preset_cache.json for use on next startup"""
     try:
-        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+        with open(_cache_file_path(), "w", encoding="utf-8") as f:
             json.dump(presets, f, ensure_ascii=False, indent=2)
         n_p = len(presets.get("providers", []))
         n_m = sum(len(p["models"]) for p in presets.get("providers", []))
-        logger.info(f"[ModelPresets] Cache saved to disk: {n_p} providers, {n_m} models → {_CACHE_FILE}")
+        cache_path = _cache_file_path()
+        logger.info(f"[ModelPresets] Cache saved to disk: {n_p} providers, {n_m} models → {cache_path}")
     except Exception as exc:
         logger.warning(f"[ModelPresets] Failed to save cache to disk: {exc}")
 
 
 def _load_cache_from_disk() -> dict | None:
     """Read previously persisted preset data from preset_cache.json; return None if missing or parse fails"""
-    if not os.path.exists(_CACHE_FILE):
+    cache_path = _cache_file_path()
+    if not os.path.exists(cache_path):
         return None
     try:
-        with open(_CACHE_FILE, encoding="utf-8") as f:
+        with open(cache_path, encoding="utf-8") as f:
             data = json.load(f)
         if data.get("providers"):
             n_p = len(data["providers"])
@@ -540,7 +549,7 @@ def get_presets() -> dict:
             "openrouter_fetched_at": _last_openrouter_ts,
             "source": "live"
             if _last_models_dev_ts
-            else ("disk_cache" if os.path.exists(_CACHE_FILE) else "static_fallback"),
+            else ("disk_cache" if os.path.exists(_cache_file_path()) else "static_fallback"),
         },
     }
 

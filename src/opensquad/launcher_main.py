@@ -78,9 +78,11 @@ if os.path.isfile(_builtin_plugins_path):
     except Exception:
         pass
 SKILLS_DIR = syscfg.builtin_resources_dir("skills")
-ROLE_CARDS_DIR = syscfg.builtin_resources_dir("role_cards")
-COLLAB_CARDS_DIR = syscfg.builtin_resources_dir("collab_cards")
-MODEL_CARDS_DIR = syscfg.builtin_resources_dir("model_cards")
+# User-editable card stores live in the workspace (writable).  Builtin copies under
+# _internal/ are read-only seeds copied on first run — never write there in frozen/desktop.
+ROLE_CARDS_DIR = os.path.join(syscfg.get_workspace(), "role_cards")
+COLLAB_CARDS_DIR = os.path.join(syscfg.get_workspace(), "collab_cards")
+MODEL_CARDS_DIR = os.path.join(syscfg.get_workspace(), "model_cards")
 
 # BOOT_SCRIPT is now inside the package
 import opensquad
@@ -3239,8 +3241,14 @@ def _init_workspace():
     except Exception as e:
         _log.error(f"[ERROR] Failed to initialize workspace: {e}")
         sys.exit(1)
-    global AGENTS_DIR
+    global AGENTS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR
     AGENTS_DIR = syscfg.workspace_agents_dir()
+    ws = syscfg.get_workspace()
+    ROLE_CARDS_DIR = os.path.join(ws, "role_cards")
+    COLLAB_CARDS_DIR = os.path.join(ws, "collab_cards")
+    MODEL_CARDS_DIR = os.path.join(ws, "model_cards")
+    for d in (ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR):
+        os.makedirs(d, exist_ok=True)
 
 
 def _setup_launcher_logging():

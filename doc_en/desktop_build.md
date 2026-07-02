@@ -371,6 +371,7 @@ correct.
 
 | Script | Purpose | Time | Requires |
 |--------|---------|------|----------|
+| `scripts/smoke_frozen_gateway.py` | Verify frozen gateway startup (`/health` ready) | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_frozen_agent.py` | Verify frozen launcher + agent startup | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_chat.py` | Verify end-to-end chat (login→WS→send→reply) | ~10s | Gateway running on 9555 |
 | `scripts/check_build_python.py --bundle <dir>` | Verify bundle uses Python 3.11 | ~1s | None |
