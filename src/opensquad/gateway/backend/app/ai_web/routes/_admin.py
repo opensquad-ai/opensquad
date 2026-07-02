@@ -399,7 +399,7 @@ async def admin_create_agent(body: dict = Body(...), current_user: User = Depend
 # Matches the write path configured in app/main.py
 from opensquad.system_config import syscfg as _syscfg
 
-_GATEWAY_LOG_DIR = os.path.join(_syscfg.project_root(), "data", "logs", "gateway")
+_GATEWAY_LOG_DIR = _syscfg.workspace_logs_dir("gateway")
 
 
 def _fill_logging_defaults(data: dict) -> dict:

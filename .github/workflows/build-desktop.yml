@@ -73,6 +73,14 @@ jobs:
       - name: Verify PyInstaller bundle is Python 3.11
         run: python scripts/check_build_python.py --bundle build/${{ matrix.artifact }}/run
 
+      - name: Static check frozen writable paths
+        if: runner.os == 'Windows'
+        run: python scripts/check_frozen_writable_paths.py
+
+      - name: Frozen smoke tests (Windows backend gate)
+        if: runner.os == 'Windows'
+        run: python scripts/smoke_frozen_all.py
+
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:

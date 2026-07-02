@@ -267,31 +267,25 @@ def load_skills_from_config(
         else:
             logger.warning(f"[SkillLoader] Agent skills dir not found: {os.path.join(agent_dir, 'skills')}")
 
-    # -- 2. Load public skills (same resolution as launcher: syscfg.builtin_resources_dir) --
-    public_skills_dir = ""
-    try:
-        from opensquad.system_config import builtin_resources_dir as _builtin_res_dir
+    # -- 2. Load public skills (workspace first, then builtin seeds) --
+    from opensquad.system_config import syscfg
 
-        _candidate = _builtin_res_dir("skills")
-        if _candidate and os.path.isdir(_candidate):
-            public_skills_dir = _candidate
-    except Exception:
-        pass
-    if not public_skills_dir:
-        # Fallback: project_root/skills/ (for backward compatibility)
-        public_skills_dir = os.path.join(project_root, "skills")
-    if os.path.isdir(public_skills_dir):
+    public_names: set[str] = set()
+    for public_skills_dir in syscfg.resource_search_dirs("skills"):
+        if not os.path.isdir(public_skills_dir):
+            continue
         discovered = discover_skills(public_skills_dir)
-        logger.info(f"[SkillLoader] Public skills discovered: {discovered}")
+        logger.info(f"[SkillLoader] Public skills discovered in {public_skills_dir}: {discovered}")
         for skill_name in discovered:
-            if skill_name in private_names:
-                logger.info(f"[SkillLoader] Skipping public '{skill_name}' (overridden by private)")
+            if skill_name in private_names or skill_name in public_names:
+                logger.info(f"[SkillLoader] Skipping public '{skill_name}' (overridden)")
                 continue
             skill_dir = os.path.join(public_skills_dir, skill_name)
             skill = load_skill(skill_dir, skill_name)
             if skill:
                 skill.is_private = False
                 loaded.append(skill)
+                public_names.add(skill_name)
 
     private_count = sum(1 for s in loaded if s.is_private)
     public_count = sum(1 for s in loaded if not s.is_private)

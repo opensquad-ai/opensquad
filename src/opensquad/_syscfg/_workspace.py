@@ -101,6 +101,52 @@ def workspace_uploads_dir(*subpaths: str) -> str:
     return workspace_data_dir("uploads", *subpaths)
 
 
+def workspace_plugins_dir(*subpaths: str) -> str:
+    """Return the workspace plugins directory path (user installs / uploads)."""
+    return os.path.join(_WORKSPACE_ROOT, "plugins", *subpaths)
+
+
+def workspace_skills_dir(*subpaths: str) -> str:
+    """Return the workspace skills directory path (user installs / uploads)."""
+    return os.path.join(_WORKSPACE_ROOT, "skills", *subpaths)
+
+
+def workspace_role_cards_dir(*subpaths: str) -> str:
+    """Return the workspace role cards directory path."""
+    return os.path.join(_WORKSPACE_ROOT, "role_cards", *subpaths)
+
+
+def workspace_collab_cards_dir(*subpaths: str) -> str:
+    """Return the workspace collab cards directory path."""
+    return os.path.join(_WORKSPACE_ROOT, "collab_cards", *subpaths)
+
+
+def workspace_model_cards_dir(*subpaths: str) -> str:
+    """Return the workspace model cards directory path."""
+    return os.path.join(_WORKSPACE_ROOT, "model_cards", *subpaths)
+
+
+def resource_search_dirs(resource_type: str) -> list[str]:
+    """Return [workspace, builtin] dirs for reads; workspace entries override builtin."""
+    builders = {
+        "plugins": workspace_plugins_dir,
+        "skills": workspace_skills_dir,
+        "role_cards": workspace_role_cards_dir,
+        "collab_cards": workspace_collab_cards_dir,
+        "model_cards": workspace_model_cards_dir,
+    }
+    if resource_type not in builders:
+        raise ValueError(f"Invalid resource_type: {resource_type}")
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for d in (builders[resource_type](), builtin_resources_dir(resource_type)):
+        ab = os.path.abspath(d)
+        if ab not in seen:
+            seen.add(ab)
+            ordered.append(d)
+    return ordered
+
+
 def workspace_metadata_dir(*subpaths: str) -> str:
     """Return the workspace metadata directory path."""
     return os.path.join(_WORKSPACE_ROOT, ".opensquad", *subpaths)

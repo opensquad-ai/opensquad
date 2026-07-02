@@ -1,0 +1,65 @@
+---
+description: Desktop app fixes must pass a local packaged build smoke test before pushing release tags or CI desktop builds.
+globs: src/opensquad/gateway/nexuschat-pro/**,src/opensquad/gateway/backend/**,scripts/build_backend.*
+alwaysApply: false
+---
+
+# Desktop release gate (local first)
+
+When fixing or changing the **packaged** OpenSquad desktop app (Electron, PyInstaller
+backend, tray/icons, startup, auto-update):
+
+## Required before push / tag / `build-desktop` CI
+
+1. **Unit/smoke tests** — run the ci-fast subset (`ruff`, targeted `pytest`, `npm run build`).
+2. **Local backend build + frozen smokes** (Windows; ~5 min + ~30 s):
+   ```powershell
+   scripts\build_backend.bat
+   uv run python scripts\smoke_frozen_all.py
+   ```
+   This catches import-time writes and workspace path bugs **without** waiting for Electron/Setup.
+3. **Full packaged build** when changing Electron/UI/installer (optional for backend-only fixes):
+   ```powershell
+   cd src\opensquad\gateway\nexuschat-pro
+   npm ci
+   npm run electron:win
+   ```
+4. **Manual smoke test** of the produced installer or portable exe (when shipping UI/installer changes):
+   - App window shows UI (not blank / not stuck on “Starting…”)
+   - Tray icon visible
+   - No “Backend did not start in time” dialog
+5. Only then: commit → merge `main` → push tag or trigger `build-desktop.yml`.
+
+Do **not** push a release tag or ask the user to install from CI as the first
+verification step for desktop startup/UI bugs.
+
+## Windows local build (mirrors CI)
+
+From repo root:
+
+```powershell
+pip install -e .
+pip install pyinstaller pillow playwright
+playwright install chromium
+
+scripts\build_backend.bat
+
+cd src\opensquad\gateway\nexuschat-pro
+npm ci
+npm run electron:win
+```
+
+Installers land in `build/release/` (e.g. `OpenSquad-*-win-x64-Setup.exe` or
+`*-Portable.exe`). Run one and confirm the above smoke checks.
+
+## Faster iteration (code-only, not a release gate)
+
+- `npm run build && node scripts/compile-electron.mjs` — compile frontend + main process
+- `npm run electron:dev:fast` — needs pre-built backend in `resources/` or `build/backend-win/`
+
+Use full `electron:win` before any release/tag push.
+
+## CI after local pass
+
+- **New release**: merge to `main`, tag `vX.Y.Z`, push tag (triggers Release + Build Desktop App).
+- **Refresh existing release assets**: `gh workflow run build-desktop.yml --ref main -f release_tag=vX.Y.Z`

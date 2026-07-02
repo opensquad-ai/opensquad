@@ -367,11 +367,34 @@ After verifying the fix works, add the corresponding `datas` / `hiddenimports`
 to `opensquad_backend.spec` and do a clean rebuild to confirm the spec is
 correct.
 
+### Recommended gate (local ~1 min, skip Electron)
+
+After PyInstaller, run frozen smokes before pushing a tag or waiting for Setup CI:
+
+```powershell
+scripts\build_backend.bat
+uv run python scripts\smoke_frozen_all.py
+```
+
+**Architecture rule (frozen desktop)**:
+
+> User-writable data **must** use `syscfg.workspace_*()` / `get_workspace()`.  
+> `builtin_resources_dir()` / `get_builtin_root()` are **read-only** seeds.  
+> Reads should use **workspace first, then builtin** via `resource_search_dirs()`.
+
+CI: `build-desktop.yml` runs the same gate on the Windows backend job right after
+PyInstaller — **before** the Electron stage (~10+ min saved on backend path bugs).
+
 ### Smoke scripts
 
 | Script | Purpose | Time | Requires |
 |--------|---------|------|----------|
+| `scripts/smoke_frozen_all.py` | **Run all** frozen gates below | ~30s | `build/backend-win/run/run.exe` |
+| `scripts/check_frozen_writable_paths.py` | Static scan for write + builtin anti-patterns | ~1s | None |
 | `scripts/smoke_frozen_gateway.py` | Verify frozen gateway startup (`/health` ready) | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_model_card_save.py` | Verify model cards save to workspace | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_role_card_save.py` | Verify role cards save to workspace | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_skill_upload.py` | Verify skill upload to workspace | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_frozen_agent.py` | Verify frozen launcher + agent startup | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_chat.py` | Verify end-to-end chat (login→WS→send→reply) | ~10s | Gateway running on 9555 |
 | `scripts/check_build_python.py --bundle <dir>` | Verify bundle uses Python 3.11 | ~1s | None |
@@ -388,6 +411,7 @@ These bugs **never appear in dev mode** — only in the frozen bundle:
 | `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` not in PYZ | Add to spec `hiddenimports` |
 | `Module use of python311.dll conflicts` | System Python 3.13 + PATH polluted with `_internal` | Setup wizard downloads embed Python 3.11 |
 | `Backend did not start in time` (NSIS install under Program Files) | Import-time writes to read-only `_internal/` (`session_manager`, `bot_api.uploads`, etc.) | Route all writable paths via `OPENSQUAD_USER_DATA` |
+| Model card / plugin / skill / market install save fails | Launcher/Gateway writes via `builtin_resources_dir` | Use `workspace_*_dir()`; reads via `resource_search_dirs()` |
 
 ---
 

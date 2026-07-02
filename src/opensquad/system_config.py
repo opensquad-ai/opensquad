@@ -54,6 +54,7 @@ from opensquad._syscfg import (
     port,
     raw,
     reload,
+    resource_search_dirs,
     set_workspace,
     tool_call_debug,
     tool_call_debug_backup_count,
@@ -61,12 +62,17 @@ from opensquad._syscfg import (
     websearch_url,
     whisper_url,
     workspace_agents_dir,
+    workspace_collab_cards_dir,
     workspace_data_dir,
     workspace_db_path,
     workspace_gateway_dir,
     workspace_logs_dir,
     workspace_metadata_dir,
+    workspace_model_cards_dir,
+    workspace_plugins_dir,
+    workspace_role_cards_dir,
     workspace_sessions_dir,
+    workspace_skills_dir,
     workspace_uploads_dir,
 )
 
@@ -113,6 +119,11 @@ def ensure_workspace_structure():
         workspace_data_dir("plugins"),
         workspace_data_dir("audit"),
         _wad(),
+        workspace_plugins_dir(),
+        workspace_skills_dir(),
+        workspace_role_cards_dir(),
+        workspace_collab_cards_dir(),
+        workspace_model_cards_dir(),
         workspace_gateway_dir("backend", "sessions"),
         workspace_gateway_dir("backend", "tasks"),
         workspace_gateway_dir("backend", "uploads"),
@@ -217,6 +228,12 @@ class _SysCfg:
     workspace_logs_dir = staticmethod(workspace_logs_dir)
     workspace_uploads_dir = staticmethod(workspace_uploads_dir)
     workspace_metadata_dir = staticmethod(workspace_metadata_dir)
+    workspace_plugins_dir = staticmethod(workspace_plugins_dir)
+    workspace_skills_dir = staticmethod(workspace_skills_dir)
+    workspace_role_cards_dir = staticmethod(workspace_role_cards_dir)
+    workspace_collab_cards_dir = staticmethod(workspace_collab_cards_dir)
+    workspace_model_cards_dir = staticmethod(workspace_model_cards_dir)
+    resource_search_dirs = staticmethod(resource_search_dirs)
     builtin_resources_dir = staticmethod(builtin_resources_dir)
     workspace_config_path = staticmethod(lambda: _CONFIG_PATH)
     ensure_workspace_structure = staticmethod(ensure_workspace_structure)

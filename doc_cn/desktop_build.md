@@ -359,12 +359,36 @@ uv run python scripts\smoke_frozen_agent.py
 验证通过后，再把对应的 `datas` / `hiddenimports` 写进
 `opensquad_backend.spec`，做一次完整重建确认 spec 正确。
 
+### 推荐门禁（本地 ~1 分钟，不必等 Electron）
+
+PyInstaller 编完后**先跑 frozen 冒烟**，全部 PASS 再 push tag / 等 CI 打 Setup：
+
+```powershell
+scripts\build_backend.bat
+uv run python scripts\smoke_frozen_all.py
+```
+
+`smoke_frozen_all.py` 会依次跑静态扫描 + gateway + 模型卡/角色卡/技能写入 + agent 启动。
+
+**架构规则（frozen 桌面必守）**：
+
+> 用户可写数据 **只能** 走 `syscfg.workspace_*()` / `get_workspace()`；  
+> `builtin_resources_dir()` / `get_builtin_root()` **只读**，仅用于读 bundled 种子资源。  
+> 读取时若 workspace 为空，应 **workspace 优先 + builtin 兜底**（`resource_search_dirs()`）。
+
+CI：`build-desktop.yml` 在 Windows backend job 的 PyInstaller 之后自动跑同一套门禁，
+**不必等 Electron 阶段**（约省 10+ 分钟才发现 backend 写路径 bug）。
+
 ### 冒烟脚本一览
 
 | 脚本 | 用途 | 耗时 | 依赖 |
 |------|------|------|------|
+| `scripts/smoke_frozen_all.py` | **一键跑齐**下面所有 frozen 门禁 | ~30s | `build/backend-win/run/run.exe` |
+| `scripts/check_frozen_writable_paths.py` | 静态扫描：写磁盘 + builtin 路径反模式 | ~1s | 无 |
 | `scripts/smoke_frozen_gateway.py` | 验证 frozen gateway 完整启动（`/health` ready） | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_model_card_save.py` | 验证模型卡保存到 workspace（非 _internal） | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_role_card_save.py` | 验证角色卡保存到 workspace | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_skill_upload.py` | 验证技能上传到 workspace/plugins | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_frozen_agent.py` | 验证 frozen launcher + agent 启动 | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_chat.py` | 验证端到端对话（登录→WS→发送→回复）| ~10s | Gateway 在 9555 跑着 |
 | `scripts/check_build_python.py --bundle <dir>` | 校验 bundle 用 Python 3.11 | ~1s | 无 |
@@ -381,6 +405,7 @@ uv run python scripts\smoke_frozen_agent.py
 | `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` 未进 PYZ | spec 加 `hiddenimports` |
 | `Module use of python311.dll conflicts` | 系统 Python 3.13 + PATH 混入 `_internal` | 安装向导下载 embed Python 3.11 |
 | `Backend did not start in time`（Setup 装到 Program Files）| 导入时在只读 `_internal/` 写目录（`session_manager`、`bot_api.uploads` 等）PermissionError | workspace / uploads 路径改读 `OPENSQUAD_USER_DATA` |
+| 模型卡/插件/技能/市场安装保存失败 | Launcher/Gateway 用 `builtin_resources_dir` 当可写目录 | 改 `workspace_plugins_dir()` 等；读用 `resource_search_dirs()` |
 
 ---
 

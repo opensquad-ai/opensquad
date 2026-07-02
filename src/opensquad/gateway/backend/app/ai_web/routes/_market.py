@@ -28,7 +28,6 @@ from opensquad.system_config import syscfg
 from ..routes._admin import _proxy_get
 
 logger = logging.getLogger(__name__)
-_REPO_ROOT = syscfg.project_root()
 _SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
 
 market_router = APIRouter()  # prefix comes from main router include
@@ -43,17 +42,31 @@ SKILL_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-s
 ROLE_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-roles/main/index.json"
 COLLAB_REGISTRY_URL = "https://raw.githubusercontent.com/opensquad-ai/opensquad-collabs/main/index.json"
 
-# Local install/storage directories — 使用 builtin root（项目安装目录），与 launcher 读取目录保持一致
-_BUILTIN_ROOT = syscfg.get_builtin_root()
-PLUGINS_DIR = os.path.join(_BUILTIN_ROOT, "plugins")
-_SKILLS_DIR = os.path.join(_BUILTIN_ROOT, "skills")
-_ROLE_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "role_cards")
-_COLLAB_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "collab_cards")
-_MODEL_CARDS_DIR = os.path.join(_BUILTIN_ROOT, "model_cards")
+# Local install/storage directories — writable workspace paths (launcher reads workspace + builtin)
+PLUGINS_DIR = syscfg.workspace_plugins_dir()
+_SKILLS_DIR = syscfg.workspace_skills_dir()
+_ROLE_CARDS_DIR = syscfg.workspace_role_cards_dir()
+_COLLAB_CARDS_DIR = syscfg.workspace_collab_cards_dir()
+_MODEL_CARDS_DIR = syscfg.workspace_model_cards_dir()
+_LIKED_ITEMS_PATH = syscfg.workspace_data_dir("liked_items.json")
 
-# Local liked items record: tracks item_id sets already liked on this node per category, to prevent duplicate likes
-# Format: {"plugins": ["id1", ...], "skills": [...], "roles": [...], "collabs": [...]}
-_LIKED_ITEMS_PATH = os.path.join(_REPO_ROOT, "data", "liked_items.json")
+
+def _local_icon_path(kind: str, item_id: str) -> str:
+    """Return the absolute path to the local icon file (file may not exist)."""
+    rel_paths = {
+        "skills": (f"{item_id}/icon.svg",),
+        "roles": (f"{item_id}_icon.svg",),
+        "collabs": (f"{item_id}_icon.svg",),
+    }
+    if kind not in rel_paths:
+        return ""
+    resource_type = {"skills": "skills", "roles": "role_cards", "collabs": "collab_cards"}[kind]
+    for root in syscfg.resource_search_dirs(resource_type):
+        for rel in rel_paths[kind]:
+            path = os.path.join(root, rel)
+            if os.path.isfile(path):
+                return path
+    return os.path.join(syscfg.resource_search_dirs(resource_type)[0], rel_paths[kind][0])
 
 
 def _read_local_liked() -> dict:
@@ -73,17 +86,6 @@ def _write_local_liked(data: dict) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.warning(f"[likes] Failed to write liked_items.json: {e}")
-
-
-def _local_icon_path(kind: str, item_id: str) -> str:
-    """Return the absolute path to the local icon file (file may not exist)"""
-    if kind == "skills":
-        return os.path.join(_SKILLS_DIR, item_id, "icon.svg")
-    elif kind == "roles":
-        return os.path.join(_ROLE_CARDS_DIR, f"{item_id}_icon.svg")
-    elif kind == "collabs":
-        return os.path.join(_COLLAB_CARDS_DIR, f"{item_id}_icon.svg")
-    return ""
 
 
 @market_router.get("/market/icon/{kind}/{item_id}")

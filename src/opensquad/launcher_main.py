@@ -64,12 +64,20 @@ PROJECT_ROOT = syscfg.project_root()
 # ── Workspace path (user data) ──
 AGENTS_DIR = syscfg.workspace_agents_dir()
 
-# ── Installation directory resource path (read-only shared resources) ──
-PLUGINS_DIR = syscfg.builtin_resources_dir("plugins")
+# ── Writable workspace resource paths (user installs / edits) ──
+PLUGINS_DIR = syscfg.workspace_plugins_dir()
+SKILLS_DIR = syscfg.workspace_skills_dir()
+ROLE_CARDS_DIR = syscfg.workspace_role_cards_dir()
+COLLAB_CARDS_DIR = syscfg.workspace_collab_cards_dir()
+MODEL_CARDS_DIR = syscfg.workspace_model_cards_dir()
+
+# ── Read-only bundled seeds (PyInstaller _internal/ in frozen desktop) ──
+BUILTIN_PLUGINS_DIR = syscfg.builtin_resources_dir("plugins")
+BUILTIN_SKILLS_DIR = syscfg.builtin_resources_dir("skills")
 
 # Built-in plugin registry: loaded from builtin_plugins.json at startup
 _BUILTIN_PLUGINS: dict = {}  # name -> {"default_enabled": bool}
-_builtin_plugins_path = os.path.join(PLUGINS_DIR, "builtin_plugins.json")
+_builtin_plugins_path = os.path.join(BUILTIN_PLUGINS_DIR, "builtin_plugins.json")
 if os.path.isfile(_builtin_plugins_path):
     try:
         with open(_builtin_plugins_path, encoding="utf-8") as _bf:
@@ -77,12 +85,66 @@ if os.path.isfile(_builtin_plugins_path):
             _BUILTIN_PLUGINS = _bp_data.get("plugins", {})
     except Exception:
         pass
-SKILLS_DIR = syscfg.builtin_resources_dir("skills")
-# User-editable card stores live in the workspace (writable).  Builtin copies under
-# _internal/ are read-only seeds copied on first run — never write there in frozen/desktop.
-ROLE_CARDS_DIR = os.path.join(syscfg.get_workspace(), "role_cards")
-COLLAB_CARDS_DIR = os.path.join(syscfg.get_workspace(), "collab_cards")
-MODEL_CARDS_DIR = os.path.join(syscfg.get_workspace(), "model_cards")
+
+
+def _plugin_search_dirs() -> list[str]:
+    return syscfg.resource_search_dirs("plugins")
+
+
+def _skill_search_dirs() -> list[str]:
+    return syscfg.resource_search_dirs("skills")
+
+
+def discover_all_plugin_services() -> list[dict]:
+    """Scan workspace + builtin plugin dirs; workspace wins on duplicate ids."""
+    seen: set[str] = set()
+    result: list[dict] = []
+    for plugins_dir in _plugin_search_dirs():
+        for info in discover_plugin_services(plugins_dir):
+            pid = info["plugin_id"]
+            if pid in seen:
+                continue
+            seen.add(pid)
+            result.append(info)
+    return result
+
+
+def _collect_plugin_dirs() -> dict[str, str]:
+    """Map dir_name -> plugin_dir; workspace entries override builtin."""
+    out: dict[str, str] = {}
+    for root in (BUILTIN_PLUGINS_DIR, PLUGINS_DIR):
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            plugin_dir = os.path.join(root, entry)
+            if not os.path.isdir(plugin_dir):
+                continue
+            if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
+                continue
+            out[entry] = plugin_dir
+    return out
+
+
+def _find_skill_dir(name: str) -> str | None:
+    for root in _skill_search_dirs():
+        skill_dir = os.path.join(root, name)
+        if os.path.isdir(skill_dir):
+            return skill_dir
+    return None
+
+
+def _collect_skill_dirs() -> dict[str, str]:
+    """Map skill dir_name -> path; workspace overrides builtin."""
+    out: dict[str, str] = {}
+    for root in (BUILTIN_SKILLS_DIR, SKILLS_DIR):
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            skill_dir = os.path.join(root, entry)
+            if os.path.isdir(skill_dir):
+                out[entry] = skill_dir
+    return out
+
 
 # BOOT_SCRIPT is now inside the package
 import opensquad
@@ -1429,20 +1491,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             Resolve a plugin name to its directory path.
 
             Tries two strategies:
-            1. Direct match: PLUGINS_DIR/name exists as a directory with plugin.py
+            1. Direct match: dir/name exists as a directory with plugin.py
             2. Name field match: scan all plugin dirs, find one where plugin.json["name"] == name
 
             Returns (plugin_dir, dir_name) tuple, or (None, None) if not found.
             """
-            # Strategy 1: directory name matches directly
-            direct = os.path.join(PLUGINS_DIR, name)
-            if os.path.isdir(direct) and os.path.isfile(os.path.join(direct, "plugin.py")):
-                return direct, name
+            for root in _plugin_search_dirs():
+                direct = os.path.join(root, name)
+                if os.path.isdir(direct) and os.path.isfile(os.path.join(direct, "plugin.py")):
+                    return direct, name
 
-            # Strategy 2: scan for matching plugin.json["name"]
-            if os.path.isdir(PLUGINS_DIR):
-                for entry in os.listdir(PLUGINS_DIR):
-                    plugin_dir = os.path.join(PLUGINS_DIR, entry)
+            for root in _plugin_search_dirs():
+                if not os.path.isdir(root):
+                    continue
+                for entry in os.listdir(root):
+                    plugin_dir = os.path.join(root, entry)
                     if not os.path.isdir(plugin_dir):
                         continue
                     if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
@@ -1459,24 +1522,27 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             return None, None
 
+        def _writable_plugin_json_path(self, name: str) -> tuple[str, str] | tuple[None, None]:
+            """Return (plugin_json_path, dir_name) under workspace for writes."""
+            plugin_dir, dir_name = self._find_plugin_dir(name)
+            if not dir_name:
+                return None, None
+            writable_dir = os.path.join(PLUGINS_DIR, dir_name)
+            os.makedirs(writable_dir, exist_ok=True)
+            return os.path.join(writable_dir, "plugin.json"), dir_name
+
         # 类级别的跳过目录缓存（跨请求持久），避免每次 HTTP 请求都刷屏
         _skipped_dirs: set = set()
 
         def _handle_list_plugins(self):
             """Scan plugins/ directory, read plugin.json for each, return list."""
             plugins = []
-            if not os.path.isdir(PLUGINS_DIR):
+            plugin_dirs = _collect_plugin_dirs()
+            if not plugin_dirs:
                 return self._send_json({"plugins": []})
 
-            for name in sorted(os.listdir(PLUGINS_DIR)):
-                plugin_dir = os.path.join(PLUGINS_DIR, name)
-                if not os.path.isdir(plugin_dir):
-                    continue
-                # Must have plugin.py to be a plugin
-                if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
-                    self._skipped_dirs.add(name)
-                    continue
-
+            for name in sorted(plugin_dirs):
+                plugin_dir = plugin_dirs[name]
                 plugin_json_path = os.path.join(plugin_dir, "plugin.json")
                 if os.path.isfile(plugin_json_path):
                     try:
@@ -1523,11 +1589,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
         def _handle_plugin_set_enabled(self, name: str, enabled: bool):
             """Set plugin enabled/disabled by updating plugin.json."""
-            plugin_dir, _dir_name = self._find_plugin_dir(name)
-            if not plugin_dir:
+            plugin_dir, dir_name = self._find_plugin_dir(name)
+            if not plugin_dir or not dir_name:
                 return self._send_json({"error": f"Plugin '{name}' not found"}, 404)
 
-            plugin_json_path = os.path.join(plugin_dir, "plugin.json")
+            plugin_json_path, _ = self._writable_plugin_json_path(name)
+            if not plugin_json_path:
+                return self._send_json({"error": f"Plugin '{name}' not found"}, 404)
+
             if os.path.isfile(plugin_json_path):
                 try:
                     with open(plugin_json_path, encoding="utf-8") as f:
@@ -1535,7 +1604,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 except Exception:
                     meta = {}
             else:
+                src_manifest = os.path.join(plugin_dir, "plugin.json")
                 meta = {"name": name}
+                if os.path.isfile(src_manifest):
+                    try:
+                        with open(src_manifest, encoding="utf-8") as f:
+                            meta = json.load(f)
+                    except Exception:
+                        meta = {"name": name}
 
             # service_only plugins cannot be enabled — they have no agent tools
             if enabled and meta.get("service_only"):
@@ -1948,7 +2024,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             Returns ALL discovered services (from plugin.json) merged with runtime status.
             This endpoint is used by the new standalone Service Management page."""
             # 1. Discover all plugin services from plugin.json
-            discovered = discover_plugin_services(PLUGINS_DIR)
+            discovered = discover_all_plugin_services()
 
             # 2. Build result merging discovery info with runtime status
             services = []
@@ -2449,14 +2525,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
         def _handle_list_skills(self):
             """GET /api/skills — Scan the skills/ directory and return the skill list"""
             skills = []
-            if not os.path.isdir(SKILLS_DIR):
+            skill_dirs = _collect_skill_dirs()
+            if not skill_dirs:
                 return self._send_json({"skills": []})
 
-            for skill_name in sorted(os.listdir(SKILLS_DIR)):
-                skill_dir = os.path.join(SKILLS_DIR, skill_name)
-                if not os.path.isdir(skill_dir):
-                    continue
-
+            for skill_name in sorted(skill_dirs):
+                skill_dir = skill_dirs[skill_name]
                 skill_json_path = os.path.join(skill_dir, "skill.json")
                 skill_md_path = os.path.join(skill_dir, "SKILL.md")
 
@@ -2522,8 +2596,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             # Sanitize name
             if not re.match(r"^[a-zA-Z0-9_\-]+$", name):
                 return self._send_json({"error": "Invalid skill name"}, 400)
-            skill_dir = os.path.join(SKILLS_DIR, name)
-            if not os.path.isdir(skill_dir):
+            skill_dir = _find_skill_dir(name)
+            if not skill_dir:
                 return self._send_json({"error": f"Skill '{name}' not found"}, 404)
             # Collect file list with sizes
             files_info = []
@@ -3241,13 +3315,14 @@ def _init_workspace():
     except Exception as e:
         _log.error(f"[ERROR] Failed to initialize workspace: {e}")
         sys.exit(1)
-    global AGENTS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR
+    global AGENTS_DIR, PLUGINS_DIR, SKILLS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR
     AGENTS_DIR = syscfg.workspace_agents_dir()
-    ws = syscfg.get_workspace()
-    ROLE_CARDS_DIR = os.path.join(ws, "role_cards")
-    COLLAB_CARDS_DIR = os.path.join(ws, "collab_cards")
-    MODEL_CARDS_DIR = os.path.join(ws, "model_cards")
-    for d in (ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR):
+    PLUGINS_DIR = syscfg.workspace_plugins_dir()
+    SKILLS_DIR = syscfg.workspace_skills_dir()
+    ROLE_CARDS_DIR = syscfg.workspace_role_cards_dir()
+    COLLAB_CARDS_DIR = syscfg.workspace_collab_cards_dir()
+    MODEL_CARDS_DIR = syscfg.workspace_model_cards_dir()
+    for d in (PLUGINS_DIR, SKILLS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR):
         os.makedirs(d, exist_ok=True)
 
 
@@ -3391,7 +3466,7 @@ def _init_and_start_plugin_services():
         return
     syscfg.ensure_external_api_key()
     _log.info("\n[Launcher] Discovering plugin services...")
-    plugin_svc_infos = discover_plugin_services(PLUGINS_DIR)
+    plugin_svc_infos = discover_all_plugin_services()
 
     _stale_ports = {9700, 9001, 5001}
     for _stale_port in _stale_ports:
