@@ -24,6 +24,7 @@ HARD_SMOKES = [
     "smoke_model_card_save.py",  # model card write path
     "smoke_role_card_save.py",  # role card write path
     "smoke_skill_upload.py",  # skill upload write path
+    "smoke_plugin_services.py",  # --no-services: services/plugins/skills/MCP discoverable
 ]
 
 # Soft gate: agent runtime smokes. These need the embed Python runtime which a

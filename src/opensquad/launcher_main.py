@@ -3457,13 +3457,17 @@ def _init_and_start_plugin_services():
     # the plugin's entry script, but in a PyInstaller bundle sys.executable IS
     # the frozen launcher EXE — spawning it would re-enter the launcher and
     # either crash or fight for ports. --no-services (set by the desktop app)
-    # skips auto-start entirely; services can still be started manually later
-    # once a real Python interpreter is available.
-    if getattr(_ARGS, "no_services", False):
+    # skips AUTO-START only; we still discover services so the Service Manager
+    # UI can list them and the user can start them manually when a real Python
+    # interpreter is available. Previously --no-services skipped discovery
+    # entirely, which made every service return 404 "not found" and hid all
+    # plugin-backed UI (Token Analytics, websearch, etc.).
+    skip_auto_start = getattr(_ARGS, "no_services", False)
+    if skip_auto_start:
         _log.info(
-            "[Launcher] --no-services set, skipping plugin service discovery & auto-start (frozen-bundle safe mode)"
+            "[Launcher] --no-services set: skipping plugin service auto-start (frozen-bundle safe mode). "
+            "Services are still discovered so they can be started manually from the Service Manager."
         )
-        return
     syscfg.ensure_external_api_key()
     _log.info("\n[Launcher] Discovering plugin services...")
     plugin_svc_infos = discover_all_plugin_services()
@@ -3502,6 +3506,9 @@ def _init_and_start_plugin_services():
         _plugin_services[pid] = psp
         if not syscfg.is_service_enabled(pid):
             _log.info(f"[Launcher] Plugin service {pid} disabled via config (services.{pid}.enabled=false), skipping.")
+            continue
+        if skip_auto_start:
+            _log.info(f"[Launcher] Plugin service {pid} discovered but not auto-started (--no-services).")
             continue
         if psp.auto_start:
             _log.info(f"[Launcher] Auto-starting plugin service: {pid}")

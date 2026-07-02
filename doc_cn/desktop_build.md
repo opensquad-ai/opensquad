@@ -389,6 +389,7 @@ CI：`build-desktop.yml` 在 Windows backend job 的 PyInstaller 之后自动跑
 | `scripts/smoke_model_card_save.py` | 验证模型卡保存到 workspace（非 _internal） | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_role_card_save.py` | 验证角色卡保存到 workspace | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_skill_upload.py` | 验证技能上传到 workspace/plugins | ~5s | `build/backend-win/run/run.exe` |
+| `scripts/smoke_plugin_services.py` | 验证 `--no-services` 下服务/插件/skills/MCP 都能被发现 | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_frozen_agent.py` | 验证 frozen launcher + agent 启动 | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_chat.py` | 验证端到端对话（登录→WS→发送→回复）| ~10s | Gateway 在 9555 跑着 |
 | `scripts/check_build_python.py --bundle <dir>` | 校验 bundle 用 Python 3.11 | ~1s | 无 |
