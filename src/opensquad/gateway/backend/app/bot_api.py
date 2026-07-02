@@ -14,10 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from opensquad.system_config import syscfg
 
-# Define upload directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+# Writable uploads dir — must match main.py StaticFiles("/uploads") mount.
+UPLOAD_DIR = syscfg.workspace_uploads_dir()
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 from app.api import get_current_user_dep
 from app.models import Attachment, Group, Message, MessageType, User, UserGroupSettings, group_members

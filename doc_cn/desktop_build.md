@@ -363,6 +363,7 @@ uv run python scripts\smoke_frozen_agent.py
 
 | 脚本 | 用途 | 耗时 | 依赖 |
 |------|------|------|------|
+| `scripts/smoke_frozen_gateway.py` | 验证 frozen gateway 完整启动（`/health` ready） | ~5s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_frozen_agent.py` | 验证 frozen launcher + agent 启动 | ~10s | `build/backend-win/run/run.exe` |
 | `scripts/smoke_chat.py` | 验证端到端对话（登录→WS→发送→回复）| ~10s | Gateway 在 9555 跑着 |
 | `scripts/check_build_python.py --bundle <dir>` | 校验 bundle 用 Python 3.11 | ~1s | 无 |
@@ -378,7 +379,7 @@ uv run python scripts\smoke_frozen_agent.py
 | `FileNotFoundError: base_fc.md` | `prompts/` 目录未打包 | spec 显式添加 `datas` |
 | `ValueError: Unknown encoding cl100k_base` | `tiktoken_ext` 未进 PYZ | spec 加 `hiddenimports` |
 | `Module use of python311.dll conflicts` | 系统 Python 3.13 + PATH 混入 `_internal` | 安装向导下载 embed Python 3.11 |
-| `Backend did not start in time`（Setup 装到 Program Files）| 导入时 workspace 默认 `_internal/`（只读），`session_manager` 写目录 PermissionError | `_workspace.py` 优先读 `OPENSQUAD_USER_DATA` |
+| `Backend did not start in time`（Setup 装到 Program Files）| 导入时在只读 `_internal/` 写目录（`session_manager`、`bot_api.uploads` 等）PermissionError | workspace / uploads 路径改读 `OPENSQUAD_USER_DATA` |
 
 ---
 

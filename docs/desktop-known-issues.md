@@ -82,15 +82,14 @@ fail to start (non-fatal — agents still work).
 
 ### 3. `Backend did not start in time` after NSIS install (Windows)
 
-**Resolved in v0.4.5+.** When the app is installed under `Program Files`, the
-PyInstaller bundle's `_internal/` directory is read-only. On import,
-`session_manager` tried to create `data/sessions/` under `_internal/` before
-Electron's workspace bootstrap ran, causing `PermissionError` and immediate
-backend exit.
+**Resolved in v0.4.6+.** When the app is installed under `Program Files`, the
+PyInstaller bundle's `_internal/` directory is read-only. Import-time
+`os.makedirs()` in multiple modules (`session_manager`, `bot_api.uploads`, …)
+crashed the gateway before Electron's health check succeeded.
 
-Fix: `_syscfg/_workspace.py` now initializes the workspace root from
-`OPENSQUAD_USER_DATA` / `OPENSQUAD_APP_DATA` (set by Electron before spawn)
-instead of defaulting to `_internal/`.
+Fix: `_syscfg/_workspace.py` honours `OPENSQUAD_USER_DATA` at import time;
+`bot_api.py` uses `syscfg.workspace_uploads_dir()` like `api.py` and
+`main.py`. Run `scripts/smoke_frozen_gateway.py` before tagging a release.
 
 
 The sidebar uses the [Lucide](https://lucide.dev) icon set (an open-source
