@@ -132,6 +132,16 @@ async function apiRequest<T>(
   const response = await fetch(url, {
     ...options,
     headers,
+  }).catch((err: any) => {
+    // fetch() throws TypeError: Failed to fetch when the backend is
+    // unreachable (process crashed, port not listening, network down).
+    // Wrap it in a descriptive error so the UI can show something useful
+    // instead of a raw "Failed to fetch" message.
+    const message = err?.message || 'Network error';
+    if (message.includes('Failed to fetch') || message.includes('NetworkError') || message.includes('network')) {
+      throw new Error('无法连接到后端服务，请稍后重试或重启应用');
+    }
+    throw new Error(message);
   });
 
   if (!response.ok) {

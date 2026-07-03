@@ -221,6 +221,13 @@ function getBackendEnv(): { cwd: string; env: NodeJS.ProcessEnv } {
   }
 }
 
+// Track whether the backend is being intentionally shut down (app quit).
+// When true, the exit handler and health monitor skip auto-restart.
+let _shuttingDown = false
+
+// Avoid duplicate restart attempts racing with each other.
+let _gatewayRestarting = false
+
 function spawnBackend(args: string[], label: string): ChildProcess | null {
   const exe = getBackendExe()
   if (!fs.existsSync(exe)) {
@@ -237,14 +244,118 @@ function spawnBackend(args: string[], label: string): ChildProcess | null {
     console.log(`[${label}]`, d.toString().trimEnd()))
   proc.stderr?.on('data', (d: Buffer) =>
     console.error(`[${label}:err]`, d.toString().trimEnd()))
-  proc.on('exit', (code, signal) =>
-    console.log(`[${label}] exited  code=${code} signal=${signal}`))
+  proc.on('exit', (code, signal) => {
+    console.log(`[${label}] exited  code=${code} signal=${signal}`)
+    // Auto-restart the gateway if it died unexpectedly (not during app quit).
+    // This is the primary fix for "Failed to fetch after idle": the backend
+    // process can be killed by Windows Defender, OOM, or a background-thread
+    // crash during idle. Without restart, port 9555 stays dead and every
+    // fetch() from the UI fails.
+    if (!_shuttingDown && label === 'backend' && !_gatewayRestarting) {
+      console.error(`[electron] Gateway exited unexpectedly (code=${code} signal=${signal}). Auto-restarting in 2s...`)
+      _gatewayRestarting = true
+      setTimeout(() => {
+        _gatewayRestarting = false
+        if (_shuttingDown) return
+        startBackend()
+        // Wait for it to be ready, then reload the window so the UI reconnects.
+        waitForBackendFullyReady()
+          .then(() => {
+            console.log('[electron] Gateway restarted successfully, reloading window')
+            mainWindow?.webContents.reload()
+          })
+          .catch(() => {
+            console.error('[electron] Gateway failed to restart in time')
+            dialog.showErrorBox(
+              'Backend Restart Failed',
+              'The backend process crashed and could not be restarted.\nPlease restart the app manually.'
+            )
+          })
+      }, 2000)
+    }
+  })
   return proc
 }
 
 // Gateway: FastAPI backend on BACKEND_PORT (plain `run.exe`, no --service).
 function startBackend(): void {
   gatewayProcess = spawnBackend([], 'backend')
+}
+
+// ── Periodic backend health monitor ───────────────────────────────────────────
+// After startup, the gateway process can die or hang without Electron knowing
+// (the exit event fires for crashes, but a *hung* process — event loop blocked
+// or deadlock — keeps its PID alive while /health stops responding). This
+// monitor polls /health every 30s; if it fails N consecutive times, the
+// gateway is killed and restarted.
+const HEALTH_MONITOR_INTERVAL_MS = 30_000  // 30s
+const HEALTH_MONITOR_MAX_FAILURES = 3      // 3 consecutive failures → restart
+let _healthFailCount = 0
+
+function startBackendHealthMonitor(): void {
+  setInterval(() => {
+    if (_shuttingDown || _gatewayRestarting) return
+    const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/health`, (res) => {
+      res.resume()
+      if (res.statusCode && res.statusCode < 500) {
+        _healthFailCount = 0
+      } else {
+        _healthFailCount++
+        console.warn(`[health-monitor] /health returned ${res.statusCode} (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
+      }
+    })
+    req.on('error', (err) => {
+      _healthFailCount++
+      console.warn(`[health-monitor] /health error: ${err.message} (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
+      if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
+        console.error('[health-monitor] Gateway unresponsive, forcing restart...')
+        forceRestartGateway()
+      }
+    })
+    req.setTimeout(5000, () => {
+      req.destroy()
+      _healthFailCount++
+      console.warn(`[health-monitor] /health timeout (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
+      if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
+        console.error('[health-monitor] Gateway unresponsive (timeout), forcing restart...')
+        forceRestartGateway()
+      }
+    })
+  }, HEALTH_MONITOR_INTERVAL_MS)
+}
+
+function forceRestartGateway(): void {
+  if (_gatewayRestarting || _shuttingDown) return
+  _gatewayRestarting = true
+  _healthFailCount = 0
+  // Kill the existing gateway process tree
+  if (gatewayProcess && !gatewayProcess.killed) {
+    console.log('[electron] Killing unresponsive gateway process...')
+    if (process.platform === 'win32') {
+      try {
+        spawn('taskkill', ['/pid', String(gatewayProcess.pid), '/f', '/t'])
+      } catch { /* ignore */ }
+    } else {
+      gatewayProcess.kill('SIGTERM')
+    }
+    gatewayProcess = null
+  }
+  // Restart after a short delay (the exit handler would also fire, but
+  // _gatewayRestarting prevents a double-restart race).
+  setTimeout(() => {
+    _gatewayRestarting = false
+    if (_shuttingDown) return
+    console.log('[electron] Restarting gateway after health-monitor kill...')
+    startBackend()
+    waitForBackendFullyReady()
+      .then(() => {
+        console.log('[electron] Gateway restarted (health monitor), reloading window')
+        mainWindow?.webContents.reload()
+      })
+      .catch(() => {
+        console.error('[electron] Gateway failed to restart after health-monitor kill')
+      })
+  }, 2000)
 }
 
 // Launcher: agent process manager on LAUNCHER_PORT. Spawned as a second
@@ -501,6 +612,12 @@ app.whenReady().then(async () => {
   createTray()
   await createWindow()
 
+  // Start periodic backend health monitor (detects hung/crashed gateway
+  // during idle and auto-restarts it, preventing "Failed to fetch").
+  if (!DEV_MODE) {
+    startBackendHealthMonitor()
+  }
+
   // Start background update checker (stable channel). Silent on failure;
   // only notifies the frontend when a newer release is found.
   if (!DEV_MODE) {
@@ -518,6 +635,8 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  // Signal the exit handler and health monitor to skip auto-restart.
+  _shuttingDown = true
   // Tear down both backend processes. On Windows use taskkill /T so the whole
   // child tree (e.g. launcher-spawned agents) is cleaned up.
   const procs: Array<[string, ChildProcess | null]> = [
