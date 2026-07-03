@@ -63,6 +63,8 @@ jobs:
         # when a lock file generated on a different OS is present (npm bug #4828).
         # Remove any stale lock file + node_modules, then install fresh so npm
         # resolves the correct platform-specific optional deps for THIS runner.
+        # Use a shell that supports rm -rf on all platforms.
+        shell: bash
         run: |
           rm -f package-lock.json
           rm -rf node_modules
@@ -154,6 +156,7 @@ jobs:
 
       - name: Install npm dependencies
         working-directory: src/opensquad/gateway/nexuschat-pro
+        shell: bash
         run: |
           rm -f package-lock.json
           rm -rf node_modules
