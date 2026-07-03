@@ -8,6 +8,9 @@ on:
   push:
     tags:
       - 'v*'
+      - '!v*beta*'   # beta tags only trigger Build Desktop App (test builds)
+      - '!v*rc*'     # same for release candidates
+      - '!v*alpha*'  # and alpha prereleases
   workflow_dispatch:
 
 permissions:
