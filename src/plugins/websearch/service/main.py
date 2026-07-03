@@ -6,33 +6,36 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ── sys.path setup ─────────────────────────────────────────
 # _here: plugins/websearch/service/
-# _project_root: project root (opensquad/) — needed so the Agent Python
-# (which has no opensquad package) can import plugins._service_runtime.
+# We need `plugins._service_runtime` to be importable. In a PyInstaller
+# bundle, _service_runtime.py lives at _internal/plugins/_service_runtime.py.
 #
-# In frozen mode, _project_root is the read-only _internal/ dir. APPEND it
-# (not insert(0)) so the Agent Python's site-packages wins for third-party
-# packages (fastapi, uvicorn, ...). Otherwise `import fastapi` would load
-# the loose copy under _internal/fastapi/ but its transitive deps
-# (annotated_doc, click) live only in the PYZ archive and crash with
-# ModuleNotFoundError. _here (this dir) is still insert(0)'d so that
-# `from websearch_api import ...` resolves to the sibling .py file.
+# CRITICAL: Do NOT add the entire _internal/ to sys.path. It contains
+# 3.11-compiled .pyd files (brotlicffi, socket, etc.) that conflict with
+# the Agent Python's own site-packages, causing crashes like
+# "Module use of python311.dll conflicts" or "brotlicffi has no attribute
+# 'error'". Instead, add ONLY the _internal/plugins/ directory so that
+# `import _service_runtime` works (direct module, not package-qualified).
 _here = _os.path.dirname(_os.path.abspath(__file__))
-_project_root = _os.path.abspath(_os.path.join(_here, "..", "..", ".."))
+# _plugins_dir: plugins/ directory — contains _service_runtime.py and __init__.py
+_plugins_dir = _os.path.abspath(_os.path.join(_here, "..", ".."))
 if _here not in sys.path:
     sys.path.insert(0, _here)  # Allow `from websearch_api import ...` (absolute import)
-if _project_root not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(_project_root)  # site-packages must win over _internal loose copies
-    else:
-        sys.path.insert(0, _project_root)  # Allow `from plugins._service_runtime import ...`
+if _plugins_dir not in sys.path:
+    sys.path.insert(0, _plugins_dir)  # Allow `import _service_runtime` (direct)
 
 
 from fastapi import FastAPI, HTTPException, Query
 
 # Self-contained runtime helper — does NOT import opensquad (which is not
 # available to the Agent Python that runs plugin services in frozen mode).
-from plugins._service_runtime import port as _runtime_port
-from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
+# Import directly from _service_runtime (not plugins._service_runtime) to
+# avoid needing the parent _internal/ dir on sys.path.
+try:
+    from plugins._service_runtime import port as _runtime_port
+    from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
+except ImportError:
+    from _service_runtime import port as _runtime_port
+    from _service_runtime import workspace_data_dir as _runtime_workspace_data_dir
 
 # --- Dynamically import business modules ---
 try:

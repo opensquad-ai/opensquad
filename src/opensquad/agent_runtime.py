@@ -18,6 +18,11 @@ def _default_runtime_python() -> str | None:
     Check both. The manifest (read_manifest) is the primary source of
     truth; this function is the last-resort fallback when the manifest
     is missing or corrupt.
+
+    IMPORTANT: Only accept Python 3.11. A venv created from 3.10 (by an
+    older setup wizard that accepted 3.10) will crash with
+    "Module use of python311.dll conflicts" because _internal/ contains
+    3.11-compiled .pyd files. Verify the version before returning.
     """
     if sys.platform != "win32":
         return None
@@ -25,13 +30,39 @@ def _default_runtime_python() -> str | None:
     if not local:
         return None
     runtime_dir = os.path.join(local, "OpenSquad", "runtime", "python311")
-    # venv mode (newer installs): python.exe lives under Scripts/
-    venv_exe = os.path.join(runtime_dir, "Scripts", "python.exe")
-    if os.path.isfile(venv_exe):
-        return venv_exe
-    # embed mode (legacy installs): python.exe at the runtime root
+
+    def _is_python_311(exe: str) -> bool:
+        """Verify the interpreter is Python 3.11.x."""
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                [exe, "-c", "import sys; exit(0 if sys.version_info[:2] == (3, 11) else 1)"],
+                capture_output=True,
+                timeout=5,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    # embed mode (always 3.11.9 — downloaded by setup wizard): preferred
+    # because it's guaranteed to be 3.11 and doesn't depend on system Python.
     embed_exe = os.path.join(runtime_dir, "python.exe")
-    return embed_exe if os.path.isfile(embed_exe) else None
+    if os.path.isfile(embed_exe) and _is_python_311(embed_exe):
+        return embed_exe
+
+    # venv mode (newer installs): only accept if it's actually 3.11
+    venv_exe = os.path.join(runtime_dir, "Scripts", "python.exe")
+    if os.path.isfile(venv_exe) and _is_python_311(venv_exe):
+        return venv_exe
+
+    # Last resort: return embed path even if version check failed (better
+    # than returning None → process_manager falls back to system Python
+    # which could be any version). The service will crash with a clear
+    # error if the version is wrong.
+    if os.path.isfile(embed_exe):
+        return embed_exe
+    return None
 
 
 def manifest_path() -> str | None:
@@ -67,7 +98,20 @@ def resolve_bundled_agent_python() -> str | None:
         if isinstance(exe, str):
             exe = os.path.abspath(exe)
             if os.path.isfile(exe):
-                return exe
+                # Validate manifest python is 3.11; older manifests may point
+                # to a 3.10 venv which causes DLL conflicts.
+                import subprocess
+
+                try:
+                    r = subprocess.run(
+                        [exe, "-c", "import sys; exit(0 if sys.version_info[:2] == (3, 11) else 1)"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    if r.returncode == 0:
+                        return exe
+                except Exception:
+                    pass  # Fall through to _default_runtime_python
 
     default = _default_runtime_python()
     if default:

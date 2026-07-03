@@ -83,7 +83,11 @@
       "httpx",
       "beautifulsoup4",
       "lxml",
-      "tiktoken"
+      "tiktoken",
+      "playwright",
+      "playwright-stealth",
+      "trafilatura",
+      "PyMuPDF"
     ]
   }
 }

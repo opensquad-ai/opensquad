@@ -966,6 +966,21 @@ class PluginServiceProcess:
                     )
                     self._circuit_last_failure_reason = f"Dependencies not installed: {still_missing}"
                     return False
+
+            # ── Playwright browser download ───────────────────────────────
+            # `pip install playwright` only installs the Python binding; the
+            # Chromium browser binary must be downloaded separately via
+            # `playwright install chromium`. Without this, the websearch
+            # service starts but crashes on the first browser launch.
+            if "playwright" in pip_deps and _plugin_python_has_module("playwright"):
+                if not _ensure_playwright_browser():
+                    _log.warning(
+                        f"[Launcher] {self.plugin_id}: playwright browser download failed; "
+                        "service may crash on browser launch"
+                    )
+                    # Don't return False — the service can still start and
+                    # report a meaningful error to the user via /health.
+
             return True
         except Exception as e:
             _log.warning(f"[Launcher] Warning: Failed to install dependencies for {self.plugin_id}: {e}")
@@ -1680,6 +1695,49 @@ def _plugin_python_has_module(import_name: str) -> bool:
         return False
 
 
+def _ensure_playwright_browser() -> bool:
+    """Download Chromium for Playwright if not already present.
+
+    ``pip install playwright`` only installs the Python binding. The browser
+    binary must be downloaded separately via ``playwright install chromium``.
+    This is a ~150MB download, so we skip it in the batch install and only
+    run it when a plugin that depends on playwright is actually started.
+
+    Uses a sentinel file to avoid re-downloading on every service start.
+    """
+    target_python = _plugin_python_executable()
+    sentinel = os.path.join(syscfg.workspace_metadata_dir("runtime"), "playwright_chromium_installed")
+    if os.path.isfile(sentinel):
+        _log.info("[Launcher] Playwright Chromium already downloaded (sentinel exists)")
+        return True
+
+    _log.info("[Launcher] Downloading Playwright Chromium browser (one-time, ~150MB)...")
+    try:
+        r = subprocess.run(
+            [target_python, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            check=False,
+            timeout=300,
+            env=_build_child_process_env(),
+        )
+        if r.returncode == 0:
+            # Write sentinel so we don't re-download on next start
+            os.makedirs(os.path.dirname(sentinel), exist_ok=True)
+            with open(sentinel, "w") as f:
+                f.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
+            _log.info("[Launcher] Playwright Chromium downloaded successfully")
+            return True
+        stderr = r.stderr.decode(errors="replace")[:300] if r.stderr else ""
+        _log.error(f"[Launcher] Playwright browser install failed (exit {r.returncode}): {stderr}")
+        return False
+    except subprocess.TimeoutExpired:
+        _log.error("[Launcher] Playwright browser install timed out (300s)")
+        return False
+    except Exception as e:
+        _log.error(f"[Launcher] Playwright browser install exception: {e}")
+        return False
+
+
 def _install_builtin_plugin_deps(svc_infos: list[dict]):
     """Install all built-in plugin pip dependencies in one batch at startup.
 
@@ -1711,7 +1769,7 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
         # Without this, `pip install whisper` (which pulls torch) can take 10+
         # minutes and every PluginServiceProcess.start() waits on
         # _plugin_deps_ready, making websearch/external_api unstartable.
-        _HEAVY_PACKAGES = {"whisper", "torch", "torchvision", "torchaudio"}
+        _HEAVY_PACKAGES = {"whisper", "torch", "torchvision", "torchaudio", "playwright"}
 
         # NOTE: Dependency presence is checked via ``_plugin_python_has_module()``
         # (subprocess against the Agent Python), NOT in-process ``importlib``.

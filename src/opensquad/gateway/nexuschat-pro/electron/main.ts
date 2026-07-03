@@ -361,17 +361,16 @@ function forceRestartGateway(): void {
 // Launcher: agent process manager on LAUNCHER_PORT. Spawned as a second
 // `run.exe` instance with `--service launcher`.
 // `--no-auto-start`: agents still need a dedicated frozen entry (see docs).
-// Plugin services with `service/main.py` auto-start here; the launcher uses
-// system Python when bundled (see process_manager._plugin_python_executable).
+// Plugin services (e.g. websearch) auto-start here when their plugin.json has
+// auto_start=true. The launcher uses the Agent Python (installed by the setup
+// wizard) to spawn them, NOT the frozen run.exe, so --no-services is no longer
+// needed.
 function startLauncher(): void {
   launcherProcess = spawnBackend(
     [
       '--service', 'launcher',
       '--mgmt-port', String(LAUNCHER_PORT),
       '--no-auto-start',
-      // Frozen run.exe cannot spawn plugin services (sys.executable re-enters
-      // the bundle); skip auto-start so mgmt port 9600 binds immediately.
-      '--no-services',
     ],
     'launcher',
   )

@@ -22,7 +22,21 @@ logger = logging.getLogger("plugins.websearch")
     version="1.0.0",
     plugin_type="tool",
     display_name="Web Search",
-    dependencies={"pip": ["requests", "fastapi", "uvicorn", "httpx", "beautifulsoup4", "lxml", "tiktoken"]},
+    dependencies={
+        "pip": [
+            "requests",
+            "fastapi",
+            "uvicorn",
+            "httpx",
+            "beautifulsoup4",
+            "lxml",
+            "tiktoken",
+            "playwright",
+            "playwright-stealth",
+            "trafilatura",
+            "PyMuPDF",
+        ]
+    },
     tags=["search"],
     config_schema={
         "port": {

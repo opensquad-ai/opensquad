@@ -61,19 +61,21 @@ except Exception as _import_err:
 # jinja2, etc.) live only in the PYZ archive and crash with
 # ModuleNotFoundError. See websearch/service/main.py for full rationale.
 _here = os.path.dirname(os.path.abspath(__file__))
-_project_root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
+# _plugins_dir: plugins/ directory — contains _service_runtime.py
+_plugins_dir = os.path.abspath(os.path.join(_here, "..", ".."))
 if _here not in sys.path:
     sys.path.insert(0, _here)  # current dir (reserved for future cross-file imports)
-if _project_root not in sys.path:
-    if getattr(sys, "frozen", False):
-        sys.path.append(_project_root)  # site-packages must win over _internal loose copies
-    else:
-        sys.path.insert(0, _project_root)  # for `from plugins._service_runtime import ...`
+if _plugins_dir not in sys.path:
+    sys.path.insert(0, _plugins_dir)  # Allow `import _service_runtime` (direct)
 
 # Self-contained runtime helper — does NOT import opensquad (which is not
 # available to the Agent Python that runs plugin services in frozen mode).
-from plugins._service_runtime import port as _runtime_port
-from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
+try:
+    from plugins._service_runtime import port as _runtime_port
+    from plugins._service_runtime import workspace_data_dir as _runtime_workspace_data_dir
+except ImportError:
+    from _service_runtime import port as _runtime_port
+    from _service_runtime import workspace_data_dir as _runtime_workspace_data_dir
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
