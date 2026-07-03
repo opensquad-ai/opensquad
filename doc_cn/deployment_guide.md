@@ -25,7 +25,7 @@ OpenSquad 由以下服务组成：
 
 ### 前置条件
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+(Web UI 前端)
 - Git
 
@@ -69,7 +69,7 @@ git clone https://github.com/opensquad-ai/opensquad.git && cd opensquad && bash 
 
 ### 前置条件
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+(前端开发)
 - [uv](https://github.com/astral-sh/uv)
 
@@ -123,7 +123,7 @@ Web UI 访问地址：`http://localhost:9555`。
 
 ### 前置条件
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+(前端开发)
 - pip(Python 自带)
 

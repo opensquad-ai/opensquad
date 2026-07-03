@@ -2,7 +2,7 @@
 // opensquad — npm bootstrap for the Python `opensquad` CLI.
 //
 // What this script does:
-//   1. Detects whether Python 3.10+ is on PATH.
+//   1. Detects whether Python 3.11+ is on PATH.
 //   2. Ensures the matching `opensquad==X.Y.Z` Python package is installed
 //      (installs via pip on first run).
 //   3. Forwards every CLI argument to the `opensquad` command.
@@ -30,7 +30,7 @@ function findPython() {
     try {
       const out = execFileSync(cmd, ['--version'], { stdio: 'pipe' }).toString();
       const m = out.match(/Python\s+(\d+)\.(\d+)/);
-      if (m && parseInt(m[1], 10) >= 3 && parseInt(m[2], 10) >= 10) {
+      if (m && parseInt(m[1], 10) >= 3 && parseInt(m[2], 10) >= 11) {
         return cmd;
       }
     } catch (_) {
@@ -111,7 +111,7 @@ function main() {
 
   const py = findPython();
   if (!py) {
-    log('Python 3.10+ is required but was not found on PATH.');
+    log('Python 3.11+ is required but was not found on PATH.');
     log('Install Python from https://www.python.org/downloads/');
     log('On macOS: brew install python@3.11');
     log('On Linux: use your package manager or pyenv');

@@ -56,7 +56,7 @@ def _resolve_packaged_python_executable() -> str | None:
             return override
 
     # Prefer 3.11 via py launcher — the PyInstaller bundle is 3.11-compiled,
-    # so only 3.11 is safe. 3.10/3.12/3.13+ will crash with
+    # so only 3.11 is safe. 3.12/3.13+ will crash with
     # "Module use of python311.dll conflicts with this version of Python"
     # if they fall back to importing _internal/ loose copies.
     if sys.platform == "win32":

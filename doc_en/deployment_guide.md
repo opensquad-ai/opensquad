@@ -26,7 +26,7 @@ initialization, and service startup in a single command.
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+ (for the Web UI frontend)
 - Git
 
@@ -74,7 +74,7 @@ service integration, etc.). For any of those, switch to Method 2/3.
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+ (for frontend development)
 - [uv](https://github.com/astral-sh/uv)
 
@@ -129,7 +129,7 @@ equivalent to Method 2 but slower on cold installs.
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 18+ (for frontend development)
 - pip (bundled with Python)
 

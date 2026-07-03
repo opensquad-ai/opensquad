@@ -12,18 +12,18 @@ echo   OpenSquad One-Click Install (Windows)
 echo ==================================================
 echo.
 
-:: ── 1. Check Python 3.10+ ──
+:: ── 1. Check Python 3.11+ ──
 echo [1/6] Checking Python version...
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.10+ first.
+    echo [ERROR] Python not found. Please install Python 3.11+ first.
     echo         Download: https://www.python.org/downloads/
     pause
     exit /b 1
 )
-python -c "import sys; ver=sys.version_info; exit(0 if ver.major==3 and ver.minor>=10 else 1)" >nul 2>&1
+python -c "import sys; ver=sys.version_info; exit(0 if ver.major==3 and ver.minor>=11 else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python 3.10+ required. Current version:
+    echo [ERROR] Python 3.11+ required. Current version:
     python --version
     pause
     exit /b 1

@@ -82,7 +82,7 @@ in dev mode. See `electron/main.ts` for the resolution rules.
 |------------|--------------------|-----|
 | **Node.js** | 20.x or 22.x       | Vite + Electron + TypeScript |
 | **npm**    | bundled with Node  | `npm ci`, scripts |
-| **Python** | 3.10+ (3.11 used in CI) | `pip install -e .`, PyInstaller, build_icons.py |
+| **Python** | 3.11+ (3.11 used in CI) | `pip install -e .`, PyInstaller, build_icons.py |
 | **PyInstaller** | latest from pip | Backend → standalone binary |
 | **Pillow + Playwright** | latest | `build_icons.py` (rasterize the SVG master into platform icons) |
 | **Platform SDKs** | varies | macOS: Xcode CLT for `.icns`/notarization. Windows: optional, only for code signing. |

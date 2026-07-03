@@ -20,7 +20,7 @@ info()  { echo -e "  ${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "  ${RED}[ERROR]${NC} $1"; }
 
-# ── 1. Check Python 3.10+ ──
+# ── 1. Check Python 3.11+ ──
 echo "[1/6] Checking Python version..."
 PYTHON=""
 for cmd in python3 python; do
@@ -28,14 +28,14 @@ for cmd in python3 python; do
         ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
         major="${ver%.*}"
         minor="${ver#*.}"
-        if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; then
+        if [ "$major" -eq 3 ] && [ "$minor" -ge 11 ]; then
             PYTHON="$cmd"
             break
         fi
     fi
 done
 if [ -z "$PYTHON" ]; then
-    error "Python 3.10+ not found. Please install it first."
+    error "Python 3.11+ not found. Please install it first."
     exit 1
 fi
 info "Python: $($PYTHON --version)"

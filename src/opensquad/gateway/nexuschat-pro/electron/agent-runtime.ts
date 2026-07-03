@@ -164,7 +164,7 @@ async function probeSystemPython(): Promise<string[]> {
   // Probe order: py launcher (Windows preferred) → direct commands.
   // IMPORTANT: Only accept Python 3.11. The PyInstaller bundle is compiled
   // with 3.11, and _internal/ contains 3.11-compiled .pyd files. If a venv
-  // created from 3.10 or 3.12 falls back to importing from _internal/ (e.g.
+  // created from 3.12 falls back to importing from _internal/ (e.g.
   // when a pip-installed dep is missing), it loads python311.dll and crashes
   // with "Module use of python311.dll conflicts with this version of Python".
   // 3.13+ is also incompatible (different ABI). Only 3.11 is safe.
@@ -329,7 +329,7 @@ export const SETUP_STEPS: SetupStep[] = [
     id: 'detect-python',
     title: '探测系统 Python',
     async run({ log, state }) {
-      // Probe for a system Python 3.10-3.12 before falling back to the
+      // Probe for a system Python 3.11 before falling back to the
       // 12MB embed download. venv-mode skips download/extract entirely
       // and creates a venv (which ships with pip via ensurepip, no
       // get-pip.py fallback hell, no _pth configuration needed).
@@ -341,7 +341,7 @@ export const SETUP_STEPS: SetupStep[] = [
         log('Will create venv (skips 12MB embed download).')
       } else {
         state.useVenv = false
-        log('No system Python 3.10-3.12 found, will download embed.')
+        log('No system Python 3.11 found, will download embed.')
       }
     },
   },

@@ -180,7 +180,7 @@ is already taken on the public registry by an unrelated project.
 When a user runs `npx @opensquad-ai/opensquad`:
 
 1. The Node.js script `bin/opensquad.js` runs.
-2. It detects Python 3.10+ on `PATH` (`python3` or `python`).
+2. It detects Python 3.11+ on `PATH` (`python3` or `python`).
 3. It checks if the matching `opensquad==X.Y.Z` PyPI package is
    installed. If not, it `pip install --user opensquad==X.Y.Z`.
 4. It `exec`s the real `opensquad` Python CLI with the user's

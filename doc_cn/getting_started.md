@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- Python 3.10+
+- Python 3.11+
 - 一个 LLM API 密钥（DeepSeek、OpenAI、Claude、Gemini 等均可）
 
 ---

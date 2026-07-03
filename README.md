@@ -15,7 +15,7 @@
 [![CI](https://github.com/opensquad-ai/opensquad/actions/workflows/ci.yml/badge.svg)](https://github.com/opensquad-ai/opensquad/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/opensquad-ai/opensquad)](https://github.com/opensquad-ai/opensquad/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/v/release/opensquad-ai/opensquad)](https://github.com/opensquad-ai/opensquad/releases)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Node 18+](https://img.shields.io/badge/node-18%2B-339933.svg)](https://nodejs.org/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
@@ -100,7 +100,7 @@ Details: [Architecture](doc_en/ARCHITECTURE.md) · [Documentation hub](docs/READ
 
 ### Prerequisites
 
-- Python 3.10+ (officially tested on 3.10 / 3.11 / 3.12 / 3.13)
+- Python 3.11+ (officially tested on 3.11 / 3.12 / 3.13)
 - Node.js 18+ (for frontend development)
 - A compatible LLM API (DeepSeek, GPT-4, Claude, Gemini, GLM, etc.)
 

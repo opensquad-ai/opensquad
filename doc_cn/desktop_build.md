@@ -78,7 +78,7 @@ Electron 应用把打包好的后端二进制作为子进程拉起来，在 `Bro
 |---------------|----------------------|------|
 | **Node.js**   | 20.x 或 22.x          | Vite + Electron + TypeScript |
 | **npm**       | Node 自带              | `npm ci`、scripts |
-| **Python**    | 3.10+（CI 用 3.11）    | `pip install -e .`、PyInstaller、build_icons.py |
+| **Python**    | 3.11+（CI 用 3.11）    | `pip install -e .`、PyInstaller、build_icons.py |
 | **PyInstaller** | pip 最新版            | 后端 → 独立二进制 |
 | **Pillow + Playwright** | 最新版       | `build_icons.py`（把 SVG 主图标栅格化成各平台图标）|
 | **平台 SDK**  | 视情况                | macOS: Xcode CLT（生成 .icns / 公证）。Windows: 可选，仅签名时需要。 |

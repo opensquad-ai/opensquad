@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from opensquad.sleep_controller import SleepController
     from opensquad.state_manager import AIStateManager
 
-    # Python 3.10+ union syntax used below (safe with from __future__ import annotations)
+    # Python 3.11+ union syntax used below (safe with from __future__ import annotations)
     ChatAPIType = ChatAPI | ClaudeAPI | GoogleAPI
     MemoryManager = Any
     PluginManager = Any
