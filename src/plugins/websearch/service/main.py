@@ -162,7 +162,12 @@ async def fetch_html(url: str = Query(..., description="URL to fetch content fro
 async def shutdown_event():
     """Cleanup browser singleton on service shutdown."""
     try:
-        from .websearch_api import shutdown_browser
+        # Try relative import first (when run as package), fallback to
+        # absolute (when run as script: `python service/main.py`).
+        try:
+            from .websearch_api import shutdown_browser
+        except ImportError:
+            from websearch_api import shutdown_browser
 
         await shutdown_browser()
     except Exception as e:

@@ -857,6 +857,11 @@ class PluginServiceProcess:
         self._circuit_fail_count: int = 0  # consecutive failures
         self._circuit_open_until: float | None = None  # time.time threshold
         self._circuit_half_open_retries: int = 0  # half-open retry count
+
+        # Per-instance lock serializing start()/stop() to prevent the
+        # TOCTOU race where two threads both pass the "already running?"
+        # check and spawn duplicate child processes on the same port.
+        self._start_lock = threading.Lock()
         self._circuit_last_failure_time: float | None = None
         self._circuit_last_failure_reason: str = ""
         self._circuit_permanent: bool = False  # True = permanent failure, never retry
@@ -965,7 +970,18 @@ class PluginServiceProcess:
             return False
 
     def start(self) -> bool:
-        """Start the plugin service child process"""
+        """Start the plugin service child process.
+
+        Serialized by ``_start_lock`` to prevent the TOCTOU race where two
+        threads both pass the "already running?" check and spawn duplicate
+        child processes on the same port (observed in beta.2: two websearch
+        processes started 2s apart, second one EADDRINUSE → crash loop).
+        """
+        with self._start_lock:
+            return self._start_impl()
+
+    def _start_impl(self) -> bool:
+        """Actual start logic — caller holds ``_start_lock``."""
         if self.process and self.process.poll() is None:
             _log.warning(f"[Launcher] Plugin service {self.plugin_id} already running (PID: {self.process.pid})")
             return False
@@ -1445,27 +1461,43 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     if os.path.normcase(target_python) != os.path.normcase(sys.executable):
         _log.info(f"[Launcher] {label_prefix}Installing to plugin Python: {target_python}")
 
-    # Check if pip is available; if not, bootstrap it
+    # Check if pip is available; if not, bootstrap it.
+    # Use _build_child_process_env() (same as PluginServiceProcess.start())
+    # to sanitize PYTHONHOME/PYTHONPATH — without this the launcher's
+    # frozen-bundle env can leak into the Agent Python embed and cause
+    # pip detection to fail even though pip is installed.
+    clean_env = _build_child_process_env()
     pip_available = False
     try:
         r = subprocess.run(
             [target_python, "-m", "pip", "--version"],
             capture_output=True,
             check=False,
-            timeout=10,
+            timeout=15,
+            env=clean_env,
         )
         pip_available = r.returncode == 0
-    except Exception:
+        if not pip_available:
+            stderr = r.stderr.decode(errors="replace")[:200] if r.stderr else ""
+            _log.info(f"[Launcher] {label_prefix}pip --version exit={r.returncode}, stderr={stderr!r}")
+    except subprocess.TimeoutExpired:
+        _log.warning(f"[Launcher] {label_prefix}pip --version timed out (15s)")
+        pip_available = False
+    except Exception as e:
+        _log.warning(f"[Launcher] {label_prefix}pip --version exception: {e}")
         pip_available = False
 
     if not pip_available:
         _log.info(f"[Launcher] {label_prefix}pip not found, bootstrapping via ensurepip...")
         try:
+            # ensurepip on embed Python (no ensurepip module) hangs — use
+            # short timeout so we fail fast and fall back to get-pip.py.
             r = subprocess.run(
                 [target_python, "-m", "ensurepip", "--default-pip"],
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=15,
+                env=clean_env,
             )
             if r.returncode != 0:
                 _log.info(
@@ -1485,9 +1517,11 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
                         capture_output=True,
                         check=False,
                         timeout=120,
+                        env=clean_env,
                     )
                     if r2.returncode != 0:
-                        _log.info(f"[Launcher] {label_prefix}get-pip.py also failed (exit {r2.returncode})")
+                        stderr2 = r2.stderr.decode(errors="replace")[:200] if r2.stderr else ""
+                        _log.info(f"[Launcher] {label_prefix}get-pip.py also failed (exit {r2.returncode}): {stderr2}")
                         return False
                 finally:
                     with contextlib.suppress(OSError):
@@ -1497,12 +1531,45 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
                 [target_python, "-m", "pip", "--version"],
                 capture_output=True,
                 check=False,
-                timeout=10,
+                timeout=15,
+                env=clean_env,
             )
             if r3.returncode != 0:
                 _log.info(f"[Launcher] {label_prefix}pip still not available after bootstrapping")
                 return False
             _log.info(f"[Launcher] {label_prefix}pip bootstrapped successfully")
+        except subprocess.TimeoutExpired:
+            _log.warning(
+                f"[Launcher] {label_prefix}ensurepip timed out (15s) — embed Python likely has no ensurepip module"
+            )
+            # Last resort: try get-pip.py directly
+            try:
+                import tempfile
+                import urllib.request
+
+                get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
+                with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as tmp:
+                    tmp_path = tmp.name
+                try:
+                    urllib.request.urlretrieve(get_pip_url, tmp_path)
+                    r2 = subprocess.run(
+                        [target_python, tmp_path],
+                        capture_output=True,
+                        check=False,
+                        timeout=120,
+                        env=clean_env,
+                    )
+                    if r2.returncode != 0:
+                        _log.info(
+                            f"[Launcher] {label_prefix}get-pip.py failed after ensurepip timeout (exit {r2.returncode})"
+                        )
+                        return False
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+            except Exception as e2:
+                _log.info(f"[Launcher] {label_prefix}get-pip.py fallback also failed: {e2}")
+                return False
         except Exception as e:
             _log.info(f"[Launcher] {label_prefix}Failed to bootstrap pip: {e}")
             return False
@@ -1513,6 +1580,7 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
             capture_output=True,
             check=False,
             timeout=300,
+            env=clean_env,
         )
         if r.returncode != 0:
             stderr = r.stderr.decode(errors="replace").strip() if r.stderr else ""
@@ -1533,6 +1601,12 @@ def _plugin_python_has_module(import_name: str) -> bool:
     would always succeed and hide the fact that the Agent Python runtime is
     missing them, leading to ``ModuleNotFoundError`` when the service actually
     starts.
+
+    Uses ``_build_child_process_env()`` for the subprocess env (same as
+    ``PluginServiceProcess.start()``) to ensure PYTHONHOME/PYTHONPATH are
+    sanitized — without this the launcher's frozen-bundle env can leak into
+    the Agent Python embed and cause false negatives (module appears missing
+    even though it's installed in site-packages).
     """
     target_python = _plugin_python_executable()
     try:
@@ -1540,10 +1614,21 @@ def _plugin_python_has_module(import_name: str) -> bool:
             [target_python, "-c", f"import {import_name}"],
             capture_output=True,
             check=False,
-            timeout=10,
+            timeout=15,
+            env=_build_child_process_env(),
         )
+        if r.returncode != 0:
+            stderr = r.stderr.decode(errors="replace")[:200] if r.stderr else ""
+            _log.debug(
+                f"[Launcher] _plugin_python_has_module('{import_name}') -> False "
+                f"(exit={r.returncode}, stderr={stderr!r})"
+            )
         return r.returncode == 0
-    except Exception:
+    except subprocess.TimeoutExpired:
+        _log.warning(f"[Launcher] _plugin_python_has_module('{import_name}') -> timeout (15s)")
+        return False
+    except Exception as e:
+        _log.warning(f"[Launcher] _plugin_python_has_module('{import_name}') -> exception: {e}")
         return False
 
 
