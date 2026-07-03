@@ -536,6 +536,10 @@ async def _initialize_mcp_background(
                 agent_tool_names=runner._agent_tool_names,
                 agent_tool_levels=runner._agent_tool_levels,
             )
+        # Log final tool inventory after MCP + plugin hot-reload completes.
+        # This is the definitive list — if a namespace is missing here, the
+        # agent will not see that tool at runtime.
+        registry.log_inventory(agent_logger)
     except Exception as exc:
         agent_logger.warning(f"[Boot] MCP background init failed: {exc}")
 

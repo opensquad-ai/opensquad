@@ -77,6 +77,14 @@ jobs:
         if: runner.os == 'Windows'
         run: python scripts/check_frozen_writable_paths.py
 
+      - name: Static check frozen native extensions
+        if: runner.os == 'Windows'
+        run: python scripts/check_frozen_native_exts.py
+        # Catches the class of bug where PyInstaller collect_submodules was
+        # used instead of collect_all for packages with C extensions (.pyd),
+        # resulting in empty __init__.py placeholders and AttributeError at
+        # runtime (e.g. httptools.HttpRequestParser).
+
       - name: Frozen smoke tests (Windows backend gate)
         if: runner.os == 'Windows'
         run: python scripts/smoke_frozen_all.py

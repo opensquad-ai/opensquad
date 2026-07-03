@@ -389,6 +389,9 @@ class AgentBootPhases:
         else:
             skills = []
         init_skill_runtime(skills, tool_registry)
+        # Log tool inventory after plugin+skill registration so smoke tests
+        # and crash logs can verify no namespace was silently lost.
+        tool_registry.log_inventory(agent_logger)
         perf_event(
             "boot",
             "skills_ready",
@@ -574,7 +577,19 @@ class AgentBootPhases:
                 global_disabled_servers=global_disabled,
             )
             registry.register_mcp_adapter(mcp_adapter, level="extended")
+        except ImportError as exc:
+            # ImportError here means the MCP SDK itself is missing from the
+            # runtime (e.g. frozen bundle didn't bundle `mcp` package). This
+            # is a BUILD BUG, not a runtime issue — escalate to error so it
+            # is visible in crash logs instead of silently disabling MCP tools.
+            logging.error(
+                f"[Boot] MCP SDK import failed: {exc}. "
+                f"This is a build/packaging bug — MCP tools will be unavailable. "
+                f"In frozen builds, check PyInstaller spec includes the `mcp` package."
+            )
         except (Exception, asyncio.CancelledError) as exc:
+            # Runtime errors (MCP server connection failures, config issues,
+            # etc.) are non-fatal — MCP tools are optional.
             logging.warning(f"[Boot] MCP adapter not available: {exc}")
 
     async def _setup_web_server(self, config: dict[str, Any], logger: Any) -> None:

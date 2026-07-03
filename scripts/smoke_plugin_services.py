@@ -228,45 +228,60 @@ def main():
         # run.exe) instead of the Agent Python, so ModuleNotFoundError crashed
         # the service on import. Discovery (checks 1-6) passed but the service
         # was unstartable.
+        #
+        # CI compatibility: On a fresh GitHub runner there is no Agent Python
+        # embed (LOCALAPPDATA/OpenSquad/runtime/python311/python.exe). The
+        # launcher falls back to a system Python, where _install_builtin_plugin_deps
+        # may be slow (subprocess-per-dep check + pip install). If the embed is
+        # absent, downgrade check7 to SKIP — it tests a scenario that only
+        # applies to real desktop installs.
+        has_agent_python = os.path.isfile(
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "OpenSquad", "runtime", "python311", "python.exe")
+        ) or bool(os.environ.get("OPENSQUAD_AGENT_RUNTIME") or os.environ.get("OPENSQUAD_PYTHON"))
+
         print("\n[smoke] Check 7: POST /api/plugin-services/websearch/start (actually start it)")
-        # Use a long timeout: the start endpoint waits for the background
-        # _install_builtin_plugin_deps thread to finish (up to 300s on a cold
-        # cache — pip bootstrap via get-pip.py + ~13 deps), then does a
-        # per-service dep check, then spawns the service. 360s gives margin.
-        status, r = api(9600, "/api/plugin-services/websearch/start", method="POST", timeout=360)
-        if status not in (200, 409):
-            failures.append(f"check7: start returned HTTP {status}: {r}")
-            print(f"  FAIL: HTTP {status} {r}")
+        if not has_agent_python:
+            print("  SKIP: Agent Python embed not found (CI runner without desktop install).")
+            print("        check7 tests 'deps installed to wrong Python' — only meaningful with a real Agent Python.")
         else:
-            print(f"  OK: start returned HTTP {status} (200=started, 409=already running)")
-            # Poll health endpoint on the service port (websearch default = 9001)
-            svc_port = 9001
-            healthy = False
-            # First launch needs to bootstrap pip in the Agent Python embed via
-            # get-pip.py (no ensurepip in embed builds), then install ~13 deps.
-            # That can take 2-3 min on a cold cache. 120s + status prints.
-            for i in range(120):
-                status_h, r_h = api(svc_port, "/health")
-                if status_h == 200:
-                    healthy = True
-                    break
-                if i % 10 == 0 and i > 0:
-                    print(f"  ...waiting for service health ({i}s elapsed)")
-                time.sleep(1)
-            if healthy:
-                print(f"  OK: websearch service healthy on port {svc_port} after {i + 1}s")
+            # Use a long timeout: the start endpoint waits for the background
+            # _install_builtin_plugin_deps thread to finish (up to 300s on a cold
+            # cache — pip bootstrap via get-pip.py + ~13 deps), then does a
+            # per-service dep check, then spawns the service. 360s gives margin.
+            status, r = api(9600, "/api/plugin-services/websearch/start", method="POST", timeout=360)
+            if status not in (200, 409):
+                failures.append(f"check7: start returned HTTP {status}: {r}")
+                print(f"  FAIL: HTTP {status} {r}")
             else:
-                failures.append(
-                    "check7: websearch service did not become healthy within 120s "
-                    "(likely pip bootstrap in Agent Python embed still in progress, "
-                    "or ModuleNotFoundError — deps installed to wrong Python)"
-                )
-                print(f"  FAIL: websearch not healthy on port {svc_port} within 120s")
-                print("        Possible causes:")
-                print("        1. Agent Python embed has no pip — get-pip.py bootstrap slow/failed")
-                print("        2. Deps installed to wrong Python (frozen run.exe instead of Agent Python)")
-            # Stop the service so the smoke test doesn't leave it running
-            api(9600, "/api/plugin-services/websearch/stop", method="POST")
+                print(f"  OK: start returned HTTP {status} (200=started, 409=already running)")
+                # Poll health endpoint on the service port (websearch default = 9001)
+                svc_port = 9001
+                healthy = False
+                # First launch needs to bootstrap pip in the Agent Python embed via
+                # get-pip.py (no ensurepip in embed builds), then install ~13 deps.
+                # That can take 2-3 min on a cold cache. 120s + status prints.
+                for i in range(120):
+                    status_h, r_h = api(svc_port, "/health")
+                    if status_h == 200:
+                        healthy = True
+                        break
+                    if i % 10 == 0 and i > 0:
+                        print(f"  ...waiting for service health ({i}s elapsed)")
+                    time.sleep(1)
+                if healthy:
+                    print(f"  OK: websearch service healthy on port {svc_port} after {i + 1}s")
+                else:
+                    failures.append(
+                        "check7: websearch service did not become healthy within 120s "
+                        "(likely pip bootstrap in Agent Python embed still in progress, "
+                        "or ModuleNotFoundError — deps installed to wrong Python)"
+                    )
+                    print(f"  FAIL: websearch not healthy on port {svc_port} within 120s")
+                    print("        Possible causes:")
+                    print("        1. Agent Python embed has no pip — get-pip.py bootstrap slow/failed")
+                    print("        2. Deps installed to wrong Python (frozen run.exe instead of Agent Python)")
+                # Stop the service so the smoke test doesn't leave it running
+                api(9600, "/api/plugin-services/websearch/stop", method="POST")
 
         # ── Summary ──
         print("\n" + "=" * 70)

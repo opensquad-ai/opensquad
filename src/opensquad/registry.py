@@ -53,6 +53,26 @@ class ToolRegistry:
         self._openai_tools_cache.clear()
         logger.info(f"MCP adapter registered as [{level}].")
 
+    def log_inventory(self, boot_logger=None) -> list[str]:
+        """Log the full set of registered tool namespaces.
+
+        Called at boot completion so smoke tests / crash logs can verify the
+        tool set is complete. A missing namespace here means a plugin failed
+        to register silently — the class of bug where one plugin's exception
+        cascaded and hid subsequent plugins' tools.
+
+        Returns the namespace list (for assertions in smoke tests).
+        """
+        with self._lock:
+            namespaces = sorted(self._tools.keys())
+            mcp_attached = self._mcp_adapter is not None
+        line = f"[Boot] ToolRegistry inventory: {namespaces} (mcp_adapter={'yes' if mcp_attached else 'no'})"
+        if boot_logger is not None:
+            boot_logger.info(line)
+        else:
+            logger.info(line)
+        return namespaces
+
     def get_tool_help(self, namespace: str) -> str:
         """Get detailed documentation for a specific tool set"""
         with self._lock:

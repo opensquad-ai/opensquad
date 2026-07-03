@@ -92,6 +92,11 @@ def main():
         print(f"[smoke] {i * 2}s: alive={alive} pid={pid} port={port} restarts={restart_count}")
         if alive:
             print(f"PASS: coder agent is alive on port {port}")
+            # Check tool inventory — this is the regression test for the class
+            # of bugs where one plugin's exception cascaded and hid subsequent
+            # plugins' tools (e.g. sequential_think PydanticUserError →
+            # websearch/whisper/telegram all lost).
+            _check_tool_inventory(9600, "coder")
             _cleanup(procs)
             sys.exit(0)
         if restart_count and restart_count >= 3:
@@ -105,6 +110,73 @@ def main():
     _check_workspace_agent_dir(APP_DATA, "coder")
     _cleanup(procs)
     sys.exit(1)
+
+
+def _check_tool_inventory(launcher_port: int, agent_name: str) -> None:
+    """Verify the agent's ToolRegistry has the expected namespaces.
+
+    Reads the agent's log file directly and looks for the
+    `[Boot] ToolRegistry inventory:` line printed by registry.log_inventory().
+    If a critical namespace is missing, it means a plugin failed to register
+    silently — the class of bug where one plugin's exception cascaded and
+    hid subsequent plugins' tools.
+
+    Note: the agent becomes "alive" (health-check OK) BEFORE boot completes
+    (plugin registration + log_inventory happens at boot end, ~7s in).
+    Poll up to 20s for the inventory line to appear in the log file.
+    """
+    # Read the agent.log file directly — the launcher's get_logs() API returns
+    # an in-memory stdout buffer that may not capture Python logging output
+    # reliably (buffer size limits, timing). The file is the source of truth.
+    log_path = os.path.join(APP_DATA, "agents", agent_name, "data", "logs", "agent.log")
+    inventory_lines: list[str] = []
+    for wait_s in range(0, 20, 2):
+        time.sleep(2)
+        if not os.path.isfile(log_path):
+            continue
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                # Read only the tail to avoid loading huge log files
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 64000))
+                tail = f.read()
+            lines = tail.splitlines()
+        except OSError:
+            continue
+        inventory_lines = [l for l in lines if "ToolRegistry inventory" in l]
+        if inventory_lines:
+            print(f"[smoke] ToolRegistry inventory found after {wait_s + 2}s")
+            break
+    if not inventory_lines:
+        print(f"WARN: No ToolRegistry inventory line found in {log_path} after 20s")
+        print("      (agent may still be initializing — not a failure)")
+        return
+    # Parse the last inventory line (MCP reload prints a second one)
+    last = inventory_lines[-1]
+    # Format: "[Boot] ToolRegistry inventory: ['ns1', 'ns2', ...] (mcp_adapter=yes/no)"
+    import ast as _ast
+
+    try:
+        bracket_start = last.index("[", last.index("inventory:") + len("inventory:"))
+        bracket_end = last.index("]", bracket_start) + 1
+        namespaces = _ast.literal_eval(last[bracket_start:bracket_end])
+    except Exception:
+        print(f"WARN: Could not parse inventory line: {last}")
+        return
+    print(f"[smoke] ToolRegistry namespaces ({len(namespaces)}): {namespaces}")
+    # Critical namespaces — if any is missing, a plugin failed to register.
+    # websearch/whisper are proxy-pattern plugins; their absence means the
+    # register_tools_to_agent loop was interrupted by an earlier plugin error.
+    critical = ["websearch"]
+    missing = [ns for ns in critical if ns not in namespaces]
+    if missing:
+        print(f"FAIL: Critical tool namespaces missing: {missing}")
+        print(f"      Full inventory: {namespaces}")
+        print("      This indicates a plugin registration cascade failure.")
+        sys.exit(1)
+    else:
+        print(f"OK: All critical namespaces present ({critical})")
 
 
 def _dump_workspace_crash_log(app_data: str, name: str) -> None:
@@ -168,8 +240,10 @@ def _check_workspace_agent_dir(app_data: str, name: str) -> None:
 def _dump_agent_logs(port: int, name: str) -> None:
     logs = api(port, f"/api/agents/{name}/logs?lines=40")
     if isinstance(logs, dict) and logs.get("logs"):
+        raw = logs["logs"]
+        lines = raw.splitlines() if isinstance(raw, str) else raw
         print(f"[smoke] Last logs for {name}:")
-        for line in logs["logs"][-20:]:
+        for line in lines[-20:]:
             print(f"  {line.rstrip()}")
 
 

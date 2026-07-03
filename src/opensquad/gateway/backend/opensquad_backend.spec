@@ -255,7 +255,6 @@ hiddenimports += [
     "mcp.shared.message",
     "mcp.shared.session",
     "mcp.shared.version",
-    "mcp.util",
 ]
 for _mcp_dep_pkg in (
     "httpx_sse",
@@ -269,7 +268,9 @@ for _mcp_dep_pkg in (
     "sniffio",
 ):
     hiddenimports += collect_submodules(_mcp_dep_pkg)
-hiddenimports += ["pyjwt", "jwt"]
+# PyJWT's import name is `jwt` (not `pyjwt`). Listing both is harmless but
+# `pyjwt` triggers PyInstaller ERROR "Hidden import not found".
+hiddenimports += ["jwt"]
 
 # ── Builtin resource packages: plugins, skills ───────────────────────────────
 # These live at src/ top-level (NOT inside the opensquad package), so
