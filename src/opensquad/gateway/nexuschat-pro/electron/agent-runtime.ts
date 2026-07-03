@@ -162,14 +162,15 @@ function configureEmbedPython(installDir: string, log: (line: string) => void): 
 async function probeSystemPython(): Promise<string[]> {
   const found: string[] = []
   // Probe order: py launcher (Windows preferred) → direct commands.
-  // Accept 3.11/3.10/3.12 (skip 3.13+ due to PyInstaller python311.dll clashes).
+  // IMPORTANT: Only accept Python 3.11. The PyInstaller bundle is compiled
+  // with 3.11, and _internal/ contains 3.11-compiled .pyd files. If a venv
+  // created from 3.10 or 3.12 falls back to importing from _internal/ (e.g.
+  // when a pip-installed dep is missing), it loads python311.dll and crashes
+  // with "Module use of python311.dll conflicts with this version of Python".
+  // 3.13+ is also incompatible (different ABI). Only 3.11 is safe.
   const probes: Array<{ cmd: string; args: string[] }> = [
     { cmd: 'py', args: ['-3.11', '-c', 'import sys; print(sys.executable)'] },
-    { cmd: 'py', args: ['-3.10', '-c', 'import sys; print(sys.executable)'] },
-    { cmd: 'py', args: ['-3.12', '-c', 'import sys; print(sys.executable)'] },
     { cmd: 'python3.11', args: ['-c', 'import sys; print(sys.executable)'] },
-    { cmd: 'python3.12', args: ['-c', 'import sys; print(sys.executable)'] },
-    { cmd: 'python3.10', args: ['-c', 'import sys; print(sys.executable)'] },
   ]
 
   for (const { cmd, args } of probes) {
@@ -192,8 +193,8 @@ async function probeSystemPython(): Promise<string[]> {
         })
       })
       if (result.ok && result.output && fs.existsSync(result.output)) {
-        // Verify version is actually 3.10-3.12 (skip 3.13+).
-        const versionOk = await verifyPythonVersion(result.output, [3, 10], [3, 12])
+        // Verify version is exactly 3.11 (the PyInstaller bundle version).
+        const versionOk = await verifyPythonVersion(result.output, [3, 11], [3, 11])
         if (versionOk && !found.includes(result.output)) {
           found.push(result.output)
         }

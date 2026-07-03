@@ -55,11 +55,14 @@ def _resolve_packaged_python_executable() -> str | None:
         if os.path.isfile(override):
             return override
 
-    # Prefer 3.11/3.10/3.12 via py launcher — avoid 3.13+ DLL clashes with PyInstaller (python311.dll).
+    # Prefer 3.11 via py launcher — the PyInstaller bundle is 3.11-compiled,
+    # so only 3.11 is safe. 3.10/3.12/3.13+ will crash with
+    # "Module use of python311.dll conflicts with this version of Python"
+    # if they fall back to importing _internal/ loose copies.
     if sys.platform == "win32":
         py_launcher = shutil.which("py")
         if py_launcher:
-            for ver in ("3.11", "3.10", "3.12"):
+            for ver in ("3.11",):
                 try:
                     proc = subprocess.run(
                         [py_launcher, f"-{ver}", "-c", "import sys; print(sys.executable)"],
@@ -75,7 +78,7 @@ def _resolve_packaged_python_executable() -> str | None:
                     if exe and os.path.isfile(exe):
                         return exe
 
-    for name in ("python3.11", "python311", "python3.10", "python310", "python3.12", "python3", "python"):
+    for name in ("python3.11", "python311"):
         found = shutil.which(name)
         if found:
             return found
