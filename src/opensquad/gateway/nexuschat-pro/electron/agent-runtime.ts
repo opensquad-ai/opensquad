@@ -149,6 +149,124 @@ function configureEmbedPython(installDir: string, log: (line: string) => void): 
   }
 }
 
+// ── System Python probing (venv mode) ────────────────────────────────────────
+// Instead of always downloading the 12MB embed zip, probe for a system
+// Python 3.11+ and create a venv from it. venv has three big advantages over
+// embed:
+//   1. venv ships with pip (via ensurepip) — no get-pip.py fallback hell
+//   2. venv has a working site.py — no _pth configuration needed
+//   3. venv's python.exe is a real interpreter, not a stripped embed
+// The trade-off: venv depends on the system Python install (uninstalling
+// it breaks the venv). We accept this for the much better dep-install UX.
+
+async function probeSystemPython(): Promise<string[]> {
+  const found: string[] = []
+  // Probe order: py launcher (Windows preferred) → direct commands.
+  // Accept 3.11/3.10/3.12 (skip 3.13+ due to PyInstaller python311.dll clashes).
+  const probes: Array<{ cmd: string; args: string[] }> = [
+    { cmd: 'py', args: ['-3.11', '-c', 'import sys; print(sys.executable)'] },
+    { cmd: 'py', args: ['-3.10', '-c', 'import sys; print(sys.executable)'] },
+    { cmd: 'py', args: ['-3.12', '-c', 'import sys; print(sys.executable)'] },
+    { cmd: 'python3.11', args: ['-c', 'import sys; print(sys.executable)'] },
+    { cmd: 'python3.12', args: ['-c', 'import sys; print(sys.executable)'] },
+    { cmd: 'python3.10', args: ['-c', 'import sys; print(sys.executable)'] },
+  ]
+
+  for (const { cmd, args } of probes) {
+    try {
+      const result = await new Promise<{ ok: boolean; output: string }>((resolve) => {
+        const proc = spawn(cmd, args, { windowsHide: true })
+        let out = ''
+        const timer = setTimeout(() => {
+          proc.kill()
+          resolve({ ok: false, output: '' })
+        }, 8000)
+        proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
+        proc.on('error', () => {
+          clearTimeout(timer)
+          resolve({ ok: false, output: '' })
+        })
+        proc.on('exit', (code) => {
+          clearTimeout(timer)
+          resolve({ ok: code === 0, output: out.trim() })
+        })
+      })
+      if (result.ok && result.output && fs.existsSync(result.output)) {
+        // Verify version is actually 3.10-3.12 (skip 3.13+).
+        const versionOk = await verifyPythonVersion(result.output, [3, 10], [3, 12])
+        if (versionOk && !found.includes(result.output)) {
+          found.push(result.output)
+        }
+      }
+    } catch {
+      /* ignore — try next probe */
+    }
+  }
+  return found
+}
+
+async function verifyPythonVersion(
+  exe: string,
+  minVersion: [number, number],
+  maxVersion: [number, number],
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const proc = spawn(
+      exe,
+      ['-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'],
+      { windowsHide: true },
+    )
+    let out = ''
+    proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
+    proc.on('error', () => resolve(false))
+    proc.on('exit', (code) => {
+      if (code !== 0) {
+        resolve(false)
+        return
+      }
+      const parts = out.trim().split('.').map((n) => parseInt(n, 10))
+      if (parts.length < 2 || parts.some(isNaN)) {
+        resolve(false)
+        return
+      }
+      const [major, minor] = parts
+      const minOk = major > minVersion[0] || (major === minVersion[0] && minor >= minVersion[1])
+      const maxOk = major < maxVersion[0] || (major === maxVersion[0] && minor <= maxVersion[1])
+      resolve(minOk && maxOk)
+    })
+  })
+}
+
+async function createVenvFromSystemPython(
+  systemPython: string,
+  installDir: string,
+  log: (line: string) => void,
+): Promise<void> {
+  log(`Creating venv from ${systemPython}...`)
+  // `--clear` ensures a fresh venv even if the dir has stale files from a
+  // previous embed install (e.g. user uninstalled embed-mode then reinstalled
+  // in venv-mode). Without --clear, venv creation can fail on existing dir.
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(systemPython, ['-m', 'venv', '--clear', installDir], {
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+    proc.on('error', reject)
+    proc.on('exit', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`venv creation exited with code ${code}`))
+    })
+  })
+  log(`venv created at ${installDir}`)
+}
+
+// venv's python.exe lives under Scripts/ on Windows, not at the install root.
+function venvPythonExe(installDir: string): string {
+  return process.platform === 'win32'
+    ? path.join(installDir, 'Scripts', 'python.exe')
+    : path.join(installDir, 'bin', 'python')
+}
+
 async function verifyPython(exe: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(exe, ['-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")'], {
@@ -166,6 +284,7 @@ async function verifyPython(exe: string): Promise<string> {
 
 export type SetupStepId =
   | 'prepare'
+  | 'detect-python'
   | 'download'
   | 'extract'
   | 'configure'
@@ -183,7 +302,16 @@ export interface SetupContext {
   log: (line: string) => void
   onStepProgress: (stepId: SetupStepId, pct: number) => void
   cancelled: () => boolean
-  state: { zipPath?: string }
+  state: {
+    zipPath?: string
+    // venv-mode state (set by 'detect-python' step).
+    // When useVenv=true, download/extract are skipped and configure
+    // creates a venv from systemPython instead of writing a _pth file.
+    // Optional here — installAgentRuntime() defaults it to false so
+    // callers can pass `{}` without TypeScript complaining.
+    systemPython?: string
+    useVenv?: boolean
+  }
 }
 
 export const SETUP_STEPS: SetupStep[] = [
@@ -197,9 +325,33 @@ export const SETUP_STEPS: SetupStep[] = [
     },
   },
   {
+    id: 'detect-python',
+    title: '探测系统 Python',
+    async run({ log, state }) {
+      // Probe for a system Python 3.10-3.12 before falling back to the
+      // 12MB embed download. venv-mode skips download/extract entirely
+      // and creates a venv (which ships with pip via ensurepip, no
+      // get-pip.py fallback hell, no _pth configuration needed).
+      const candidates = await probeSystemPython()
+      if (candidates.length > 0) {
+        state.systemPython = candidates[0]
+        state.useVenv = true
+        log(`Found system Python: ${candidates[0]}`)
+        log('Will create venv (skips 12MB embed download).')
+      } else {
+        state.useVenv = false
+        log('No system Python 3.10-3.12 found, will download embed.')
+      }
+    },
+  },
+  {
     id: 'download',
     title: `下载 Python ${PYTHON_VERSION}（Agent 专用）`,
     async run({ log, onStepProgress, cancelled, state }) {
+      if (state.useVenv) {
+        log('Skipped — using venv from system Python.')
+        return
+      }
       const zipPath = path.join(os.tmpdir(), `opensquad-python-${PYTHON_VERSION}-embed-amd64.zip`)
       log(`Downloading from ${PYTHON_EMBED_URL}`)
       await downloadFile(PYTHON_EMBED_URL, zipPath, (pct) => {
@@ -214,6 +366,10 @@ export const SETUP_STEPS: SetupStep[] = [
     id: 'extract',
     title: '解压 Python 运行时',
     async run({ log, cancelled, state }) {
+      if (state.useVenv) {
+        log('Skipped — using venv from system Python.')
+        return
+      }
       if (cancelled()) throw new Error('Cancelled')
       const zipPath = state.zipPath
       if (!zipPath) throw new Error('Missing downloaded zip')
@@ -226,15 +382,26 @@ export const SETUP_STEPS: SetupStep[] = [
   {
     id: 'configure',
     title: '配置 Python 环境',
-    async run({ log }) {
-      configureEmbedPython(runtimeInstallDir(), log)
+    async run({ log, state }) {
+      if (state.useVenv && state.systemPython) {
+        // venv mode: create a venv from the system Python. venv ships
+        // with pip (via ensurepip) and has a working site.py, so no
+        // _pth configuration is needed.
+        await createVenvFromSystemPython(state.systemPython, runtimeInstallDir(), log)
+      } else {
+        // embed mode: enable `import site` + Lib\site-packages in _pth
+        // so that pip-installed packages are importable.
+        configureEmbedPython(runtimeInstallDir(), log)
+      }
     },
   },
   {
     id: 'verify',
     title: '验证 Agent Python',
-    async run({ log }) {
-      const exe = runtimePythonExe()
+    async run({ log, state }) {
+      const exe = state.useVenv
+        ? venvPythonExe(runtimeInstallDir())
+        : runtimePythonExe()
       if (!fs.existsSync(exe)) throw new Error(`python.exe not found at ${exe}`)
       const version = await verifyPython(exe)
       log(`Verified Python ${version} at ${exe}`)
@@ -243,10 +410,14 @@ export const SETUP_STEPS: SetupStep[] = [
   {
     id: 'manifest',
     title: '写入运行时配置',
-    async run({ log }) {
-      const manifest = writeManifest(runtimePythonExe())
+    async run({ log, state }) {
+      const exe = state.useVenv
+        ? venvPythonExe(runtimeInstallDir())
+        : runtimePythonExe()
+      const manifest = writeManifest(exe)
       log(`Manifest: ${manifestFilePath()}`)
       log(`Agent Python: ${manifest.python}`)
+      log(`Mode: ${state.useVenv ? 'venv (from system Python)' : 'embed'}`)
     },
   },
   {
@@ -259,7 +430,10 @@ export const SETUP_STEPS: SetupStep[] = [
 ]
 
 export async function installAgentRuntime(ctx: SetupContext): Promise<void> {
-  if (!ctx.state) ctx.state = {}
+  if (!ctx.state) ctx.state = { useVenv: false }
+  // Default useVenv to false so the 'detect-python' step always runs the
+  // probe (state mutates in-place across steps).
+  if (ctx.state.useVenv === undefined) ctx.state.useVenv = false
   for (const step of SETUP_STEPS) {
     if (ctx.cancelled()) throw new Error('Cancelled')
     ctx.onStepProgress(step.id, 0)
@@ -271,6 +445,11 @@ export async function installAgentRuntime(ctx: SetupContext): Promise<void> {
 export function agentPythonForBackendEnv(): string | undefined {
   const manifest = readAgentRuntimeManifest()
   if (manifest?.python && fs.existsSync(manifest.python)) return manifest.python
-  const fallback = runtimePythonExe()
-  return fs.existsSync(fallback) ? fallback : undefined
+  // Fallbacks: try embed path first, then venv path.
+  // (Old installs may have either layout; manifest is the source of truth
+  // but we cover the case where it's missing/corrupt.)
+  const embedPath = runtimePythonExe()
+  if (fs.existsSync(embedPath)) return embedPath
+  const venvPath = venvPythonExe(runtimeInstallDir())
+  return fs.existsSync(venvPath) ? venvPath : undefined
 }

@@ -10,14 +10,28 @@ MANIFEST_FILENAME = "agent-runtime.json"
 
 
 def _default_runtime_python() -> str | None:
-    """Well-known install location written by the desktop setup wizard."""
+    """Well-known install location written by the desktop setup wizard.
+
+    The wizard may install Python in two layouts:
+      - embed mode (legacy): <runtime>/python311/python.exe
+      - venv mode (new):     <runtime>/python311/Scripts/python.exe
+    Check both. The manifest (read_manifest) is the primary source of
+    truth; this function is the last-resort fallback when the manifest
+    is missing or corrupt.
+    """
     if sys.platform != "win32":
         return None
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         return None
-    candidate = os.path.join(local, "OpenSquad", "runtime", "python311", "python.exe")
-    return candidate if os.path.isfile(candidate) else None
+    runtime_dir = os.path.join(local, "OpenSquad", "runtime", "python311")
+    # venv mode (newer installs): python.exe lives under Scripts/
+    venv_exe = os.path.join(runtime_dir, "Scripts", "python.exe")
+    if os.path.isfile(venv_exe):
+        return venv_exe
+    # embed mode (legacy installs): python.exe at the runtime root
+    embed_exe = os.path.join(runtime_dir, "python.exe")
+    return embed_exe if os.path.isfile(embed_exe) else None
 
 
 def manifest_path() -> str | None:

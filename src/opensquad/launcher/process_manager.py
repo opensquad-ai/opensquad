@@ -1440,6 +1440,18 @@ def _resolve_discovery_port(info: dict) -> int:
     return service_cfg.get("default_port", 0)
 
 
+def _resolve_uv_executable() -> str | None:
+    """Detect the ``uv`` binary on PATH.
+
+    ``uv`` is a Rust-based pip replacement that is 10-100x faster and,
+    crucially, does NOT require pip to be bootstrapped in the target
+    Python — ``uv pip install --python <target>`` writes directly into
+    the target's site-packages. This sidesteps the entire ensurepip /
+    get-pip.py fallback chain that embed Python forces us into.
+    """
+    return shutil.which("uv")
+
+
 def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     """Install pip packages, bootstrapping pip itself if needed. Returns True on success.
 
@@ -1461,12 +1473,45 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     if os.path.normcase(target_python) != os.path.normcase(sys.executable):
         _log.info(f"[Launcher] {label_prefix}Installing to plugin Python: {target_python}")
 
+    # Build the clean env once — used by both uv and pip paths below.
+    # Sanitizes PYTHONHOME/PYTHONPATH so the launcher's frozen-bundle env
+    # does not leak into the Agent Python embed.
+    clean_env = _build_child_process_env()
+
+    # ── Prefer uv when available ──────────────────────────────────────────
+    # uv doesn't need pip to be bootstrapped in the target Python, so it
+    # skips the entire ensurepip / get-pip.py fallback chain (the source
+    # of beta.2's "circuit breaker permanently open" bug on embed Python).
+    # If uv fails for any reason, fall through to the pip path below.
+    uv_exe = _resolve_uv_executable()
+    if uv_exe:
+        _log.info(f"[Launcher] {label_prefix}Using uv to install {len(packages)} package(s) into {target_python}")
+        try:
+            r = subprocess.run(
+                [uv_exe, "pip", "install", "--python", target_python, *packages],
+                capture_output=True,
+                check=False,
+                timeout=180,
+                env=clean_env,
+            )
+            if r.returncode == 0:
+                _log.info(f"[Launcher] {label_prefix}uv install succeeded")
+                return True
+            stderr = r.stderr.decode(errors="replace").strip() if r.stderr else ""
+            _log.warning(
+                f"[Launcher] {label_prefix}uv pip install failed (exit {r.returncode}): {stderr} — falling back to pip"
+            )
+        except subprocess.TimeoutExpired:
+            _log.warning(f"[Launcher] {label_prefix}uv pip install timed out (180s) — falling back to pip")
+        except Exception as e:
+            _log.warning(f"[Launcher] {label_prefix}uv pip install exception: {e} — falling back to pip")
+        # Fall through to pip path
+
     # Check if pip is available; if not, bootstrap it.
     # Use _build_child_process_env() (same as PluginServiceProcess.start())
     # to sanitize PYTHONHOME/PYTHONPATH — without this the launcher's
     # frozen-bundle env can leak into the Agent Python embed and cause
     # pip detection to fail even though pip is installed.
-    clean_env = _build_child_process_env()
     pip_available = False
     try:
         r = subprocess.run(

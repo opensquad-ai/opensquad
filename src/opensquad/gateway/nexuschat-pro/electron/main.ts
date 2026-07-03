@@ -7,6 +7,7 @@ import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
 import { resolveDesktopWorkspace } from './desktop-workspace'
 import { runDesktopUpdate, type UpdateStatus } from './desktop-updater'
+import { checkForUpdates, type UpdateChannel } from './update-checker'
 import { agentPythonForBackendEnv, isAgentRuntimeReady } from './agent-runtime'
 import { runSetupWizard } from './setup-window'
 
@@ -113,6 +114,61 @@ function registerElectronIpc(): void {
       }
     },
   )
+
+  // Manual update check (frontend "Check for updates" button).
+  // Returns UpdateInfo; the frontend decides whether to prompt the user
+  // and, if they accept, calls 'electron:download-and-install-update'
+  // with the returned downloadUrl + fileName.
+  ipcMain.handle(
+    'electron:check-for-updates',
+    async (_event, channel: UpdateChannel = 'stable') => {
+      try {
+        return await checkForUpdates(channel)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return {
+          hasUpdate: false,
+          currentVersion: app.getVersion(),
+          latestVersion: app.getVersion(),
+          isBeta: false,
+          error: message,
+        }
+      }
+    },
+  )
+}
+
+// ── Auto update checker ──────────────────────────────────────────────────────
+// Polls GitHub releases on a fixed cadence and notifies all open windows
+// via 'electron:update-available' when a newer version is found. The user
+// can accept/reject from the frontend; on accept, the frontend calls
+// 'electron:download-and-install-update' (which uses desktop-updater.ts).
+//
+// Defaults to the stable channel. The frontend can switch to the beta
+// channel via settings (not yet wired up — channel is hard-coded here
+// until the UI lands).
+const AUTO_UPDATE_INITIAL_DELAY_MS = 30_000 // 30s after app ready
+const AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000 // 1h
+
+function startAutoUpdateChecker(channel: UpdateChannel = 'stable'): void {
+  const tick = async () => {
+    try {
+      const info = await checkForUpdates(channel)
+      if (info.hasUpdate) {
+        // Broadcast to every open window so the frontend can show a
+        // toast/badge. The user decides whether to actually install.
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send('electron:update-available', info)
+          }
+        }
+      }
+    } catch {
+      // Silent — auto-check failures should never bother the user.
+    }
+  }
+  setTimeout(tick, AUTO_UPDATE_INITIAL_DELAY_MS)
+  setInterval(tick, AUTO_UPDATE_INTERVAL_MS)
 }
 
 // ── 获取各平台后端二进制路径 ──────────────────────────────────────────────────
@@ -444,6 +500,12 @@ app.whenReady().then(async () => {
   }
   createTray()
   await createWindow()
+
+  // Start background update checker (stable channel). Silent on failure;
+  // only notifies the frontend when a newer release is found.
+  if (!DEV_MODE) {
+    startAutoUpdateChecker('stable')
+  }
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) await createWindow()
