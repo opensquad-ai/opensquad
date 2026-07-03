@@ -58,8 +58,12 @@ jobs:
 
       - name: Build frontend (required before PyInstaller)
         working-directory: src/opensquad/gateway/nexuschat-pro
+        # Use npm install (not ci) so each platform resolves its own
+        # platform-specific optional deps (e.g. @rollup/rollup-darwin-arm64).
+        # npm ci with a lock file generated on another OS misses cross-platform
+        # optional dependencies (npm bug #4828).
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: Run PyInstaller
@@ -122,7 +126,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package-lock.json
+          cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package.json
 
       - name: Set up Python and Playwright for icons
         uses: actions/setup-python@v5
@@ -149,7 +153,7 @@ jobs:
 
       - name: Install npm dependencies
         working-directory: src/opensquad/gateway/nexuschat-pro
-        run: npm ci
+        run: npm install
 
       - name: Build Electron app
         working-directory: src/opensquad/gateway/nexuschat-pro
