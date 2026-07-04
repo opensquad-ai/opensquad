@@ -41,7 +41,13 @@
  * ===========================================================
  */
 
-export type PluginViewProps = { onBack: () => void };
+export type PluginViewProps = {
+  onBack: () => void;
+  /** 当前语言代码，插件可据此做条件渲染（可选，向后兼容） */
+  locale?: 'zh' | 'en';
+  /** i18n 翻译函数（可选，向后兼容） */
+  t?: (key: string, options?: Record<string, unknown>) => string;
+};
 
 export type PluginViewAdapter = {
   mount(container: HTMLElement, props: PluginViewProps): void;
@@ -126,7 +132,7 @@ export async function getPluginViewAdapter(
   viewKey: string
 ): Promise<PluginViewAdapter | null> {
   const loader = PLUGIN_VIEW_LOADERS[viewKey];
-  
+
   // 1. Check internal hardcoded loaders first
   if (loader) {
     if (!_adapterCache[viewKey]) {
@@ -166,8 +172,8 @@ export async function getPluginViewAdapter(
 
 /**
  * Synchronous check — true if a custom adapter is registered for viewKey.
- * Note: For dynamic plugins, we can't know synchronously if the file exists, 
- * so we assume true if it follows the "plugin:view" format and let the async 
+ * Note: For dynamic plugins, we can't know synchronously if the file exists,
+ * so we assume true if it follows the "plugin:view" format and let the async
  * loader handle the rest.
  */
 export function hasPluginViewAdapter(viewKey: string): boolean {

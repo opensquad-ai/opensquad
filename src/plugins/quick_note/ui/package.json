@@ -2,7 +2,7 @@
   "name": "quick-note-ui",
   "version": "1.0.0",
   "scripts": {
-    "build": "tsc --noEmit && esbuild src/index.tsx --bundle --outfile=../index.js --format=esm --external:react --external:react-dom --external:lucide-react"
+    "build": "tsc --noEmit && esbuild src/index.tsx --bundle --outfile=index.js --format=esm --external:react --external:react-dom --external:lucide-react"
   },
   "devDependencies": {
     "esbuild": "^0.20.0",

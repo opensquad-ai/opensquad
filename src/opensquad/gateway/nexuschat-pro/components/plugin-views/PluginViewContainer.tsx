@@ -32,7 +32,7 @@ export const PluginViewContainer: React.FC<PluginViewContainerProps> = ({
   onBack,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // Keep latest onBack in a ref — changes don't re-trigger mount/unmount
   const onBackRef = useRef(onBack);
   useEffect(() => { onBackRef.current = onBack; }, [onBack]);
@@ -75,18 +75,26 @@ export const PluginViewContainer: React.FC<PluginViewContainerProps> = ({
   }, [viewKey]);
 
   // --- Effect 2: mount when adapter is ready (container div is now in DOM) ---
+  // 依赖 i18n.language：用户切换语言时重新 mount 插件，让插件用新语言渲染。
+  // 远程 ESM 插件无法热替换字典，remount 是最简单可靠的方式。
   useEffect(() => {
     if (!adapter || !containerRef.current) return;
     const el = containerRef.current;
+    const locale = (i18n.language === 'en' ? 'en' : 'zh') as 'zh' | 'en';
     try {
-      adapter.mount(el, { onBack: () => onBackRef.current() });
+      adapter.mount(el, {
+        onBack: () => onBackRef.current(),
+        locale,
+        t: (key: string, options?: Record<string, unknown>) =>
+          String(t(key, options as any)),
+      });
     } catch (e: any) {
       console.error('[PluginViewContainer] mount() threw:', e);
     }
     return () => {
       try { adapter.unmount(el); } catch (_) {}
     };
-  }, [adapter]);
+  }, [adapter, i18n.language, t]);
 
   if (loading) {
     return (

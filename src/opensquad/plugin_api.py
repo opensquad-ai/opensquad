@@ -159,7 +159,17 @@ def register(
         author:        plugin author name
         description:   human-readable description
         version:       semantic version string
-        plugin_type:   "platform" | "tool" | "hook"
+        plugin_type:   "platform" | "tool" | "hook" — classification label only.
+                       Runtime behavior is determined by what the plugin actually
+                       registers (@tool methods, @hook methods, or a `service`
+                       field in plugin.json), NOT by this label. The only runtime
+                       branch is `platform` vs non-platform (platform plugins
+                       bridge their config to system_config.json, see
+                       launcher_main.py). The `hook` type is a documentation hint
+                       meaning "no @tool methods, only hooks/events/side-effects"
+                       (e.g. token_analytics, task_watch, long_memory). A `hook`
+                       plugin that also exposes @tool methods works fine — the
+                       label is advisory and does not gate any code path.
         display_name:  short display name (defaults to auto-generated from name)
         config_schema: JSON-Schema-like dict for plugin configuration.
                        Each key maps to a field descriptor dict with:
@@ -592,16 +602,19 @@ class ToolModuleWrapper:
 
         The function is exposed with proper signature (without 'self') so
         that ToolRegistry's inspect-based discovery works correctly.
+        Preserves *args / **kwargs from the original signature so that
+        variadic tool methods are callable with positional args too.
         """
 
         # Create a wrapper function that strips 'self' from the signature
+        # but transparently forwards both positional and keyword args.
         @functools.wraps(bound_method)
-        def wrapper_func(**kwargs):
-            return bound_method(**kwargs)
+        def wrapper_func(*args, **kwargs):
+            return bound_method(*args, **kwargs)
 
-        # Rebuild signature without 'self'
+        # Rebuild signature without 'self', keeping VAR_POSITIONAL / VAR_KEYWORD
         orig_sig = inspect.signature(bound_method)
-        params = [p for name, p in orig_sig.parameters.items() if name != "self"]
+        params = [p for p in orig_sig.parameters.values() if p.name != "self"]
         wrapper_func.__signature__ = orig_sig.replace(parameters=params)
 
         if doc:

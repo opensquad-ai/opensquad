@@ -92,6 +92,13 @@ print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build
 # Source lives at GATEWAY_DIR.parent = src/opensquad/.
 datas += [(str(GATEWAY_DIR.parent / "launcher_main.py"), "opensquad/_launcher_main")]
 
+# pkg_import_map.json — shared pip-distribution-name → import-name mapping used
+# by launcher's dependency install logic. Must be bundled so frozen launcher
+# can load it via os.path.dirname(__file__).
+_pkg_import_map_src = GATEWAY_DIR.parent / "launcher" / "pkg_import_map.json"
+if _pkg_import_map_src.exists():
+    datas += [(str(_pkg_import_map_src), "opensquad/launcher")]
+
 # alembic 迁移脚本
 alembic_dir = BACKEND_DIR / "alembic"
 if alembic_dir.exists():
@@ -278,12 +285,24 @@ hiddenimports += ["jwt"]
 # plugin code via `import plugins.<name>.plugin` (importlib.import_module), so
 # the .py must be importable in the bundle — collect_submodules puts them in the
 # PYZ. The non-.py runtime data (plugin.json, role prompts, etc.) ships as data
-# files. CRITICAL: filter out node_modules + ui/ build dirs — plugins/ contains
-# 10k+ files of UI build tooling (task_watch/ui, token_analytics/ui = ~140MB)
-# that is useless at runtime and would bloat the installer tenfold.
+# files. CRITICAL: filter out node_modules + ui/ source/build tooling — plugins/
+# contains 10k+ files of UI build tooling (task_watch/ui, token_analytics/ui =
+# ~140MB) that is useless at runtime and would bloat the installer tenfold.
+# EXCEPTION: keep the built `ui/index.js` bundle — the front-end dynamically
+# imports it via /api/plugins/static/{name}/ui/index.js to render plugin views
+# (Token Analytics dashboard, Quick Note, Task Watch, Email Assistant). Without
+# it, registry.ts falls back to GenericPluginView (raw JSON tree) and the user
+# sees "just a database display" instead of charts.
 def _is_plugin_runtime_data(src: str) -> bool:
     norm = src.replace("\\", "/")
-    if "node_modules" in norm or "/ui/" in norm or "/__pycache__/" in norm:
+    if "node_modules" in norm or "/__pycache__/" in norm:
+        return False
+    if "/ui/" in norm:
+        # Keep the built bundle, drop everything else under ui/
+        # (source .tsx, package.json, lock files, tsconfig — all build-time only)
+        base = os.path.basename(src)
+        if base == "index.js":
+            return True
         return False
     base = os.path.basename(src)
     if base.endswith((".map", ".d.ts", ".ts")):

@@ -305,12 +305,26 @@ class AgentRunner:
         # Bridge state machine transitions to on_state_change plugin hook.
         # Uses asyncio.create_task so the hook fires outside the state lock,
         # preventing deadlock if a plugin handler reads state.
+        # The task is tracked in _state_change_tasks to prevent GC and to log
+        # exceptions via done-callback (asyncio otherwise swallows them).
+        self._state_change_tasks: set[asyncio.Task] = set()
+
         if self._plugin_manager:
             _pm = self._plugin_manager
             _aid = self._agent_id
+            _tasks_ref = self._state_change_tasks
+
+            def _log_task_exception(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc:
+                    logger.warning("[Runner] on_state_change hook task raised: %r", exc, exc_info=exc)
+                # Drop from the tracking set once done.
+                _tasks_ref.discard(t)
 
             async def _on_state_change_hook(old_state: str, new_state: str):
-                asyncio.create_task(
+                task = asyncio.create_task(
                     _pm.run_hook(
                         "on_state_change",
                         {
@@ -320,6 +334,8 @@ class AgentRunner:
                         },
                     )
                 )
+                _tasks_ref.add(task)
+                task.add_done_callback(_log_task_exception)
 
             _get_state_manager().add_listener(_on_state_change_hook)
         self._agent_tool_names = agent_tool_names or []  # Tool names from agent config (for plugin hot-reload)
@@ -1622,6 +1638,34 @@ class AgentRunner:
                         "error",
                         {
                             "message": f"LLM API call timed out after {_asyncio_timeout}s. Please check your network or try again later.",
+                        },
+                    )
+                    task_finished = True
+                    initial_query = None
+                    break
+                except asyncio.CancelledError as _cancel_err:
+                    # Safety net: anyio's CancelScope can leak CancelledError out of
+                    # httpx/anyio.connect_tcp() (used by all LLM API calls). Without
+                    # this catch, the CancelledError propagates to
+                    # agent_boot_phases.await_runner_shutdown(), which treats it as
+                    # "Runner task interrupted" and restarts the runner with
+                    # initial_query=None — silently dropping the user's message.
+                    # Drain the host task's uncancel counter (Python 3.12+) so
+                    # subsequent awaits don't re-raise, then end this turn gracefully
+                    # so the user can retry.
+                    _current_task = asyncio.current_task()
+                    if _current_task and hasattr(_current_task, "uncancel"):
+                        while _current_task.uncancel() > 0:
+                            pass
+                    _cancel_msg = str(_cancel_err) or ""
+                    logger.warning(
+                        f"[Runner] CancelledError during chat() (recovered via safety net): {_cancel_msg[:200]}"
+                    )
+                    await self._emit("status", "LLM API call was interrupted, please retry")
+                    await self._emit(
+                        "error",
+                        {
+                            "message": "LLM API call was interrupted by an internal cancellation. Please retry your message.",
                         },
                     )
                     task_finished = True

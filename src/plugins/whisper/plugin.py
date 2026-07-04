@@ -2,15 +2,15 @@
 Whisper Transcribe Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/whisper/whisper_transcribe.py.
-Service auto-start: launches the Whisper Flask service on plugin load.
+Service lifecycle is owned by the Launcher's PluginServiceProcess
+(declared via `service` field in plugin.json).
 """
 
 import importlib
 import logging
 from typing import Any
 
-from opensquad.plugin_api import Context, register
-from opensquad.service_plugin import ServicePlugin
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.whisper")
 
@@ -38,23 +38,18 @@ logger = logging.getLogger("plugins.whisper")
         "auto_start": {
             "type": "boolean",
             "default": True,
-            "description": "Automatically start the Whisper service when the plugin loads",
+            "description": "Automatically start the Whisper service when the launcher boots",
         },
     },
 )
-class WhisperPlugin(ServicePlugin):
-    """Whisper transcription tool plugin with auto-start service support."""
+class WhisperPlugin(Plugin):
+    """Whisper transcription tool plugin. Service is managed by the Launcher."""
 
     def __init__(self, context: Context):
-        # Call ServicePlugin's initializer, configure service parameters
-        super().__init__(
-            context=context,
-            service_script="service.py",  # Whisper uses Flask (service.py)
-            health_endpoint="/health",
-            service_name="WhisperPlugin",
-            max_startup_wait=10,
-            health_check_interval=60,
-        )
+        super().__init__(context)
+
+    def on_load(self) -> None:
+        logger.info("[WhisperPlugin] loaded.")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
         """

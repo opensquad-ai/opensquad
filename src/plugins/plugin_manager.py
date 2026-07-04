@@ -8,6 +8,7 @@ Integrates with boot.py to register plugin-provided tools into agent ToolRegistr
 Provides hook chain execution for runner.py lifecycle hooks.
 """
 
+import asyncio
 import importlib
 import json
 import logging
@@ -25,6 +26,12 @@ import contextlib
 from opensquad.system_config import syscfg
 
 logger = logging.getLogger("plugins.manager")
+
+# Per-handler timeout for run_hook. A handler that exceeds this is logged and
+# skipped (its context mutations are lost). 10s is generous for IM webhook
+# fetches / memory lookups but protects the main turn loop from indefinite
+# stalls. Hook handlers doing heavy I/O should spawn their own task.
+_HOOK_HANDLER_TIMEOUT = 10.0
 
 
 class PluginManager:
@@ -67,7 +74,12 @@ class PluginManager:
         self._plugins: dict[str, dict[str, Any]] = {}
 
         # Cached hook chain: {hook_name: [(priority, plugin_name, bound_method), ...]}
-        self._hook_chain_cache: dict[str, list] | None = None
+        # Per-hook_name granularity: unloading/reloading a plugin only invalidates
+        # the hook_names it actually registered, not the entire cache. This avoids
+        # performance抖动 during frequent hot-reloads (P2 optimization).
+        self._hook_chain_cache: dict[str, list] = {}
+        # Reverse index: {plugin_name: set(hook_name)} for targeted invalidation.
+        self._plugin_hooks_index: dict[str, set[str]] = {}
 
         # Hot-reload: track EventBus subscriptions per plugin for clean unload
         # {plugin_name: [(event_type, callback), ...]}
@@ -128,7 +140,8 @@ class PluginManager:
             except Exception as e:
                 logger.error(f"[PluginManager] Failed to load plugin from {entry}: {e}", exc_info=True)
 
-        self._hook_chain_cache = None
+        self._hook_chain_cache.clear()
+        self._plugin_hooks_index.clear()
         logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
         return loaded
 
@@ -362,8 +375,27 @@ class PluginManager:
 
         try:
             os.makedirs(plugin_dir, exist_ok=True)
-            # Merge strategy: generated content (from @register metadata) is merged with
-            # existing file, so runtime fields (service, service_toggle) are never lost.
+            # ── plugin.json merge strategy ───────────────────────────────
+            # The manifest is the source of truth for the Launcher, but it is
+            # partly generated (from @register metadata) and partly hand-edited
+            # at runtime (e.g. via the Plugin Manager UI). The merge policy:
+            #
+            # OVERWRITTEN by @register metadata (generated dict wins):
+            #   name, display_name, version, type, description, author, tags,
+            #   tools, hooks, config.schema, config_schema, contributes,
+            #   dependencies
+            #   → These reflect code reality and should not be hand-edited.
+            #
+            # PRESERVED from existing manifest (runtime-only fields):
+            #   service          — process management config (port/entry/health)
+            #   service_toggle   — launcher auto-start/stop control
+            #   enabled          — per-node enable/disable (node_scope=single)
+            #   config.section   — bridge to system_config.json (platform plugins)
+            #   → These are runtime state, not declared in @register.
+            #
+            # If @register's `dependencies` is updated, it OVERWRITES any
+            # hand-added extra deps in plugin.json. To add runtime-only deps,
+            # update the @register decorator, not plugin.json.
             if os.path.isfile(manifest_path):
                 with open(manifest_path, encoding="utf-8") as f:
                     existing_manifest = json.load(f)
@@ -407,6 +439,7 @@ class PluginManager:
             "hook_map": hook_map,
             "tool_wrappers": tool_wrappers,
         }
+        self._index_plugin_hooks(name, hook_map)
 
         logger.info(
             f"[PluginManager] Loaded: {name} v{meta.get('version', '?')} "
@@ -447,83 +480,111 @@ class PluginManager:
 
         count = 0
 
+        # Per-plugin try-except isolation: a single plugin's failure (e.g.
+        # registry.register raising on a malformed wrapper, or get_tool_modules
+        # throwing an unexpected non-ImportError) MUST NOT cascade to break
+        # tool registration for all subsequent plugins. This is the "class of
+        # bugs" pattern documented in project_memory: single-point failure
+        # cascading to global. Each plugin's registration is independent.
         for plugin_name, info in self._plugins.items():
-            plugin = info["plugin"]
+            try:
+                plugin = info["plugin"]
 
-            # 1) Register @tool decorated methods via ToolModuleWrapper
-            # plugin_name in agent_tool_names means "enable all tools from this plugin"
-            # (set by the per-agent toggle in Plugin Manager UI)
-            plugin_enabled_by_name = plugin_name in agent_tool_names
+                # 1) Register @tool decorated methods via ToolModuleWrapper
+                # plugin_name in agent_tool_names means "enable all tools from this plugin"
+                # (set by the per-agent toggle in Plugin Manager UI)
+                plugin_enabled_by_name = plugin_name in agent_tool_names
 
-            for tw in info.get("tool_wrappers", []):
-                wrapper = tw["wrapper"]
-                namespace = tw["namespace"]
-                meta = tw["meta"]
-                # Per-agent level override takes precedence over plugin default
-                level = agent_tool_levels.get(
-                    namespace, agent_tool_levels.get(plugin_name, meta.get("level", "extended"))
-                )
-                auto_register = meta.get("auto_register", False)
-                enabled_by_namespace = namespace in agent_tool_names
+                for tw in info.get("tool_wrappers", []):
+                    try:
+                        wrapper = tw["wrapper"]
+                        namespace = tw["namespace"]
+                        meta = tw["meta"]
+                        # Per-agent level override takes precedence over plugin default
+                        level = agent_tool_levels.get(
+                            namespace, agent_tool_levels.get(plugin_name, meta.get("level", "extended"))
+                        )
+                        auto_register = meta.get("auto_register", False)
+                        enabled_by_namespace = namespace in agent_tool_names
 
-                if not (auto_register or plugin_enabled_by_name or enabled_by_namespace):
-                    logger.info(
-                        f"[PluginManager] Skipped tool '{namespace}' from plugin '{plugin_name}': "
-                        f"not enabled for agent (auto_register={auto_register}, "
-                        f"plugin_toggle={plugin_enabled_by_name}, namespace_toggle={enabled_by_namespace})"
-                    )
-                    continue
+                        if not (auto_register or plugin_enabled_by_name or enabled_by_namespace):
+                            logger.info(
+                                f"[PluginManager] Skipped tool '{namespace}' from plugin '{plugin_name}': "
+                                f"not enabled for agent (auto_register={auto_register}, "
+                                f"plugin_toggle={plugin_enabled_by_name}, namespace_toggle={enabled_by_namespace})"
+                            )
+                            continue
 
-                registry.register(wrapper, namespace, level=level)
-                count += 1
-                logger.info(
-                    f"[PluginManager] Registered tool '{namespace}' from plugin '{plugin_name}' (level={level})"
-                )
-
-            # 2) Also check get_tool_modules() for proxy-pattern tools
-            if hasattr(plugin, "get_tool_modules"):
-                try:
-                    _proxy_descs = plugin.get_tool_modules()
-                except Exception as _gtm_err:
-                    logger.error(
-                        f"[PluginManager] get_tool_modules() raised for plugin '{plugin_name}': "
-                        f"{type(_gtm_err).__name__}: {_gtm_err}",
-                        exc_info=True,
-                    )
-                    _proxy_descs = []
-                for desc in _proxy_descs:
-                    tool_name = desc.get("name", "")
-                    module = desc.get("module")
-                    # Per-agent level override takes precedence over plugin default
-                    level = agent_tool_levels.get(
-                        tool_name, agent_tool_levels.get(plugin_name, desc.get("level", "extended"))
-                    )
-                    auto_register = desc.get("auto_register", False)
-                    requires_agent_id = desc.get("requires_agent_id", False)
-                    enabled_by_tool_name = tool_name in agent_tool_names
-
-                    if not (auto_register or plugin_enabled_by_name or enabled_by_tool_name):
+                        registry.register(wrapper, namespace, level=level)
+                        count += 1
                         logger.info(
-                            f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': "
-                            f"not enabled for agent (auto_register={auto_register}, "
-                            f"plugin_toggle={plugin_enabled_by_name}, tool_toggle={enabled_by_tool_name})"
+                            f"[PluginManager] Registered tool '{namespace}' from plugin '{plugin_name}' (level={level})"
                         )
-                        continue
-                    if module is None:
-                        logger.warning(
-                            f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': module is None"
+                    except Exception as _tw_err:
+                        logger.error(
+                            f"[PluginManager] Failed to register @tool from plugin '{plugin_name}': "
+                            f"{type(_tw_err).__name__}: {_tw_err}",
+                            exc_info=True,
                         )
-                        continue
 
-                    registry.register(module, tool_name, level=level)
-                    if requires_agent_id and hasattr(module, "set_agent_id") and agent_id:
-                        module.set_agent_id(agent_id)
+                # 2) Also check get_tool_modules() for proxy-pattern tools
+                if hasattr(plugin, "get_tool_modules"):
+                    try:
+                        _proxy_descs = plugin.get_tool_modules()
+                    except Exception as _gtm_err:
+                        logger.error(
+                            f"[PluginManager] get_tool_modules() raised for plugin '{plugin_name}': "
+                            f"{type(_gtm_err).__name__}: {_gtm_err}",
+                            exc_info=True,
+                        )
+                        _proxy_descs = []
+                    for desc in _proxy_descs:
+                        try:
+                            tool_name = desc.get("name", "")
+                            module = desc.get("module")
+                            # Per-agent level override takes precedence over plugin default
+                            level = agent_tool_levels.get(
+                                tool_name, agent_tool_levels.get(plugin_name, desc.get("level", "extended"))
+                            )
+                            auto_register = desc.get("auto_register", False)
+                            requires_agent_id = desc.get("requires_agent_id", False)
+                            enabled_by_tool_name = tool_name in agent_tool_names
 
-                    count += 1
-                    logger.info(
-                        f"[PluginManager] Registered tool '{tool_name}' from "
-                        f"plugin '{plugin_name}' (proxy, level={level})"
-                    )
+                            if not (auto_register or plugin_enabled_by_name or enabled_by_tool_name):
+                                logger.info(
+                                    f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': "
+                                    f"not enabled for agent (auto_register={auto_register}, "
+                                    f"plugin_toggle={plugin_enabled_by_name}, tool_toggle={enabled_by_tool_name})"
+                                )
+                                continue
+                            if module is None:
+                                logger.warning(
+                                    f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': module is None"
+                                )
+                                continue
+
+                            registry.register(module, tool_name, level=level)
+                            if requires_agent_id and hasattr(module, "set_agent_id") and agent_id:
+                                module.set_agent_id(agent_id)
+
+                            count += 1
+                            logger.info(
+                                f"[PluginManager] Registered tool '{tool_name}' from "
+                                f"plugin '{plugin_name}' (proxy, level={level})"
+                            )
+                        except Exception as _desc_err:
+                            logger.error(
+                                f"[PluginManager] Failed to register proxy tool from plugin '{plugin_name}': "
+                                f"{type(_desc_err).__name__}: {_desc_err}",
+                                exc_info=True,
+                            )
+            except Exception as _plugin_err:
+                logger.error(
+                    f"[PluginManager] Plugin '{plugin_name}' registration failed, "
+                    f"continuing with remaining plugins: "
+                    f"{type(_plugin_err).__name__}: {_plugin_err}",
+                    exc_info=True,
+                )
 
         return count
 
@@ -561,12 +622,49 @@ class PluginManager:
 
         return chain
 
+    def _build_hook_chain_for(self, hook_name: str) -> list:
+        """Build the handler list for a single hook_name (on-demand cache fill)."""
+        handlers: list = []
+        for name in sorted(self._plugins.keys()):
+            hook_map = self._plugins[name].get("hook_map", {})
+            if hook_name not in hook_map:
+                continue
+            for method in hook_map[hook_name]:
+                priority = 0
+                if hasattr(method, "__hook_meta__"):
+                    for entry in method.__hook_meta__:
+                        if entry.get("hook_name") == hook_name:
+                            priority = entry.get("priority", 0)
+                            break
+                handlers.append((priority, name, method))
+        handlers.sort(key=lambda t: (-t[0], t[1]))
+        return handlers
+
+    def _invalidate_hooks_for_plugin(self, plugin_name: str) -> None:
+        """Drop cached hook chains for hook_names registered by plugin_name."""
+        affected = self._plugin_hooks_index.pop(plugin_name, set())
+        for hn in affected:
+            self._hook_chain_cache.pop(hn, None)
+
+    def _index_plugin_hooks(self, plugin_name: str, hook_map: dict[str, list]) -> None:
+        """Record which hook_names a plugin registered, for targeted invalidation."""
+        if hook_map:
+            self._plugin_hooks_index[plugin_name] = set(hook_map.keys())
+        else:
+            self._plugin_hooks_index.pop(plugin_name, None)
+
     async def run_hook(self, hook_name: str, context: dict[str, Any]) -> dict[str, Any]:
         """
         Execute a hook across all registered plugins (chain pattern).
 
         Handlers are sorted by (-priority, plugin_name) for deterministic execution order.
         A handler can stop the chain by setting context['__stop__'] = True.
+
+        Each handler is wrapped in asyncio.wait_for with a per-handler timeout
+        (default 10s) so a single slow handler cannot stall the main request
+        path (on_before_llm / on_after_llm / on_before_send etc. are all on the
+        user-facing turn loop). A timeout is logged but does NOT break the
+        chain — subsequent handlers still run.
 
         Args:
             hook_name: name of the hook (e.g. "on_message_received")
@@ -575,8 +673,8 @@ class PluginManager:
         Returns:
             The final context dict after all hooks have processed it.
         """
-        if self._hook_chain_cache is None:
-            self._hook_chain_cache = self._build_hook_chain()
+        if hook_name not in self._hook_chain_cache:
+            self._hook_chain_cache[hook_name] = self._build_hook_chain_for(hook_name)
 
         handlers = self._hook_chain_cache.get(hook_name, [])
         if not handlers:
@@ -584,7 +682,13 @@ class PluginManager:
 
         for priority, plugin_name, method in handlers:
             try:
-                context = await method(context)
+                try:
+                    context = await asyncio.wait_for(method(context), timeout=_HOOK_HANDLER_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"[PluginManager] Hook '{hook_name}' handler in plugin '{plugin_name}' "
+                        f"timed out after {_HOOK_HANDLER_TIMEOUT}s, skipping (handler did not return)"
+                    )
             except Exception as e:
                 logger.error(f"[PluginManager] Hook '{hook_name}' error in plugin '{plugin_name}': {e}", exc_info=True)
             if context.get("__stop__"):
@@ -688,9 +792,9 @@ class PluginManager:
                 except Exception:
                     pass
 
-        # 4) Remove from _plugins and invalidate cache
+        # 4) Remove from _plugins and invalidate only this plugin's hook chains
         del self._plugins[name]
-        self._hook_chain_cache = None
+        self._invalidate_hooks_for_plugin(name)
         logger.info(f"[PluginManager] Unloaded plugin '{name}'")
         return True
 
@@ -808,7 +912,8 @@ class PluginManager:
                     logger.error(f"[PluginManager] Failed to reload plugin '{name}': {e}", exc_info=True)
 
         if result["loaded"] or result["unloaded"]:
-            self._hook_chain_cache = None
+            self._hook_chain_cache.clear()
+            self._plugin_hooks_index.clear()
             logger.info(f"[PluginManager] Reload complete: loaded={result['loaded']}, unloaded={result['unloaded']}")
 
         return result

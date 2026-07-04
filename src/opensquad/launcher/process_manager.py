@@ -21,6 +21,27 @@ from datetime import datetime
 
 _log = logging.getLogger("launcher.process_manager")
 
+
+# Shared package-name → import-name mapping. Loaded once from pkg_import_map.json
+# so _install_builtin_plugin_deps() and PluginServiceProcess._install_dependencies()
+# use the same source of truth (previously maintained in two separate dicts).
+# Add new entries to pkg_import_map.json when a pip distribution name differs
+# from its import name (e.g. "beautifulsoup4" → "bs4").
+_PKG_IMPORT_MAP_PATH = os.path.join(os.path.dirname(__file__), "pkg_import_map.json")
+
+
+def _load_pkg_import_map() -> dict[str, str]:
+    try:
+        with open(_PKG_IMPORT_MAP_PATH, encoding="utf-8") as _f:
+            data = json.load(_f)
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+    except Exception as _e:
+        _log.warning(f"Failed to load pkg_import_map.json: {_e}; using empty map.")
+        return {}
+
+
+_PKG_IMPORT_MAP = _load_pkg_import_map()
+
 _PYINSTALLER_PATH_MARKERS = (
     os.path.join("backend-win", "run"),
     os.path.join("backend-mac", "run"),
@@ -870,6 +891,16 @@ class PluginServiceProcess:
         self._circuit_permanent: bool = False  # True = permanent failure, never retry
         self._circuit_was_alive: bool = False  # track alive state transitions for stable timer
 
+        # Coarse lifecycle state for UI display. Unlike `alive` (binary
+        # process.poll() check), `state` includes a `starting` transitional
+        # state so the UI can distinguish "deps installing / about to spawn"
+        # from "stopped". Transitions:
+        #   stopped → starting (start() entered) → running (Popen ok)
+        #          → error (any failure: port / deps / spawn)
+        #   running → stopped (stop()) or → error (crash detected)
+        #   error → starting (retry via start())
+        self.state: str = "stopped"
+
     def _resolve_port(self) -> int:
         """Port priority: data/plugins/{id}/config.json > system_config ports > plugin.json default_port"""
         # 1. data/plugins/{id}/config.json → port
@@ -932,16 +963,7 @@ class PluginServiceProcess:
         if not pip_deps:
             return True
 
-        pkg_import_map = {
-            "beautifulsoup4": "bs4",
-            "opencv-python": "cv2",
-            "PyMuPDF": "fitz",
-            "python-dotenv": "dotenv",
-            "scikit-learn": "sklearn",
-            "flask-cors": "flask_cors",
-            "lark-oapi": "lark_oapi",
-            "playwright-stealth": "playwright_stealth",
-        }
+        pkg_import_map = _PKG_IMPORT_MAP
 
         def _check_all() -> list[str]:
             """Return list of deps still missing (not importable in plugin Python)."""
@@ -1002,7 +1024,15 @@ class PluginServiceProcess:
         """Actual start logic — caller holds ``_start_lock``."""
         if self.process and self.process.poll() is None:
             _log.warning(f"[Launcher] Plugin service {self.plugin_id} already running (PID: {self.process.pid})")
+            # Already running — keep state as "running" (not "error")
+            self.state = "running"
             return False
+
+        # Mark transitional state so UI can show "Starting..." while we wait
+        # for deps to install / port to free / Popen to spawn. This is the
+        # key fix for the user-reported "auto-start service shows Start
+        # button instead of Starting..." issue.
+        self.state = "starting"
 
         # ── Port pre-check: detect EADDRINUSE before spawning the child ──
         if self.port > 0 and is_port_in_use(self.port):
@@ -1015,6 +1045,7 @@ class PluginServiceProcess:
                 )
                 self._circuit_permanent = True
                 self._circuit_last_failure_reason = f"Port {self.port} in use and could not be freed"
+                self.state = "error"
                 return False
 
         cmd_str = self.service_cfg.get("cmd", "")
@@ -1028,11 +1059,13 @@ class PluginServiceProcess:
             abs_entry = os.path.join(self.plugin_dir, entry)
             if not os.path.isfile(abs_entry):
                 _log.info(f"[Launcher] Plugin service entry not found: {abs_entry}")
+                self.state = "error"
                 return False
             popen_args = [_plugin_python_executable(), abs_entry]
             popen_kwargs = {}
         else:
             _log.info(f"[Launcher] Plugin service {self.plugin_id}: neither 'cmd' nor 'entry' defined")
+            self.state = "error"
             return False
 
         # Wait for the background _install_builtin_plugin_deps thread to finish
@@ -1049,6 +1082,7 @@ class PluginServiceProcess:
                     f"[Launcher] {self.plugin_id}: background dependency install did not finish in 300s, aborting start"
                 )
                 self._circuit_last_failure_reason = "Background dep install timeout (300s)"
+                self.state = "error"
                 return False
 
         # Install pip dependencies before launching (safety net for hot-installed plugins).
@@ -1061,6 +1095,7 @@ class PluginServiceProcess:
                 "(would crash with ModuleNotFoundError). Check Agent Python pip install logs."
             )
             self._circuit_trip("dependencies not installed", permanent=False)
+            self.state = "error"
             return False
 
         child_env = _build_child_process_env(
@@ -1092,6 +1127,7 @@ class PluginServiceProcess:
         )
         self.should_run = True
         self.restart_count = 0
+        self.state = "running"
         self.started_at = datetime.now().isoformat()
         _write_runtime_registry(
             "plugin",
@@ -1136,10 +1172,12 @@ class PluginServiceProcess:
                 _kill_port_owner(self.port)
             _remove_runtime_registry("plugin", self.plugin_id)
             self._close_log_file()
+            self.state = "stopped"
             _log.info(f"[Launcher] Plugin service {self.plugin_id} stopped.")
             return True
         _remove_runtime_registry("plugin", self.plugin_id)
         self._close_log_file()
+        self.state = "stopped"
         return False
 
     def is_alive(self) -> bool:
@@ -1241,11 +1279,25 @@ class PluginServiceProcess:
             except Exception:
                 pass
 
+        # Reconcile `state` with reality: if the process is alive but state
+        # says "starting" or "stopped", promote to "running". If process died
+        # but state still says "running" (crash detected passively, e.g. by
+        # a poll() check here), mark as "error" unless user explicitly stopped.
+        if alive:
+            if self.state != "running":
+                self.state = "running"
+        else:
+            if self.state == "running":
+                # Process died without stop() being called — likely a crash.
+                # should_run=true differentiates crash from intentional stop.
+                self.state = "error" if self.should_run else "stopped"
+
         status = {
             "plugin_id": self.plugin_id,
             "display_name": self.display_name or self.plugin_id,
             "plugin_type": self.plugin_type or "",
             "alive": alive,
+            "state": self.state,
             "pid": self.process.pid if alive else None,
             "port": self.port,
             "host": self._resolve_host(),
@@ -1777,15 +1829,7 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
         # fastapi/uvicorn/click/etc. in ``_internal/``; importing them in-process
         # would always succeed and hide missing deps in the Agent Python runtime,
         # causing ``ModuleNotFoundError`` when the service actually starts.
-        pkg_import_map = {
-            "beautifulsoup4": "bs4",
-            "PyMuPDF": "fitz",
-            "python-dotenv": "dotenv",
-            "scikit-learn": "sklearn",
-            "flask-cors": "flask_cors",
-            "lark-oapi": "lark_oapi",
-            "playwright-stealth": "playwright_stealth",
-        }
+        pkg_import_map = _PKG_IMPORT_MAP
 
         missing = []
         skipped_heavy = []

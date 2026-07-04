@@ -82,7 +82,9 @@ jobs:
         fail-fast: false
         matrix:
           os: [ubuntu-latest, windows-latest, macos-latest]
-          python-version: ["3.10", "3.12", "3.13"]
+          # 仅验证 3.11（项目锁定版本）。3.12/3.13 因 anyio CancelScope
+          # 交互问题暂不支持，3.10 缺少 asyncio.TaskGroup/timeout。
+          python-version: ["3.11"]
 
       steps:
         - uses: actions/checkout@v4
@@ -108,7 +110,9 @@ jobs:
       strategy:
         fail-fast: false
         matrix:
-          python-version: ["3.10", "3.11", "3.12", "3.13"]
+          # 项目锁定 3.11：anyio 4.x 在 3.12+ 有 CancelScope 交互问题，
+          # 3.10 缺少原生 asyncio.TaskGroup/timeout。待 anyio 修复后再放开。
+          python-version: ["3.11"]
 
       steps:
         - uses: actions/checkout@v4

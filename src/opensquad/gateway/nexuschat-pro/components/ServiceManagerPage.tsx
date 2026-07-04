@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
@@ -113,12 +113,48 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
     return () => clearInterval(interval);
   }, [fetchServices]);
 
+  // ── Short-burst fast poll after a user action ──
+  // The default 10s poll is too slow to reflect "starting → running"
+  // transitions (which can take 1-5s for Popen + health-check). After a
+  // Start/Restart, we run a 2s-interval poll for up to 30s, stopping early
+  // once no service is in `starting` state. Cheaper than a WebSocket/SSE
+  // and gives near-real-time feedback after the user's click.
+  const fastPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fastPollUntilStable = useCallback(() => {
+    // Clear any previous burst poll before starting a new one
+    if (fastPollRef.current) clearInterval(fastPollRef.current);
+    let elapsed = 0;
+    const intervalMs = 2000;
+    const maxMs = 30000;
+    fastPollRef.current = setInterval(async () => {
+      elapsed += intervalMs;
+      await fetchServices();
+      if (elapsed >= maxMs && fastPollRef.current) {
+        clearInterval(fastPollRef.current);
+        fastPollRef.current = null;
+      }
+    }, intervalMs);
+  }, [fetchServices]);
+
+  // Cleanup fast-poll on unmount
+  useEffect(() => {
+    return () => {
+      if (fastPollRef.current) clearInterval(fastPollRef.current);
+    };
+  }, []);
+
   const handleStart = async (pluginId: string) => {
     setActing(prev => ({ ...prev, [pluginId]: true }));
     try {
       await pluginServiceAPI.start(pluginId);
       await fetchServices();
+      // Start a short-burst fast poll to catch the starting→running
+      // transition without waiting for the next 10s tick.
+      fastPollUntilStable();
     } catch (e: any) {
+      // P0-3: backend now returns 200 for "already running" (idempotent),
+      // so this alert should only fire on genuine errors (404 not found,
+      // port conflict, etc.) — no longer on duplicate Start clicks.
       alert(`Start failed: ${e.message}`);
     } finally {
       setActing(prev => ({ ...prev, [pluginId]: false }));
@@ -155,6 +191,9 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
     try {
       await pluginServiceAPI.restart(pluginId);
       await fetchServices();
+      // Restart cycles through stop→start, so poll for the starting→running
+      // transition the same way as handleStart.
+      fastPollUntilStable();
     } catch (e: any) {
       alert(`Restart failed: ${e.message}`);
     } finally {
@@ -384,14 +423,35 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
 
         {/* Status badge + gear */}
         <div className="flex items-center gap-1 shrink-0">
-          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${
-            svc.alive
-              ? 'bg-emerald-500/15 text-emerald-400'
-              : 'bg-slate-500/15 text-slate-400'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${svc.alive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-            {svc.alive ? (tr('pluginManager.statusRunning') || 'Running') : (tr('pluginManager.statusStopped') || 'Stopped')}
-          </span>
+          {(() => {
+            // Derive display state: prefer backend `state` (4-state), fall
+            // back to binary `alive` (2-state) for older backends.
+            const s = svc.state ?? (svc.alive ? 'running' : 'stopped');
+            const badgeMap: Record<string, { cls: string; dot: string; label: string; spin?: boolean }> = {
+              running:   { cls: 'bg-emerald-500/15 text-emerald-400', dot: 'bg-emerald-400 animate-pulse', label: tr('pluginManager.statusRunning') || 'Running' },
+              starting:  { cls: 'bg-amber-500/15 text-amber-400',      dot: 'bg-amber-400 animate-pulse',  label: 'Starting...', spin: true },
+              error:     { cls: 'bg-red-500/15 text-red-400',         dot: 'bg-red-400',                  label: 'Error' },
+              stopped:   { cls: 'bg-slate-500/15 text-slate-400',     dot: 'bg-slate-500',                label: tr('pluginManager.statusStopped') || 'Stopped' },
+            };
+            const b = badgeMap[s] || badgeMap.stopped;
+            return (
+              <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${b.cls}`}>
+                {b.spin
+                  ? <Loader2 size={9} className="animate-spin" />
+                  : <span className={`w-1.5 h-1.5 rounded-full ${b.dot}`} />}
+                {b.label}
+              </span>
+            );
+          })()}
+          {svc.auto_start && (
+            <span
+              className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20"
+              title="This service starts automatically when OpenSquad launches"
+            >
+              <Zap size={9} />
+              Auto
+            </span>
+          )}
           <button
             onClick={() => setConfigExpanded(v => !v)}
             className={`p-1 rounded transition-colors ${
@@ -587,40 +647,65 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
 
       {/* Actions */}
       <div className="flex items-center gap-2 mt-auto pt-2 border-t border-border/50">
-        {svc.alive ? (
-          <>
+        {(() => {
+          const s = svc.state ?? (svc.alive ? 'running' : 'stopped');
+          if (s === 'starting') {
+            // Starting: show disabled Starting button (no Stop/Restart yet —
+              // the user just clicked Start or it's auto-starting in background)
+            return (
+              <button
+                disabled
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-500/10 text-amber-400 cursor-not-allowed opacity-75"
+              >
+                <Loader2 size={11} className="animate-spin" />
+                Starting...
+              </button>
+            );
+          }
+          if (s === 'running') {
+            return (
+              <>
+                <button
+                  onClick={onStop}
+                  disabled={acting}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                >
+                  {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
+                  Stop
+                </button>
+                <button
+                  onClick={onRestart}
+                  disabled={acting}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
+                    needsRestart
+                      ? 'bg-primary/20 text-primary hover:bg-primary/30 ring-1 ring-primary/40'
+                      : 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                  }`}
+                  title={needsRestart ? 'Restart to apply config changes' : 'Restart service'}
+                >
+                  {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
+                  Restart{needsRestart ? ' *' : ''}
+                </button>
+              </>
+            );
+          }
+          // stopped or error: show Start button (error is recoverable via Start)
+          return (
             <button
-              onClick={onStop}
-              disabled={acting}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-            >
-              {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
-              Stop
-            </button>
-            <button
-              onClick={onRestart}
+              onClick={onStart}
               disabled={acting}
               className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                needsRestart
-                  ? 'bg-primary/20 text-primary hover:bg-primary/30 ring-1 ring-primary/40'
-                  : 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                s === 'error'
+                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
+                  : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
               }`}
-              title={needsRestart ? 'Restart to apply config changes' : 'Restart service'}
+              title={s === 'error' ? 'Retry start (previous attempt failed)' : 'Start service'}
             >
-              {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
-              Restart{needsRestart ? ' *' : ''}
+              {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              {s === 'error' ? 'Retry' : 'Start'}
             </button>
-          </>
-        ) : (
-          <button
-            onClick={onStart}
-            disabled={acting}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
-          >
-            {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
-            Start
-          </button>
-        )}
+          );
+        })()}
         <button
           onClick={onToggleLogs}
           className="ml-auto inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-textMuted hover:text-textMain hover:bg-slate-500/10 transition-colors"

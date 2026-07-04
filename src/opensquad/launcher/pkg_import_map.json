@@ -1,0 +1,11 @@
+{
+  "_comment": "Package name to import name mapping for pip dependency checks. Used by launcher's _install_builtin_plugin_deps() and PluginServiceProcess._install_dependencies() to detect whether a pip package is importable. Add new entries here when a plugin declares a pip dependency whose distribution name differs from its import name.",
+  "beautifulsoup4": "bs4",
+  "opencv-python": "cv2",
+  "PyMuPDF": "fitz",
+  "python-dotenv": "dotenv",
+  "scikit-learn": "sklearn",
+  "flask-cors": "flask_cors",
+  "lark-oapi": "lark_oapi",
+  "playwright-stealth": "playwright_stealth"
+}

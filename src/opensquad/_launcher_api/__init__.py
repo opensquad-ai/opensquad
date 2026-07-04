@@ -1520,8 +1520,18 @@ def create_management_handler(
             if plugin_id not in plug_svcs:
                 return self._send_json({"error": f"Plugin service '{plugin_id}' not found"}, 404)
             psp = self.state.plug_svcs[plugin_id]
-            if psp.is_alive():
-                return self._send_json({"error": f"{plugin_id} already running"}, 400)
+            # Idempotent: already running or in `starting` returns 200 (not 400)
+            # so the UI doesn't alert an error on a duplicate Start click.
+            if psp.is_alive() or psp.state == "starting":
+                return self._send_json(
+                    {
+                        "message": f"{plugin_id} already running",
+                        "already_running": True,
+                        "state": psp.state,
+                        "pid": psp.process.pid if psp.process else None,
+                        "port": psp.port,
+                    }
+                )
             self._set_service_enabled_in_config(plugin_id, True)
             psp.port = psp._resolve_port()
             psp.start()

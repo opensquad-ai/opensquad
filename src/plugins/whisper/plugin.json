@@ -35,7 +35,7 @@
       "auto_start": {
         "type": "boolean",
         "default": true,
-        "description": "Automatically start the Whisper service when the plugin loads"
+        "description": "Automatically start the Whisper service when the launcher boots"
       }
     }
   },
@@ -53,7 +53,7 @@
     "auto_start": {
       "type": "boolean",
       "default": true,
-      "description": "Automatically start the Whisper service when the plugin loads"
+      "description": "Automatically start the Whisper service when the launcher boots"
     }
   },
   "contributes": {},

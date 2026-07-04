@@ -1082,6 +1082,10 @@ export interface ServiceStatus {
   display_name: string;
   plugin_type: string;
   alive: boolean;
+  /** Coarse lifecycle state for UI display. Adds transitional `starting`
+   *  and terminal `error` states that `alive` (binary process.poll() check)
+   *  cannot represent. Falls back to derived value if backend omits it. */
+  state?: 'stopped' | 'starting' | 'running' | 'error';
   pid: number | null;
   port: number;
   host: string;

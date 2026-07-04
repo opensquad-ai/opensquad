@@ -2,15 +2,15 @@
 WebSearch Tool Plugin (New-style Decorator API)
 
 Tool implementation lives in plugins/websearch/websearch.py.
-Service auto-start: launches the WebSearch FastAPI service on plugin load.
+Service lifecycle is owned by the Launcher's PluginServiceProcess
+(declared via `service` field in plugin.json).
 """
 
 import importlib
 import logging
 from typing import Any
 
-from opensquad.plugin_api import Context, register
-from opensquad.service_plugin import ServicePlugin
+from opensquad.plugin_api import Context, Plugin, register
 
 logger = logging.getLogger("plugins.websearch")
 
@@ -52,27 +52,21 @@ logger = logging.getLogger("plugins.websearch")
         "auto_start": {
             "type": "boolean",
             "default": True,
-            "description": "Auto-start the WebSearch service when the plugin loads",
+            "description": "Auto-start the WebSearch service when the launcher boots",
         },
     },
 )
-class WebSearchPlugin(ServicePlugin):
-    """WebSearch tool plugin with auto-start service support."""
+class WebSearchPlugin(Plugin):
+    """WebSearch tool plugin. Service is managed by the Launcher."""
 
     def __init__(self, context: Context):
-        # Call ServicePlugin initialization with service configuration parameters
-        super().__init__(
-            context=context,
-            service_script="main.py",  # WebSearch uses FastAPI (main.py)
-            health_endpoint="/health",
-            service_name="WebSearchPlugin",
-            max_startup_wait=10,
-            health_check_interval=60,
-        )
+        super().__init__(context)
+
+    def on_load(self) -> None:
+        logger.info("[WebSearchPlugin] loaded.")
 
     def on_unload(self) -> None:
-        """Override: stop service + shutdown browser singleton."""
-        super().on_unload()
+        """Shutdown browser singleton if it was started in-process."""
         try:
             import asyncio
 

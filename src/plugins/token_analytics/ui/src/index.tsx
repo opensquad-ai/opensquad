@@ -30,59 +30,54 @@ const pluginAPI = {
     }
 };
 
-interface ByModelRow {
-  model: string;
-  tokens: number;
-  requests: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-}
-
-interface ByAgentRow {
-  agent_id: string;
-  tokens: number;
-  requests: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-}
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 interface TimelineByModelPoint {
   bucket: string;
   by_model: Record<string, number>;
 }
 
+interface ByModelRow { model: string; tokens: number; }
+interface ByAgentRow { agent_id: string; tokens: number; requests: number; }
+
 interface DashboardData {
-  metric: 'total' | 'cache_read' | 'cache_creation';
+  timeline_by_model: TimelineByModelPoint[];
+  by_model: ByModelRow[];
+  by_agent: ByAgentRow[];
   summary: {
     total_tokens: number;
-    total_requests: number;
     total_input: number;
     total_output: number;
+    total_requests: number;
     unique_models: number;
     unique_agents: number;
     total_cache_read: number;
     total_cache_creation: number;
   };
-  timeline_by_model: TimelineByModelPoint[];
-  by_model: ByModelRow[];
-  by_agent: ByAgentRow[];
-  meta: { time_range: string; cutoff: string; query_time_ms: number; metric?: string; error?: string };
+  error?: string;
 }
 
 type MetricKey = 'total' | 'cache_read' | 'cache_creation';
 
-const TIME_RANGES = [
-  { value: '24h', label: '24H' },
-  { value: '7d', label: '7D' },
-  { value: '30d', label: '30D' },
-  { value: 'all', label: 'All' },
+// t 函数类型（与主应用 react-i18next 兼容）
+type TFunc = (key: string, options?: Record<string, unknown>) => string;
+
+// 时间范围：label 走 i18n key
+const TIME_RANGES: { value: string; labelKey: string }[] = [
+  { value: '24h', labelKey: 'tokenAnalytics.range24h' },
+  { value: '7d',  labelKey: 'tokenAnalytics.range7d' },
+  { value: '30d', labelKey: 'tokenAnalytics.range30d' },
+  { value: 'all', labelKey: 'tokenAnalytics.rangeAll' },
 ];
 
-const METRICS: { value: MetricKey; label: string; sub: string; icon: React.ReactNode; tone: string }[] = [
-  { value: 'total',         label: '总 Token',   sub: 'input + output',     icon: <Zap size={14} />,        tone: 'indigo' },
-  { value: 'cache_read',    label: '缓存命中',   sub: 'cache hit (省)',     icon: <DatabaseZap size={14} />, tone: 'emerald' },
-  { value: 'cache_creation',label: '缓存创建',   sub: 'cache warm-up',      icon: <DatabaseZap size={14} />, tone: 'violet' },
-];
+// 指标定义：label/sub 走 i18n
+function buildMetrics(t: TFunc): { value: MetricKey; labelKey: string; subKey: string; icon: React.ReactNode; tone: string }[] {
+  return [
+    { value: 'total',          labelKey: 'tokenAnalytics.metricTotal',    subKey: 'tokenAnalytics.metricTotalSub',    icon: <Zap size={14} />,         tone: 'indigo' },
+    { value: 'cache_read',     labelKey: 'tokenAnalytics.metricCacheHit', subKey: 'tokenAnalytics.metricCacheHitSub', icon: <DatabaseZap size={14} />, tone: 'emerald' },
+    { value: 'cache_creation', labelKey: 'tokenAnalytics.metricCacheCreate', subKey: 'tokenAnalytics.metricCacheCreateSub', icon: <DatabaseZap size={14} />, tone: 'violet' },
+  ];
+}
 
 // Stable, color-blind-friendly-ish palette (10 hues). Order = rank by usage.
 const MODEL_PALETTE = [
@@ -140,9 +135,10 @@ interface StackedBarProps {
   colors: Record<string, string>;
   metric: MetricKey;
   metricLabel: string;
+  t: TFunc;
 }
 
-const StackedBarChart: React.FC<StackedBarProps> = ({ points, rankedModels, colors, metricLabel }) => {
+const StackedBarChart: React.FC<StackedBarProps> = ({ points, rankedModels, colors, metricLabel, t }) => {
   const W = 800;
   const H = 260;
   const PAD_L = 56;
@@ -186,8 +182,8 @@ const StackedBarChart: React.FC<StackedBarProps> = ({ points, rankedModels, colo
         onMouseLeave={() => setHover(null)}
       >
         {/* Y axis grid + labels */}
-        {ticks.map((t, i) => {
-          const y = PAD_T + (H - PAD_T - PAD_B) * (1 - t / Math.max(maxTotal, niceStep(maxTotal)));
+        {ticks.map((tk, i) => {
+          const y = PAD_T + (H - PAD_T - PAD_B) * (1 - tk / Math.max(maxTotal, niceStep(maxTotal)));
           return (
             <g key={i}>
               <line
@@ -198,7 +194,7 @@ const StackedBarChart: React.FC<StackedBarProps> = ({ points, rankedModels, colo
                 x={PAD_L - 6} y={y + 3}
                 textAnchor="end" fontSize="10" fill="#94a3b8"
               >
-                {formatNumber(t)}
+                {formatNumber(tk)}
               </text>
             </g>
           );
@@ -286,22 +282,22 @@ const StackedBarChart: React.FC<StackedBarProps> = ({ points, rankedModels, colo
           .sort((a, b) => b.v - a.v);
         return (
           <div
-            className="absolute z-20 pointer-events-none bg-slate-900 text-white text-[11px] rounded-lg shadow-xl px-3 py-2 -translate-x-1/2 -translate-y-full"
+            className="absolute z-20 pointer-events-none bg-white text-slate-800 text-[11px] rounded-lg shadow-xl border border-slate-200 px-3 py-2 -translate-x-1/2 -translate-y-full"
             style={{ left: hover.x, top: hover.y - 8 }}
           >
-            <div className="font-bold mb-1">{p.bucket} · {formatNumberFull(total)} {metricLabel}</div>
+            <div className="font-bold mb-1 text-slate-900">{p.bucket} · {formatNumberFull(total)} {metricLabel}</div>
             {segments.slice(0, 6).map(s => (
               <div key={s.model} className="flex items-center gap-2 whitespace-nowrap">
                 <span
                   className="inline-block w-2 h-2 rounded-sm"
                   style={{ background: colors[s.model] || '#94a3b8' }}
                 />
-                <span className="text-slate-300">{s.model}</span>
-                <span className="ml-auto font-mono">{formatNumber(s.v)}</span>
+                <span className="text-slate-600">{s.model}</span>
+                <span className="ml-auto font-mono text-slate-800">{formatNumber(s.v)}</span>
               </div>
             ))}
             {segments.length > 6 && (
-              <div className="text-slate-400 mt-1">+{segments.length - 6} more</div>
+              <div className="text-slate-400 mt-1">+{segments.length - 6} {t('tokenAnalytics.more')}</div>
             )}
           </div>
         );
@@ -318,55 +314,63 @@ interface DonutProps {
 }
 
 const Donut: React.FC<DonutProps> = ({ rows, total, metricLabel }) => {
-  const R = 78;
-  const r = 52;
-  const mid = (R + r) / 2;
-  const C = 2 * Math.PI * R;
   const [hover, setHover] = useState<number | null>(null);
-
-  if (total <= 0) {
-    return (
-      <svg viewBox="-100 -100 200 200" className="w-48 h-48">
-        <circle cx={0} cy={0} r={R} fill="none" stroke="#e2e8f0" strokeWidth={R - r} />
-        <text x={0} y={-2} textAnchor="middle" fontSize="14" fill="#94a3b8">暂无数据</text>
-        <text x={0} y={14} textAnchor="middle" fontSize="9" fill="#cbd5e1">no data</text>
-      </svg>
-    );
-  }
+  const R = 70;
+  const r = 42;
+  const cx = 90;
+  const cy = 90;
+  const circumference = 2 * Math.PI * R;
 
   let offset = 0;
+  const arcs = rows.map((row, i) => {
+    const fraction = row.value / Math.max(1, total);
+    const dash = fraction * circumference;
+    const arc = {
+      i,
+      color: row.color,
+      dash,
+      gap: circumference - dash,
+      offset: -offset,
+      label: row.label,
+      value: row.value,
+      pct: row.pct,
+    };
+    offset += dash;
+    return arc;
+  });
+
   return (
-    <svg viewBox="-100 -100 200 200" className="w-48 h-48" style={{ transform: 'rotate(-90deg)' }}>
-      <circle cx={0} cy={0} r={R} fill="none" stroke="#f1f5f9" strokeWidth={R - r} />
-      {rows.map((seg, i) => {
-        const len = (seg.value / total) * C;
-        const el = (
+    <svg width="180" height="180" viewBox="0 0 180 180">
+      <g transform={`translate(${cx}, ${cy}) rotate(-90)`}>
+        {arcs.map(arc => (
           <circle
-            key={seg.label}
-            cx={0} cy={0} r={mid}
+            key={arc.i}
+            r={R}
             fill="none"
-            stroke={seg.color}
+            stroke={arc.color}
             strokeWidth={R - r}
-            strokeDasharray={`${len} ${C - len}`}
-            strokeDashoffset={-offset}
+            strokeDasharray={`${arc.dash} ${arc.gap}`}
+            strokeDashoffset={arc.offset}
             style={{
+              opacity: hover === null || hover === arc.i ? 1 : 0.35,
+              transition: 'opacity 150ms',
               cursor: 'pointer',
-              opacity: hover === null || hover === i ? 1 : 0.35,
-              transition: 'opacity 0.15s',
             }}
-            onMouseEnter={() => setHover(i)}
+            onMouseEnter={() => setHover(arc.i)}
             onMouseLeave={() => setHover(null)}
           />
-        );
-        offset += len;
-        return el;
-      })}
+        ))}
+      </g>
     </svg>
   );
 };
 
-// ─── Main view ──────────────────────────────────────────────────────────────
-export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
+// ─── Main Dashboard ─────────────────────────────────────────────────────────
+export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack, t: propT, locale }) => {
+  // t 函数：优先用 props 传入的（来自主应用 i18n），否则回退到 key 原样返回
+  // （插件独立运行/未接入主应用 i18n 时的兜底）
+  const t: TFunc = propT || ((key: string) => key);
+
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -438,12 +442,14 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
     return data.summary.total_cache_creation;
   }, [data, metric]);
   const metricSub = useMemo(() => {
-    if (metric === 'total') return '总消耗';
-    if (metric === 'cache_read') return '节省的 token';
-    return '建立缓存';
-  }, [metric]);
+    if (metric === 'total') return t('tokenAnalytics.subTotal');
+    if (metric === 'cache_read') return t('tokenAnalytics.subCacheRead');
+    return t('tokenAnalytics.subCacheCreate');
+  }, [metric, t]);
 
   const isEmpty = data && rankedModels.length === 0;
+
+  const METRICS = useMemo(() => buildMetrics(t), [t]);
 
   return (
     <div className="flex-1 h-full bg-slate-50 flex flex-col overflow-hidden rounded-2xl border border-slate-200">
@@ -457,11 +463,11 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
             <BarChart3 size={22} />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-slate-800">Token 消耗统计</h1>
+            <h1 className="text-lg font-bold text-slate-800">{t('tokenAnalytics.title')}</h1>
             <p className="text-xs text-slate-500">
               {data?.summary
-                ? `${formatNumber(metricValue)} ${metricSub} / ${data.summary.total_requests.toLocaleString()} 请求`
-                : '加载中...'}
+                ? `${formatNumber(metricValue)} ${metricSub} / ${data.summary.total_requests.toLocaleString()} ${t('tokenAnalytics.requests')}`
+                : t('tokenAnalytics.loading')}
             </p>
           </div>
         </div>
@@ -475,7 +481,7 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
                 range === tr.value ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              {tr.label}
+              {t(tr.labelKey)}
             </button>
           ))}
         </div>
@@ -490,13 +496,13 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
         {loading && !data ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
             <Loader2 className="animate-spin text-indigo-600" size={32} />
-            <p className="text-slate-500 text-sm">正在计算统计数据...</p>
+            <p className="text-slate-500 text-sm">{t('tokenAnalytics.computing')}</p>
           </div>
         ) : error && !data ? (
           <div className="bg-rose-50 p-6 rounded-2xl border border-rose-100 flex flex-col items-center text-center">
             <AlertCircle className="text-rose-500 mb-2" size={32} />
             <p className="text-rose-800 font-medium">{error}</p>
-            <button onClick={fetchData} className="mt-4 text-sm font-bold text-rose-600 hover:underline">重试</button>
+            <button onClick={fetchData} className="mt-4 text-sm font-bold text-rose-600 hover:underline">{t('tokenAnalytics.retry')}</button>
           </div>
         ) : data ? (
           <>
@@ -504,7 +510,7 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
             <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-2">
               <div className="flex items-center gap-2 px-2 text-slate-400">
                 <Filter size={14} />
-                <span className="text-xs font-bold uppercase tracking-wider">指标</span>
+                <span className="text-xs font-bold uppercase tracking-wider">{t('tokenAnalytics.metricLabel')}</span>
               </div>
               <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
                 {METRICS.map(m => (
@@ -518,38 +524,38 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
                     }`}
                   >
                     {m.icon}
-                    {m.label}
+                    {t(m.labelKey)}
                   </button>
                 ))}
               </div>
-              <div className="ml-auto text-xs text-slate-400">{METRICS.find(x => x.value === metric)?.sub}</div>
+              <div className="ml-auto text-xs text-slate-400">{t(METRICS.find(x => x.value === metric)?.subKey || '')}</div>
             </div>
 
             {/* Summary Cards */}
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
               <StatCard
-                label={METRICS.find(x => x.value === metric)?.label || '总 Token'}
+                label={t(METRICS.find(x => x.value === metric)?.labelKey || 'tokenAnalytics.metricTotal')}
                 value={formatNumber(metricValue)}
                 icon={<Zap size={18} />}
                 color="bg-amber-500"
                 subtitle={metricSub}
                 active
               />
-              <StatCard label="请求数" value={data.summary.total_requests.toLocaleString()} icon={<Hash size={18} />} color="bg-blue-500" />
-              <StatCard label="输入 Token" value={formatNumber(data.summary.total_input)} icon={<ChevronDown size={18} />} color="bg-emerald-500" />
-              <StatCard label="输出 Token" value={formatNumber(data.summary.total_output)} icon={<Cpu size={18} />} color="bg-indigo-500" />
-              <StatCard label="模型数" value={String(data.summary.unique_models)} icon={<Cpu size={18} />} color="bg-cyan-500" />
-              <StatCard label="Agent 数" value={String(data.summary.unique_agents)} icon={<Bot size={18} />} color="bg-rose-500" />
-              <StatCard label="缓存命中" value={formatNumber(data.summary.total_cache_read)} icon={<DatabaseZap size={18} />} color="bg-teal-500" subtitle="节省的 token" />
+              <StatCard label={t('tokenAnalytics.cardRequests')} value={data.summary.total_requests.toLocaleString()} icon={<Hash size={18} />} color="bg-blue-500" />
+              <StatCard label={t('tokenAnalytics.cardInput')} value={formatNumber(data.summary.total_input)} icon={<ChevronDown size={18} />} color="bg-emerald-500" />
+              <StatCard label={t('tokenAnalytics.cardOutput')} value={formatNumber(data.summary.total_output)} icon={<Cpu size={18} />} color="bg-indigo-500" />
+              <StatCard label={t('tokenAnalytics.cardModels')} value={String(data.summary.unique_models)} icon={<Cpu size={18} />} color="bg-cyan-500" />
+              <StatCard label={t('tokenAnalytics.cardAgents')} value={String(data.summary.unique_agents)} icon={<Bot size={18} />} color="bg-rose-500" />
+              <StatCard label={t('tokenAnalytics.cardCacheHit')} value={formatNumber(data.summary.total_cache_read)} icon={<DatabaseZap size={18} />} color="bg-teal-500" subtitle={t('tokenAnalytics.subCacheRead')} />
               {data.summary.total_cache_creation > 0 && (
-                <StatCard label="缓存创建" value={formatNumber(data.summary.total_cache_creation)} icon={<DatabaseZap size={18} />} color="bg-violet-500" subtitle="建立缓存" />
+                <StatCard label={t('tokenAnalytics.cardCacheCreate')} value={formatNumber(data.summary.total_cache_creation)} icon={<DatabaseZap size={18} />} color="bg-violet-500" subtitle={t('tokenAnalytics.subCacheCreate')} />
               )}
             </div>
 
             {/* Stacked bar chart */}
-            <Section title="每天 Token 趋势" icon={<BarChart3 size={16} />}>
+            <Section title={t('tokenAnalytics.sectionTimeline')} icon={<BarChart3 size={16} />}>
               {isEmpty ? (
-                <EmptyHint metric={metric} />
+                <EmptyHint metric={metric} t={t} />
               ) : (
                 <>
                   <StackedBarChart
@@ -557,7 +563,8 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
                     rankedModels={rankedModels}
                     colors={colors}
                     metric={metric}
-                    metricLabel={METRICS.find(x => x.value === metric)?.label || 'tokens'}
+                    metricLabel={t(METRICS.find(x => x.value === metric)?.labelKey || 'tokenAnalytics.metricTotal')}
+                    t={t}
                   />
                   {rankedModels.length > 0 && (
                     <div className="flex flex-wrap gap-x-4 gap-y-2 mt-4 pt-3 border-t border-slate-100">
@@ -577,23 +584,23 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
             </Section>
 
             {/* Donut + legend */}
-            <Section title="模型用量" icon={<PieChart size={16} />}>
+            <Section title={t('tokenAnalytics.sectionModelUsage')} icon={<PieChart size={16} />}>
               {isEmpty ? (
-                <EmptyHint metric={metric} />
+                <EmptyHint metric={metric} t={t} />
               ) : (
                 <div className="flex flex-col md:flex-row items-center gap-6">
                   <div className="relative">
                     <Donut
                       rows={donutRows}
                       total={donutRows.reduce((s, r) => s + r.value, 0)}
-                      metricLabel={METRICS.find(x => x.value === metric)?.label || 'tokens'}
+                      metricLabel={t(METRICS.find(x => x.value === metric)?.labelKey || 'tokenAnalytics.metricTotal')}
                     />
                     <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                       <div className="text-xl font-black text-slate-800">
                         {formatNumber(donutRows.reduce((s, r) => s + r.value, 0))}
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5">
-                        {METRICS.find(x => x.value === metric)?.label}
+                        {t(METRICS.find(x => x.value === metric)?.labelKey || 'tokenAnalytics.metricTotal')}
                       </div>
                     </div>
                   </div>
@@ -626,12 +633,12 @@ export const TokenDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
 
             {/* By Agent */}
             {data.by_agent.length > 0 && (
-              <Section title="按 Agent 统计" icon={<Bot size={16} />}>
+              <Section title={t('tokenAnalytics.sectionByAgent')} icon={<Bot size={16} />}>
                 <BarList
                   items={data.by_agent.map(a => ({
                     label: a.agent_id,
                     value: a.tokens,
-                    sub: `${a.requests.toLocaleString()} req`,
+                    sub: `${a.requests.toLocaleString()} ${t('tokenAnalytics.reqUnit')}`,
                   }))}
                   color="bg-emerald-500"
                 />
@@ -650,13 +657,13 @@ const ChevronDown = (props: any) => (
   </svg>
 );
 
-const EmptyHint: React.FC<{ metric: MetricKey }> = ({ metric }) => (
+const EmptyHint: React.FC<{ metric: MetricKey; t: TFunc }> = ({ metric, t }) => (
   <div className="h-48 flex flex-col items-center justify-center text-slate-400 gap-2">
     <BarChart3 size={28} className="opacity-40" />
     <p className="text-sm">
       {metric === 'cache_read' || metric === 'cache_creation'
-        ? '当前模型未使用 prompt cache,此指标为 0'
-        : '所选时间范围内暂无数据'}
+        ? t('tokenAnalytics.emptyCache')
+        : t('tokenAnalytics.emptyRange')}
     </p>
   </div>
 );

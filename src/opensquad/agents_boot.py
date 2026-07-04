@@ -33,14 +33,22 @@ if sys.platform == "win32":
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 # -- Global anyio patch (Python 3.12+) --
-# Must run BEFORE any code that imports MCP adapter or uses anyio.
-# Fixes anyio CancelScope leakage into main asyncio event loop.
-try:
-    from opensquad.anyio_patches import apply as _apply_anyio_patches
-
-    _apply_anyio_patches()
-except Exception:
-    pass  # Not fatal if patch fails — runner has its own safety net
+# DISABLED: the patch in anyio_patches.py breaks anyio.connect_tcp() used by
+# httpx for ALL LLM API calls (CancelledError leaks out of connect_tcp's
+# move_on_after scope). The patch was meant to fix a leak of
+# _num_cancels_requested on timeout, but it caused a much more severe bug:
+# every chat() call fails immediately with CancelledError, the runner task
+# is interrupted and restarted with initial_query=None, silently dropping
+# every user message. The runner now has its own CancelledError safety net
+# at the chat() call site (runner.py) — that handles the timeout-leak case
+# without breaking normal network calls.
+# See: anyio_patches.py for the original rationale (kept for reference).
+# try:
+#     from opensquad.anyio_patches import apply as _apply_anyio_patches
+#
+#     _apply_anyio_patches()
+# except Exception:
+#     pass  # Not fatal if patch fails — runner has its own safety net
 
 # Project root (one level up from this file)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

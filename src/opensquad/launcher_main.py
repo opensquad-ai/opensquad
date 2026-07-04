@@ -2102,8 +2102,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if plugin_id not in _plugin_services:
                 return self._send_json({"error": f"Plugin service '{plugin_id}' not found"}, 404)
             psp = _plugin_services[plugin_id]
-            if psp.is_alive():
-                return self._send_json({"error": f"{plugin_id} already running"}, 400)
+            # Idempotent: if already running or in `starting` (deps installing),
+            # return 200 with already_running=true so the UI doesn't alert an
+            # error when the user clicks Start on a service that auto-started
+            # in the background. Previously this returned HTTP 400 which made
+            # the front-end pop an "Start failed: ... already running" dialog.
+            if psp.is_alive() or psp.state == "starting":
+                return self._send_json(
+                    {
+                        "message": f"{plugin_id} already running",
+                        "already_running": True,
+                        "state": psp.state,
+                        "pid": psp.process.pid if psp.process else None,
+                        "port": psp.port,
+                    }
+                )
             # Sync services.X.enabled = true so the service can read its own config
             # (otherwise the service may exit immediately if it sees enabled=false)
             self._set_service_enabled_in_config(plugin_id, True)
@@ -3509,6 +3522,13 @@ def _init_and_start_plugin_services():
         _plugin_deps_thread.native_id,
     )
 
+    # ── Pass 1: Register ALL services first (fast, no blocking) ──
+    # This closes the timing window where the UI lists a service (via
+    # /api/services/manage which re-scans plugin.json) but /api/plugin-services/
+    # {name}/start returns 404 because _plugin_services dict isn't populated
+    # yet. By registering all PSps up-front, any Start click from the UI
+    # — even mid-way through Pass 2's auto-start loop — finds the service
+    # already in the registry.
     for info in plugin_svc_infos:
         pid = info["plugin_id"]
         psp = PluginServiceProcess(pid, info["plugin_dir"], info["service_cfg"])
@@ -3517,6 +3537,15 @@ def _init_and_start_plugin_services():
         psp.auto_start = info["service_cfg"].get("auto_start", False)
         psp.dependencies = info.get("dependencies", {})
         _plugin_services[pid] = psp
+
+    # ── Pass 2: Auto-start enabled services ──
+    # Each psp.start() may block waiting for _plugin_deps_ready (background
+    # dep install thread) and per-service _install_dependencies(). Doing this
+    # in a separate loop after full registration ensures the registry is
+    # complete before any blocking call.
+    for info in plugin_svc_infos:
+        pid = info["plugin_id"]
+        psp = _plugin_services[pid]
         if not syscfg.is_service_enabled(pid):
             _log.info(f"[Launcher] Plugin service {pid} disabled via config (services.{pid}.enabled=false), skipping.")
             continue

@@ -24651,16 +24651,18 @@ var pluginAPI = {
   }
 };
 var TIME_RANGES = [
-  { value: "24h", label: "24H" },
-  { value: "7d", label: "7D" },
-  { value: "30d", label: "30D" },
-  { value: "all", label: "All" }
+  { value: "24h", labelKey: "tokenAnalytics.range24h" },
+  { value: "7d", labelKey: "tokenAnalytics.range7d" },
+  { value: "30d", labelKey: "tokenAnalytics.range30d" },
+  { value: "all", labelKey: "tokenAnalytics.rangeAll" }
 ];
-var METRICS = [
-  { value: "total", label: "\u603B Token", sub: "input + output", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Zap, { size: 14 }), tone: "indigo" },
-  { value: "cache_read", label: "\u7F13\u5B58\u547D\u4E2D", sub: "cache hit (\u7701)", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 14 }), tone: "emerald" },
-  { value: "cache_creation", label: "\u7F13\u5B58\u521B\u5EFA", sub: "cache warm-up", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 14 }), tone: "violet" }
-];
+function buildMetrics(t) {
+  return [
+    { value: "total", labelKey: "tokenAnalytics.metricTotal", subKey: "tokenAnalytics.metricTotalSub", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Zap, { size: 14 }), tone: "indigo" },
+    { value: "cache_read", labelKey: "tokenAnalytics.metricCacheHit", subKey: "tokenAnalytics.metricCacheHitSub", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 14 }), tone: "emerald" },
+    { value: "cache_creation", labelKey: "tokenAnalytics.metricCacheCreate", subKey: "tokenAnalytics.metricCacheCreateSub", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 14 }), tone: "violet" }
+  ];
+}
 var MODEL_PALETTE = [
   "#3b82f6",
   // blue
@@ -24720,7 +24722,7 @@ function niceStep(max) {
     step = 2;
   return step * base;
 }
-var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
+var StackedBarChart = ({ points, rankedModels, colors, metricLabel, t }) => {
   const W = 800;
   const H = 260;
   const PAD_L = 56;
@@ -24759,8 +24761,8 @@ var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
         preserveAspectRatio: "none",
         onMouseLeave: () => setHover(null),
         children: [
-          ticks.map((t, i) => {
-            const y = PAD_T + (H - PAD_T - PAD_B) * (1 - t / Math.max(maxTotal, niceStep(maxTotal)));
+          ticks.map((tk, i) => {
+            const y = PAD_T + (H - PAD_T - PAD_B) * (1 - tk / Math.max(maxTotal, niceStep(maxTotal)));
             return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
               /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                 "line",
@@ -24782,7 +24784,7 @@ var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
                   textAnchor: "end",
                   fontSize: "10",
                   fill: "#94a3b8",
-                  children: formatNumber(t)
+                  children: formatNumber(tk)
                 }
               )
             ] }, i);
@@ -24885,10 +24887,10 @@ var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
       return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
         "div",
         {
-          className: "absolute z-20 pointer-events-none bg-slate-900 text-white text-[11px] rounded-lg shadow-xl px-3 py-2 -translate-x-1/2 -translate-y-full",
+          className: "absolute z-20 pointer-events-none bg-white text-slate-800 text-[11px] rounded-lg shadow-xl border border-slate-200 px-3 py-2 -translate-x-1/2 -translate-y-full",
           style: { left: hover.x, top: hover.y - 8 },
           children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "font-bold mb-1", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "font-bold mb-1 text-slate-900", children: [
               p.bucket,
               " \xB7 ",
               formatNumberFull(total),
@@ -24903,13 +24905,14 @@ var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
                   style: { background: colors[s.model] || "#94a3b8" }
                 }
               ),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "text-slate-300", children: s.model }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "ml-auto font-mono", children: formatNumber(s.v) })
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "text-slate-600", children: s.model }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "ml-auto font-mono text-slate-800", children: formatNumber(s.v) })
             ] }, s.model)),
             segments.length > 6 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "text-slate-400 mt-1", children: [
               "+",
               segments.length - 6,
-              " more"
+              " ",
+              t("tokenAnalytics.more")
             ] })
           ]
         }
@@ -24918,50 +24921,51 @@ var StackedBarChart = ({ points, rankedModels, colors, metricLabel }) => {
   ] });
 };
 var Donut = ({ rows, total, metricLabel }) => {
-  const R = 78;
-  const r = 52;
-  const mid = (R + r) / 2;
-  const C = 2 * Math.PI * R;
   const [hover, setHover] = (0, import_react3.useState)(null);
-  if (total <= 0) {
-    return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", { viewBox: "-100 -100 200 200", className: "w-48 h-48", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", { cx: 0, cy: 0, r: R, fill: "none", stroke: "#e2e8f0", strokeWidth: R - r }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("text", { x: 0, y: -2, textAnchor: "middle", fontSize: "14", fill: "#94a3b8", children: "\u6682\u65E0\u6570\u636E" }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("text", { x: 0, y: 14, textAnchor: "middle", fontSize: "9", fill: "#cbd5e1", children: "no data" })
-    ] });
-  }
+  const R = 70;
+  const r = 42;
+  const cx = 90;
+  const cy = 90;
+  const circumference = 2 * Math.PI * R;
   let offset = 0;
-  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", { viewBox: "-100 -100 200 200", className: "w-48 h-48", style: { transform: "rotate(-90deg)" }, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", { cx: 0, cy: 0, r: R, fill: "none", stroke: "#f1f5f9", strokeWidth: R - r }),
-    rows.map((seg, i) => {
-      const len = seg.value / total * C;
-      const el = /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
-        "circle",
-        {
-          cx: 0,
-          cy: 0,
-          r: mid,
-          fill: "none",
-          stroke: seg.color,
-          strokeWidth: R - r,
-          strokeDasharray: `${len} ${C - len}`,
-          strokeDashoffset: -offset,
-          style: {
-            cursor: "pointer",
-            opacity: hover === null || hover === i ? 1 : 0.35,
-            transition: "opacity 0.15s"
-          },
-          onMouseEnter: () => setHover(i),
-          onMouseLeave: () => setHover(null)
-        },
-        seg.label
-      );
-      offset += len;
-      return el;
-    })
-  ] });
+  const arcs = rows.map((row, i) => {
+    const fraction = row.value / Math.max(1, total);
+    const dash = fraction * circumference;
+    const arc = {
+      i,
+      color: row.color,
+      dash,
+      gap: circumference - dash,
+      offset: -offset,
+      label: row.label,
+      value: row.value,
+      pct: row.pct
+    };
+    offset += dash;
+    return arc;
+  });
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("svg", { width: "180", height: "180", viewBox: "0 0 180 180", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", { transform: `translate(${cx}, ${cy}) rotate(-90)`, children: arcs.map((arc) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+    "circle",
+    {
+      r: R,
+      fill: "none",
+      stroke: arc.color,
+      strokeWidth: R - r,
+      strokeDasharray: `${arc.dash} ${arc.gap}`,
+      strokeDashoffset: arc.offset,
+      style: {
+        opacity: hover === null || hover === arc.i ? 1 : 0.35,
+        transition: "opacity 150ms",
+        cursor: "pointer"
+      },
+      onMouseEnter: () => setHover(arc.i),
+      onMouseLeave: () => setHover(null)
+    },
+    arc.i
+  )) }) });
 };
-var TokenDashboard = ({ onBack }) => {
+var TokenDashboard = ({ onBack, t: propT, locale }) => {
+  const t = propT || ((key) => key);
   const [data, setData] = (0, import_react3.useState)(null);
   const [loading, setLoading] = (0, import_react3.useState)(true);
   const [error, setError] = (0, import_react3.useState)(null);
@@ -25027,20 +25031,21 @@ var TokenDashboard = ({ onBack }) => {
   }, [data, metric]);
   const metricSub = (0, import_react3.useMemo)(() => {
     if (metric === "total")
-      return "\u603B\u6D88\u8017";
+      return t("tokenAnalytics.subTotal");
     if (metric === "cache_read")
-      return "\u8282\u7701\u7684 token";
-    return "\u5EFA\u7ACB\u7F13\u5B58";
-  }, [metric]);
+      return t("tokenAnalytics.subCacheRead");
+    return t("tokenAnalytics.subCacheCreate");
+  }, [metric, t]);
   const isEmpty = data && rankedModels.length === 0;
+  const METRICS = (0, import_react3.useMemo)(() => buildMetrics(t), [t]);
   return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex-1 h-full bg-slate-50 flex flex-col overflow-hidden rounded-2xl border border-slate-200", children: [
     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "px-6 py-4 border-b border-slate-200 bg-white flex items-center gap-4 shrink-0", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { onClick: onBack, className: "p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-indigo-600 transition-colors", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ArrowLeft, { size: 20 }) }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex items-center gap-3 flex-1", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BarChart3, { size: 22 }) }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { className: "text-lg font-bold text-slate-800", children: "Token \u6D88\u8017\u7EDF\u8BA1" }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-xs text-slate-500", children: data?.summary ? `${formatNumber(metricValue)} ${metricSub} / ${data.summary.total_requests.toLocaleString()} \u8BF7\u6C42` : "\u52A0\u8F7D\u4E2D..." })
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { className: "text-lg font-bold text-slate-800", children: t("tokenAnalytics.title") }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-xs text-slate-500", children: data?.summary ? `${formatNumber(metricValue)} ${metricSub} / ${data.summary.total_requests.toLocaleString()} ${t("tokenAnalytics.requests")}` : t("tokenAnalytics.loading") })
         ] })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "flex gap-1 bg-slate-100 rounded-lg p-1", children: TIME_RANGES.map((tr) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
@@ -25048,7 +25053,7 @@ var TokenDashboard = ({ onBack }) => {
         {
           onClick: () => setRange(tr.value),
           className: `px-2 py-1 rounded text-[10px] font-bold transition-colors ${range === tr.value ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`,
-          children: tr.label
+          children: t(tr.labelKey)
         },
         tr.value
       )) }),
@@ -25056,16 +25061,16 @@ var TokenDashboard = ({ onBack }) => {
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "flex-1 overflow-y-auto p-6 space-y-6", children: loading && !data ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex flex-col items-center justify-center h-64 gap-3", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(LoaderCircle, { className: "animate-spin text-indigo-600", size: 32 }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-slate-500 text-sm", children: "\u6B63\u5728\u8BA1\u7B97\u7EDF\u8BA1\u6570\u636E..." })
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-slate-500 text-sm", children: t("tokenAnalytics.computing") })
     ] }) : error && !data ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "bg-rose-50 p-6 rounded-2xl border border-rose-100 flex flex-col items-center text-center", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CircleAlert, { className: "text-rose-500 mb-2", size: 32 }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-rose-800 font-medium", children: error }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { onClick: fetchData, className: "mt-4 text-sm font-bold text-rose-600 hover:underline", children: "\u91CD\u8BD5" })
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { onClick: fetchData, className: "mt-4 text-sm font-bold text-rose-600 hover:underline", children: t("tokenAnalytics.retry") })
     ] }) : data ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "bg-white p-3 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-2", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex items-center gap-2 px-2 text-slate-400", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Filter, { size: 14 }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "text-xs font-bold uppercase tracking-wider", children: "\u6307\u6807" })
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "text-xs font-bold uppercase tracking-wider", children: t("tokenAnalytics.metricLabel") })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "flex gap-1 bg-slate-100 rounded-lg p-1", children: METRICS.map((m) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
           "button",
@@ -25074,18 +25079,18 @@ var TokenDashboard = ({ onBack }) => {
             className: `flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${metric === m.value ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"}`,
             children: [
               m.icon,
-              m.label
+              t(m.labelKey)
             ]
           },
           m.value
         )) }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "ml-auto text-xs text-slate-400", children: METRICS.find((x) => x.value === metric)?.sub })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "ml-auto text-xs text-slate-400", children: t(METRICS.find((x) => x.value === metric)?.subKey || "") })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
           StatCard,
           {
-            label: METRICS.find((x) => x.value === metric)?.label || "\u603B Token",
+            label: t(METRICS.find((x) => x.value === metric)?.labelKey || "tokenAnalytics.metricTotal"),
             value: formatNumber(metricValue),
             icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Zap, { size: 18 }),
             color: "bg-amber-500",
@@ -25093,15 +25098,15 @@ var TokenDashboard = ({ onBack }) => {
             active: true
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u8BF7\u6C42\u6570", value: data.summary.total_requests.toLocaleString(), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Hash, { size: 18 }), color: "bg-blue-500" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u8F93\u5165 Token", value: formatNumber(data.summary.total_input), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronDown, { size: 18 }), color: "bg-emerald-500" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u8F93\u51FA Token", value: formatNumber(data.summary.total_output), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cpu, { size: 18 }), color: "bg-indigo-500" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u6A21\u578B\u6570", value: String(data.summary.unique_models), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cpu, { size: 18 }), color: "bg-cyan-500" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "Agent \u6570", value: String(data.summary.unique_agents), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Bot, { size: 18 }), color: "bg-rose-500" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u7F13\u5B58\u547D\u4E2D", value: formatNumber(data.summary.total_cache_read), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 18 }), color: "bg-teal-500", subtitle: "\u8282\u7701\u7684 token" }),
-        data.summary.total_cache_creation > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: "\u7F13\u5B58\u521B\u5EFA", value: formatNumber(data.summary.total_cache_creation), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 18 }), color: "bg-violet-500", subtitle: "\u5EFA\u7ACB\u7F13\u5B58" })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardRequests"), value: data.summary.total_requests.toLocaleString(), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Hash, { size: 18 }), color: "bg-blue-500" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardInput"), value: formatNumber(data.summary.total_input), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ChevronDown, { size: 18 }), color: "bg-emerald-500" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardOutput"), value: formatNumber(data.summary.total_output), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cpu, { size: 18 }), color: "bg-indigo-500" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardModels"), value: String(data.summary.unique_models), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Cpu, { size: 18 }), color: "bg-cyan-500" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardAgents"), value: String(data.summary.unique_agents), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Bot, { size: 18 }), color: "bg-rose-500" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardCacheHit"), value: formatNumber(data.summary.total_cache_read), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 18 }), color: "bg-teal-500", subtitle: t("tokenAnalytics.subCacheRead") }),
+        data.summary.total_cache_creation > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(StatCard, { label: t("tokenAnalytics.cardCacheCreate"), value: formatNumber(data.summary.total_cache_creation), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DatabaseZap, { size: 18 }), color: "bg-violet-500", subtitle: t("tokenAnalytics.subCacheCreate") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: "\u6BCF\u5929 Token \u8D8B\u52BF", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BarChart3, { size: 16 }), children: isEmpty ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(EmptyHint, { metric }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: t("tokenAnalytics.sectionTimeline"), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BarChart3, { size: 16 }), children: isEmpty ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(EmptyHint, { metric, t }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
           StackedBarChart,
           {
@@ -25109,7 +25114,8 @@ var TokenDashboard = ({ onBack }) => {
             rankedModels,
             colors,
             metric,
-            metricLabel: METRICS.find((x) => x.value === metric)?.label || "tokens"
+            metricLabel: t(METRICS.find((x) => x.value === metric)?.labelKey || "tokenAnalytics.metricTotal"),
+            t
           }
         ),
         rankedModels.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "flex flex-wrap gap-x-4 gap-y-2 mt-4 pt-3 border-t border-slate-100", children: rankedModels.map((m) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex items-center gap-1.5 text-xs", children: [
@@ -25123,19 +25129,19 @@ var TokenDashboard = ({ onBack }) => {
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "text-slate-600 font-medium", children: m })
         ] }, m)) })
       ] }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: "\u6A21\u578B\u7528\u91CF", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PieChart, { size: 16 }), children: isEmpty ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(EmptyHint, { metric }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex flex-col md:flex-row items-center gap-6", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: t("tokenAnalytics.sectionModelUsage"), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PieChart, { size: 16 }), children: isEmpty ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(EmptyHint, { metric, t }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "flex flex-col md:flex-row items-center gap-6", children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "relative", children: [
           /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
             Donut,
             {
               rows: donutRows,
               total: donutRows.reduce((s, r) => s + r.value, 0),
-              metricLabel: METRICS.find((x) => x.value === metric)?.label || "tokens"
+              metricLabel: t(METRICS.find((x) => x.value === metric)?.labelKey || "tokenAnalytics.metricTotal")
             }
           ),
           /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "absolute inset-0 flex flex-col items-center justify-center pointer-events-none", children: [
             /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "text-xl font-black text-slate-800", children: formatNumber(donutRows.reduce((s, r) => s + r.value, 0)) }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "text-[10px] text-slate-400 mt-0.5", children: METRICS.find((x) => x.value === metric)?.label })
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "text-[10px] text-slate-400 mt-0.5", children: t(METRICS.find((x) => x.value === metric)?.labelKey || "tokenAnalytics.metricTotal") })
           ] })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "flex-1 w-full space-y-2", children: donutRows.map((r) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
@@ -25161,13 +25167,13 @@ var TokenDashboard = ({ onBack }) => {
           r.label
         )) })
       ] }) }),
-      data.by_agent.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: "\u6309 Agent \u7EDF\u8BA1", icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Bot, { size: 16 }), children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+      data.by_agent.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Section, { title: t("tokenAnalytics.sectionByAgent"), icon: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Bot, { size: 16 }), children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
         BarList,
         {
           items: data.by_agent.map((a) => ({
             label: a.agent_id,
             value: a.tokens,
-            sub: `${a.requests.toLocaleString()} req`
+            sub: `${a.requests.toLocaleString()} ${t("tokenAnalytics.reqUnit")}`
           })),
           color: "bg-emerald-500"
         }
@@ -25176,9 +25182,9 @@ var TokenDashboard = ({ onBack }) => {
   ] });
 };
 var ChevronDown = (props) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("svg", { viewBox: "0 0 24 24", width: 18, height: 18, fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", ...props, children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("polyline", { points: "6 9 12 15 18 9" }) });
-var EmptyHint = ({ metric }) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "h-48 flex flex-col items-center justify-center text-slate-400 gap-2", children: [
+var EmptyHint = ({ metric, t }) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "h-48 flex flex-col items-center justify-center text-slate-400 gap-2", children: [
   /* @__PURE__ */ (0, import_jsx_runtime.jsx)(BarChart3, { size: 28, className: "opacity-40" }),
-  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-sm", children: metric === "cache_read" || metric === "cache_creation" ? "\u5F53\u524D\u6A21\u578B\u672A\u4F7F\u7528 prompt cache,\u6B64\u6307\u6807\u4E3A 0" : "\u6240\u9009\u65F6\u95F4\u8303\u56F4\u5185\u6682\u65E0\u6570\u636E" })
+  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "text-sm", children: metric === "cache_read" || metric === "cache_creation" ? t("tokenAnalytics.emptyCache") : t("tokenAnalytics.emptyRange") })
 ] });
 var StatCard = ({ label, value, icon, color, subtitle, active }) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: `bg-white p-4 rounded-2xl border ${active ? "border-indigo-200 shadow-md ring-1 ring-indigo-100" : "border-slate-100"} shadow-sm`, children: [
   /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: `w-8 h-8 rounded-lg ${color} text-white flex items-center justify-center mb-3`, children: icon }),

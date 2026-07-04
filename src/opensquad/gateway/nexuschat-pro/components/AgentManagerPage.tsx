@@ -245,6 +245,34 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
     return () => clearInterval(timer);
   }, [fetchAgents]);
 
+  // ── 短时高频轮询：用户操作后捕捉 starting→running 过渡 ──
+  // 默认 30s 轮询太慢，用户点 Start/Restart 后 agent 还在 starting
+  // 阶段（Popen 已起但尚未 register 到 Gateway），下次自动刷新要等
+  // 最多 30s。这里在操作后用 2s 间隔轮询 30s 窗口，让 UI 近实时反映
+  // starting→ready 的过渡。比 WS 推送轻量，且无需后端改动。
+  const fastPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const fastPollUntilStable = useCallback(() => {
+    if (fastPollRef.current) clearInterval(fastPollRef.current);
+    let elapsed = 0;
+    const intervalMs = 2000;
+    const maxMs = 30000;
+    fastPollRef.current = setInterval(async () => {
+      elapsed += intervalMs;
+      await fetchAgents();
+      if (elapsed >= maxMs && fastPollRef.current) {
+        clearInterval(fastPollRef.current);
+        fastPollRef.current = null;
+      }
+    }, intervalMs);
+  }, [fetchAgents]);
+
+  // 卸载时清理快轮询定时器，避免泄漏
+  useEffect(() => {
+    return () => {
+      if (fastPollRef.current) clearInterval(fastPollRef.current);
+    };
+  }, []);
+
   // ---- Agent 操作 ----
 
   const doAction = async (agent: AdminAgent, action: 'start' | 'stop' | 'restart') => {
@@ -255,6 +283,11 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       else if (action === 'stop') await adminAPI.stopAgent(name);
       else await adminAPI.restartAgent(name);
       await fetchAgents();
+      // start/restart 有 starting→ready 过渡，触发快轮询捕捉状态变化；
+      // stop 是立即生效的，不需要补偿轮询。
+      if (action === 'start' || action === 'restart') {
+        fastPollUntilStable();
+      }
     } catch (e: any) {
       alert(`${action} failed: ${e.message}`);
     } finally {

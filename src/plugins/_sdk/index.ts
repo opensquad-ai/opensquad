@@ -21,10 +21,17 @@
 
 /**
  * Props passed by the framework to every plugin view component.
+ *
+ * i18n 字段（locale/t）为可选，便于插件按需接入中英双语。
+ * 框架在用户切换导航栏语言时会重新 mount 插件，保证文案即时刷新。
  */
 export interface PluginViewProps {
   /** Call this to navigate back to the Plugin Manager. */
   onBack: () => void;
+  /** 当前语言代码，例如 'zh' | 'en'。插件可据此做条件渲染。 */
+  locale?: 'zh' | 'en';
+  /** i18n 翻译函数，key 使用主应用 locales 命名空间（如 'tokenAnalytics.title'）。 */
+  t?: (key: string, options?: Record<string, unknown>) => string;
 }
 
 /**
