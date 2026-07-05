@@ -1236,6 +1236,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 "description": body.get("description", ""),
                 "capabilities": [],
                 "model": {
+                    "api_protocol": "openai_compat",  # Default: OpenAI-compatible API (most third-party providers)
+                    "provider": "",
                     "api_key": "",
                     "base_url": "",
                     "model_name": "",
