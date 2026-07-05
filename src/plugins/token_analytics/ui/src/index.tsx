@@ -103,8 +103,8 @@ function modelColor(model: string, rankedModels: string[]): string {
 
 function formatNumber(n: number): string {
   if (!Number.isFinite(n)) return '0';
-  if (Math.abs(n) >= 1_0000_0000) return (n / 1_0000_0000).toFixed(2) + '亿';
-  if (Math.abs(n) >= 10_000) return (n / 10_000).toFixed(1) + '万';
+  if (Math.abs(n) >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'B';
+  if (Math.abs(n) >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
   if (Math.abs(n) >= 1_000) return (n / 1_000).toFixed(1) + 'K';
   return String(Math.round(n));
 }

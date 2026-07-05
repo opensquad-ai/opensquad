@@ -24,9 +24,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// node_modules/.pnpm/react@18.3.1/node_modules/react/cjs/react.development.js
+// node_modules/react/cjs/react.development.js
 var require_react_development = __commonJS({
-  "node_modules/.pnpm/react@18.3.1/node_modules/react/cjs/react.development.js"(exports, module) {
+  "node_modules/react/cjs/react.development.js"(exports, module) {
     "use strict";
     if (true) {
       (function() {
@@ -1898,9 +1898,9 @@ var require_react_development = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react@18.3.1/node_modules/react/index.js
+// node_modules/react/index.js
 var require_react = __commonJS({
-  "node_modules/.pnpm/react@18.3.1/node_modules/react/index.js"(exports, module) {
+  "node_modules/react/index.js"(exports, module) {
     "use strict";
     if (false) {
       module.exports = null;
@@ -1910,9 +1910,9 @@ var require_react = __commonJS({
   }
 });
 
-// node_modules/.pnpm/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.development.js
+// node_modules/scheduler/cjs/scheduler.development.js
 var require_scheduler_development = __commonJS({
-  "node_modules/.pnpm/scheduler@0.23.2/node_modules/scheduler/cjs/scheduler.development.js"(exports) {
+  "node_modules/scheduler/cjs/scheduler.development.js"(exports) {
     "use strict";
     if (true) {
       (function() {
@@ -2360,9 +2360,9 @@ var require_scheduler_development = __commonJS({
   }
 });
 
-// node_modules/.pnpm/scheduler@0.23.2/node_modules/scheduler/index.js
+// node_modules/scheduler/index.js
 var require_scheduler = __commonJS({
-  "node_modules/.pnpm/scheduler@0.23.2/node_modules/scheduler/index.js"(exports, module) {
+  "node_modules/scheduler/index.js"(exports, module) {
     "use strict";
     if (false) {
       module.exports = null;
@@ -2372,9 +2372,9 @@ var require_scheduler = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js
+// node_modules/react-dom/cjs/react-dom.development.js
 var require_react_dom_development = __commonJS({
-  "node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/cjs/react-dom.development.js"(exports) {
+  "node_modules/react-dom/cjs/react-dom.development.js"(exports) {
     "use strict";
     if (true) {
       (function() {
@@ -23507,9 +23507,9 @@ var require_react_dom_development = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/index.js
+// node_modules/react-dom/index.js
 var require_react_dom = __commonJS({
-  "node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/index.js"(exports, module) {
+  "node_modules/react-dom/index.js"(exports, module) {
     "use strict";
     if (false) {
       checkDCE();
@@ -23520,9 +23520,9 @@ var require_react_dom = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/client.js
+// node_modules/react-dom/client.js
 var require_client = __commonJS({
-  "node_modules/.pnpm/react-dom@18.3.1_react@18.3.1/node_modules/react-dom/client.js"(exports) {
+  "node_modules/react-dom/client.js"(exports) {
     "use strict";
     var m = require_react_dom();
     if (false) {
@@ -23551,9 +23551,9 @@ var require_client = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.development.js
+// node_modules/react/cjs/react-jsx-runtime.development.js
 var require_react_jsx_runtime_development = __commonJS({
-  "node_modules/.pnpm/react@18.3.1/node_modules/react/cjs/react-jsx-runtime.development.js"(exports) {
+  "node_modules/react/cjs/react-jsx-runtime.development.js"(exports) {
     "use strict";
     if (true) {
       (function() {
@@ -24444,9 +24444,9 @@ var require_react_jsx_runtime_development = __commonJS({
   }
 });
 
-// node_modules/.pnpm/react@18.3.1/node_modules/react/jsx-runtime.js
+// node_modules/react/jsx-runtime.js
 var require_jsx_runtime = __commonJS({
-  "node_modules/.pnpm/react@18.3.1/node_modules/react/jsx-runtime.js"(exports, module) {
+  "node_modules/react/jsx-runtime.js"(exports, module) {
     "use strict";
     if (false) {
       module.exports = null;
@@ -24460,19 +24460,19 @@ var require_jsx_runtime = __commonJS({
 var import_react3 = __toESM(require_react());
 var import_client = __toESM(require_client());
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/createLucideIcon.js
+// node_modules/lucide-react/dist/esm/createLucideIcon.js
 var import_react2 = __toESM(require_react());
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/shared/src/utils.js
+// node_modules/lucide-react/dist/esm/shared/src/utils.js
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 var mergeClasses = (...classes) => classes.filter((className, index, array) => {
   return Boolean(className) && array.indexOf(className) === index;
 }).join(" ");
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/Icon.js
+// node_modules/lucide-react/dist/esm/Icon.js
 var import_react = __toESM(require_react());
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/defaultAttributes.js
+// node_modules/lucide-react/dist/esm/defaultAttributes.js
 var defaultAttributes = {
   xmlns: "http://www.w3.org/2000/svg",
   width: 24,
@@ -24485,7 +24485,7 @@ var defaultAttributes = {
   strokeLinejoin: "round"
 };
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/Icon.js
+// node_modules/lucide-react/dist/esm/Icon.js
 var Icon = (0, import_react.forwardRef)(
   ({
     color = "currentColor",
@@ -24517,7 +24517,7 @@ var Icon = (0, import_react.forwardRef)(
   }
 );
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/createLucideIcon.js
+// node_modules/lucide-react/dist/esm/createLucideIcon.js
 var createLucideIcon = (iconName, iconNode) => {
   const Component = (0, import_react2.forwardRef)(
     ({ className, ...props }, ref) => (0, import_react2.createElement)(Icon, {
@@ -24531,13 +24531,13 @@ var createLucideIcon = (iconName, iconNode) => {
   return Component;
 };
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/arrow-left.js
+// node_modules/lucide-react/dist/esm/icons/arrow-left.js
 var ArrowLeft = createLucideIcon("ArrowLeft", [
   ["path", { d: "m12 19-7-7 7-7", key: "1l729n" }],
   ["path", { d: "M19 12H5", key: "x3x0zl" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/bar-chart-3.js
+// node_modules/lucide-react/dist/esm/icons/bar-chart-3.js
 var BarChart3 = createLucideIcon("BarChart3", [
   ["path", { d: "M3 3v18h18", key: "1s2lah" }],
   ["path", { d: "M18 17V9", key: "2bz60n" }],
@@ -24545,7 +24545,7 @@ var BarChart3 = createLucideIcon("BarChart3", [
   ["path", { d: "M8 17v-3", key: "17ska0" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/bot.js
+// node_modules/lucide-react/dist/esm/icons/bot.js
 var Bot = createLucideIcon("Bot", [
   ["path", { d: "M12 8V4H8", key: "hb8ula" }],
   ["rect", { width: "16", height: "12", x: "4", y: "8", rx: "2", key: "enze0r" }],
@@ -24555,14 +24555,14 @@ var Bot = createLucideIcon("Bot", [
   ["path", { d: "M9 13v2", key: "rq6x2g" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/circle-alert.js
+// node_modules/lucide-react/dist/esm/icons/circle-alert.js
 var CircleAlert = createLucideIcon("CircleAlert", [
   ["circle", { cx: "12", cy: "12", r: "10", key: "1mglay" }],
   ["line", { x1: "12", x2: "12", y1: "8", y2: "12", key: "1pkeuh" }],
   ["line", { x1: "12", x2: "12.01", y1: "16", y2: "16", key: "4dfq90" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/cpu.js
+// node_modules/lucide-react/dist/esm/icons/cpu.js
 var Cpu = createLucideIcon("Cpu", [
   ["rect", { width: "16", height: "16", x: "4", y: "4", rx: "2", key: "14l7u7" }],
   ["rect", { width: "6", height: "6", x: "9", y: "9", rx: "1", key: "5aljv4" }],
@@ -24576,7 +24576,7 @@ var Cpu = createLucideIcon("Cpu", [
   ["path", { d: "M9 20v2", key: "i2bqo8" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/database-zap.js
+// node_modules/lucide-react/dist/esm/icons/database-zap.js
 var DatabaseZap = createLucideIcon("DatabaseZap", [
   ["ellipse", { cx: "12", cy: "5", rx: "9", ry: "3", key: "msslwz" }],
   ["path", { d: "M3 5V19A9 3 0 0 0 15 21.84", key: "14ibmq" }],
@@ -24585,12 +24585,12 @@ var DatabaseZap = createLucideIcon("DatabaseZap", [
   ["path", { d: "M3 12A9 3 0 0 0 14.59 14.87", key: "1y4wr8" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/filter.js
+// node_modules/lucide-react/dist/esm/icons/filter.js
 var Filter = createLucideIcon("Filter", [
   ["polygon", { points: "22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3", key: "1yg77f" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/hash.js
+// node_modules/lucide-react/dist/esm/icons/hash.js
 var Hash = createLucideIcon("Hash", [
   ["line", { x1: "4", x2: "20", y1: "9", y2: "9", key: "4lhtct" }],
   ["line", { x1: "4", x2: "20", y1: "15", y2: "15", key: "vyu0kd" }],
@@ -24598,18 +24598,18 @@ var Hash = createLucideIcon("Hash", [
   ["line", { x1: "16", x2: "14", y1: "3", y2: "21", key: "weycgp" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/loader-circle.js
+// node_modules/lucide-react/dist/esm/icons/loader-circle.js
 var LoaderCircle = createLucideIcon("LoaderCircle", [
   ["path", { d: "M21 12a9 9 0 1 1-6.219-8.56", key: "13zald" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/pie-chart.js
+// node_modules/lucide-react/dist/esm/icons/pie-chart.js
 var PieChart = createLucideIcon("PieChart", [
   ["path", { d: "M21.21 15.89A10 10 0 1 1 8 2.83", key: "k2fpak" }],
   ["path", { d: "M22 12A10 10 0 0 0 12 2v10z", key: "1rfc4y" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/refresh-cw.js
+// node_modules/lucide-react/dist/esm/icons/refresh-cw.js
 var RefreshCw = createLucideIcon("RefreshCw", [
   ["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", key: "v9h5vc" }],
   ["path", { d: "M21 3v5h-5", key: "1q7to0" }],
@@ -24617,7 +24617,7 @@ var RefreshCw = createLucideIcon("RefreshCw", [
   ["path", { d: "M8 16H3v5", key: "1cv678" }]
 ]);
 
-// node_modules/.pnpm/lucide-react@0.378.0_react@18.3.1/node_modules/lucide-react/dist/esm/icons/zap.js
+// node_modules/lucide-react/dist/esm/icons/zap.js
 var Zap = createLucideIcon("Zap", [
   [
     "path",
@@ -24692,10 +24692,10 @@ var MODEL_PALETTE = [
 function formatNumber(n) {
   if (!Number.isFinite(n))
     return "0";
-  if (Math.abs(n) >= 1e8)
-    return (n / 1e8).toFixed(2) + "\u4EBF";
-  if (Math.abs(n) >= 1e4)
-    return (n / 1e4).toFixed(1) + "\u4E07";
+  if (Math.abs(n) >= 1e9)
+    return (n / 1e9).toFixed(2) + "B";
+  if (Math.abs(n) >= 1e6)
+    return (n / 1e6).toFixed(2) + "M";
   if (Math.abs(n) >= 1e3)
     return (n / 1e3).toFixed(1) + "K";
   return String(Math.round(n));
