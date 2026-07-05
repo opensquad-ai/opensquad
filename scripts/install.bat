@@ -80,6 +80,24 @@ echo.
 echo [OK] Python dependencies installed.
 echo.
 
+:: ── 3b. Download Playwright Chromium browser ──
+:: The `playwright` pip package (installed above) does NOT bundle the
+:: Chromium binary. Without this step, the websearch plugin service fails
+:: at runtime with "Executable doesn't exist at ...chromium_headless_shell-XXXX".
+:: We download only chromium (not firefox/webkit) to keep the install lean.
+:: Respect a user-set PLAYWRIGHT_BROWSERS_PATH but strip any trailing
+:: whitespace (a common cause of "path not found" errors on Windows).
+echo [3b/6] Downloading Playwright Chromium browser...
+if defined PLAYWRIGHT_BROWSERS_PATH (
+    set "PLAYWRIGHT_BROWSERS_PATH=%PLAYWRIGHT_BROWSERS_PATH: =%"
+)
+python -m playwright install chromium
+if errorlevel 1 (
+    echo [WARN] Playwright Chromium download failed. Web search will not work until you run: python -m playwright install chromium
+)
+echo [OK] Playwright Chromium browser ready.
+echo.
+
 :: ── 4. Install frontend dependencies ──
 echo [4/6] Installing frontend dependencies...
 pushd "%~dp0..\src\opensquad\gateway\nexuschat-pro"
