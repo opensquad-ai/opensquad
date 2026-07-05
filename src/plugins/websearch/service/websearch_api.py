@@ -14,6 +14,19 @@ except ImportError:
     from web_crawler import search_with_bing_playwright
 
 
+# ── Env var sanitization ──────────────────────────────────────────────
+# PLAYWRIGHT_BROWSERS_PATH is often set manually (e.g. to D:\ms-playwright)
+# and a trailing space is a common mistake that makes Playwright look for
+# "D:\ms-playwright \chromium-XXXX" (note the space) which never exists.
+# Strip surrounding whitespace so the path is always clean.
+_pwb_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+if _pwb_path != _pwb_path.strip():
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _pwb_path.strip()
+    print(
+        f"[WebSearch] Corrected PLAYWRIGHT_BROWSERS_PATH (stripped whitespace) -> {os.environ['PLAYWRIGHT_BROWSERS_PATH']!r}"
+    )
+
+
 # ── Global browser singleton ──────────────────────────────────────────
 _playwright = None
 _browser: Browser | None = None
@@ -41,7 +54,20 @@ async def _get_browser(headless: bool = True):
             if chrome_path:
                 launch_kwargs["executable_path"] = chrome_path
             _browser = await _playwright.chromium.launch(**launch_kwargs)
-        except Exception:
+        except Exception as e:
+            # If the bundled Chromium is missing, surface a clear, actionable
+            # error instead of a bare "Executable doesn't exist at ..." so the
+            # user knows to run `python -m playwright install chromium`.
+            # Do NOT retry launch() — if the binary is missing, the retry will
+            # also fail and the uncaught exception would crash the endpoint.
+            if "Executable doesn't exist" in str(e):
+                print(
+                    "[WebSearch] Chromium binary not found. "
+                    "Fix: run `python -m playwright install chromium` to download it."
+                )
+                raise
+            # For other errors (e.g. custom chrome_path failed), try without
+            # executable_path as fallback.
             _browser = await _playwright.chromium.launch(headless=headless)
         print("[WebSearch] Browser launched (singleton)")
         return _browser
