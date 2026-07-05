@@ -503,8 +503,10 @@ class AgentProcess:
     # P0-2: Health check config
     HEALTH_CHECK_INTERVAL = 10  # seconds between probes
     HEALTH_CHECK_TIMEOUT = 5  # seconds before probe is considered failed
-    HEALTH_CHECK_FAIL_THRESHOLD = 3  # consecutive failures before restart
-    HEALTH_CHECK_INITIAL_DELAY = 20  # let health server register before first probe
+    HEALTH_CHECK_FAIL_THRESHOLD = 6  # consecutive failures before restart (was 3 → 6 for multi-agent concurrent boot)
+    HEALTH_CHECK_INITIAL_DELAY = (
+        60  # let health server register before first probe (was 20 → 60 for cold start + MCP init)
+    )
 
     def __init__(self, agent_dir: str, config: dict):
         self.agent_dir = agent_dir
