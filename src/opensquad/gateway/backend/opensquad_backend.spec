@@ -311,9 +311,34 @@ def _is_plugin_runtime_data(src: str) -> bool:
         return False
     return True
 
+# ── Pre-clean: remove any leftover node_modules dirs under plugins/*/ui/ and
+# skills/*/ui/ before collect_all scans them. node_modules may contain
+# platform-specific symlinks/junctions (e.g. @esbuild/aix-ppc64) that cause
+# FileNotFoundError during glob/scandir on Windows. We only need index.js.
+import shutil as _shutil
+for _ui_root in [GATEWAY_DIR.parent / "plugins", GATEWAY_DIR.parent / "skills"]:
+    if _ui_root.is_dir():
+        for _plugin_dir in _ui_root.iterdir():
+            _nm = _plugin_dir / "ui" / "node_modules"
+            if _nm.exists():
+                try:
+                    _shutil.rmtree(_nm, ignore_errors=True)
+                    print(f"[spec] pre-clean: removed {_nm}")
+                except Exception as _e:
+                    print(f"[spec] pre-clean: WARNING could not remove {_nm}: {_e}")
+
 for _res_pkg in ("plugins", "skills"):
     hiddenimports += collect_submodules(_res_pkg)
-    _res_datas, _res_bins, _res_hidden = collect_all(_res_pkg)
+    # Exclude node_modules and ui subdirs from data collection — they contain
+    # platform-specific optional deps (e.g. @esbuild/aix-ppc64) that cause
+    # FileNotFoundError during glob/scandir on Windows.
+    try:
+        _res_datas, _res_bins, _res_hidden = collect_all(
+            _res_pkg, exclude_datas=["*/node_modules/*", "*/ui/node_modules/*"]
+        )
+    except FileNotFoundError as _e:
+        print(f"[spec] WARNING: collect_all({_res_pkg}) failed: {_e}")
+        _res_datas, _res_bins, _res_hidden = [], [], []
     datas += [pair for pair in _res_datas if _is_plugin_runtime_data(pair[0])]
     print(f"[spec] {_res_pkg}: {len([p for p in _res_datas if _is_plugin_runtime_data(p[0])])} runtime data files (node_modules/ui excluded)")
 
