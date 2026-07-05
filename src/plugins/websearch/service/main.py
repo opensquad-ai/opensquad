@@ -4,6 +4,30 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# ── Force UTF-8 stdout/stderr on Windows ──────────────────────────
+# On Chinese Windows, the default console encoding is GBK (cp936), which
+# cannot encode many Unicode characters (e.g. emoji, check marks). When
+# print() encounters such a character, it raises UnicodeEncodeError,
+# which propagates up and crashes the API endpoint with a 500 error.
+# Reconfigure stdout/stderr to UTF-8 to prevent this.
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        elif hasattr(_stream, "buffer"):
+            import io as _io
+
+            _new = _io.TextIOWrapper(
+                _stream.buffer,
+                encoding="utf-8",
+                errors="replace",
+                line_buffering=_stream.line_buffering if hasattr(_stream, "line_buffering") else False,
+            )
+            if _stream is sys.stdout:
+                sys.stdout = _new
+            else:
+                sys.stderr = _new
+
 # ── sys.path setup ─────────────────────────────────────────
 # _here: plugins/websearch/service/
 # We need `plugins._service_runtime` to be importable. In a PyInstaller

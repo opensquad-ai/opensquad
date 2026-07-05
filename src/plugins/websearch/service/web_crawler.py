@@ -69,7 +69,9 @@ async def search_with_bing_playwright(browser: Browser, query: str, max_results:
             try:
                 await page.wait_for_selector("#b_results", state="visible", timeout=10000)
             except PlaywrightError as e:
-                print(f"--- ❌ Critical Error on page {page_num} for '{query}': Could not find visible results. ---")
+                print(
+                    f"--- [FAIL] Critical Error on page {page_num} for '{query}': Could not find visible results. ---"
+                )
                 print("--- Saving debug info to help diagnose... ---")
 
                 # Write debug artifacts to the writable workspace logs dir, not a

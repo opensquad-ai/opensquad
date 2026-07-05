@@ -18,6 +18,11 @@ from playwright.async_api import Error as PlaywrightError
 # from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
+# Reusable Stealth instance (playwright_stealth.Stealth can be expensive to
+# instantiate and may race when multiple pages call apply_stealth_async
+# concurrently with separate instances).
+_stealth_instance: Stealth | None = None
+
 try:
     from .pdf_processor import extract_text_from_pdf
 except ImportError:
@@ -49,21 +54,21 @@ async def fetch_page_content_async(context: BrowserContext, url: str, retries: i
                     text = extract_text_from_pdf(pdf_content)
 
                     if text:
-                        print(f"--- ✔️  Successfully extracted text from PDF: {url} ---")
+                        print(f"--- [OK] Successfully extracted text from PDF: {url} ---")
                         return text
                     else:
-                        print(f"--- ❌ Failed to extract text from PDF (empty content): {url} ---")
+                        print(f"--- [FAIL] Failed to extract text from PDF (empty content): {url} ---")
                         return None  # Even if the download succeeded, treat as failure if PDF content is empty or unparseable
 
                 except httpx.HTTPStatusError as e:
-                    print(f"--- ❌ HTTP Error on attempt {attempt + 1}/{retries + 1} for PDF {url}: {e} ---")
+                    print(f"--- [FAIL] HTTP Error on attempt {attempt + 1}/{retries + 1} for PDF {url}: {e} ---")
                 except httpx.RequestError as e:
-                    print(f"--- ❌ Request Error on attempt {attempt + 1}/{retries + 1} for PDF {url}: {e} ---")
+                    print(f"--- [FAIL] Request Error on attempt {attempt + 1}/{retries + 1} for PDF {url}: {e} ---")
 
                 if attempt < retries:
                     await asyncio.sleep(2)
                 else:
-                    print(f"--- 💥 All attempts failed to download PDF: {url}. ---")
+                    print(f"--- [FAIL] All attempts failed to download PDF: {url}. ---")
                     return None
         return None
 
@@ -76,13 +81,25 @@ async def fetch_page_content_async(context: BrowserContext, url: str, retries: i
         'div[class*="entry-content"]',
     ]
 
+    # Reuse a single Stealth instance (creating one per page is wasteful
+    # and can race on concurrent calls).
+    global _stealth_instance
+    if _stealth_instance is None:
+        _stealth_instance = Stealth()
+
     for attempt in range(retries + 1):
         page = None
         try:
             page = await context.new_page()
-            # await stealth_async(page)
-            stealth = Stealth()
-            await stealth.apply_stealth_async(page)
+            # Apply stealth before navigation. Wrapped in try/except because
+            # stealth script injection can fail on about:blank (pre-navigation)
+            # or race with concurrent page creation, raising non-PlaywrightError
+            # exceptions (RuntimeError, AttributeError) that would bubble up
+            # as 500 errors.
+            try:
+                await _stealth_instance.apply_stealth_async(page)
+            except Exception as stealth_err:
+                print(f"--- [WARN] Stealth injection skipped (non-fatal): {stealth_err} ---")
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
             with contextlib.suppress(PlaywrightError):
@@ -91,17 +108,28 @@ async def fetch_page_content_async(context: BrowserContext, url: str, retries: i
             content = await page.content()
             await page.close()
 
-            print(f"--- ✔️  Successfully fetched HTML from: {url} ---")
+            print(f"--- [OK] Successfully fetched HTML from: {url} ---")
             return content
 
         except PlaywrightError as e:
-            print(f"--- ❌ Playwright Error on attempt {attempt + 1}/{retries + 1} for {url}: {e} ---")
+            print(f"--- [FAIL] Playwright Error on attempt {attempt + 1}/{retries + 1} for {url}: {e} ---")
             if page and not page.is_closed():
                 await page.close()
             if attempt < retries:
                 await asyncio.sleep(2)
             else:
-                print(f"--- 💥 All Playwright attempts failed for {url}. ---")
+                print(f"--- [FAIL] All Playwright attempts failed for {url}. ---")
+                return None
+        except Exception as e:
+            # Catch non-PlaywrightError exceptions (RuntimeError, etc.) that
+            # would otherwise bubble up as 500 Internal Server Error.
+            print(f"--- [FAIL] Unexpected error on attempt {attempt + 1}/{retries + 1} for {url}: {e} ---")
+            if page and not page.is_closed():
+                await page.close()
+            if attempt < retries:
+                await asyncio.sleep(2)
+            else:
+                print(f"--- [FAIL] All attempts failed for {url} (unexpected error). ---")
                 return None
     return None
 
