@@ -1144,6 +1144,15 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     pp["mcp_hidden_servers"] = _norm_str_list(pp.get("mcp_hidden_servers", []))
 
                 apply_config_defaults(config_data)
+                # Ensure required model.api_protocol is not lost during save
+                model = config_data.get("model")
+                if isinstance(model, dict) and not model.get("api_protocol"):
+                    try:
+                        old_cfg = _read_json(config_path)
+                        old_proto = (old_cfg.get("model") or {}).get("api_protocol", "")
+                        model["api_protocol"] = old_proto or "openai_compat"
+                    except Exception:
+                        model["api_protocol"] = "openai_compat"
                 gc = config_data.get("group_chat")
                 if isinstance(gc, dict) and os.path.isfile(config_path):
                     new_pw = gc.get("password")

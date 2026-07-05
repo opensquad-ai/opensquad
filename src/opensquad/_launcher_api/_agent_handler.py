@@ -177,6 +177,13 @@ class AgentHandlerMixin:
             import json as _json
 
             new_cfg = body.get("config", body)
+            # Ensure required model.api_protocol is not lost during save
+            model = new_cfg.get("model")
+            if isinstance(model, dict) and not model.get("api_protocol"):
+                # Try to preserve from existing config, else default to openai_compat
+                old_cfg = self.state.read_json(config_path)
+                old_proto = old_cfg.get("model", {}).get("api_protocol", "")
+                model["api_protocol"] = old_proto or "openai_compat"
             with open(config_path, "w", encoding="utf-8") as f:
                 _json.dump(new_cfg, f, ensure_ascii=False, indent=2)
             self._send_json({"message": "Config updated"})
