@@ -234,11 +234,14 @@ def run_playwright_install(argv: list[str] | None = None):
         print(f"[playwright-install] playwright not bundled: {e}", file=sys.stderr)
         sys.exit(1)
 
-    driver = compute_driver_executable()
-    print(f"[playwright-install] driver: {driver}")
+    # compute_driver_executable() returns (node_exe, cli_js) — we need both
+    # to invoke the driver: node.exe cli.js install chromium
+    node_exe, cli_js = compute_driver_executable()
+    print(f"[playwright-install] node: {node_exe}")
+    print(f"[playwright-install] cli:  {cli_js}")
     print(f"[playwright-install] installing: {browsers}")
 
-    r = subprocess.run([str(driver), "install"] + browsers)
+    r = subprocess.run([node_exe, cli_js, "install"] + browsers)
     if r.returncode != 0:
         print(f"[playwright-install] failed (exit {r.returncode})", file=sys.stderr)
     else:

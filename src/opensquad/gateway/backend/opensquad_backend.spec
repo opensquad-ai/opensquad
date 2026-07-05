@@ -238,6 +238,17 @@ datas += _httptools_datas
 all_binaries += _httptools_binaries
 hiddenimports += _httptools_hidden
 
+# ── Playwright — must bundle the Node driver (node.exe + cli.js) so that
+# `run.exe --service playwright-install chromium` can download the correct
+# browser revision. Without this, compute_driver_executable() points to a
+# driver/ directory that doesn't exist in the frozen bundle, and the
+# browser download silently fails.
+_pw_datas, _pw_binaries, _pw_hidden = collect_all("playwright")
+datas += _pw_datas
+all_binaries += _pw_binaries
+hiddenimports += _pw_hidden
+print(f"[spec] playwright: {len(_pw_datas)} data files, {len(_pw_binaries)} binaries")
+
 # ── MCP SDK (official `mcp` package) + transitive deps ──────────────────────
 # mcp_adapter.py does `from mcp import ClientSession` at module top level.
 # Without this, the agent process (frozen run.exe) crashes with
