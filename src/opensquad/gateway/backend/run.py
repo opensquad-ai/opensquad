@@ -209,6 +209,43 @@ def run_agent():
         raise
 
 
+def run_playwright_install(argv: list[str] | None = None):
+    """Install Playwright browser binary using the bundled playwright driver.
+
+    Called via ``run.exe --service playwright-install [chromium]``.
+
+    When no system Python 3.11 is available, plugin services fall back to
+    running on the frozen ``run.exe``, which uses the bundled playwright
+    package.  ``_ensure_playwright_browser()`` cannot use ``run.exe -m
+    playwright install`` because run.exe's entry point does not support
+    ``-m`` — it would start the gateway instead.  This service mode
+    invokes playwright's internal Node driver directly so the browser
+    revision matches the bundled playwright version.
+    """
+    import subprocess
+
+    browsers = (argv or ["chromium"]) if argv else ["chromium"]
+    # Filter out empty strings
+    browsers = [b for b in browsers if b]
+
+    try:
+        from playwright._impl._driver import compute_driver_executable
+    except ImportError as e:
+        print(f"[playwright-install] playwright not bundled: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    driver = compute_driver_executable()
+    print(f"[playwright-install] driver: {driver}")
+    print(f"[playwright-install] installing: {browsers}")
+
+    r = subprocess.run([str(driver), "install"] + browsers)
+    if r.returncode != 0:
+        print(f"[playwright-install] failed (exit {r.returncode})", file=sys.stderr)
+    else:
+        print("[playwright-install] success")
+    sys.exit(r.returncode)
+
+
 if __name__ == "__main__":
     # ── Force UTF-8 for stdout/stderr on Windows before any output ──
     # Without this, uvicorn / Python error messages containing Chinese
@@ -251,6 +288,9 @@ if __name__ == "__main__":
         sys.exit(0)
     if service == "agent":
         run_agent()
+        sys.exit(0)
+    if service == "playwright-install":
+        run_playwright_install(_forward_argv)
         sys.exit(0)
     # service == "gateway" (or anything else) → fall through to gateway startup
 

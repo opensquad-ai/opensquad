@@ -1758,6 +1758,16 @@ def _ensure_playwright_browser() -> bool:
     run it when a plugin that depends on playwright is actually started.
 
     Uses a sentinel file to avoid re-downloading on every service start.
+
+    **Frozen-mode fix**: When no system Python 3.11 is available, plugin
+    services fall back to running on the frozen ``run.exe``, which uses the
+    bundled playwright (e.g. 1.61.1-beta needing chromium-1228).  The old
+    code ran ``run.exe -m playwright install chromium``, but run.exe's entry
+    point does not support ``-m`` — it starts the gateway instead, so
+    chromium was never installed.  Now we detect frozen mode and use
+    ``run.exe --service playwright-install chromium`` which invokes the
+    bundled playwright's Node driver directly, ensuring the browser
+    revision matches the bundled playwright version.
     """
     target_python = _plugin_python_executable()
     sentinel = os.path.join(syscfg.workspace_metadata_dir("runtime"), "playwright_chromium_installed")
@@ -1765,10 +1775,20 @@ def _ensure_playwright_browser() -> bool:
         _log.info("[Launcher] Playwright Chromium already downloaded (sentinel exists)")
         return True
 
-    _log.info("[Launcher] Downloading Playwright Chromium browser (one-time, ~150MB)...")
+    # Detect frozen mode: if target_python is sys.executable (run.exe), we
+    # must use --service playwright-install instead of -m playwright.
+    is_frozen_exe = getattr(sys, "frozen", False) and os.path.abspath(target_python) == os.path.abspath(sys.executable)
+
+    if is_frozen_exe:
+        cmd = [target_python, "--service", "playwright-install", "chromium"]
+        _log.info("[Launcher] Downloading Playwright Chromium (frozen mode, ~150MB)...")
+    else:
+        cmd = [target_python, "-m", "playwright", "install", "chromium"]
+        _log.info("[Launcher] Downloading Playwright Chromium (system Python, ~150MB)...")
+
     try:
         r = subprocess.run(
-            [target_python, "-m", "playwright", "install", "chromium"],
+            cmd,
             capture_output=True,
             check=False,
             timeout=300,
@@ -1781,8 +1801,9 @@ def _ensure_playwright_browser() -> bool:
                 f.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
             _log.info("[Launcher] Playwright Chromium downloaded successfully")
             return True
-        stderr = r.stderr.decode(errors="replace")[:300] if r.stderr else ""
-        _log.error(f"[Launcher] Playwright browser install failed (exit {r.returncode}): {stderr}")
+        stderr = r.stderr.decode(errors="replace")[:500] if r.stderr else ""
+        stdout = r.stdout.decode(errors="replace")[:500] if r.stdout else ""
+        _log.error(f"[Launcher] Playwright browser install failed (exit {r.returncode}): {stderr or stdout}")
         return False
     except subprocess.TimeoutExpired:
         _log.error("[Launcher] Playwright browser install timed out (300s)")
