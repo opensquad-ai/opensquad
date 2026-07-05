@@ -107,12 +107,12 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package-lock.json
+          cache-dependency-path: src/opensquad/gateway/nexuschat-pro/package.json
 
       - name: Build frontend
         working-directory: src/opensquad/gateway/nexuschat-pro
         run: |
-          npm ci
+          npm install --no-package-lock
           npm run build
 
   secrets-scan:
