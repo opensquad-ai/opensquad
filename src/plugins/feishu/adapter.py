@@ -125,6 +125,7 @@ try:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
         P2ImChatAccessEventBotP2pChatEnteredV1,
+        P2ImMessageMessageReadV1,
         P2ImMessageReceiveV1,
         ReplyMessageRequest,
         ReplyMessageRequestBody,
@@ -460,10 +461,17 @@ class FeishuBotRunner:
     def on_bot_entered(self, data: P2ImChatAccessEventBotP2pChatEnteredV1) -> None:
         self._log.info(f"[{self.cfg.name}] User opened P2P chat")
 
+    def on_message_read(self, data: P2ImMessageMessageReadV1) -> None:
+        """Handle message read receipts — no-op, just prevent 'processor not found' errors."""
+        pass
+
     def build_ws_client(self) -> FeishuWSClient:
         """Build the WebSocket event client for this bot."""
         event_handler = (
-            EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self.on_message_receive).build()
+            EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(self.on_message_receive)
+            .register_p2_im_message_message_read_v1(self.on_message_read)
+            .build()
         )
 
         ws_client = FeishuWSClient(
