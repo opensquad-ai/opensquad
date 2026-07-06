@@ -135,6 +135,23 @@ def set_session_cwd(path: str) -> dict[str, Any]:
 
         _set_allowed_dirs_unified(_EXTRA_ALLOWED_DIRS)
 
+    # 3. Reset persistent shell sessions so they pick up the new cwd.
+    #    Existing ShellSession objects keep their old working_directory;
+    #    clearing _SESSIONS forces _get_or_create_session() to create fresh
+    #    ones with the updated session_cwd on the next run_session_job call.
+    try:
+        from opensquad.tools import system as _sysmod
+
+        for sid, sess in list(_sysmod._SESSIONS.items()):
+            try:
+                sess.close()
+            except Exception:
+                pass
+        _sysmod._SESSIONS.clear()
+        logger.info(f"[filesystem] Cleared {len(_sysmod._SESSIONS)} shell session(s) for new cwd")
+    except Exception as e:
+        logger.warning(f"[filesystem] Could not clear shell sessions: {e}")
+
     logger.info(f"[filesystem] Session working directory set to: {abs_path}")
     return {"status": "success", "path": abs_path}
 

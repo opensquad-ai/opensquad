@@ -40,7 +40,21 @@ def get_current() -> dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"Cannot read workspace config: {e}"}
 
-    work_dir = os.path.join(ws_root, "workspace")
+    # Check for session-level working directory override (set via folder-picker UI)
+    session_cwd = ""
+    try:
+        from opensquad._context import get_current_context
+
+        ctx = get_current_context()
+        if ctx and ctx.session_cwd:
+            session_cwd = ctx.session_cwd
+    except Exception:
+        pass
+
+    # If session_cwd is set, it becomes the effective workspace root for this session
+    effective_root = session_cwd if session_cwd else ws_root
+
+    work_dir = os.path.join(effective_root, "workspace")
     agents_dir = os.path.join(ws_root, "agents")
     meta_path = os.path.join(ws_root, ".opensquad", "workspace.json")
 
@@ -56,10 +70,12 @@ def get_current() -> dict[str, Any]:
 
     return {
         "status": "ok",
-        "workspace_root": ws_root,
+        "workspace_root": effective_root,
+        "session_cwd": session_cwd,
+        "permanent_root": ws_root,
         "work_dir": work_dir,
         "agents_dir": agents_dir,
-        "exists": os.path.isdir(ws_root),
+        "exists": os.path.isdir(effective_root),
         "work_dir_exists": os.path.isdir(work_dir),
         "metadata": metadata,
     }
