@@ -4603,13 +4603,35 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               className="hidden"
             />
 
-            {/* Set working directory button — opens OS folder picker */}
+            {/* Set working directory button — opens OS folder picker (Electron)
+                or manual input prompt (browser) */}
             <button
               onClick={async () => {
                 try {
-                  // Use Electron IPC to open native folder picker
-                  const pickedPath = await window.electronEnv?.pickWorkspaceFolder();
+                  let pickedPath: string | null = null;
+
+                  // 1. Try Electron IPC (native folder picker)
+                  if (typeof (window as any).electronEnv?.pickWorkspaceFolder === 'function') {
+                    pickedPath = await (window as any).electronEnv.pickWorkspaceFolder();
+                  }
+
+                  // 2. Browser fallback — prompt for path manually
+                  //    (browsers can't access the real filesystem path for security)
+                  if (!pickedPath) {
+                    const current = agentCwd || '(workspace root)';
+                    const input = window.prompt(
+                      'Enter working directory path:\n\n' +
+                      'This will be the default directory for agent shell commands\n' +
+                      '(ls, dir, run_command, file operations, etc.)\n\n' +
+                      `Current: ${current}`,
+                      agentCwd || ''
+                    );
+                    if (!input || !input.trim()) return;
+                    pickedPath = input.trim();
+                  }
+
                   if (!pickedPath) return;
+
                   // Send to backend via admin API
                   const dirName = agentProfile?.dir_name || agentId;
                   await adminAPI.setWorkingDirectory(dirName, pickedPath);
@@ -4623,7 +4645,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               }}
               disabled={isLoadingSession}
               className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
-              title={agentCwd ? `Working directory: ${agentCwd}` : 'Set working directory'}
+              title={agentCwd ? `Working dir: ${agentCwd} (click to change)` : 'Set working directory'}
             >
               <FolderOpen size={18} className={agentCwd ? 'text-primary' : 'text-textMuted'} />
             </button>
