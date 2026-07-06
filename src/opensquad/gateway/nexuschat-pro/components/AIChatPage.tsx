@@ -20,7 +20,7 @@ import {
   Bot, ArrowLeft, Send, Square, Image as ImageIcon,
   PanelLeftOpen, PanelLeftClose, X, Paperclip, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Archive, ArchiveRestore, Clock,
+  Loader2, Archive, ArchiveRestore, Clock, FolderOpen,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -4602,6 +4602,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               onChange={handleImageUpload}
               className="hidden"
             />
+
+            {/* Set working directory button — opens OS folder picker */}
+            <button
+              onClick={async () => {
+                try {
+                  // Use Electron IPC to open native folder picker
+                  const pickedPath = await window.electronEnv?.pickWorkspaceFolder();
+                  if (!pickedPath) return;
+                  // Send to backend via admin API
+                  const dirName = agentProfile?.dir_name || agentId;
+                  await adminAPI.setWorkingDirectory(dirName, pickedPath);
+                  // Update local state so ContextViewer reflects the change
+                  setAgentCwd(pickedPath);
+                  console.log('[AIChatPage] Working directory set to:', pickedPath);
+                } catch (err: any) {
+                  console.error('[AIChatPage] Failed to set working directory:', err);
+                  alert(`Failed to set working directory: ${err.message || err}`);
+                }
+              }}
+              disabled={isLoadingSession}
+              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
+              title={agentCwd ? `Working directory: ${agentCwd}` : 'Set working directory'}
+            >
+              <FolderOpen size={18} className={agentCwd ? 'text-primary' : 'text-textMuted'} />
+            </button>
 
             {/* Text input */}
             <textarea
