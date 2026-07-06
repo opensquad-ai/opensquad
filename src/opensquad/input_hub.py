@@ -45,22 +45,26 @@ class InputHub:
         ``get_workspace_root()`` returns the new path.
         """
         if not self.agent_dir:
+            logger.debug("[InputHub] _check_session_cwd: agent_dir not set, skipping")
             return
         import json as _json
         import os as _os
 
         cwd_file = _os.path.join(self.agent_dir, ".session_cwd")
         if not _os.path.isfile(cwd_file):
+            logger.debug(f"[InputHub] _check_session_cwd: no .session_cwd file at {cwd_file}")
             return
 
         try:
             with open(cwd_file, encoding="utf-8") as f:
                 data = _json.load(f)
             new_cwd = data.get("path", "").strip()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[InputHub] _check_session_cwd: failed to read {cwd_file}: {e}")
             return
 
         if not new_cwd or not _os.path.isdir(new_cwd):
+            logger.warning(f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={_os.path.isdir(new_cwd) if new_cwd else 'N/A'})")
             return
 
         # Check if already applied (avoid re-applying on every turn)
@@ -69,9 +73,11 @@ class InputHub:
 
             ctx = get_current_context()
             if ctx and ctx.session_cwd == new_cwd:
-                return  # Already applied, skip
-        except Exception:
-            pass
+                logger.debug(f"[InputHub] _check_session_cwd: already applied '{new_cwd}', skipping")
+                return
+            logger.info(f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (ctx.session_cwd was '{ctx.session_cwd if ctx else 'None'}')")
+        except Exception as e:
+            logger.warning(f"[InputHub] _check_session_cwd: context check failed: {e}")
 
         # Apply the new working directory
         try:
@@ -80,6 +86,8 @@ class InputHub:
             result = set_session_cwd(new_cwd)
             if result.get("status") == "success":
                 logger.info(f"[InputHub] Session working directory applied: {new_cwd}")
+            else:
+                logger.warning(f"[InputHub] set_session_cwd returned: {result}")
         except Exception as e:
             logger.warning(f"[InputHub] Failed to apply session_cwd: {e}")
 
