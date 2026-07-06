@@ -114,7 +114,24 @@ class AgentContext:
     agent_dir: str = ""
     """Absolute path to the agent's directory."""
     workspace_dir: str = ""
-    """Active workspace root path."""
+    """Active workspace root path (the shared workspace folder)."""
+
+    session_cwd: str = ""
+    """Session-level working directory override.
+
+    When set (non-empty), all shell commands and file operations default
+    to this directory instead of ``workspace_dir``. Set at runtime via
+    the ``PUT /api/agents/{name}/working-directory`` endpoint — typically
+    triggered by the user clicking a folder-picker button in the chat UI.
+
+    Unlike ``workspace_dir`` (which is the permanent shared workspace),
+    ``session_cwd`` is a per-session override that can be changed at any
+    time without restarting the agent. It is NOT persisted to config.json
+    — it only lasts for the current agent process lifetime.
+
+    Sub-agents spawned by this agent inherit the same ``session_cwd``
+    value at spawn time (see ``AgentRunner._spawn_sub_agent``).
+    """
 
     @property
     def is_complete(self) -> bool:
