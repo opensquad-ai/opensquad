@@ -835,6 +835,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       .catch(err => console.warn("[AIChatPage] Failed to load agent profile:", err.message));
   }, [agentId]);
 
+  // After agent profile loads, also fetch the session working directory
+  // (set via the folder-picker button). This overrides the permanent
+  // workspace root so ContextViewer shows the user-selected cwd.
+  useEffect(() => {
+    if (!agentProfile?.dir_name) return;
+    adminAPI.getWorkingDirectory(agentProfile.dir_name)
+      .then(res => {
+        if (res.session_cwd) setAgentCwd(res.session_cwd);
+      })
+      .catch(() => {/* not critical, keep default */});
+  }, [agentProfile?.dir_name]);
+
   // Load available model cards once, to populate the runtime model-switch dropdown.
   useEffect(() => {
     let cancelled = false;
