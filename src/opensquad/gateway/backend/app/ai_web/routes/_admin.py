@@ -688,7 +688,8 @@ async def admin_uninstall_plugin(
     Uninstall (delete) a plugin. Proxied to Launcher to delete from agent machine.
     """
     # Sanitize: only allow simple directory names (prevent path traversal)
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", name):
+    # Allow dot for plugin names like "my.plugin" (launcher also allows dot)
+    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
         raise HTTPException(status_code=400, detail="Invalid plugin name")
 
     try:

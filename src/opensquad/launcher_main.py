@@ -1975,7 +1975,33 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 return self._send_json({"error": f"{resource_type[:-1].capitalize()} '{name}' not found"}, 404)
 
             try:
-                shutil.rmtree(target_dir)
+                # On Windows, .git/objects/pack/*.idx files are often locked
+                # by AV software (360, Defender) or have read-only attributes
+                # that cause WinError 5 (Access Denied). Use a custom onerror
+                # handler that clears read-only flags and retries, then falls
+                # back to renaming the directory out of the way.
+                def _rmtree_onerror(func, path, exc_info):
+                    import stat as _stat
+
+                    try:
+                        os.chmod(path, _stat.S_IWRITE)
+                    except Exception:
+                        pass
+                    try:
+                        func(path)
+                    except Exception:
+                        # Last resort: rename the stubborn file/dir so the
+                        # outer rmtree can continue. The renamed leftover
+                        # will be cleaned up on next restart or manually.
+                        try:
+                            import uuid as _uuid
+
+                            dead_name = path + ".dead_" + _uuid.uuid4().hex[:8]
+                            os.rename(path, dead_name)
+                        except Exception:
+                            pass  # Give up on this single entry
+
+                shutil.rmtree(target_dir, onerror=_rmtree_onerror)
 
                 # Trigger reload for plugins
                 if resource_type == "plugins":
