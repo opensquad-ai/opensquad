@@ -15,11 +15,33 @@ def apply_config_defaults(config: dict) -> None:
     Called before validate_agent_config to ensure optional fields have reasonable defaults.
 
     Current rules:
+      - model.api_protocol missing -> default to "openai_compat"
+        (older configs created before this field was added will not have it)
       - gateway not configured, or gateway.enabled=true but url is empty
         -> automatically fill in the default URL and enable it
       - group_chat not configured -> enabled=true with default IM credentials
       - group_chat.enabled=true but email/password missing -> fill bridge defaults
     """
+    # model.api_protocol — required field added in v0.4.11. Old configs
+    # created by earlier versions do not have this field. Infer it from
+    # provider/base_url so we don't fail validation on upgrade.
+    model = config.get("model")
+    if isinstance(model, dict) and not model.get("api_protocol"):
+        provider = (model.get("provider") or "").lower()
+        base_url = (model.get("base_url") or "").lower()
+        if provider == "anthropic":
+            model["api_protocol"] = "anthropic"
+        elif provider == "google":
+            model["api_protocol"] = "google"
+        elif "api.anthropic.com" in base_url:
+            model["api_protocol"] = "anthropic"
+        elif "generativelanguage.googleapis.com" in base_url:
+            model["api_protocol"] = "google"
+        elif "api.openai.com" in base_url:
+            model["api_protocol"] = "openai"
+        else:
+            model["api_protocol"] = "openai_compat"
+
     gw = config.get("gateway")
     if not isinstance(gw, dict):
         config["gateway"] = {"enabled": True, "url": _gateway_register_url()}
