@@ -110,6 +110,12 @@ export default defineConfig(({ mode }) => {
         strictPort: frontendConfig.strict_port ?? true,
         hmr: true,
         proxy: {
+          // Launcher-direct routes (bypass gateway for working-directory etc.)
+          '/api/launcher': {
+            target: `http://${backendHost}:9600`,
+            changeOrigin: true,
+            rewrite: (p: string) => p.replace(/^\/api\/launcher/, ''),
+          },
           '/api': {
             target: backendUrl,
             changeOrigin: true,
