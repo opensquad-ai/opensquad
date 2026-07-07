@@ -64,7 +64,9 @@ class InputHub:
             return
 
         if not new_cwd or not _os.path.isdir(new_cwd):
-            logger.warning(f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={_os.path.isdir(new_cwd) if new_cwd else 'N/A'})")
+            logger.warning(
+                f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={_os.path.isdir(new_cwd) if new_cwd else 'N/A'})"
+            )
             return
 
         # Check if already applied (avoid re-applying on every turn)
@@ -75,7 +77,9 @@ class InputHub:
             if ctx and ctx.session_cwd == new_cwd:
                 logger.debug(f"[InputHub] _check_session_cwd: already applied '{new_cwd}', skipping")
                 return
-            logger.info(f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (ctx.session_cwd was '{ctx.session_cwd if ctx else 'None'}')")
+            logger.info(
+                f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (ctx.session_cwd was '{ctx.session_cwd if ctx else 'None'}')"
+            )
         except Exception as e:
             logger.warning(f"[InputHub] _check_session_cwd: context check failed: {e}")
 
