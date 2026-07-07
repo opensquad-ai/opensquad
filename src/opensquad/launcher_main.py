@@ -621,6 +621,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/agents/") and path.endswith("/config"):
                 name = path.split("/")[3]
                 return self._handle_get_config(name)
+            elif path.startswith("/api/agents/") and path.endswith("/working-directory"):
+                # GET /api/agents/{name}/working-directory
+                # Returns the agent's current session working directory (if set)
+                # plus the permanent workspace root.
+                name = path.split("/")[3]
+                return self._handle_get_working_directory(name)
             elif path.startswith("/api/agents/") and path.endswith("/role"):
                 name = path.split("/")[3]
                 return self._handle_get_role(name)
@@ -872,7 +878,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/agents/") and path.endswith("/model-card"):
                 name = path.split("/")[3]
                 body = self._read_body()
-                return self._handle_put_model_card_assign(name, body)
+                return self._handle_put_model_card(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/working-directory"):
+                # PUT /api/agents/{name}/working-directory
+                # Sets the agent's session-level working directory (cwd) for
+                # shell commands and file operations. Writes a .session_cwd
+                # signal file that the agent process picks up at the start
+                # of the next conversation turn.
+                name = path.split("/")[3]
+                body = self._read_body()
+                return self._handle_set_working_directory(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/role-prompt"):
                 name = path.split("/")[3]
                 body = self._read_body()
@@ -1095,6 +1110,105 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if "group_chat" in config and "password" in config.get("group_chat", {}):
                 config["group_chat"]["password"] = "********"
             return self._send_json({"agent": name, "config": config})
+
+        def _handle_get_working_directory(self, name: str):
+            """GET /api/agents/{name}/working-directory
+
+            Returns the agent's current session working directory (if set
+            via the folder-picker UI) and the permanent workspace root.
+            """
+            import json as _json
+
+            agent_dir = os.path.join(AGENTS_DIR, name)
+            if not os.path.isdir(agent_dir):
+                return self._send_json({"error": "Agent directory not found"}, 404)
+
+            # Read .session_cwd signal file (written by PUT handler)
+            session_cwd = ""
+            cwd_file = os.path.join(agent_dir, ".session_cwd")
+            if os.path.isfile(cwd_file):
+                try:
+                    with open(cwd_file, encoding="utf-8") as f:
+                        data = _json.load(f)
+                        session_cwd = data.get("path", "")
+                except Exception:
+                    pass
+
+            # Get permanent workspace root
+            workspace_root = ""
+            try:
+                workspace_root = syscfg.get_workspace()
+            except Exception:
+                pass
+
+            return self._send_json(
+                {
+                    "agent": name,
+                    "session_cwd": session_cwd,
+                    "workspace_root": workspace_root,
+                    "active_cwd": session_cwd if session_cwd else workspace_root,
+                }
+            )
+
+        def _handle_set_working_directory(self, name: str, body: dict):
+            """PUT /api/agents/{name}/working-directory
+
+            Sets the agent's session-level working directory by writing a
+            ``.session_cwd`` signal file. The agent process picks this up
+            at the start of the next conversation turn (in
+            ``InputHub.get_user_response()``) and calls
+            ``filesystem.set_session_cwd()`` to apply it.
+
+            Body: ``{"path": "C:\\Users\\admin\\projects\\my-app"}``
+
+            To reset back to the permanent workspace root, send
+            ``{"path": ""}`` or ``{"path": null}``.
+            """
+            import json as _json
+
+            agent_dir = os.path.join(AGENTS_DIR, name)
+            if not os.path.isdir(agent_dir):
+                return self._send_json({"error": "Agent directory not found"}, 404)
+
+            path = body.get("path", "").strip() if body else ""
+
+            cwd_file = os.path.join(agent_dir, ".session_cwd")
+
+            if not path:
+                # Reset to workspace root: remove the signal file
+                try:
+                    if os.path.isfile(cwd_file):
+                        os.remove(cwd_file)
+                except Exception:
+                    pass
+                _log.info(f"[Launcher] Reset working directory for agent '{name}' to workspace root")
+                return self._send_json(
+                    {
+                        "status": "success",
+                        "message": "Working directory reset to workspace root",
+                        "path": "",
+                    }
+                )
+
+            # Validate directory exists
+            if not os.path.isdir(path):
+                return self._send_json({"error": f"Directory does not exist: {path}"}, 400)
+
+            # Write signal file
+            try:
+                with open(cwd_file, "w", encoding="utf-8") as f:
+                    _json.dump({"path": os.path.abspath(path), "ts": time.time()}, f)
+            except Exception as e:
+                return self._send_json({"error": f"Failed to write session cwd file: {e}"}, 500)
+
+            _log.info(f"[Launcher] Set working directory for agent '{name}' to: {path}")
+            return self._send_json(
+                {
+                    "status": "success",
+                    "message": f"Working directory set to: {path}",
+                    "path": os.path.abspath(path),
+                }
+            )
 
         def _handle_put_config(self, name: str, body: dict):
             """Write agent config.json"""

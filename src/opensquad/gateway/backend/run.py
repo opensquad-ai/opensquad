@@ -329,12 +329,28 @@ if __name__ == "__main__":
         not IS_FROZEN and os.environ.get("OPENSQUAD_RELOAD", "1") != "0" and backend_config.get("reload", True)
     )
 
-    uvicorn.run(
-        "app.main:app",
-        host=host,
-        port=port,
-        reload=enable_reload,
-        reload_dirs=[BACKEND_DIR] if enable_reload else None,
-        log_level=backend_config.get("log_level", "warning"),
-        access_log=False,
-    )
+    # When reload is disabled, pass the app object directly (not a string).
+    # Passing a string "app.main:app" causes uvicorn to spawn a subprocess
+    # to import it, which can pick up the wrong Python interpreter (e.g.
+    # anaconda instead of .venv). Passing the object directly runs in-process.
+    if enable_reload:
+        uvicorn.run(
+            "app.main:app",
+            host=host,
+            port=port,
+            reload=True,
+            reload_dirs=[BACKEND_DIR],
+            log_level=backend_config.get("log_level", "warning"),
+            access_log=False,
+        )
+    else:
+        from app.main import app as _fastapi_app
+
+        uvicorn.run(
+            _fastapi_app,
+            host=host,
+            port=port,
+            reload=False,
+            log_level=backend_config.get("log_level", "warning"),
+            access_log=False,
+        )

@@ -91,6 +91,71 @@ def set_allowed_dirs(dirs: list[str]) -> None:
     logger.info(f"[filesystem] Extra allowed dirs: {_EXTRA_ALLOWED_DIRS}")
 
 
+def set_session_cwd(path: str) -> dict[str, Any]:
+    """Set the agent's session-level working directory.
+
+    Called by the gateway when the user picks a folder via the chat UI
+    folder-picker button. The selected directory becomes the default cwd
+    for all shell commands and file operations — ``ls(".")`` will list
+    this directory, ``run_command("dir")`` will run in it, etc.
+
+    The directory is also added to ``_EXTRA_ALLOWED_DIRS`` so that
+    ``is_path_safe()`` permits access, and the ``AgentContext.session_cwd``
+    field is updated so ``get_workspace_root()`` returns it.
+
+    Args:
+        path: Absolute directory path selected by the user.
+
+    Returns:
+        Dict with status and the resolved path.
+    """
+    global _EXTRA_ALLOWED_DIRS
+
+    if not path or not path.strip():
+        return {"status": "error", "message": "Path cannot be empty."}
+
+    abs_path = os.path.normcase(os.path.abspath(path.strip()))
+    if not os.path.isdir(abs_path):
+        return {"status": "error", "message": f"Directory does not exist: {abs_path}"}
+
+    # 1. Update AgentContext.session_cwd so get_workspace_root() returns it
+    try:
+        from opensquad._context import get_current_context
+
+        ctx = get_current_context()
+        if ctx:
+            ctx.session_cwd = abs_path
+    except Exception as e:
+        logger.warning(f"[filesystem] Could not set AgentContext.session_cwd: {e}")
+
+    # 2. Add to _EXTRA_ALLOWED_DIRS so is_path_safe() allows access
+    if abs_path not in _EXTRA_ALLOWED_DIRS:
+        _EXTRA_ALLOWED_DIRS.append(abs_path)
+        from opensquad.utils.path_utils import set_allowed_dirs as _set_allowed_dirs_unified
+
+        _set_allowed_dirs_unified(_EXTRA_ALLOWED_DIRS)
+
+    # 3. Reset persistent shell sessions so they pick up the new cwd.
+    #    Existing ShellSession objects keep their old working_directory;
+    #    clearing _SESSIONS forces _get_or_create_session() to create fresh
+    #    ones with the updated session_cwd on the next run_session_job call.
+    try:
+        from opensquad.tools import system as _sysmod
+
+        for sid, sess in list(_sysmod._SESSIONS.items()):
+            try:
+                sess.close()
+            except Exception:
+                pass
+        _sysmod._SESSIONS.clear()
+        logger.info(f"[filesystem] Cleared {len(_sysmod._SESSIONS)} shell session(s) for new cwd")
+    except Exception as e:
+        logger.warning(f"[filesystem] Could not clear shell sessions: {e}")
+
+    logger.info(f"[filesystem] Session working directory set to: {abs_path}")
+    return {"status": "success", "path": abs_path}
+
+
 def set_config_path(config_path: str) -> None:
     """
     Set the agent's config.json path (called by agents_boot.py at startup).

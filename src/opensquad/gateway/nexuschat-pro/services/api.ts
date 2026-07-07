@@ -752,6 +752,26 @@ export const adminAPI = {
     });
   },
 
+  /** 获取 Agent 当前的工作目录（session_cwd + workspace_root）
+   *  直接走 Launcher API（端口 9600），绕过可能卡死的 Gateway */
+  getWorkingDirectory: async (name: string) => {
+    return apiRequest<{
+      agent: string;
+      session_cwd: string;
+      workspace_root: string;
+      active_cwd: string;
+    }>(`/launcher/api/agents/${name}/working-directory`);
+  },
+
+  /** 设置 Agent 的 session 工作目录（实时生效，无需重启）
+   *  直接走 Launcher API（端口 9600），绕过可能卡死的 Gateway */
+  setWorkingDirectory: async (name: string, path: string) => {
+    return apiRequest<{ status: string; path: string }>(`/launcher/api/agents/${name}/working-directory`, {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    });
+  },
+
   /** 获取 Agent 的 role.md */
   getRole: async (name: string) => {
     return apiRequest<{ content: string }>(`/ai-web/admin/agents/${name}/role`);
