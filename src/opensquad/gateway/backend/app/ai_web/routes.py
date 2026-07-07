@@ -762,6 +762,28 @@ async def admin_get_config(name: str, current_user: User = Depends(get_current_u
     return data
 
 
+@router.get("/admin/agents/{name}/working-directory")
+async def admin_get_working_directory(name: str, current_user: User = Depends(get_current_user_dep)):
+    """Get the agent's current session working directory (if set via folder-picker)."""
+    return await _proxy_get(f"/api/agents/{name}/working-directory")
+
+
+@router.put("/admin/agents/{name}/working-directory")
+async def admin_set_working_directory(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    """Set the agent's session-level working directory.
+
+    Body: ``{"path": "C:\\Users\\admin\\projects\\my-app"}``
+    Send ``{"path": ""}`` to reset to workspace root.
+
+    The launcher writes a ``.session_cwd`` signal file; the agent process
+    picks it up at the start of the next conversation turn and applies it
+    via ``filesystem.set_session_cwd()``.
+    """
+    return await _proxy_put(f"/api/agents/{name}/working-directory", body)
+
+
 @router.put("/admin/agents/{name}/config")
 async def admin_update_config(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
     """Update Agent's config.json and sync agent_name to the bound account's display name"""

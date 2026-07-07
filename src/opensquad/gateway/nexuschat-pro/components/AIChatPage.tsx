@@ -20,7 +20,7 @@ import {
   Bot, ArrowLeft, Send, Square, Image as ImageIcon,
   PanelLeftOpen, PanelLeftClose, X, Paperclip, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Archive, ArchiveRestore, Clock,
+  Loader2, Archive, ArchiveRestore, Clock, FolderOpen,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -834,6 +834,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       })
       .catch(err => console.warn("[AIChatPage] Failed to load agent profile:", err.message));
   }, [agentId]);
+
+  // After agent profile loads, also fetch the session working directory
+  // (set via the folder-picker button). This overrides the permanent
+  // workspace root so ContextViewer shows the user-selected cwd.
+  useEffect(() => {
+    if (!agentProfile?.dir_name) return;
+    adminAPI.getWorkingDirectory(agentProfile.dir_name)
+      .then(res => {
+        if (res.session_cwd) setAgentCwd(res.session_cwd);
+      })
+      .catch(() => {/* not critical, keep default */});
+  }, [agentProfile?.dir_name]);
 
   // Load available model cards once, to populate the runtime model-switch dropdown.
   useEffect(() => {
@@ -4602,6 +4614,53 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               onChange={handleImageUpload}
               className="hidden"
             />
+
+            {/* Set working directory button — opens OS folder picker (Electron)
+                or manual input prompt (browser) */}
+            <button
+              onClick={async () => {
+                try {
+                  let pickedPath: string | null = null;
+
+                  // 1. Try Electron IPC (native folder picker)
+                  if (typeof (window as any).electronEnv?.pickWorkspaceFolder === 'function') {
+                    pickedPath = await (window as any).electronEnv.pickWorkspaceFolder();
+                  }
+
+                  // 2. Browser fallback — prompt for path manually
+                  //    (browsers can't access the real filesystem path for security)
+                  if (!pickedPath) {
+                    const current = agentCwd || '(workspace root)';
+                    const input = window.prompt(
+                      'Enter working directory path:\n\n' +
+                      'This will be the default directory for agent shell commands\n' +
+                      '(ls, dir, run_command, file operations, etc.)\n\n' +
+                      `Current: ${current}`,
+                      agentCwd || ''
+                    );
+                    if (!input || !input.trim()) return;
+                    pickedPath = input.trim();
+                  }
+
+                  if (!pickedPath) return;
+
+                  // Send to backend via admin API
+                  const dirName = agentProfile?.dir_name || agentId;
+                  await adminAPI.setWorkingDirectory(dirName, pickedPath);
+                  // Update local state so ContextViewer reflects the change
+                  setAgentCwd(pickedPath);
+                  console.log('[AIChatPage] Working directory set to:', pickedPath);
+                } catch (err: any) {
+                  console.error('[AIChatPage] Failed to set working directory:', err);
+                  alert(`Failed to set working directory: ${err.message || err}`);
+                }
+              }}
+              disabled={isLoadingSession}
+              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
+              title={agentCwd ? `Working dir: ${agentCwd} (click to change)` : 'Set working directory'}
+            >
+              <FolderOpen size={18} className={agentCwd ? 'text-primary' : 'text-textMuted'} />
+            </button>
 
             {/* Text input */}
             <textarea

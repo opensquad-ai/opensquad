@@ -32,6 +32,65 @@ class InputHub:
         """Set Agent context for localizing multi-modal resources."""
         self.agent_dir = agent_dir
 
+    def _check_session_cwd(self):
+        """Check for .session_cwd signal file and apply working directory.
+
+        Called at the start of every conversation turn (in
+        ``get_user_response()``). If the launcher has written a
+        ``.session_cwd`` file in the agent's directory, we read the path
+        and call ``filesystem.set_session_cwd()`` to update the agent's
+        working directory in real-time.
+
+        Also updates ``AgentContext.session_cwd`` so that
+        ``get_workspace_root()`` returns the new path.
+        """
+        if not self.agent_dir:
+            logger.debug("[InputHub] _check_session_cwd: agent_dir not set, skipping")
+            return
+        import json as _json
+        import os as _os
+
+        cwd_file = _os.path.join(self.agent_dir, ".session_cwd")
+        if not _os.path.isfile(cwd_file):
+            logger.debug(f"[InputHub] _check_session_cwd: no .session_cwd file at {cwd_file}")
+            return
+
+        try:
+            with open(cwd_file, encoding="utf-8") as f:
+                data = _json.load(f)
+            new_cwd = data.get("path", "").strip()
+        except Exception as e:
+            logger.warning(f"[InputHub] _check_session_cwd: failed to read {cwd_file}: {e}")
+            return
+
+        if not new_cwd or not _os.path.isdir(new_cwd):
+            logger.warning(f"[InputHub] _check_session_cwd: invalid path '{new_cwd}' (isdir={_os.path.isdir(new_cwd) if new_cwd else 'N/A'})")
+            return
+
+        # Check if already applied (avoid re-applying on every turn)
+        try:
+            from opensquad._context import get_current_context
+
+            ctx = get_current_context()
+            if ctx and ctx.session_cwd == new_cwd:
+                logger.debug(f"[InputHub] _check_session_cwd: already applied '{new_cwd}', skipping")
+                return
+            logger.info(f"[InputHub] _check_session_cwd: applying new cwd '{new_cwd}' (ctx.session_cwd was '{ctx.session_cwd if ctx else 'None'}')")
+        except Exception as e:
+            logger.warning(f"[InputHub] _check_session_cwd: context check failed: {e}")
+
+        # Apply the new working directory
+        try:
+            from opensquad.tools.filesystem import set_session_cwd
+
+            result = set_session_cwd(new_cwd)
+            if result.get("status") == "success":
+                logger.info(f"[InputHub] Session working directory applied: {new_cwd}")
+            else:
+                logger.warning(f"[InputHub] set_session_cwd returned: {result}")
+        except Exception as e:
+            logger.warning(f"[InputHub] Failed to apply session_cwd: {e}")
+
     def _get_queue(self) -> asyncio.Queue:
         if self._queue is None:
             self._queue = asyncio.Queue(maxsize=10000)
@@ -51,6 +110,14 @@ class InputHub:
         cancelled, preventing asyncio.wait_for() timeout cancellation from leaving
         orphan tasks that steal queued messages.
         """
+        # ── Check for session_cwd signal file ──────────────────────────
+        # The launcher writes .session_cwd when the user picks a folder via
+        # the chat UI folder-picker button. We check it here (at the start
+        # of every conversation turn) and apply it before processing the
+        # next user message. This ensures the agent's shell commands and
+        # file operations use the user-selected working directory.
+        self._check_session_cwd()
+
         queue = self._get_queue()
         urgent_queue = self._get_urgent_queue()
         logger.debug(

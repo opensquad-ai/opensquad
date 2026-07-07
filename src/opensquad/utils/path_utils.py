@@ -30,7 +30,25 @@ def set_allowed_dirs(dirs: list[str]) -> None:
 
 
 def get_workspace_root() -> str:
-    """Return the current workspace root (fallback to process cwd)."""
+    """Return the current workspace root (fallback to process cwd).
+
+    Resolution order:
+    1. ``AgentContext.session_cwd`` — per-session override set via the
+       folder-picker UI. When set, all shell commands and file operations
+       default to this directory.
+    2. ``syscfg.get_workspace()`` — the permanent shared workspace folder.
+    3. ``os.getcwd()`` — last resort fallback.
+    """
+    # 1. Check session_cwd from AgentContext (per-session override)
+    try:
+        from opensquad._context import get_current_context
+
+        ctx = get_current_context()
+        if ctx and ctx.session_cwd and os.path.isdir(ctx.session_cwd):
+            return os.path.normcase(os.path.abspath(ctx.session_cwd))
+    except Exception:
+        pass
+    # 2. Fall back to permanent workspace root
     try:
         from opensquad.system_config import syscfg
 
@@ -39,6 +57,7 @@ def get_workspace_root() -> str:
             return os.path.normcase(os.path.abspath(ws))
     except Exception:
         pass
+    # 3. Last resort
     return os.path.normcase(os.path.abspath(os.getcwd()))
 
 
