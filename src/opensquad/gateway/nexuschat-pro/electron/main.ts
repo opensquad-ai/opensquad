@@ -227,6 +227,58 @@ let _shuttingDown = false
 
 // Avoid duplicate restart attempts racing with each other.
 let _gatewayRestarting = false
+// Suppress health-monitor false positives while gateway is booting after a restart.
+let _healthMonitorPausedUntil = 0
+// Prevent reload storms when restart + health-monitor race each other.
+let _lastAutoReloadAt = 0
+const AUTO_RELOAD_COOLDOWN_MS = 60_000
+const HEALTH_MONITOR_GRACE_MS = 45_000
+const HEALTH_MONITOR_INTERVAL_MS = 30_000
+const HEALTH_MONITOR_MAX_FAILURES = 3
+let _healthFailCount = 0
+
+function maybeReloadMainWindow(reason: string): void {
+  const now = Date.now()
+  if (now - _lastAutoReloadAt < AUTO_RELOAD_COOLDOWN_MS) {
+    console.warn(`[electron] Skip auto-reload (${reason}); cooldown active`)
+    return
+  }
+  _lastAutoReloadAt = now
+  _healthMonitorPausedUntil = now + HEALTH_MONITOR_GRACE_MS
+  console.log(`[electron] Auto-reloading window (${reason})`)
+  mainWindow?.webContents.reload()
+}
+
+function restartGatewayAfterCrash(reason: string): void {
+  if (_gatewayRestarting || _shuttingDown) return
+  _gatewayRestarting = true
+  _healthFailCount = 0
+  _healthMonitorPausedUntil = Date.now() + HEALTH_MONITOR_GRACE_MS
+  console.error(`[electron] Restarting gateway (${reason}) in 2s...`)
+
+  setTimeout(() => {
+    if (_shuttingDown) {
+      _gatewayRestarting = false
+      return
+    }
+    startBackend()
+    waitForBackendFullyReady()
+      .then(() => {
+        console.log('[electron] Gateway restarted successfully')
+        maybeReloadMainWindow(reason)
+      })
+      .catch(() => {
+        console.error('[electron] Gateway failed to restart in time')
+        dialog.showErrorBox(
+          'Backend Restart Failed',
+          'The backend process crashed and could not be restarted.\nPlease restart the app manually.'
+        )
+      })
+      .finally(() => {
+        _gatewayRestarting = false
+      })
+  }, 2000)
+}
 
 function spawnBackend(args: string[], label: string): ChildProcess | null {
   const exe = getBackendExe()
@@ -253,25 +305,7 @@ function spawnBackend(args: string[], label: string): ChildProcess | null {
     // fetch() from the UI fails.
     if (!_shuttingDown && label === 'backend' && !_gatewayRestarting) {
       console.error(`[electron] Gateway exited unexpectedly (code=${code} signal=${signal}). Auto-restarting in 2s...`)
-      _gatewayRestarting = true
-      setTimeout(() => {
-        _gatewayRestarting = false
-        if (_shuttingDown) return
-        startBackend()
-        // Wait for it to be ready, then reload the window so the UI reconnects.
-        waitForBackendFullyReady()
-          .then(() => {
-            console.log('[electron] Gateway restarted successfully, reloading window')
-            mainWindow?.webContents.reload()
-          })
-          .catch(() => {
-            console.error('[electron] Gateway failed to restart in time')
-            dialog.showErrorBox(
-              'Backend Restart Failed',
-              'The backend process crashed and could not be restarted.\nPlease restart the app manually.'
-            )
-          })
-      }, 2000)
+      restartGatewayAfterCrash(`gateway exit code=${code} signal=${signal}`)
     }
   })
   return proc
@@ -288,47 +322,50 @@ function startBackend(): void {
 // or deadlock — keeps its PID alive while /health stops responding). This
 // monitor polls /health every 30s; if it fails N consecutive times, the
 // gateway is killed and restarted.
-const HEALTH_MONITOR_INTERVAL_MS = 30_000  // 30s
-const HEALTH_MONITOR_MAX_FAILURES = 3      // 3 consecutive failures → restart
-let _healthFailCount = 0
-
 function startBackendHealthMonitor(): void {
   setInterval(() => {
     if (_shuttingDown || _gatewayRestarting) return
+    if (Date.now() < _healthMonitorPausedUntil) return
+
+    let settled = false
+    const markFailure = (detail: string) => {
+      if (settled) return
+      settled = true
+      _healthFailCount++
+      console.warn(`[health-monitor] ${detail} (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
+      if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
+        console.error('[health-monitor] Gateway unresponsive, forcing restart...')
+        forceRestartGateway()
+      }
+    }
+
     const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/health`, (res) => {
+      settled = true
       res.resume()
       if (res.statusCode && res.statusCode < 500) {
         _healthFailCount = 0
       } else {
         _healthFailCount++
         console.warn(`[health-monitor] /health returned ${res.statusCode} (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
+        if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
+          console.error('[health-monitor] Gateway unresponsive, forcing restart...')
+          forceRestartGateway()
+        }
       }
     })
     req.on('error', (err) => {
-      _healthFailCount++
-      console.warn(`[health-monitor] /health error: ${err.message} (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
-      if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
-        console.error('[health-monitor] Gateway unresponsive, forcing restart...')
-        forceRestartGateway()
-      }
+      markFailure(`/health error: ${err.message}`)
     })
-    req.setTimeout(5000, () => {
+    req.setTimeout(10_000, () => {
       req.destroy()
-      _healthFailCount++
-      console.warn(`[health-monitor] /health timeout (${_healthFailCount}/${HEALTH_MONITOR_MAX_FAILURES})`)
-      if (_healthFailCount >= HEALTH_MONITOR_MAX_FAILURES) {
-        console.error('[health-monitor] Gateway unresponsive (timeout), forcing restart...')
-        forceRestartGateway()
-      }
+      markFailure('/health timeout')
     })
   }, HEALTH_MONITOR_INTERVAL_MS)
 }
 
 function forceRestartGateway(): void {
   if (_gatewayRestarting || _shuttingDown) return
-  _gatewayRestarting = true
-  _healthFailCount = 0
-  // Kill the existing gateway process tree
+  // Kill the existing gateway process tree before the shared restart helper runs.
   if (gatewayProcess && !gatewayProcess.killed) {
     console.log('[electron] Killing unresponsive gateway process...')
     if (process.platform === 'win32') {
@@ -340,22 +377,7 @@ function forceRestartGateway(): void {
     }
     gatewayProcess = null
   }
-  // Restart after a short delay (the exit handler would also fire, but
-  // _gatewayRestarting prevents a double-restart race).
-  setTimeout(() => {
-    _gatewayRestarting = false
-    if (_shuttingDown) return
-    console.log('[electron] Restarting gateway after health-monitor kill...')
-    startBackend()
-    waitForBackendFullyReady()
-      .then(() => {
-        console.log('[electron] Gateway restarted (health monitor), reloading window')
-        mainWindow?.webContents.reload()
-      })
-      .catch(() => {
-        console.error('[electron] Gateway failed to restart after health-monitor kill')
-      })
-  }, 2000)
+  restartGatewayAfterCrash('health-monitor kill')
 }
 
 // Launcher: agent process manager on LAUNCHER_PORT. Spawned as a second
@@ -536,6 +558,8 @@ async function createWindow(): Promise<void> {
     if (!USE_CUSTOM_TITLEBAR) {
       mainWindow.setTitle(APP_DISPLAY_NAME)
     }
+    // First paint triggers many API calls; pause health checks briefly.
+    _healthMonitorPausedUntil = Date.now() + HEALTH_MONITOR_GRACE_MS
   } catch {
     dialog.showErrorBox(
       'Startup Failed',

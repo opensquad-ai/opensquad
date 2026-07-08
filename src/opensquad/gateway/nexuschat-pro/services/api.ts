@@ -98,13 +98,21 @@ function _handle401() {
   setAuthToken(null);
   if (_redirectingToLogin) return;
   _redirectingToLogin = true;
-  // Avoid infinite loop if we're already on the login view.
   if (typeof window !== 'undefined') {
-    // Give a small delay so in-flight requests can be cancelled gracefully.
+    // Guard against reload loops: if we already cleared auth and reloaded
+    // recently, skip another hard reload (Electron/desktop can hit many 401s
+    // in parallel during gateway restart).
+    try {
+      const last = Number(sessionStorage.getItem('auth_reload_at') || '0');
+      if (Date.now() - last < 5000) {
+        _redirectingToLogin = false;
+        return;
+      }
+      sessionStorage.setItem('auth_reload_at', String(Date.now()));
+    } catch {
+      /* ignore storage errors */
+    }
     setTimeout(() => {
-      // AuthScreen is rendered by App.tsx when there's no token; clearing the
-      // token (done above) is enough for React to switch views. We also
-      // reload to reset all polling/WS state cleanly.
       try {
         window.location.reload();
       } catch {
