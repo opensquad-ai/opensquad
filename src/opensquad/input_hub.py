@@ -52,7 +52,17 @@ class InputHub:
 
         cwd_file = _os.path.join(self.agent_dir, ".session_cwd")
         if not _os.path.isfile(cwd_file):
-            logger.debug(f"[InputHub] _check_session_cwd: no .session_cwd file at {cwd_file}")
+            try:
+                from opensquad._context import get_current_context
+                from opensquad.utils.path_utils import set_session_cwd_override
+
+                ctx = get_current_context()
+                if ctx and ctx.session_cwd:
+                    ctx.session_cwd = ""
+                    set_session_cwd_override(None)
+                    logger.info("[InputHub] Session working directory reset (signal file removed)")
+            except Exception as e:
+                logger.debug(f"[InputHub] _check_session_cwd reset skipped: {e}")
             return
 
         try:

@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from opensquad.utils.path_utils import get_workspace_root
+from opensquad.utils.path_utils import get_workspace_root, set_session_cwd_override
 from opensquad.utils.path_utils import is_path_safe as _is_path_safe_unified
 
 try:
@@ -26,6 +26,14 @@ except Exception:
 def _get_workspace_root() -> str:
     """Get current workspace root (delegates to opensquad.utils.path_utils)."""
     return get_workspace_root()
+
+
+def _resolve_path(path: str) -> str:
+    """Resolve *path* against the effective workspace root (incl. session_cwd)."""
+    p = (path or ".").strip() or "."
+    if os.path.isabs(p):
+        return os.path.normcase(os.path.abspath(p))
+    return os.path.normcase(os.path.abspath(os.path.join(_get_workspace_root(), p)))
 
 
 # Filesystem root (workspace-aware)
@@ -117,6 +125,9 @@ def set_session_cwd(path: str) -> dict[str, Any]:
     abs_path = os.path.normcase(os.path.abspath(path.strip()))
     if not os.path.isdir(abs_path):
         return {"status": "error", "message": f"Directory does not exist: {abs_path}"}
+
+    # 0. Module-level override so executor threads see session cwd immediately
+    set_session_cwd_override(abs_path)
 
     # 1. Update AgentContext.session_cwd so get_workspace_root() returns it
     try:
@@ -268,19 +279,19 @@ def list_directory(path: str = ".") -> dict[str, Any]:
     """
     List directory contents.
     """
-    if not _is_path_safe(path):
+    resolved = _resolve_path(path)
+    if not _is_path_safe(resolved):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
     try:
-        items = os.listdir(path)
-        # BUGFIX: filter out symlinks that escape the project workspace
-        _PROJECT_ROOT = os.path.realpath(os.getcwd())
+        items = os.listdir(resolved)
+        workspace_root = os.path.realpath(_get_workspace_root())
         safe_items = []
         for item in items:
-            full_path = os.path.join(path, item)
+            full_path = os.path.join(resolved, item)
             if os.path.islink(full_path):
                 real_target = os.path.realpath(full_path)
-                root = os.path.realpath(_PROJECT_ROOT)
+                root = os.path.realpath(workspace_root)
                 if not (real_target == root or real_target.startswith(root + os.sep)):
                     safe_items.append(f"{item} -> (external symlink, hidden)")
                     continue
@@ -288,8 +299,8 @@ def list_directory(path: str = ".") -> dict[str, Any]:
         return {
             "status": "success",
             "data": {
-                "directories": [d for d in safe_items if os.path.isdir(os.path.join(path, d))],
-                "files": [f for f in safe_items if os.path.isfile(os.path.join(path, f))],
+                "directories": [d for d in safe_items if os.path.isdir(os.path.join(resolved, d))],
+                "files": [f for f in safe_items if os.path.isfile(os.path.join(resolved, f))],
             },
         }
     except Exception as e:
@@ -309,12 +320,14 @@ def read_file(path: str, start_line: int = 1, end_line: int = -1, max_lines: int
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     try:
-        if not os.path.isfile(path):
+        if not os.path.isfile(resolved):
             return {"status": "error", "message": "File not found."}
 
         # Use utf-8-sig to handle Windows BOM files written by write_file
-        with open(path, encoding="utf-8-sig", errors="ignore") as f:
+        with open(resolved, encoding="utf-8-sig", errors="ignore") as f:
             lines = f.readlines()
 
         total_lines = len(lines)
@@ -375,16 +388,18 @@ def search_files(
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     if not pattern:
         return {"status": "error", "message": "Pattern cannot be empty."}
 
     # Try ripgrep first
     rg_path = shutil.which("rg")
     if rg_path:
-        return _search_with_ripgrep(rg_path, path, pattern, include, case_sensitive, context_lines, max_results)
+        return _search_with_ripgrep(rg_path, resolved, pattern, include, case_sensitive, context_lines, max_results)
 
     # Fall back to pure Python implementation
-    return _search_pure_python(path, pattern, include, case_sensitive, context_lines, max_results)
+    return _search_pure_python(resolved, pattern, include, case_sensitive, context_lines, max_results)
 
 
 def _search_with_ripgrep(
@@ -519,11 +534,13 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     try:
-        full_search_pattern = os.path.join(path, pattern)
+        full_search_pattern = os.path.join(resolved, pattern)
         files = glob_mod.glob(full_search_pattern, recursive=True)
 
-        base_cwd = os.getcwd()
+        base_root = resolved
         rel_files = []
 
         for f in files:
@@ -531,7 +548,7 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
                 continue
 
             # Check if the path contains any excluded directories
-            rel = os.path.relpath(f, base_cwd)
+            rel = os.path.relpath(f, base_root)
             parts = rel.replace("\\", "/").split("/")
             if any(_should_exclude_dir(p) for p in parts):
                 continue
@@ -563,8 +580,10 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        os.makedirs(os.path.dirname(resolved), exist_ok=True)
         # Use plain utf-8 (no BOM). The earlier utf-8-sig writer was used to
         # handle Windows BOMs from external editors, but writing with utf-8-sig
         # *adds* a BOM to every file produced by this tool — which then breaks
@@ -572,9 +591,9 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         # (notably all mcp_config.json / mcp_global.json handlers). Read paths
         # elsewhere now use "utf-8-sig" so they are BOM-tolerant, and writers
         # should stay BOM-free so freshly produced files round-trip cleanly.
-        with open(path, "w", encoding="utf-8") as f:
+        with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
-        return {"status": "success", "message": f"File '{path}' written successfully."}
+        return {"status": "success", "message": f"File '{resolved}' written successfully."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -592,9 +611,11 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     try:
         # Use utf-8-sig to handle Windows BOM files written by write_file
-        with open(path, encoding="utf-8-sig", errors="ignore") as f:
+        with open(resolved, encoding="utf-8-sig", errors="ignore") as f:
             content = f.read()
 
         if old_str not in content:
@@ -613,10 +634,10 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
         # See write_file() for why we use plain utf-8 here: we must not add a
         # BOM on write, otherwise subsequent json.load() calls (which read with
         # utf-8-sig but still treat the BOM as content) will see corrupted data.
-        with open(path, "w", encoding="utf-8") as f:
+        with open(resolved, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        msg = f"Replaced {replaced} of {count} occurrences in '{path}'."
+        msg = f"Replaced {replaced} of {count} occurrences in '{resolved}'."
         if count > 1 and not replace_all:
             msg += f" WARNING: {count - 1} more occurrences remain. Set replace_all=True to replace all."
 
@@ -632,10 +653,12 @@ def delete_file(path: str) -> dict[str, Any]:
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
     try:
-        if os.path.isfile(path):
-            os.remove(path)
-            return {"status": "success", "message": f"Deleted file '{path}'."}
+        if os.path.isfile(resolved):
+            os.remove(resolved)
+            return {"status": "success", "message": f"Deleted file '{resolved}'."}
         return {"status": "error", "message": "Not a file or file not found."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -652,16 +675,20 @@ def create_directory(path: str, parents: bool = True) -> dict[str, Any]:
     if not _is_path_safe(path):
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
+    resolved = _resolve_path(path)
+
+    resolved = _resolve_path(path)
+
     try:
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                return {"status": "success", "message": f"Directory '{path}' already exists."}
-            return {"status": "error", "message": f"Path '{path}' exists but is not a directory."}
+        if os.path.exists(resolved):
+            if os.path.isdir(resolved):
+                return {"status": "success", "message": f"Directory '{resolved}' already exists."}
+            return {"status": "error", "message": f"Path '{resolved}' exists but is not a directory."}
 
         if parents:
-            os.makedirs(path, exist_ok=True)
+            os.makedirs(resolved, exist_ok=True)
         else:
-            os.mkdir(path)
-        return {"status": "success", "message": f"Directory '{path}' created."}
+            os.mkdir(resolved)
+        return {"status": "success", "message": f"Directory '{resolved}' created."}
     except Exception as e:
         return {"status": "error", "message": str(e)}

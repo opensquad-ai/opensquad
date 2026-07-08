@@ -1119,7 +1119,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             import json as _json
 
-            agent_dir = os.path.join(AGENTS_DIR, name)
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
             if not os.path.isdir(agent_dir):
                 return self._send_json({"error": "Agent directory not found"}, 404)
 
@@ -1166,7 +1166,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             import json as _json
 
-            agent_dir = os.path.join(AGENTS_DIR, name)
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
             if not os.path.isdir(agent_dir):
                 return self._send_json({"error": "Agent directory not found"}, 404)
 

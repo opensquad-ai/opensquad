@@ -38,11 +38,13 @@ admin_router = APIRouter()  # prefix comes from main router include
 # ============================================================
 
 
-async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | None = None) -> dict:
+async def _proxy_get(
+    path: str, params: dict | None = None, launcher_url: str | None = None, *, http_only: bool = False
+) -> dict:
     """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     # WS tunnel: no inbound port needed on home machine
-    if launcher_url is None and launcher_handler.has_connections():
+    if not http_only and launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
         full_path = path
         if params:
@@ -104,10 +106,12 @@ async def _proxy_post(path: str, json: dict | None = None, launcher_url: str | N
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_put(path: str, json_body: dict | None = None, launcher_url: str | None = None) -> dict:
+async def _proxy_put(
+    path: str, json_body: dict | None = None, launcher_url: str | None = None, *, http_only: bool = False
+) -> dict:
     """PUT proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
-    if launcher_url is None and launcher_handler.has_connections():
+    if not http_only and launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
         try:
             return await launcher_handler.rpc(node_id, "PUT", path, body=json_body, timeout=5.0)
@@ -289,7 +293,7 @@ async def admin_get_config(name: str, current_user: User = Depends(get_current_u
 @admin_router.get("/admin/agents/{name}/working-directory")
 async def admin_get_working_directory(name: str, current_user: User = Depends(get_current_user_dep)):
     """Get the agent's current session working directory (if set via folder-picker)."""
-    return await _proxy_get(f"/api/agents/{name}/working-directory")
+    return await _proxy_get(f"/api/agents/{name}/working-directory", http_only=True)
 
 
 @admin_router.put("/admin/agents/{name}/working-directory")
@@ -302,7 +306,7 @@ async def admin_set_working_directory(
     on the next conversation turn. Takes effect immediately — no restart
     needed.
     """
-    return await _proxy_put(f"/api/agents/{name}/working-directory", body)
+    return await _proxy_put(f"/api/agents/{name}/working-directory", body, http_only=True)
 
 
 @admin_router.put("/admin/agents/{name}/config")

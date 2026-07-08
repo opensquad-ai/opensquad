@@ -17,6 +17,24 @@ import os
 # ── Extra allowed directories (injected by agents_boot.py at startup) ──
 _EXTRA_ALLOWED_DIRS: list[str] = []
 
+# Module-level session cwd — visible from executor threads (ContextVar is not).
+_SESSION_CWD: str = ""
+
+
+def set_session_cwd_override(path: str | None) -> None:
+    """Set/clear the process-wide session working directory override."""
+    global _SESSION_CWD
+    if not path or not str(path).strip():
+        _SESSION_CWD = ""
+        return
+    abs_path = os.path.normcase(os.path.abspath(str(path).strip()))
+    _SESSION_CWD = abs_path if os.path.isdir(abs_path) else ""
+
+
+def get_session_cwd_override() -> str:
+    """Return the module-level session cwd override (may be empty)."""
+    return _SESSION_CWD
+
 
 def set_allowed_dirs(dirs: list[str]) -> None:
     """Set the extra allowed working directory whitelist (called at startup)."""
@@ -39,6 +57,9 @@ def get_workspace_root() -> str:
     2. ``syscfg.get_workspace()`` — the permanent shared workspace folder.
     3. ``os.getcwd()`` — last resort fallback.
     """
+    # 0. Module-level override (thread-safe, set by filesystem.set_session_cwd)
+    if _SESSION_CWD and os.path.isdir(_SESSION_CWD):
+        return _SESSION_CWD
     # 1. Check session_cwd from AgentContext (per-session override)
     try:
         from opensquad._context import get_current_context

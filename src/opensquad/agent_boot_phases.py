@@ -137,6 +137,7 @@ class AgentBootPhases:
 
         t0 = __import__("time").perf_counter()
         input_hub.set_agent_context(agent_dir)
+        input_hub._check_session_cwd()
         data_dir = os.path.join(agent_dir, "data")
         os.makedirs(data_dir, exist_ok=True)
 

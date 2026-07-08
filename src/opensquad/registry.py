@@ -1,3 +1,4 @@
+import contextvars
 import inspect
 import json
 import re
@@ -667,7 +668,9 @@ class ToolRegistry:
                 # (some tools internally use time.sleep / subprocess.run and other blocking calls;
                 #  running them directly on the event loop thread causes WebSocket heartbeat timeouts)
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, functools.partial(func, **args))
+                ctx = contextvars.copy_context()
+                partial_fn = functools.partial(func, **args)
+                result = await loop.run_in_executor(None, ctx.run, partial_fn)
             tc_log.debug("[registry.call] OK: %s.%s -> result_len=%d", ns, fn, len(str(result)))
             return result
         except Exception as e:
