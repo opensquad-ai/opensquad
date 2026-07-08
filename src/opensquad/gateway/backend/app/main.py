@@ -11,8 +11,10 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket
+import httpx
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 # ── Phase 2.5: Workspace initialization (must happen before all other imports) ──
@@ -442,6 +444,45 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
 async def health_check():
     """Health check endpoint (returns before full init; check ``ready`` for UI load)."""
     return {"status": "ok", "service": "OpenSquad API", "ready": _app_ready}
+
+
+# Launcher management API proxy (production / desktop parity with Vite dev proxy).
+# Frontend may call /api/launcher/api/... which Vite rewrites to launcher :9600.
+# Without this route, unmatched PUT requests fall through to StaticFiles → 405.
+@app.api_route(
+    "/api/launcher/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+)
+async def launcher_http_proxy(path: str, request: Request):
+    """Forward /api/launcher/* to the launcher management server."""
+    base = syscfg.launcher_url().rstrip("/")
+    target = f"/{path}"
+    if request.url.query:
+        target += f"?{request.url.query}"
+
+    hop_by_hop = {"host", "content-length", "connection", "transfer-encoding"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in hop_by_hop}
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            upstream = await client.request(request.method, f"{base}{target}", content=body, headers=headers)
+    except httpx.ConnectError:
+        return Response(
+            content='{"detail":"Launcher is not running"}',
+            status_code=502,
+            media_type="application/json",
+        )
+    except httpx.RequestError as exc:
+        return Response(
+            content=f'{{"detail":"Launcher proxy error: {exc!s}"}}',
+            status_code=502,
+            media_type="application/json",
+        )
+
+    excluded = {"content-encoding", "transfer-encoding", "connection"}
+    out_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in excluded}
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=out_headers)
 
 
 # Static file serving (frontend application)
