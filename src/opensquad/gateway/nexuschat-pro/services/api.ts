@@ -99,9 +99,12 @@ function _handle401() {
   if (_redirectingToLogin) return;
   _redirectingToLogin = true;
   if (typeof window !== 'undefined') {
-    // Guard against reload loops: if we already cleared auth and reloaded
-    // recently, skip another hard reload (Electron/desktop can hit many 401s
-    // in parallel during gateway restart).
+    // Desktop app: never hard-reload the chat window on auth expiry.
+    if ((window as any).electronEnv) {
+      _redirectingToLogin = false;
+      window.dispatchEvent(new CustomEvent('opensquad:auth-expired'));
+      return;
+    }
     try {
       const last = Number(sessionStorage.getItem('auth_reload_at') || '0');
       if (Date.now() - last < 5000) {
