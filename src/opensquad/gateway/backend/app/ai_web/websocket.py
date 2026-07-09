@@ -210,13 +210,21 @@ class AgentWebSocketHandler:
                             hdata = message.get("content") or message.get("data") or {}
                             if isinstance(hdata, dict):
                                 logger.info(
-                                    "[Gateway] Forward history_sync session_id=%s messages=%d events=%d user_id=%s agent_id=%s",
+                                    "[Gateway] Forward history_sync session_id=%s messages=%d events=%d reason=%s user_id=%s agent_id=%s",
                                     hdata.get("session_id"),
                                     len(hdata.get("messages", []) or []),
                                     len(hdata.get("events", []) or []),
+                                    hdata.get("reason"),
                                     user_id,
                                     agent_id,
                                 )
+                                # Compression rewrites archived_* on disk — drop
+                                # the cached reader so the next HTTP hydrate sees
+                                # the new archive without requiring a refresh.
+                                if hdata.get("reason") == "compression":
+                                    from .agent_sessions import invalidate_reader
+
+                                    invalidate_reader(agent_id)
                         except Exception:
                             pass
 

@@ -1094,6 +1094,7 @@ class AgentRunner:
                         "events": _get_session_manager().get_events(),
                         "session_id": sid,
                         "is_working_session": True,
+                        "reason": "compression",
                     }
                     await bus.emit_async("history_sync", history_data)
                     await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
@@ -1712,7 +1713,16 @@ class AgentRunner:
                 # --- Auto-compression post-processing ---
                 if getattr(self.chat_api, "_auto_compressed", False):
                     _summary = getattr(self.chat_api, "_latest_summary", "")
+                    # Persist archive on disk so the UI can show the collapsible
+                    # "已归档" section (chat_api only compacted self.req before).
+                    _prev = getattr(self.chat_api, "_latest_summary", "") or ""
+                    _get_session_manager().compress_current_session(
+                        keep_ratio=0.1,
+                        previous_summary=_prev,
+                        external_summary=_summary or "",
+                    )
                     if _summary:
+                        self.chat_api._latest_summary = _summary
                         _summary_evt = {
                             "event": "context_summary_generated",
                             "text": "Context auto-compacted",
@@ -1751,14 +1761,18 @@ class AgentRunner:
                         "session_id": sid,
                         "is_working_session": True,
                     }
+                    # Tag reason so the frontend can merge archive into the live
+                    # timeline instead of fully replacing it (avoids tool-stream
+                    # duplication and message reordering mid-turn).
+                    history_data["reason"] = "compression"
                     await bus.emit_async("history_sync", history_data)
                     await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                     await bus.emit_async("session_list", _get_session_manager().get_session_list())
 
-                    _end_ms = int(datetime.now().timestamp() * 1000)
-                    await self._emit(
-                        "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _end_ms}
-                    )
+                    # Do NOT emit turn_elapsed here. Auto-compression often fires
+                    # mid tool-loop; closing the workflow timer would force the
+                    # next tool_call into a new workflow block and make the UI
+                    # look like the tool stream was duplicated.
 
                     # Broadcast updated token stats after compression so frontend
                     # reflects the reduced context size immediately.

@@ -581,6 +581,28 @@ class SessionManager:
     _ARCHIVED_MESSAGES_CAP = 5000
     _ARCHIVED_EVENTS_CAP = 10000
 
+    @staticmethod
+    def _item_timestamp_ms(item: dict[str, Any]) -> float:
+        """Parse ISO timestamp to epoch-ms; missing/invalid → +inf (sort last)."""
+        raw = item.get("timestamp")
+        if not raw or not isinstance(raw, str):
+            return float("inf")
+        try:
+            # Support both "...Z" and "+00:00" forms
+            normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+            return datetime.fromisoformat(normalized).timestamp() * 1000.0
+        except (ValueError, TypeError, OSError):
+            return float("inf")
+
+    @staticmethod
+    def _tool_pair_id(evt: dict[str, Any]) -> str | None:
+        """Stable id linking a tool_call to its tool_result, if present."""
+        data = evt.get("data") if isinstance(evt.get("data"), dict) else {}
+        if not isinstance(data, dict):
+            return None
+        tid = data.get("id") or data.get("tool_use_id")
+        return str(tid) if tid else None
+
     def compress_current_session(
         self, keep_ratio: float = 0.1, previous_summary: str = "", external_summary: str = ""
     ) -> dict[str, Any]:
@@ -593,53 +615,101 @@ class SessionManager:
         Removed items are also stored in session_data["archived_messages"] /
         ["archived_events"] (append-only, capped) so the frontend can still
         display the original conversation in a collapsible section.
+
+        Items are ordered by timestamp (messages and events interleaved) so the
+        archive cut never splits a chronological turn. tool_call / tool_result
+        pairs that share an id are kept or archived atomically.
         """
         messages = list(self.session_data.get("messages", []))
         events = list(self.session_data.get("events", []))
 
-        # Build a unified list of (index, kind, item, token_count) for all content
-        items = []
+        # Build a unified chronological list. Previously messages were appended
+        # first and events second, so walking from the "end" kept all events
+        # before any messages — splitting tool pairs across the archive boundary
+        # and scrambling the frontend timeline after hydration.
+        items: list[dict[str, Any]] = []
         for i, msg in enumerate(messages):
             content = str(msg.get("content", ""))
             tc = self._estimate_tokens(content)
-            items.append({"idx": i, "kind": "message", "item": msg, "tokens": tc})
+            items.append(
+                {
+                    "idx": i,
+                    "kind": "message",
+                    "item": msg,
+                    "tokens": tc,
+                    "ts": self._item_timestamp_ms(msg),
+                    "order": i,
+                }
+            )
         for i, evt in enumerate(events):
             data = evt.get("data", evt.get("content", ""))
             text = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data or "")
             tc = self._estimate_tokens(text)
-            items.append({"idx": i, "kind": "event", "item": evt, "tokens": tc})
+            items.append(
+                {
+                    "idx": i,
+                    "kind": "event",
+                    "item": evt,
+                    "tokens": tc,
+                    "ts": self._item_timestamp_ms(evt),
+                    "order": len(messages) + i,
+                }
+            )
+
+        # Chronological order; same-ts: events before messages (matches UI builder),
+        # then original insertion order as tie-break.
+        items.sort(
+            key=lambda it: (
+                it["ts"],
+                0 if it["kind"] == "event" else 1,
+                it["order"],
+            )
+        )
+
+        # Group tool_call + matching tool_result into atomic units so a cut
+        # never archives the call while leaving the result live (or vice versa).
+        units: list[list[dict[str, Any]]] = []
+        pending_tool: dict[str, list[dict[str, Any]]] = {}
+        for it in items:
+            if it["kind"] == "event":
+                evt = it["item"]
+                etype = evt.get("type")
+                pair_id = self._tool_pair_id(evt) if etype in ("tool_call", "tool_result") else None
+                if pair_id and etype == "tool_call":
+                    group = [it]
+                    pending_tool[pair_id] = group
+                    units.append(group)
+                    continue
+                if pair_id and etype == "tool_result" and pair_id in pending_tool:
+                    pending_tool[pair_id].append(it)
+                    continue
+            units.append([it])
 
         total_tokens = sum(it["tokens"] for it in items)
         keep_tokens = int(total_tokens * keep_ratio)
 
-        # Keep newest items from the end until we reach keep_tokens budget
-        kept_messages = []
-        kept_events = []
-        compressed_messages = []
-        compressed_events = []
+        kept_messages: list[dict[str, Any]] = []
+        kept_events: list[dict[str, Any]] = []
+        compressed_messages: list[dict[str, Any]] = []
+        compressed_events: list[dict[str, Any]] = []
         budget = keep_tokens
 
-        # Walk from newest to oldest, keep while budget allows
-        for it in reversed(items):
-            if budget <= 0:
-                # All remaining items go to compressed
-                if it["kind"] == "message":
-                    compressed_messages.insert(0, it["item"])
-                else:
-                    compressed_events.insert(0, it["item"])
-                continue
-            if it["tokens"] <= budget:
-                budget -= it["tokens"]
-                if it["kind"] == "message":
-                    kept_messages.insert(0, it["item"])
-                else:
-                    kept_events.insert(0, it["item"])
+        # Walk units newest → oldest; each unit is kept or archived as a whole.
+        # Prepend the whole unit (in chronological order) so tool_call stays
+        # before its tool_result — per-item insert(0) would reverse pairs.
+        for unit in reversed(units):
+            unit_tokens = sum(it["tokens"] for it in unit)
+            keep_unit = budget > 0 and unit_tokens <= budget
+            if keep_unit:
+                budget -= unit_tokens
+            unit_msgs = [it["item"] for it in unit if it["kind"] == "message"]
+            unit_evts = [it["item"] for it in unit if it["kind"] == "event"]
+            if keep_unit:
+                kept_messages = unit_msgs + kept_messages
+                kept_events = unit_evts + kept_events
             else:
-                # Partial: this item exceeds remaining budget, compress it
-                if it["kind"] == "message":
-                    compressed_messages.insert(0, it["item"])
-                else:
-                    compressed_events.insert(0, it["item"])
+                compressed_messages = unit_msgs + compressed_messages
+                compressed_events = unit_evts + compressed_events
 
         summary_content = external_summary.strip() if external_summary else ""
         if not summary_content:

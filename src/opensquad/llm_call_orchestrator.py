@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 
@@ -179,7 +178,15 @@ class LlmCallOrchestrator:
         if not getattr(self.runner.chat_api, "_auto_compressed", False):
             return
         summary = getattr(self.runner.chat_api, "_latest_summary", "")
+        # Mirror runner: persist archived_* so the UI can show "已归档".
+        prev = summary or ""
+        self.runner._session_manager.compress_current_session(
+            keep_ratio=0.1,
+            previous_summary=prev,
+            external_summary=summary or "",
+        )
         if summary:
+            self.runner.chat_api._latest_summary = summary
             summary_event = {
                 "event": "context_summary_generated",
                 "text": "Context auto-compacted",
@@ -206,13 +213,11 @@ class LlmCallOrchestrator:
             "session_id": sid,
             "is_working_session": True,
         }
+        history_data["reason"] = "compression"
         await self.runner._bus.emit_async("history_sync", history_data)
         await self.runner._bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
         await self.runner._bus.emit_async("session_list", self.runner._session_manager.get_session_list())
-        await self.runner._emit(
-            "turn_elapsed",
-            {"started_ms": int(self.runner._workflow_started_ms), "ended_ms": int(datetime.now().timestamp() * 1000)},
-        )
+        # Do NOT emit turn_elapsed mid tool-loop — see runner auto-compression note.
         await self.runner._broadcast_token_stats()
         self.runner.chat_api._auto_compressed = False
 

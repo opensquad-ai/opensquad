@@ -241,7 +241,7 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
       {visibleEvents.map((evt, i) => {
         // Use pre-assigned _uid for stable key during window shifts
         const eventKey = evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
-        
+
         if (evt.type === 'thought') {
           return (
             <ThoughtBlock
@@ -588,6 +588,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const prevOuterScrollHeightRef = useRef(0); // for smart auto-scroll
   const pendingFilePushesRef = useRef<ChatMessage[]>([]);
   const pendingHydrationMediaRef = useRef<ChatMessage[]>([]); // media history received while hydrating
+  /** Workflow WS events buffered while hydrating so they are not double-appended after snapshot replace. */
+  const pendingHydrationWorkflowEventsRef = useRef<Array<{ event: WorkflowEvent; status: string | null }>>([]);
+  /** When true, next hydrate merges archive into the live timeline instead of full replace. */
+  const compressionHydrationPendingRef = useRef(false);
   const filePushDedupRef = useRef<Map<string, number>>(new Map());
   const isHydratingSessionRef = useRef(false); // true while restoring current session after refresh
   const currentSessionIdRef = useRef<string | null>(null);
@@ -958,6 +962,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // ---- Timeline helpers ----
 
+  /** Stable dedup key for a workflow tool_call / tool_result event. */
+  function _workflowToolEventKey(evt: WorkflowEvent): string | null {
+    if (evt.type !== 'tool_call' && evt.type !== 'tool_result') return null;
+    const data = typeof evt.content === 'object' && evt.content ? evt.content : null;
+    if (!data) return null;
+    const id = data.id || data.tool_use_id;
+    if (!id) return null;
+    // tool_result merges into tool_call, so both share the call id namespace.
+    return `tool:${id}`;
+  }
+
+  /** True if timeline already contains a tool_call/result with the same id. */
+  function _timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowEvent): boolean {
+    const key = _workflowToolEventKey(event);
+    if (!key) return false;
+    for (const entry of timeline) {
+      if (entry.kind === 'archived_section') {
+        if (_timelineHasToolEvent(entry.data.entries, event)) return true;
+        continue;
+      }
+      if (entry.kind !== 'workflow') continue;
+      for (const evt of entry.data.events) {
+        if (_workflowToolEventKey(evt) === key) return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Get or create the last incomplete workflow block in the timeline.
    * If the last entry is already an incomplete workflow, append to it.
@@ -968,6 +1000,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     event: WorkflowEvent,
     status: string | null,
   ): TimelineEntry[] {
+    // Dedup: after compression hydration the disk snapshot already has tool
+    // events; late WS replays of the same tool_call/result must not create a
+    // second copy of the tool stream.
+    if (_timelineHasToolEvent(prev, event)) {
+      return prev;
+    }
+
     const updated = [...prev];
 
     // Find the last incomplete workflow block, skipping over any trailing 'prompt' or
@@ -1312,6 +1351,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const text = _extractContent(msg);
       if (text) {
         const event: WorkflowEvent = { type: 'thought', content: text, timestamp: Date.now() };
+        if (isHydratingSessionRef.current) {
+          pendingHydrationWorkflowEventsRef.current.push({ event, status: 'Thinking...' });
+          return;
+        }
         setTimeline(prev => appendWorkflowEvent(prev, event, 'Thinking...'));
         setAgentStatus('thinking');
       }
@@ -1329,7 +1372,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         subAgent: isSubAgent,
         subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
       };
-      setTimeline(prev => appendWorkflowEvent(prev, event, `Calling ${toolName}...`));
+      if (isHydratingSessionRef.current) {
+        pendingHydrationWorkflowEventsRef.current.push({ event, status: `Calling ${toolName}...` });
+      } else {
+        setTimeline(prev => appendWorkflowEvent(prev, event, `Calling ${toolName}...`));
+      }
       // 仅主 agent 工具调用时才清空流式文本缓冲区；子 agent 调用不应影响父 agent 的流式输出。
       // 正常情况下 to_user_final 已在 tool_call 之前到达并清空了缓冲区，此处无副作用。
       // 异常情况（JSON 参数泄漏）下，后端未发送 to_user_final，泄漏的 JSON 仍留在
@@ -1351,6 +1398,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         subAgent: typeof data === 'object' ? !!data.sub_agent : false,
         subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
       };
+      if (isHydratingSessionRef.current) {
+        pendingHydrationWorkflowEventsRef.current.push({ event, status: `${toolName} completed` });
+        return;
+      }
       setTimeline(prev => appendWorkflowEvent(prev, event, `${toolName} completed`));
     });
 
@@ -1810,6 +1861,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       isHydratingSessionRef.current = true;
       sessionBootstrapDoneRef.current = false;
       pendingHydrationMediaRef.current = [];
+      pendingHydrationWorkflowEventsRef.current = [];
       diskSessionLoadedRef.current = false;
 
       (async () => {
@@ -2007,7 +2059,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
 
             nextEntries = flushBufferedFilePushes(nextEntries);
-            setTimeline(nextEntries);
+
+            const isCompressionHydration = compressionHydrationPendingRef.current;
+            compressionHydrationPendingRef.current = false;
+
+            if (isCompressionHydration) {
+              // Keep live message order + in-flight tool stream; only graft
+              // archived_section (and missing summary) from the disk snapshot.
+              setTimeline((prev) => {
+                let merged = _mergeCompressionHydration(prev, nextEntries);
+                const bufferedWf = pendingHydrationWorkflowEventsRef.current;
+                pendingHydrationWorkflowEventsRef.current = [];
+                for (const { event, status } of bufferedWf) {
+                  merged = appendWorkflowEvent(merged, event, status);
+                }
+                return merged;
+              });
+            } else {
+              // Full replace path (connect / session switch / refresh).
+              const bufferedWf = pendingHydrationWorkflowEventsRef.current;
+              pendingHydrationWorkflowEventsRef.current = [];
+              let withBuffered = nextEntries;
+              for (const { event, status } of bufferedWf) {
+                withBuffered = appendWorkflowEvent(withBuffered, event, status);
+              }
+              setTimeline(withBuffered);
+            }
             sessionBootstrapDoneRef.current = true;
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
@@ -2057,6 +2134,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             setIsLoadingSession(false);
             isHydratingSessionRef.current = false;
+            // Flush any workflow events that arrived between setTimeline and this
+            // finally (race window while isHydratingSessionRef was still true).
+            const lateWf = pendingHydrationWorkflowEventsRef.current;
+            if (lateWf.length > 0) {
+              pendingHydrationWorkflowEventsRef.current = [];
+              setTimeline((prev) => {
+                let next = prev;
+                for (const { event, status } of lateWf) {
+                  next = appendWorkflowEvent(next, event, status);
+                }
+                return next;
+              });
+            }
             // Allow WS history events to flow through when disk session is unavailable
             if (!diskSessionLoadedRef.current) {
               sessionBootstrapDoneRef.current = true;
@@ -2396,6 +2486,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (viewingHistorySessionRef.current || newSessionPendingRef.current) return;
       const data: any = msg.content || msg.data || {};
       const sid = typeof data === 'object' ? (data.session_id || data.id || null) : null;
+      const reason = typeof data === 'object' ? data.reason : null;
+      if (reason === 'compression') {
+        // Always reload after compression so the "已归档" section appears
+        // without requiring a page refresh. Merge path keeps in-flight tools.
+        compressionHydrationPendingRef.current = true;
+        scheduleCurrentSessionHydration(80);
+        return;
+      }
       if (!sid || !currentSessionIdRef.current || sid === currentSessionIdRef.current || !sessionBootstrapDoneRef.current) {
         scheduleCurrentSessionHydration();
       }
@@ -2680,19 +2778,82 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }
 
   /**
-   * Build a timeline from a session's messages[] and events[] arrays.
-   *
-   * Both records carry an ISO timestamp. We simply merge them by timestamp
-   * and walk the sorted stream:
-   *   - events accumulate into a pending raw buffer
-   *   - when a message is encountered, flush the buffer as a completed
-   *     workflow block placed immediately before that message
-   *   - leftover events at the end mean the agent is still working
-   *
-   * This is correct by design: runner.py stores thought BEFORE the
-   * assistant message, and tool_call/tool_result AFTER it — so the
-   * natural timestamp order already places each event in the right slot.
+   * After context compression, the disk snapshot is authoritative for what is
+   * live vs archived. Keep only in-flight / optimistic live entries that are
+   * not yet on disk and not present in the archive — otherwise the UI keeps
+   * showing the full pre-compress conversation and the "已归档" section looks
+   * like a no-op until refresh.
    */
+  function _mergeCompressionHydration(
+    prev: TimelineEntry[],
+    snapshot: TimelineEntry[],
+  ): TimelineEntry[] {
+    const archivedFromSnap = snapshot.find((e) => e.kind === 'archived_section') as
+      | Extract<TimelineEntry, { kind: 'archived_section' }>
+      | undefined;
+    const snapLive = snapshot.filter((e) => e.kind !== 'archived_section');
+
+    const collectMessageKeys = (entries: TimelineEntry[], into: Set<string>) => {
+      for (const e of entries) {
+        if (e.kind === 'archived_section') {
+          collectMessageKeys(e.data.entries, into);
+          continue;
+        }
+        if (e.kind !== 'message') continue;
+        const k = _messageIdentityKey(e.data as ChatMessage);
+        if (k) into.add(k);
+      }
+    };
+
+    const archivedKeys = new Set<string>();
+    if (archivedFromSnap) {
+      collectMessageKeys(archivedFromSnap.data.entries, archivedKeys);
+    }
+    const snapLiveKeys = new Set<string>();
+    collectMessageKeys(snapLive, snapLiveKeys);
+
+    // Snapshot live area is the post-compress truth.
+    let next = [...snapLive];
+
+    // Preserve unmatched optimistic user bubbles / incomplete workflows from
+    // the live view that are not archived and not already in the snapshot.
+    const liveWithoutArchive = prev.filter((e) => e.kind !== 'archived_section');
+    for (const e of liveWithoutArchive) {
+      if (e.kind === 'message') {
+        const k = _messageIdentityKey(e.data as ChatMessage);
+        if (!k) continue;
+        if (archivedKeys.has(k) || snapLiveKeys.has(k)) continue;
+        // Optimistic message not yet flushed to disk — keep at the end.
+        next.push(e);
+        snapLiveKeys.add(k);
+        continue;
+      }
+      if (e.kind === 'workflow') {
+        const wf = e.data;
+        // Keep only incomplete workflows whose tool ids are not already in snap.
+        if (wf.completed) continue;
+        const hasNew = wf.events.some((evt) => {
+          const tk = _workflowToolEventKey(evt);
+          if (!tk) return evt.type === 'summary_stream' || evt.type === 'thought';
+          return !_timelineHasToolEvent(next, evt);
+        });
+        if (!hasNew) continue;
+        // Dedup tools already present in snapshot, then append remainder.
+        const filteredEvents = wf.events.filter((evt) => !_timelineHasToolEvent(next, evt));
+        if (filteredEvents.length === 0) continue;
+        next.push({
+          kind: 'workflow',
+          data: { ...wf, events: filteredEvents },
+          _uid: e._uid || genUID(),
+        });
+      }
+    }
+
+    if (archivedFromSnap) {
+      return [archivedFromSnap, ...next];
+    }
+    return next;
+  }
 
   /**
    * Post-processing pass: merge orphaned tool_result events across workflow
@@ -2847,6 +3008,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return result;
   }
 
+  /**
+   * Build a timeline from a session's messages[] and events[] arrays.
+   *
+   * Message array order is the conversation skeleton (user/assistant turns).
+   * Events are attached between consecutive messages by timestamp window —
+   * NOT by a global timestamp sort of messages+events, which collapses
+   * same-role messages together when clocks collide or timestamps are missing.
+   */
   function _buildTimelineFromSession(
     messages: any[],
     events: any[],
@@ -2859,25 +3028,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return Number.isNaN(ts) ? Number.MAX_SAFE_INTEGER : ts;
     };
 
-    const records: Array<
-      | { kind: 'message'; item: any; ts: number; order: number }
-      | { kind: 'event'; item: any; ts: number; order: number }
-    > = [];
-
-    messages.forEach((m, index) => {
-      records.push({ kind: 'message', item: m, ts: getTs(m), order: index });
-    });
-    events.forEach((evt, index) => {
-      records.push({ kind: 'event', item: evt, ts: getTs(evt), order: messages.length + index });
-    });
-
-    records.sort((a, b) => {
-      if (a.ts !== b.ts) return a.ts - b.ts;
-      if (a.kind !== b.kind) return a.kind === 'event' ? -1 : 1;
-      return a.order - b.order;
-    });
+    // Preserve message array order. Sort events by timestamp (then insertion
+    // order) so we can walk them once while iterating messages.
+    const sortedEvents = events
+      .map((evt, index) => ({ item: evt, ts: getTs(evt), order: index }))
+      .sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.order - b.order));
 
     let pendingRaw: any[] = [];
+    let eventCursor = 0;
 
     const flushPendingWorkflow = (opts?: { completed?: boolean; elapsedMs?: number }) => {
       if (pendingRaw.length === 0) return;
@@ -2922,13 +3080,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
     };
 
-    for (const record of records) {
-      if (record.kind === 'event') {
-        pendingRaw.push(record.item);
-        continue;
+    // Pull events whose timestamp is strictly before `beforeTs` into pendingRaw.
+    // Events with missing/invalid timestamps (MAX_SAFE_INTEGER) stay until the end.
+    const pullEventsBefore = (beforeTs: number) => {
+      while (eventCursor < sortedEvents.length) {
+        const ev = sortedEvents[eventCursor];
+        if (ev.ts >= beforeTs) break;
+        pendingRaw.push(ev.item);
+        eventCursor += 1;
       }
+    };
 
-      const m = record.item;
+    for (let mi = 0; mi < messages.length; mi++) {
+      const m = messages[mi];
+      const mTs = getTs(m);
+
+      // Events that happened before this message belong to the preceding turn.
+      pullEventsBefore(mTs);
 
       // System context_summary → must NOT act as a workflow boundary.
       // Convert to summary_stream event and keep its original position in the
@@ -3071,7 +3239,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // to also have media, to avoid merging a media-rich message into a
       // plain text placeholder.
       let dupIdx = -1;
-      const mTs = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
+      const mTsNum = m.timestamp ? new Date(m.timestamp).getTime() : NaN;
       const DEDUP_WINDOW_MS = 30000;
       for (let i = timeline.length - 1; i >= 0; i -= 1) {
         const entry = timeline[i];
@@ -3088,7 +3256,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
         if (d.role !== m.role || d.content !== cleanedContent) continue;
         const dTs = d.timestamp ? new Date(d.timestamp).getTime() : NaN;
-        const withinWindow = Number.isNaN(mTs) || Number.isNaN(dTs) || Math.abs(dTs - mTs) <= DEDUP_WINDOW_MS;
+        const withinWindow = Number.isNaN(mTsNum) || Number.isNaN(dTs) || Math.abs(dTs - mTsNum) <= DEDUP_WINDOW_MS;
         if (withinWindow) {
           dupIdx = i;
           break;
@@ -3136,8 +3304,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
     }
 
-    // Remaining trailing events mean the agent was still working when the
-    // session snapshot was taken.
+    // Remaining events (including those with missing timestamps) belong after
+    // the last message — agent still working, or trailing tool results.
+    while (eventCursor < sortedEvents.length) {
+      pendingRaw.push(sortedEvents[eventCursor].item);
+      eventCursor += 1;
+    }
     flushPendingWorkflow({ completed: false });
 
     // CRITICAL: After building the timeline, orphaned tool_result events may be
@@ -3616,6 +3788,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     diskSessionLoadedRef.current = false;
     pendingFilePushesRef.current = [];
     pendingHydrationMediaRef.current = [];
+    pendingHydrationWorkflowEventsRef.current = [];
+    compressionHydrationPendingRef.current = false;
     sessionBootstrapDoneRef.current = false;
     viewingHistorySessionRef.current = false;
     setViewingHistorySession(false);

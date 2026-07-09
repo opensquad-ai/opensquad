@@ -254,3 +254,113 @@ class TestCompressSession:
         assert "total_archived_messages" in stats
         assert "total_archived_events" in stats
         assert stats["total_archived_messages"] > 0
+
+    def test_compress_keeps_tool_call_result_pairs_atomic(self, sm):
+        """tool_call and matching tool_result must not be split across the
+        archive boundary — otherwise the UI merges orphans into the wrong
+        tool card after hydration."""
+        # Build an interleaved chronological history: user → assistant →
+        # tool_call → tool_result → user → assistant (newest kept).
+        sm.add_message("user", "old-user-" + ("x" * 80))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:00:00+00:00"
+        sm.add_message("assistant", "old-asst-" + ("x" * 80))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:00:01+00:00"
+        sm.add_event(
+            "tool_call",
+            {"id": "call_old", "name": "search", "args": {"q": "a"}},
+            turn_id=1,
+            round_id=1,
+        )
+        sm.session_data["events"][-1]["timestamp"] = "2024-01-01T00:00:02+00:00"
+        sm.add_event(
+            "tool_result",
+            {"id": "call_old", "name": "search", "result": "old-result-" + ("y" * 80)},
+            turn_id=1,
+            round_id=1,
+        )
+        sm.session_data["events"][-1]["timestamp"] = "2024-01-01T00:00:03+00:00"
+
+        # Newer turn that should survive keep_ratio
+        sm.add_message("user", "new-user-" + ("z" * 20))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:01:00+00:00"
+        sm.add_message("assistant", "new-asst-" + ("z" * 20))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:01:01+00:00"
+        sm.add_event(
+            "tool_call",
+            {"id": "call_new", "name": "search", "args": {"q": "b"}},
+            turn_id=2,
+            round_id=2,
+        )
+        sm.session_data["events"][-1]["timestamp"] = "2024-01-01T00:01:02+00:00"
+        sm.add_event(
+            "tool_result",
+            {"id": "call_new", "name": "search", "result": "ok"},
+            turn_id=2,
+            round_id=2,
+        )
+        sm.session_data["events"][-1]["timestamp"] = "2024-01-01T00:01:03+00:00"
+
+        sm.compress_current_session(keep_ratio=0.15)
+
+        live_events = sm.session_data.get("events") or []
+        archived_events = sm.session_data.get("archived_events") or []
+
+        def _ids(evts, etype):
+            out = set()
+            for e in evts:
+                if e.get("type") != etype:
+                    continue
+                data = e.get("data") or {}
+                tid = data.get("id") or data.get("tool_use_id")
+                if tid:
+                    out.add(tid)
+            return out
+
+        live_calls = _ids(live_events, "tool_call")
+        live_results = _ids(live_events, "tool_result")
+        arch_calls = _ids(archived_events, "tool_call")
+        arch_results = _ids(archived_events, "tool_result")
+
+        # No orphan: every call id present on one side must have its result
+        # on the same side.
+        assert live_calls == live_results, f"live tool pairs split: calls={live_calls} results={live_results}"
+        assert arch_calls == arch_results, f"archived tool pairs split: calls={arch_calls} results={arch_results}"
+        # A given id must not appear on both sides.
+        assert live_calls.isdisjoint(arch_calls), (
+            f"tool id duplicated across archive boundary: {live_calls & arch_calls}"
+        )
+
+    def test_compress_interleaves_messages_and_events_by_timestamp(self, sm):
+        """Archive cut walks chronological order, not messages-then-events.
+
+        Old algorithm appended all messages then all events, so walking from
+        the end kept every event before any message. Chronological ordering
+        archives an old thought together with the older messages that precede
+        it, instead of leaving the thought live while archiving its turn.
+        """
+        # Large older turn (message + thought), small newest message.
+        sm.add_message("user", "old-" + ("a" * 400))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:00:00+00:00"
+        sm.add_event("thought", {"text": "old-thought-" + ("b" * 400)})
+        sm.session_data["events"][-1]["timestamp"] = "2024-01-01T00:00:01+00:00"
+        sm.add_message("assistant", "new-keep-me")
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:01:00+00:00"
+
+        sm.compress_current_session(keep_ratio=0.1)
+
+        live_msgs = sm.get_messages()
+        archived_msgs = sm.session_data.get("archived_messages") or []
+        archived_evts = sm.session_data.get("archived_events") or []
+        live_evts = sm.session_data.get("events") or []
+
+        assert any("new-keep-me" in (m.get("content") or "") for m in live_msgs), (
+            f"expected newest message to stay live, got live={live_msgs!r}"
+        )
+        assert any("old-" in (m.get("content") or "") for m in archived_msgs), "expected older message to be archived"
+        # Older thought must follow its turn into the archive, not remain live alone.
+        assert any(e.get("type") == "thought" for e in archived_evts), (
+            "expected older thought event to be archived with its turn"
+        )
+        assert not any(e.get("type") == "thought" for e in live_evts), (
+            "old thought must not remain live after its message was archived"
+        )
