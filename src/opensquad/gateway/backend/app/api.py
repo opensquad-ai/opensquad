@@ -369,7 +369,7 @@ async def _bootstrap_default_group(db: AsyncSession, admin_user: User, language:
         id=_DEFAULT_GROUP_ID,
         name=group_name,
         description="OpenSquad default collaboration group" if lang == "en" else "OpenSquad 默认协作群",
-        avatar="https://api.dicebear.com/7.x/identicon/svg?seed=g-default",
+        avatar="",
         is_private=False,
         created_by=admin_user.id,
         created_at=now,
@@ -612,7 +612,7 @@ async def create_group(
         is_private=group_data.is_private,
         created_by=current_user.id,
         created_at=datetime.now(timezone.utc),
-        avatar=f"https://api.dicebear.com/7.x/identicon/svg?seed={group_id}",
+        avatar="",  # frontend local SVG fallback (no Dicebear CDN)
         notification_sound_enabled=True,
     )
 

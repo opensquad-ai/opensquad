@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Search, Plus, AtSign, Volume2, VolumeX, X, Camera, Save, LogOut, Palette, Mail, Bell, Send, User as UserIcon, Paperclip, Image as ImageIcon, FileText, XCircle, Download, ZoomIn, ChevronLeft, ChevronRight, BotMessageSquare, Menu } from 'lucide-react';
 import { Group, User } from '../types';
 import { uploadAPI, directMessageAPI } from '../services/api';
-import { getAvatarUrl } from '../utils/image';
+import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { formatTime } from '../utils/time';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { parse } from 'marked';
@@ -414,11 +414,17 @@ export const ChatList: React.FC<ChatListProps> = ({
                  {/* Mobile Profile Access */}
                 {currentUser && (
                     <img
-                        src={getAvatarUrl(currentUser.avatar)}
-                        className="w-10 h-10 rounded-full object-cover cursor-pointer hover:opacity-80 md:hidden"
+                        src={getAvatarUrl(currentUser.avatar, currentUser.id, currentUser.name)}
+                        className="w-10 h-10 rounded-full object-cover cursor-pointer hover:opacity-80 md:hidden bg-border"
                         onClick={handleOpenProfile}
-                        alt="Profile"
+                        alt=""
                         loading="lazy"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (img.dataset.fallbackApplied) return;
+                          img.dataset.fallbackApplied = '1';
+                          img.src = getLocalAvatarFallback(currentUser.id, currentUser.name);
+                        }}
                     />
                 )}
 
@@ -807,7 +813,18 @@ export const ChatList: React.FC<ChatListProps> = ({
             }`}
           >
             <div className="relative flex-shrink-0">
-                <img src={getAvatarUrl(group.avatar)} alt={group.name} className="w-12 h-12 rounded-full object-cover shadow-sm" loading="lazy" />
+                <img
+                  src={getAvatarUrl(group.avatar, group.id, group.name)}
+                  alt=""
+                  className="w-12 h-12 rounded-full object-cover shadow-sm bg-border"
+                  loading="lazy"
+                  onError={(e) => {
+                    const img = e.currentTarget;
+                    if (img.dataset.fallbackApplied) return;
+                    img.dataset.fallbackApplied = '1';
+                    img.src = getLocalAvatarFallback(group.id, group.name);
+                  }}
+                />
                 {group.unreadCount > 0 && (
                     <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-panel min-w-[20px] text-center">
                         {group.unreadCount}

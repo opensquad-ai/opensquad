@@ -143,7 +143,7 @@ async def init_default_data():
                 name=sa["name"],
                 email=sa["email"],
                 hashed_password=get_password_hash(sa["password"]),
-                avatar=f"https://api.dicebear.com/7.x/bottts-neutral/svg?seed={sa['name']}",
+                avatar="",
                 status=UserStatus.OFFLINE,
                 created_at=now,
                 last_seen=now,

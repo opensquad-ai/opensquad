@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio, Loader2 } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { User } from '../types';
-import { getAvatarUrl } from '../utils/image';
+import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { useTranslation } from 'react-i18next';
 import { setLanguage } from '../i18n';
 import { pluginAPI, PluginInfo, adminAPI, AdminAgent } from '../services/api';
@@ -47,10 +47,10 @@ function loadAgentShortcutsCache(): AgentShortcutItem[] {
 export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProfile, onOpenSettings, currentView }) => {
   const { t, i18n } = useTranslation();
   const isZh = i18n.language === 'zh';
-  const [pluginNavItems, setPluginNavItems] = useState<Array<{ 
-    name: string; 
-    icon: string; 
-    label: string; 
+  const [pluginNavItems, setPluginNavItems] = useState<Array<{
+    name: string;
+    icon: string;
+    label: string;
     view: string;
     iconType?: 'lucide' | 'image' | 'initial';
     iconUrl?: string;
@@ -177,8 +177,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
     const navBtn = (view: string | string[]) => {
         const isActive = Array.isArray(view) ? view.includes(currentView || '') : currentView === view;
         return `flex items-center md:justify-center justify-start gap-3 w-full px-4 md:px-2 py-3 md:py-2 rounded-xl transition-all duration-200 ${
-            isActive 
-                ? 'text-primary bg-primary/10' 
+            isActive
+                ? 'text-primary bg-primary/10'
                 : 'text-textMuted hover:bg-primary/10 hover:text-primary'
         }`;
     };
@@ -429,10 +429,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                 >
                     <div className="w-8 h-8 rounded-full overflow-hidden border border-border shrink-0">
                         <img
-                            src={getAvatarUrl(currentUser?.avatar)}
-                            alt="Profile"
-                            className="w-full h-full object-cover"
+                            src={getAvatarUrl(currentUser?.avatar, currentUser?.id, currentUser?.name)}
+                            alt=""
+                            className="w-full h-full object-cover bg-border"
                             loading="lazy"
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              if (img.dataset.fallbackApplied) return;
+                              img.dataset.fallbackApplied = '1';
+                              img.src = getLocalAvatarFallback(
+                                currentUser?.id || 'user',
+                                currentUser?.name,
+                              );
+                            }}
                         />
                     </div>
                     <span className="font-medium md:hidden ml-3 truncate">{currentUser?.name || 'User'}</span>

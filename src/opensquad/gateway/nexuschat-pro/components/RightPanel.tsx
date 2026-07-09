@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, Search, Calendar, User as UserIcon, FileText, Image as ImageIcon, Video, File, LogOut, ArrowRight, Bell, BellOff, Copy, Check, MessageSquare, Edit2, Check as CheckIcon, Camera, Loader2, UserPlus } from 'lucide-react';
 import { Group, User, ChatState, Message, MessageType } from '../types';
-import { getAvatarUrl } from '../utils/image';
+import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { uploadAPI, messageAPI, groupAPI } from '../services/api';
 
 interface RightPanelProps {
@@ -26,12 +26,12 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
   const [showAddAgentModal, setShowAddAgentModal] = useState(false);
   const [availableAgents, setAvailableAgents] = useState<Array<{ id: string; name: string; avatar: string; dir_name: string }>>([]);
   const [loadingAgents, setLoadingAgents] = useState(false);
-  
+
   // Search API states
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
-  
+
   // Edit states
   const [isEditingName, setIsEditingName] = useState(false);
   const [isEditingDesc, setIsEditingDesc] = useState(false);
@@ -146,10 +146,10 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
 
   const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || !e.target.files[0] || !group || !onUpdateGroup) return;
-    
+
     const file = e.target.files[0];
     setIsUploadingAvatar(true);
-    
+
     try {
       const result = await uploadAPI.uploadFile(file);
       await onUpdateGroup(group.id, { avatar: result.url });
@@ -179,13 +179,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
     if (window.innerWidth < 768) {
       onClose();
     }
-    
+
     // 派发带时间戳的跳转事件，用于历史消息自动加载
     window.dispatchEvent(new CustomEvent('jumpToMessage', {
-      detail: { 
-        messageId, 
+      detail: {
+        messageId,
         clearFilter: true,
-        timestamp: timestamp 
+        timestamp: timestamp
       }
     }));
   };
@@ -211,11 +211,17 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
         {group && (
           <div className="flex flex-col items-center mb-6">
             <div className="relative mb-3 group">
-              <img 
-                src={getAvatarUrl(group.avatar)} 
-                alt={group.name} 
-                className={`w-20 h-20 rounded-full object-cover shadow-sm ${isUploadingAvatar ? 'opacity-50' : ''}`}
+              <img
+                src={getAvatarUrl(group.avatar, group.id, group.name)}
+                alt=""
+                className={`w-20 h-20 rounded-full object-cover shadow-sm bg-border ${isUploadingAvatar ? 'opacity-50' : ''}`}
                 loading="lazy"
+                onError={(e) => {
+                  const img = e.currentTarget;
+                  if (img.dataset.fallbackApplied) return;
+                  img.dataset.fallbackApplied = '1';
+                  img.src = getLocalAvatarFallback(group.id, group.name);
+                }}
               />
               {onUpdateGroup && (
                 <>
@@ -243,7 +249,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                 </div>
               )}
             </div>
-            
+
             {/* Group Name - Editable */}
             {isEditingName ? (
               <div className="flex items-center gap-2 w-full">
@@ -266,13 +272,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                 </button>
               </div>
             ) : (
-              <div 
+              <div
                 className="flex items-center gap-2 group cursor-pointer"
                 onClick={() => onUpdateGroup && startEditName()}
               >
                 <h2 className="text-lg font-bold text-textMain">{group.name}</h2>
                 {onUpdateGroup && (
-                  <button 
+                  <button
                     onClick={(e) => { e.stopPropagation(); startEditName(); }}
                     className="p-1 hover:bg-border rounded text-textMuted hover:text-primary transition-colors opacity-0 group-hover:opacity-100"
                   >
@@ -281,7 +287,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                 )}
               </div>
             )}
-            
+
             {/* Group Description - Editable */}
             {isEditingDesc ? (
               <div className="flex items-center gap-2 w-full mt-2">
@@ -305,13 +311,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                 </button>
               </div>
             ) : (
-              <div 
+              <div
                 className="flex items-center gap-2 mt-1 group cursor-pointer"
                 onClick={() => onUpdateGroup && startEditDesc()}
               >
                 <p className="text-sm text-textMuted text-center">{group.description || t('rightPanel.noDescription')}</p>
                 {onUpdateGroup && (
-                  <button 
+                  <button
                     onClick={(e) => { e.stopPropagation(); startEditDesc(); }}
                     className="p-1 hover:bg-border rounded text-textMuted hover:text-primary transition-colors opacity-0 group-hover:opacity-100"
                   >
@@ -349,7 +355,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                         {group.notificationSoundEnabled ? <Bell size={18} /> : <BellOff size={18} />}
                         <span className="text-sm font-medium">{t('rightPanel.notifications')}</span>
                     </div>
-                    <button 
+                    <button
                         onClick={() => onToggleSound(group.id)}
                         className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors duration-300 ${group.notificationSoundEnabled ? 'bg-primary' : 'bg-gray-300'}`}
                     >
@@ -362,7 +368,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
         {/* Search Section */}
         <div className="mb-6">
           <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{t('rightPanel.searchHistory')}</h4>
-          
+
           <div className="space-y-3">
             <div className="relative">
               <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
@@ -382,7 +388,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
             <div className="flex gap-2">
               <div className="flex-1 relative">
                 <UserIcon className="absolute left-3 top-2.5 text-gray-400" size={16} />
-                <select 
+                <select
                   className="w-full pl-9 pr-3 py-2 bg-bgLight border border-border rounded-lg text-sm appearance-none focus:outline-none"
                   value={searchQuery.userId || ''}
                   onChange={(e) => onSearchChange({ userId: e.target.value || null })}
@@ -456,7 +462,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                       {searchError}
                     </div>
                   )}
-                  
+
                   {/* Loading State */}
                   {isSearching && searchResults.length === 0 && (
                     <div className="p-4 text-center text-gray-400 text-sm">
@@ -464,14 +470,14 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                       {t('rightPanel.searchingDb')}
                     </div>
                   )}
-                  
+
                   {/* Empty State */}
                   {!isSearching && !searchError && searchResults.length === 0 && (
                     <div className="p-4 text-center text-gray-400 text-sm">
                       {t('rightPanel.noMessagesFound')}
                     </div>
                   )}
-                  
+
                   {/* Results List */}
                   {!isSearching && searchResults.map(msg => {
                       const sender = users[msg.senderId];
@@ -519,7 +525,18 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                 return (
                   <div key={memberId} className="flex items-center gap-3 p-2 hover:bg-bgLight rounded-lg transition-colors cursor-pointer">
                     <div className="relative">
-                      <img src={getAvatarUrl(user.avatar)} className="w-8 h-8 rounded-full object-cover" loading="lazy" />
+                      <img
+                        src={getAvatarUrl(user.avatar, user.id, user.name)}
+                        className="w-8 h-8 rounded-full object-cover bg-border"
+                        alt=""
+                        loading="lazy"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (img.dataset.fallbackApplied) return;
+                          img.dataset.fallbackApplied = '1';
+                          img.src = getLocalAvatarFallback(user.id, user.name);
+                        }}
+                      />
                       <div className={`absolute bottom-0 right-0 w-2.5 h-2.5 border-2 border-white rounded-full ${user.status === 'online' ? 'bg-green-500' : user.status === 'busy' ? 'bg-red-500' : 'bg-gray-400'}`}></div>
                     </div>
                     <div className="flex-1 min-w-0">
@@ -536,7 +553,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
         {/* Actions */}
         {group && (
             <div className="mt-auto pt-4 border-t border-border">
-                 <button 
+                 <button
                     onClick={() => onLeaveGroup(group.id)}
                     className="w-full flex items-center justify-center gap-2 p-2.5 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors font-semibold text-sm"
                  >

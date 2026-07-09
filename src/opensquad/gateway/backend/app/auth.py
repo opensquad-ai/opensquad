@@ -167,7 +167,7 @@ async def create_user(db: AsyncSession, user_data: UserCreate, user_id: str | No
         email=user_data.email,
         name=user_data.name,
         hashed_password=hashed_password,
-        avatar=user_data.avatar or f"https://api.dicebear.com/7.x/bottts-neutral/svg?seed={final_id}",
+        avatar=user_data.avatar or "",
         status="offline",
         created_at=datetime.now(timezone.utc),
         last_seen=datetime.now(timezone.utc),

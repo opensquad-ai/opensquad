@@ -46,13 +46,20 @@ interface MessageBubbleProps {
   senderAvatar?: string | null;
 }
 
-/** Resolve an avatar URL: absolute URLs pass through; relative paths are
- *  prefixed with the backend base URL so they load regardless of Vite proxy. */
+/** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
 function resolveAvatarUrl(avatar: string): string {
-  if (avatar.startsWith('http://') || avatar.startsWith('https://')) return avatar;
-  // Paths stored in the DB are like "/uploads/..." or "uploads/..."
-  const path = avatar.startsWith('/') ? avatar : `/${avatar}`;
-  return `${SERVER_BASE_URL}${path}`;
+  if (avatar.startsWith('http://') || avatar.startsWith('https://')) {
+    try {
+      const u = new URL(avatar);
+      if (u.pathname.startsWith('/uploads/')) {
+        return `${u.pathname}${u.search}`;
+      }
+    } catch {
+      // keep absolute
+    }
+    return avatar;
+  }
+  return avatar.startsWith('/') ? avatar : `/${avatar}`;
 }
 
 
