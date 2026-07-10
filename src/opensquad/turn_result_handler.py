@@ -18,6 +18,7 @@ class ResponseTagState:
     sleep_seconds: str | None
     sys_cmd: str | None
     task_start: str | None
+    title: str | None
 
 
 @dataclass
@@ -80,6 +81,7 @@ class TurnResultHandler:
             sleep_seconds=self.runner._extract_tag(full_response, "sleep"),
             sys_cmd=self.runner._extract_tag(full_response, "to_system"),
             task_start=self.runner._extract_tag(full_response, "task_start"),
+            title=self.runner._extract_tag(full_response, "title"),
         )
 
     async def apply_state_transitions(self, tag_state: ResponseTagState) -> tuple[bool, str, bool]:
@@ -98,6 +100,15 @@ class TurnResultHandler:
                     "session_title",
                     {"id": self.runner._session_manager.get_current_session_id(), "title": task_name},
                 )
+
+        # Agent-chosen session subject via <title>...</title>
+        if tag_state.title and tag_state.title.strip():
+            title_name = tag_state.title.strip()
+            self.runner._session_manager.set_title(title_name)
+            sid = self.runner._session_manager.get_current_session_id()
+            await self.runner._emit("current_session", {"id": sid, "title": title_name})
+            await self.runner._bus.emit_async("session_list", self.runner._session_manager.get_session_list())
+            await self.runner._emit("session_title", {"id": sid, "title": title_name})
 
         if tag_state.sys_cmd in ["task_complete", "task_failed"]:
             self.runner._in_task = False

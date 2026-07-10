@@ -34,6 +34,52 @@ export interface WorkflowBlock {
   elapsed_ms?: number;
 }
 
+/** True when nothing in the block is still in-flight (open tools / live summary). */
+export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
+  for (const e of events) {
+    if (e.type === 'tool_call' && !e.result) return false;
+    if (e.type === 'summary_stream') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      if (!data.done) return false;
+    }
+    if (e.type === 'compression_progress') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      if (!data.is_final) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether a trailing / orphan workflow should render as finished even if
+ * `completed` was never flipped by a following chat message.
+ * Avoids thought-only live blocks (still streaming) being marked done.
+ */
+export function shouldTreatWorkflowComplete(block: WorkflowBlock): boolean {
+  if (block.completed) return true;
+  if (!isWorkflowSettled(block.events)) return false;
+
+  let hasDoneSummary = false;
+  let hasFinalProgress = false;
+  let toolCalls = 0;
+  let toolsWithResult = 0;
+  for (const e of block.events) {
+    if (e.type === 'summary_stream') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      if (data.done) hasDoneSummary = true;
+    } else if (e.type === 'compression_progress') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      if (data.is_final) hasFinalProgress = true;
+    } else if (e.type === 'tool_call') {
+      toolCalls += 1;
+      if (e.result) toolsWithResult += 1;
+    }
+  }
+  if (hasDoneSummary || hasFinalProgress) return true;
+  if (toolCalls > 0 && toolsWithResult === toolCalls) return true;
+  return false;
+}
+
 export type TimelineEntry =
   | { kind: 'message'; data: ChatMessage; _uid: string }
   | { kind: 'workflow'; data: WorkflowBlock; _uid: string }
@@ -73,16 +119,95 @@ export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowE
   return false;
 }
 
+/** Extract display text from a tool_result payload (WS or session event). */
+export function extractToolResultText(resultData: unknown): string {
+  if (resultData == null) return '';
+  if (typeof resultData === 'string') return resultData;
+  if (typeof resultData !== 'object') return String(resultData);
+  const data = resultData as Record<string, unknown>;
+  const candidates = [data.result, data.output, data.content, data.text, data.message];
+  for (const c of candidates) {
+    if (typeof c === 'string') {
+      if (c.length > 0) return c;
+      continue;
+    }
+    if (c != null && typeof c !== 'object') return String(c);
+    if (c != null && typeof c === 'object') {
+      try {
+        return JSON.stringify(c, null, 2);
+      } catch {
+        /* continue */
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Merge a tool_result into the matching tool_call (by id, else last unmatched).
+ * Returns a new timeline when merged; null when no unmatched tool_call was found.
+ */
+export function mergeToolResultIntoTimeline(
+  prev: TimelineEntry[],
+  event: WorkflowEvent,
+  status: string | null,
+): TimelineEntry[] | null {
+  if (event.type !== 'tool_result') return null;
+  const resultData = event.content;
+  const resultId =
+    typeof resultData === 'object' && resultData
+      ? (resultData.id || resultData.tool_use_id)
+      : null;
+  const resStr = extractToolResultText(resultData);
+  const resultStatus =
+    typeof resultData === 'object' && resultData && (resultData as any).error ? 'error' as const : 'success' as const;
+
+  for (let wi = prev.length - 1; wi >= 0; wi--) {
+    if (prev[wi].kind !== 'workflow') continue;
+    const wf = (prev[wi] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
+    for (let ei = wf.events.length - 1; ei >= 0; ei--) {
+      const evt = wf.events[ei];
+      if (evt.type !== 'tool_call' || evt.result) continue;
+      const callData = typeof evt.content === 'object' && evt.content ? evt.content : {};
+      const callId = callData.id || callData.tool_use_id;
+      if (!resultId || !callId || resultId === callId) {
+        const newEvents = [...wf.events];
+        newEvents[ei] = {
+          ...evt,
+          result: resStr || evt.result,
+          resultStatus,
+        };
+        return prev.map((entry, idx) =>
+          idx === wi
+            ? {
+                kind: 'workflow' as const,
+                data: { ...wf, events: newEvents, status: status ?? wf.status },
+                _uid: entry._uid,
+              }
+            : entry,
+        );
+      }
+    }
+  }
+  return null;
+}
+
 export function appendWorkflowEvent(
   prev: TimelineEntry[],
   event: WorkflowEvent,
   status: string | null,
 ): TimelineEntry[] {
-  // Dedup: after compression hydration the disk snapshot already has tool
-  // events; late WS replays of the same tool_call/result must not create a
-  // second copy of the tool stream.
-  if (timelineHasToolEvent(prev, event)) {
+  // Dedup tool_call replays (e.g. after compression hydration).
+  // IMPORTANT: tool_result shares the same id namespace as tool_call
+  // (`tool:${id}`). Treating tool_result as a duplicate here used to DROP
+  // the result entirely, leaving the UI stuck on "No result".
+  if (event.type === 'tool_call' && timelineHasToolEvent(prev, event)) {
     return prev;
+  }
+  if (event.type === 'tool_result' && timelineHasToolEvent(prev, event)) {
+    // Matching tool_call already on the timeline — merge result into it
+    // (or no-op if that call already has a result from a prior merge).
+    return mergeToolResultIntoTimeline(prev, event, status) ?? prev;
   }
 
   const updated = [...prev];
@@ -117,13 +242,11 @@ export function appendWorkflowEvent(
           const callId = callData.id || callData.tool_use_id;
           if (!resultId || !callId || resultId === callId) {
             // Found match — merge result into this tool_call
-            const resStr = typeof resultData === 'object'
-              ? (typeof resultData.result === 'string' ? resultData.result : (resultData.output || JSON.stringify(resultData)))
-              : String(resultData);
+            const resStr = extractToolResultText(resultData);
             wf.events[ei] = {
               ...evt,
               result: resStr,
-              resultStatus: (typeof resultData === 'object' && resultData.error) ? 'error' : 'success',
+              resultStatus: (typeof resultData === 'object' && resultData && resultData.error) ? 'error' : 'success',
             };
             // Keep the workflow's completed flag unchanged. Setting completed=false
             // here would re-open a legitimately-finished workflow (e.g. system.wait
@@ -159,8 +282,9 @@ export function appendWorkflowEvent(
 
     if (event.type === 'thought' && wf.events.length > 0) {
       // For thoughts, accumulate consecutive chunks into one block
+      // (do not merge parent thoughts with sub-agent thoughts).
       const lastEvt = wf.events[wf.events.length - 1];
-      if (lastEvt.type === 'thought') {
+      if (lastEvt.type === 'thought' && !!lastEvt.subAgent === !!event.subAgent) {
         newEvents = [...wf.events];
         newEvents[newEvents.length - 1] = {
           ...lastEvt,
@@ -179,18 +303,16 @@ export function appendWorkflowEvent(
       let merged = false;
       for (let i = newEvents.length - 1; i >= 0; i--) {
         const evt = newEvents[i];
-        if (evt.type === 'tool_call' && !evt.result) {
+        if (evt.type === 'tool_call' && !evt.result && !!evt.subAgent === !!event.subAgent) {
           const callData = typeof evt.content === 'object' ? evt.content : {};
           const callId = callData.id || callData.tool_use_id;
           if (!resultId || !callId || resultId === callId) {
             // Merge: add result to the tool_call event
-            const resStr = typeof resultData === 'object'
-              ? (typeof resultData.result === 'string' ? resultData.result : (resultData.output || JSON.stringify(resultData)))
-              : String(resultData);
+            const resStr = extractToolResultText(resultData);
             newEvents[i] = {
               ...evt,
               result: resStr,
-              resultStatus: (typeof resultData === 'object' && resultData.error) ? 'error' : 'success',
+              resultStatus: (typeof resultData === 'object' && resultData && resultData.error) ? 'error' : 'success',
             };
             merged = true;
             break;
@@ -290,6 +412,16 @@ export function mergeOrphanedToolResultsAcrossWorkflows(timeline: TimelineEntry[
   // Track which entries have been mutated so we can create new references
   const mutatedWfIndices = new Set<number>();
 
+  const hasUserMessageBetween = (fromWfIdx: number, toWfIdx: number): boolean => {
+    if (toWfIdx <= fromWfIdx) return false;
+    for (let i = fromWfIdx + 1; i < toWfIdx; i++) {
+      if (timeline[i]?.kind === 'message' && (timeline[i] as Extract<TimelineEntry, { kind: 'message' }>).data.role === 'user') {
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Merge each orphaned result into the nearest preceding unmatched tool_call
   const usedCallIndices = new Set<number>();
   for (const orphan of orphanResults) {
@@ -300,17 +432,21 @@ export function mergeOrphanedToolResultsAcrossWorkflows(timeline: TimelineEntry[
       const tc = toolCalls[i];
       const tcGlobalIdx = tc.wfIdx * 1000 + tc.eventIdx;
       const orphanGlobalIdx = orphan.wfIdx * 1000 + orphan.eventIdx;
-      if (tcGlobalIdx < orphanGlobalIdx && !usedCallIndices.has(i)) {
-        // Prefer exact id match, otherwise accept any unmatched
-        if (orphan.resultId && tc.callId && orphan.resultId === tc.callId) {
-          bestMatch = tc;
-          bestCallListIdx = i;
-          break; // Exact match found, use it
-        }
-        if (!bestMatch) {
-          bestMatch = tc;
-          bestCallListIdx = i;
-        }
+      if (tcGlobalIdx >= orphanGlobalIdx || usedCallIndices.has(i)) continue;
+
+      const exactId = !!(orphan.resultId && tc.callId && orphan.resultId === tc.callId);
+      // After compression/archive, loose matching across a user-message boundary
+      // can glue a new tool_result onto an older turn's tool_call and scramble order.
+      if (!exactId && hasUserMessageBetween(tc.wfIdx, orphan.wfIdx)) continue;
+
+      if (exactId) {
+        bestMatch = tc;
+        bestCallListIdx = i;
+        break; // Exact match found, use it
+      }
+      if (!bestMatch) {
+        bestMatch = tc;
+        bestCallListIdx = i;
       }
     }
 
@@ -465,8 +601,14 @@ export function buildTimelineFromSession(
     const m = messages[mi];
     const mTs = getTs(m);
 
-    // Events that happened before this message belong to the preceding turn.
-    pullEventsBefore(mTs);
+    // Do NOT pull/flush workflow events before a user bubble.
+    // After compression (and with sub-agent / clock skew), same-turn
+    // thought/tool events can have timestamps <= the user message. Pulling
+    // them here used to render "Worked" above the user who triggered it.
+    // User turns only flush parked context_summary entries (see below).
+    if (m.role !== 'user') {
+      pullEventsBefore(mTs);
+    }
 
     // System context_summary → must NOT act as a workflow boundary.
     // Convert to summary_stream event and keep its original position in the
@@ -499,10 +641,44 @@ export function buildTimelineFromSession(
       // Fall through and render as a normal assistant text message.
     }
 
-    flushPendingWorkflow({
-      completed: true,
-      elapsedMs: typeof m.elapsed_ms === 'number' ? m.elapsed_ms : undefined,
-    });
+    // Assistant replies are often persisted (ChatAPI api_sync) BEFORE the
+    // matching thought/plan events are written at end-of-turn. Live UI still
+    // shows think→reply because WS streams thoughts first; on reload, pure
+    // timestamp interleaving would put the reply above the thought.
+    // Absorb the rest of this turn's events (until the next user message)
+    // so workflow stays above the assistant bubble after refresh.
+    if (m.role === 'assistant') {
+      let turnEndTs = Number.POSITIVE_INFINITY;
+      for (let j = mi + 1; j < messages.length; j++) {
+        if (messages[j]?.role === 'user') {
+          turnEndTs = getTs(messages[j]);
+          break;
+        }
+      }
+      pullEventsBefore(turnEndTs);
+    }
+
+    // Flush workflow before assistant (and other non-user) messages only.
+    // Before a user message, flush only if pending is parked context_summary
+    // content — never same-turn tools.
+    if (m.role === 'user') {
+      const onlySummary =
+        pendingRaw.length > 0 &&
+        pendingRaw.every(
+          (raw) =>
+            raw?.type === 'summary_stream' ||
+            raw?.type === 'compression_progress' ||
+            raw?.type === 'prompt_update',
+        );
+      if (onlySummary) {
+        flushPendingWorkflow({ completed: true });
+      }
+    } else {
+      flushPendingWorkflow({
+        completed: true,
+        elapsedMs: typeof m.elapsed_ms === 'number' ? m.elapsed_ms : undefined,
+      });
+    }
 
     const extra = (m && typeof m.extra === 'object' && m.extra !== null) ? m.extra : {};
     const rawImagesInput = Array.isArray(m.images)
@@ -675,12 +851,26 @@ export function buildTimelineFromSession(
   }
 
   // Remaining events (including those with missing timestamps) belong after
-  // the last message — agent still working, or trailing tool results.
+  // the last message — often a finished compression/summary with no following
+  // chat bubble. Mark settled trailing blocks completed so Classic UI does not
+  // stick on "working".
   while (eventCursor < sortedEvents.length) {
     pendingRaw.push(sortedEvents[eventCursor].item);
     eventCursor += 1;
   }
-  flushPendingWorkflow({ completed: false });
+  {
+    // Peek-convert to decide completed flag without double-flushing.
+    const peek = pendingRaw.filter((r) => r.type !== 'prompt_update');
+    const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
+    const trailingDone =
+      peekWf.length > 0 &&
+      shouldTreatWorkflowComplete({
+        events: peekWf,
+        status: null,
+        completed: false,
+      });
+    flushPendingWorkflow({ completed: trailingDone });
+  }
 
   // CRITICAL: After building the timeline, orphaned tool_result events may be
   // stuck in separate workflow blocks because user messages act as boundaries.
@@ -748,14 +938,24 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
     if (type === 'thought') {
       const text = typeof data === 'string' ? data : (data.text || data.content || '');
       if (!text) continue;
-      // Merge consecutive thoughts
+      const isSub = typeof data === 'object' && data !== null && !!data.sub_agent;
+      const subLabel = typeof data === 'object' && data !== null ? (data.sub_task_label || '') : '';
+      // Merge consecutive thoughts (same sub-agent scope only)
       const last = result[result.length - 1];
-      if (last && last.type === 'thought') {
+      if (last && last.type === 'thought' && !!last.subAgent === isSub) {
         last.content += '\n' + text;
       } else {
-        result.push({ _uid: genTimelineUID(), type: 'thought', content: text, timestamp: eventTimestamp });
+        result.push({
+          _uid: genTimelineUID(),
+          type: 'thought',
+          content: text,
+          timestamp: eventTimestamp,
+          subAgent: isSub || undefined,
+          subTaskLabel: subLabel || undefined,
+        });
       }
     } else if (type === 'tool_call') {
+      const isSub = !!data.sub_agent;
       result.push({
         _uid: genTimelineUID(),
         type: 'tool_call',
@@ -765,19 +965,20 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           args: data.args || data.arguments || data.input,
         },
         timestamp: eventTimestamp,
+        subAgent: isSub || undefined,
+        subTaskLabel: data.sub_task_label || undefined,
       });
     } else if (type === 'tool_result') {
       // Merge into matching tool_call
       const resultId = data.id || data.tool_use_id;
+      const isSub = !!data.sub_agent;
       let merged = false;
       for (let i = result.length - 1; i >= 0; i--) {
         const evt = result[i];
         if (evt.type === 'tool_call' && !evt.result) {
           const callId = evt.content?.id;
           if (!resultId || !callId || resultId === callId) {
-            const resStr = typeof data.result === 'string'
-              ? data.result
-              : (typeof data.result === 'object' ? JSON.stringify(data.result) : (data.output || JSON.stringify(data)));
+            const resStr = extractToolResultText(data);
             evt.result = resStr;
             evt.resultStatus = data.error ? 'error' : 'success';
             merged = true;
@@ -787,12 +988,14 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       }
       if (!merged) {
         // Standalone result (fallback)
-        const resStr = typeof data.result === 'string' ? data.result : JSON.stringify(data.result || data);
+        const resStr = extractToolResultText(data) || JSON.stringify(data.result || data);
         result.push({
           _uid: genTimelineUID(),
           type: 'tool_result',
           content: { name: data.name || 'Tool', result: resStr },
           timestamp: eventTimestamp,
+          subAgent: isSub || undefined,
+          subTaskLabel: data.sub_task_label || undefined,
         });
       }
     } else if (type === 'plan') {
@@ -821,7 +1024,15 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       if (detailed.text && /entering wait mode|listening for events|Workflow started|Context summary|Context compressed|compression skipped|injected into prompt/i.test(detailed.text)) {
         continue;
       }
-      result.push({ _uid: genTimelineUID(), type: 'info', content: detailed, timestamp: eventTimestamp });
+      const isSub = !!detailed.sub_agent;
+      result.push({
+        _uid: genTimelineUID(),
+        type: 'info',
+        content: detailed,
+        timestamp: eventTimestamp,
+        subAgent: isSub || undefined,
+        subTaskLabel: detailed.sub_task_label || undefined,
+      });
     }
     // Skip other event types (option, etc.) — or add handling as needed
   }

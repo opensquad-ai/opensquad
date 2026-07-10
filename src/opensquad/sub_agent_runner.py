@@ -164,13 +164,47 @@ class SubAgentRunner:
         self._sid = sid
         self._sub_task_label = sub_task_label or ""
 
+    def _tag_payload(self, data) -> dict:
+        """Normalize emit payload and always stamp sub-agent metadata."""
+        if isinstance(data, str):
+            payload = {"text": data}
+        elif isinstance(data, dict):
+            payload = dict(data)
+        else:
+            payload = {"text": str(data)}
+        payload["sub_agent"] = True
+        payload["sub_task_label"] = self._sub_task_label
+        return payload
+
+    def _persist_sub_event(self, etype: str, data: dict) -> None:
+        """Best-effort persist so refresh/history_sync can rebuild the nest."""
+        try:
+            from opensquad import session_manager as _sm_module
+
+            sm = getattr(_sm_module, "session_manager", None)
+            if sm is not None and hasattr(sm, "add_event"):
+                sm.add_event(etype, dict(data))
+        except Exception:
+            logger.debug("[SubAgentRunner] persist sub event skipped", exc_info=True)
+
+    def _emit_sub_sync(self, etype: str, data) -> None:
+        """Sync bus emit used by ChatAPI stream callbacks (must stay tagged)."""
+        payload = self._tag_payload(data)
+        if self._sid:
+            bus.emit(etype, {"sid": self._sid, "data": payload})
+        else:
+            bus.emit(etype, payload)
+        self._persist_sub_event(etype, payload)
+
     async def _emit_sub(self, etype: str, data: dict):
         """Emit a frontend event under the parent agent's session_id, tagged as sub-agent."""
-        if not self._sid:
-            return
-        data["sub_agent"] = True
-        data["sub_task_label"] = self._sub_task_label
-        await bus.emit_async(etype, {"sid": self._sid, "data": data})
+        payload = self._tag_payload(data)
+        if self._sid:
+            await bus.emit_async(etype, {"sid": self._sid, "data": payload})
+        else:
+            # Still emit so local/dev UIs can see activity even without sid.
+            await bus.emit_async(etype, payload)
+        self._persist_sub_event(etype, payload)
 
     def _build_chat_api(self):
         """Instantiate the appropriate ChatAPI subclass based on api_protocol."""
@@ -185,7 +219,14 @@ class SubAgentRunner:
 
         from opensquad.xml_parser import StreamingTagParser
 
-        stream_parser = StreamingTagParser({})
+        # Route XML <thought>/<think> chunks through the tagged sub-agent path so
+        # the frontend can nest them under the parent delegate_task fold.
+        stream_parser = StreamingTagParser(
+            {
+                "thought": lambda x: self._emit_sub_sync("thought", x),
+                "think": lambda x: self._emit_sub_sync("thought", x),
+            }
+        )
 
         common_kwargs = dict(
             api_key=cfg.get("api_key", ""),
@@ -206,15 +247,22 @@ class SubAgentRunner:
         if provider in ("claude", "anthropic"):
             from opensquad.claude_api import ClaudeAPI
 
-            return ClaudeAPI(**common_kwargs)
+            api = ClaudeAPI(**common_kwargs)
         elif provider in ("google", "gemini"):
             from opensquad.google_api import GoogleAPI
 
-            return GoogleAPI(**common_kwargs)
+            api = GoogleAPI(**common_kwargs)
         else:
             from opensquad.chat_api import ChatAPI
 
-            return ChatAPI(**common_kwargs)
+            api = ChatAPI(**common_kwargs)
+
+        # Native reasoning_content / stream emits go through ChatAPI._emit_with_sid.
+        # Without this, those thoughts hit the parent session untagged and break
+        # delegate nesting (and hide subsequent sub tool_calls as orphans).
+        api._sid_provider = lambda: self._sid
+        api._emit_with_sid = lambda etype, data: self._emit_sub_sync(etype, data)
+        return api
 
     def _get_sub_registry(self):
         """
@@ -390,8 +438,17 @@ class SubAgentRunner:
         if not last_text:
             last_text = f"[Sub-agent produced no final text output within {MAX_TURNS} turns]"
 
-        # Notify frontend that sub-agent has finished
-        await self._emit_sub("info", {"message": f"[Sub-Agent] Done: {self._sub_task_label or task[:80]}"})
+        # Notify frontend that sub-agent has finished + surface the final answer
+        # (parent tool_result also carries this text; panel shows it as Result).
+        await self._emit_sub(
+            "info",
+            {
+                "event": "sub_agent_result",
+                "message": f"[Sub-Agent] Done: {self._sub_task_label or task[:80]}",
+                "text": last_text,
+                "result": last_text,
+            },
+        )
 
         return last_text
 

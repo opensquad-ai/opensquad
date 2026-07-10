@@ -812,6 +812,11 @@ class SessionManager:
 
             self.session_data["messages"].append(message)
             self.session_data["last_updated"] = utc_now_iso()
+            # Provisional session title from the first user message until agent names it.
+            if role == "user" and not self.session_data.get("title"):
+                provisional = self._title_from_user_content(content)
+                if provisional:
+                    self.session_data["title"] = provisional
             if len(self.session_data["messages"]) > 1000:
                 self.session_data["messages"] = self.session_data["messages"][-1000:]
 
@@ -915,6 +920,35 @@ class SessionManager:
     def get_title(self) -> str | None:
         return self.session_data.get("title")
 
+    @staticmethod
+    def _title_from_user_content(content: str) -> str:
+        """Normalize user message text into a short session title."""
+        if not content:
+            return ""
+        text = re.sub(r"<image>.*?</image>", "[image]", content, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"\[File:[^\]]*\]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:80]
+
+    @classmethod
+    def resolve_session_title(cls, messages: list, explicit_title: str | None, fallback: str) -> str:
+        """Resolve display title: explicit → <title> tag → first user message → fallback id."""
+        if explicit_title and str(explicit_title).strip():
+            return str(explicit_title).strip()
+        for m in messages or []:
+            if m.get("role") == "assistant":
+                match = re.search(r"<title>(.*?)</title>", m.get("content", "") or "", re.DOTALL)
+                if match:
+                    t = match.group(1).strip()
+                    if t:
+                        return t
+        for m in messages or []:
+            if m.get("role") == "user":
+                t = cls._title_from_user_content(m.get("content", "") or "")
+                if t:
+                    return t
+        return fallback
+
     def clear(self):
         self._init_new_session()
         # clear() is user-initiated; sync flush to guarantee immediate persistence
@@ -935,14 +969,6 @@ class SessionManager:
         sessions = []
         seen_ids = set()
 
-        def _extract_title(messages: list, fallback: str) -> str:
-            for m in messages:
-                if m.get("role") == "assistant":
-                    match = re.search(r"<title>(.*?)</title>", m.get("content", ""))
-                    if match:
-                        return match.group(1).strip()
-            return fallback
-
         def _extract_preview(messages: list) -> str:
             """Extract the last user message as preview."""
             for m in reversed(messages):
@@ -958,7 +984,7 @@ class SessionManager:
         curr_id = self.session_data.get("id")
         if curr_id:
             messages = self.session_data.get("messages", [])
-            title = self.session_data.get("title") or _extract_title(messages, curr_id)
+            title = self.resolve_session_title(messages, self.session_data.get("title"), curr_id)
             preview = _extract_preview(messages)
             sessions.append({"id": curr_id, "title": title, "preview": preview, "current": True})
             seen_ids.add(curr_id)
@@ -978,26 +1004,24 @@ class SessionManager:
                     cached = self._cache_get(sid)
                     if cached is not None:
                         messages = cached.get("messages", [])
-                        title = cached.get("title") or _extract_title(messages, sid)
+                        title = self.resolve_session_title(messages, cached.get("title"), sid)
                         preview = _extract_preview(messages)
                     else:
                         try:
                             with open(os.path.join(history_dir, f), encoding="utf-8") as jf:
                                 content = jf.read()
-                                # Prefer JSON title field if present, otherwise fall back to <title> tag
                                 try:
                                     parsed = json.loads(content)
-                                    title = parsed.get("title") or title
-                                    if not preview:
-                                        preview = _extract_preview(parsed.get("messages", []) or [])
+                                    messages = parsed.get("messages", []) or []
+                                    title = self.resolve_session_title(messages, parsed.get("title"), sid)
+                                    preview = _extract_preview(messages)
                                 except Exception:
-                                    match = re.search(r"<title>(.*?)</title>", content)
+                                    match = re.search(r"<title>(.*?)</title>", content, re.DOTALL)
                                     if match:
-                                        title = match.group(1).strip()
-                                # Avoid parsing full JSON just for preview to prevent performance overhead
+                                        title = match.group(1).strip() or sid
                         except Exception:
                             pass
-                        sessions.append({"id": sid, "title": title, "preview": preview, "current": False})
+                    sessions.append({"id": sid, "title": title, "preview": preview, "current": False})
                     seen_ids.add(sid)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")

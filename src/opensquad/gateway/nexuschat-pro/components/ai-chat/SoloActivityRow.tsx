@@ -7,9 +7,11 @@
  *   - file edit/write: fold shows +N -M; expand → embedded FileDiffBlock
  *   - other tools (websearch, etc.): expand → light box with Args + Result
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
+import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
+import { DelegateFold } from './DelegateFold';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
@@ -75,7 +77,7 @@ function thoughtLabel(text: string): { primary: string; secondary: string } {
   return { primary: 'Thought', secondary: 'for a bit' };
 }
 
-type LineKind = 'thought' | 'tool' | 'info';
+type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation';
 
 interface ActivityLine {
   key: string;
@@ -90,103 +92,167 @@ interface ActivityLine {
   toolResult?: string;
   fileEdit?: FileEditInfo | null;
   toolStatus?: 'running' | 'success' | 'error';
+  /** Context-compression summary flags */
+  summaryDone?: boolean;
+  summaryPending?: boolean;
+  /** Cursor-style delegate bundle (opens SubAgentPanel) */
+  delegation?: DelegateBundle;
+}
+
+function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean): ActivityLine[] {
+  const lines: ActivityLine[] = [];
+
+  if (evt.type === 'thought') {
+    const text = thoughtText(evt);
+    if (!text.trim()) return lines;
+    const { primary, secondary } = thoughtLabel(text);
+    lines.push({ key, kind: 'thought', primary, secondary, detail: text });
+    return lines;
+  }
+
+  if (evt.type === 'summary_stream') {
+    const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    const text = typeof data.text === 'string' ? data.text : '';
+    const done = !!data.done;
+    const pending = !!data.pending;
+    lines.push({
+      key,
+      kind: 'summary',
+      primary: done
+        ? (text ? 'Context summary' : 'Compression completed')
+        : (pending ? 'Waiting for compression' : 'Compressing context'),
+      secondary: done ? 'done' : 'live',
+      detail: pending ? '' : (text || (done ? '' : 'Summarizing…')),
+      running: !done,
+      summaryDone: done,
+      summaryPending: pending,
+    });
+    return lines;
+  }
+
+  if (evt.type === 'compression_progress') {
+    const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    const text =
+      typeof evt.content === 'string'
+        ? evt.content
+        : String(data.text || data.message || '');
+    if (!text.trim()) return lines;
+    const isFinal = !!data.is_final;
+    lines.push({
+      key,
+      kind: 'progress',
+      primary: text.length > 72 ? `${text.slice(0, 72)}…` : text,
+      secondary: isFinal ? 'done' : '',
+      detail: text,
+      running: !isFinal && !blockCompleted,
+    });
+    return lines;
+  }
+
+  if (evt.type === 'tool_call') {
+    const running = !evt.result && !blockCompleted;
+    const name = toolNameOf(evt);
+    const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    const rawArgs = content.arguments ?? content.args ?? content.input;
+    const argsObj = parseArgs(rawArgs);
+    const resultStr = formatResult(evt.result);
+    const fileEdit = extractFileEditInfo(name, argsObj || rawArgs || {});
+    const status: 'running' | 'success' | 'error' = running
+      ? 'running'
+      : evt.resultStatus === 'error'
+        ? 'error'
+        : 'success';
+
+    let primary = name;
+    let secondary = '';
+    if (fileEdit) {
+      if (fileEdit.kind === 'read') {
+        primary = `Read ${fileEdit.fileName}`;
+        secondary = fileEdit.lineRange || '';
+      } else if (fileEdit.kind === 'write') {
+        primary = `Wrote ${fileEdit.fileName}`;
+      } else {
+        primary = `Edited ${fileEdit.fileName}`;
+      }
+    } else if (running) {
+      primary = 'Running';
+      secondary = name;
+    }
+
+    lines.push({
+      key,
+      kind: 'tool',
+      primary,
+      secondary,
+      detail: '',
+      running,
+      toolName: name,
+      toolArgs: argsObj,
+      toolResult: resultStr,
+      fileEdit,
+      toolStatus: status,
+    });
+    return lines;
+  }
+
+  if (evt.type === 'tool_result') {
+    const data = typeof evt.content === 'object' ? evt.content : {};
+    const name = String(data.name || data.tool || 'Tool');
+    const result = formatResult(data.result ?? data.output ?? data);
+    lines.push({
+      key,
+      kind: 'tool',
+      primary: name,
+      secondary: '',
+      detail: '',
+      toolName: name,
+      toolArgs: null,
+      toolResult: result,
+      fileEdit: null,
+      toolStatus: data.error ? 'error' : 'success',
+    });
+    return lines;
+  }
+
+  if (evt.type === 'info') {
+    const text =
+      typeof evt.content === 'string'
+        ? evt.content
+        : evt.content?.text || evt.content?.message || '';
+    if (!text) return lines;
+    lines.push({
+      key,
+      kind: 'info',
+      primary: text.length > 60 ? `${text.slice(0, 60)}…` : text,
+      secondary: '',
+      detail: text,
+    });
+  }
+
+  return lines;
 }
 
 function buildLines(block: WorkflowBlock): ActivityLine[] {
   const lines: ActivityLine[] = [];
+  const items = buildDisplayWorkflowItems(block.events);
 
-  for (let i = 0; i < block.events.length; i++) {
-    const evt = block.events[i];
-    const key = evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
-
-    if (evt.type === 'thought') {
-      const text = thoughtText(evt);
-      if (!text.trim()) continue;
-      const { primary, secondary } = thoughtLabel(text);
-      lines.push({ key, kind: 'thought', primary, secondary, detail: text });
-      continue;
-    }
-
-    if (evt.type === 'tool_call') {
-      const running = !evt.result && !block.completed;
-      const name = toolNameOf(evt);
-      const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
-      const rawArgs = content.arguments ?? content.args ?? content.input;
-      const argsObj = parseArgs(rawArgs);
-      const resultStr = formatResult(evt.result);
-      const fileEdit = extractFileEditInfo(name, argsObj || rawArgs || {});
-      const status: 'running' | 'success' | 'error' = running
-        ? 'running'
-        : evt.resultStatus === 'error'
-          ? 'error'
-          : 'success';
-
-      let primary = name;
-      let secondary = '';
-      if (fileEdit) {
-        if (fileEdit.kind === 'read') {
-          primary = `Read ${fileEdit.fileName}`;
-          secondary = fileEdit.lineRange || '';
-        } else if (fileEdit.kind === 'write') {
-          primary = `Wrote ${fileEdit.fileName}`;
-        } else {
-          primary = `Edited ${fileEdit.fileName}`;
-        }
-      } else if (running) {
-        primary = 'Running';
-        secondary = name;
-      }
-
+  for (const item of items) {
+    if (item.kind === 'delegation') {
       lines.push({
-        key,
-        kind: 'tool',
-        primary,
-        secondary,
+        key: item.key,
+        kind: 'delegation',
+        primary: item.bundle.running ? 'Exploring' : 'Explored',
+        secondary: item.bundle.label,
         detail: '',
-        running,
-        toolName: name,
-        toolArgs: argsObj,
-        toolResult: resultStr,
-        fileEdit,
-        toolStatus: status,
+        running: item.bundle.running,
+        delegation: item.bundle,
       });
       continue;
     }
-
-    if (evt.type === 'tool_result') {
-      // Usually merged into tool_call; orphan results still show
-      const data = typeof evt.content === 'object' ? evt.content : {};
-      const name = String(data.name || data.tool || 'Tool');
-      const result = formatResult(data.result ?? data.output ?? data);
-      lines.push({
-        key,
-        kind: 'tool',
-        primary: name,
-        secondary: '',
-        detail: '',
-        toolName: name,
-        toolArgs: null,
-        toolResult: result,
-        fileEdit: null,
-        toolStatus: data.error ? 'error' : 'success',
-      });
-      continue;
-    }
-
-    if (evt.type === 'info') {
-      const text =
-        typeof evt.content === 'string'
-          ? evt.content
-          : evt.content?.text || '';
-      if (!text) continue;
-      lines.push({
-        key,
-        kind: 'info',
-        primary: text.length > 60 ? `${text.slice(0, 60)}…` : text,
-        secondary: '',
-        detail: text,
-      });
-    }
+    // Skip orphan sub-agent events that somehow weren't nested (still hide from main stream
+    // when they carry the flag — they belong in a delegate window).
+    if (item.event.subAgent) continue;
+    lines.push(...eventToLines(item.event, item.key, !!block.completed));
   }
 
   return lines;
@@ -197,7 +263,6 @@ function outerSummary(
   lines: ActivityLine[],
   turnStartedMs?: number,
 ): { primary: string; secondary: string } {
-  const running = !block.completed || lines.some((l) => l.running);
   let elapsedMs: number | null =
     typeof block.elapsed_ms === 'number' ? block.elapsed_ms : null;
   if (elapsedMs == null && turnStartedMs != null) {
@@ -205,9 +270,25 @@ function outerSummary(
   }
   const secs = elapsedMs != null ? Math.max(1, Math.round(elapsedMs / 1000)) : null;
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
-  const tools = lines.filter((l) => l.kind === 'tool').length;
+  const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation').length;
+  const summaries = lines.filter((l) => l.kind === 'summary');
+  const liveSummary = summaries.some((l) => l.running);
+  const liveTool = lines.some((l) => l.kind === 'tool' && l.running);
+  const hasLiveLine = lines.some((l) => l.running);
 
-  if (running) {
+  if (liveSummary) {
+    if (secs != null) return { primary: `Compressing for ${secs}s`, secondary: '' };
+    return { primary: 'Compressing context', secondary: '' };
+  }
+  // Summary finished (even if workflow block not yet marked completed).
+  if (summaries.length > 0 && summaries.every((l) => !l.running)) {
+    return { primary: 'Context compressed', secondary: '' };
+  }
+  if (liveTool || (hasLiveLine && !block.completed)) {
+    if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
+    return { primary: 'Working', secondary: '' };
+  }
+  if (!block.completed && turnStartedMs != null) {
     if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
@@ -220,45 +301,55 @@ function outerSummary(
   return { primary: 'Activity', secondary: '' };
 }
 
+/** Cursor-like faint activity chrome: outer slightly stronger, nested lighter. */
 const TextChevronToggle: React.FC<{
   primary: string;
   secondary?: string;
   open: boolean;
   onToggle: () => void;
   running?: boolean;
-  muted?: boolean;
+  /** 0 = outer turn, 1 = event line */
+  depth?: 0 | 1;
   addedLines?: number;
   removedLines?: number;
-}> = ({ primary, secondary, open, onToggle, running, muted, addedLines, removedLines }) => (
+}> = ({ primary, secondary, open, onToggle, running, depth = 0, addedLines, removedLines }) => {
+  // Inline color-mix: Tailwind opacity utilities were not reliably fading
+  // primary labels (inherited theme muted stayed too strong).
+  const faint =
+    depth === 0
+      ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
+      : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+
+  return (
   <button
     type="button"
     onClick={onToggle}
+    style={{ color: faint }}
     className="group inline-flex items-baseline gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
   >
-    <span
-      className={`text-[13px] leading-relaxed min-w-0 ${
-        muted ? 'text-textMuted/70' : 'text-textMuted/85'
-      }`}
-    >
-      <span className="font-normal">{primary}</span>
-      {secondary ? <span className="text-textMuted/50"> {secondary}</span> : null}
-      {running ? <span className="text-textMuted/40"> …</span> : null}
+    <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
+      <span className="font-normal" style={{ color: faint }}>{primary}</span>
+      {secondary ? (
+        <span style={{ color: faint }}>{' '}{secondary}</span>
+      ) : null}
+      {running ? <span style={{ color: faint, opacity: 0.85 }}> …</span> : null}
     </span>
     {(addedLines != null && addedLines > 0) && (
-      <span className="text-[12px] font-mono font-semibold text-emerald-600/90 dark:text-emerald-400/90 shrink-0">
+      <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #059669 55%, transparent)' }}>
         +{addedLines}
       </span>
     )}
     {(removedLines != null && removedLines > 0) && (
-      <span className="text-[12px] font-mono font-semibold text-red-500/90 dark:text-red-400/90 shrink-0">
+      <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #ef4444 55%, transparent)' }}>
         -{removedLines}
       </span>
     )}
-    <span className="text-[13px] text-textMuted/55 font-normal leading-relaxed shrink-0">
+    <span className="text-[13px] font-normal leading-relaxed shrink-0" style={{ color: faint }}>
       {open ? '⌄' : '>'}
     </span>
   </button>
-);
+  );
+};
 
 const SoloToolExpandPanel: React.FC<{
   toolName: string;
@@ -323,45 +414,96 @@ const SoloEventLine: React.FC<{
   line: ActivityLine;
   defaultOpen?: boolean;
 }> = ({ line, defaultOpen = false }) => {
-  const [open, setOpen] = useState(defaultOpen);
+  const isSummary = line.kind === 'summary';
+  const isProgress = line.kind === 'progress';
+  // Keep compression summary open while streaming so text is visible live.
+  const [open, setOpen] = useState(defaultOpen || !!(isSummary && line.running));
   const isThought = line.kind === 'thought';
   const isFileEdit = !!(line.fileEdit && (line.fileEdit.kind === 'edit' || line.fileEdit.kind === 'write'));
   const isFileRead = line.fileEdit?.kind === 'read';
 
   useEffect(() => {
-    if (defaultOpen) setOpen(true);
-  }, [defaultOpen]);
+    if (defaultOpen || (isSummary && line.running)) setOpen(true);
+  }, [defaultOpen, isSummary, line.running]);
 
   const added = line.fileEdit?.addedLines;
   const removed = line.fileEdit?.removedLines;
 
+  // Delegate: open Cursor-style sub-agent window (not an inline expand).
+  if (line.kind === 'delegation' && line.delegation) {
+    return <DelegateFold bundle={line.delegation} variant="solo" />;
+  }
+
+  // Progress lines are compact status rows (no nested fold needed).
+  if (isProgress) {
+    return (
+      <div
+        className="w-full select-text py-0.5 text-[12px] leading-relaxed"
+        style={{ color: 'color-mix(in srgb, var(--color-text-muted) 62%, transparent)' }}
+      >
+        {line.running ? <span className="opacity-80">… </span> : null}
+        <span className="whitespace-pre-wrap break-words">{line.detail || line.primary}</span>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={`w-full select-text ${
-        isThought && open ? 'rounded-sm bg-black/[0.03] dark:bg-white/[0.04] px-1.5 py-1 -mx-0.5' : ''
-      }`}
-    >
+    <div className="w-full select-text">
       <TextChevronToggle
         primary={line.primary}
         secondary={line.secondary}
         open={open}
         onToggle={() => setOpen((v) => !v)}
         running={line.running}
-        muted={!isThought}
+        depth={1}
         addedLines={isFileEdit ? added : undefined}
         removedLines={isFileEdit ? removed : undefined}
       />
 
+      {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
       {open && isThought && line.detail && (
-        <div className="pl-0 pr-1 pb-0.5 pt-0.5">
-          <pre className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto text-textMuted/45 dark:text-textMuted/40">
+        <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+          <pre
+            className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
+            style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
+          >
             {line.detail}
           </pre>
         </div>
       )}
 
+      {/* Context compression summary — live streaming text (classic-parity). */}
+      {open && isSummary && (line.detail || line.running) && (
+        <div
+          className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
+            line.summaryDone
+              ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+              : 'border-indigo-500/25 bg-indigo-500/[0.04]'
+          }`}
+        >
+          {line.summaryPending && !line.detail ? (
+            <div
+              className="text-[12px] animate-pulse"
+              style={{ color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)' }}
+            >
+              Waiting for context compression…
+            </div>
+          ) : (
+            <pre
+              className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
+              style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
+            >
+              {line.detail || 'Summarizing…'}
+              {line.running && !line.summaryPending ? (
+                <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
+              ) : null}
+            </pre>
+          )}
+        </div>
+      )}
+
       {open && isFileEdit && line.fileEdit && (
-        <div className="mt-1 mb-1.5">
+        <div className="mt-1 mb-1.5 pl-4">
           <FileDiffBlock
             info={line.fileEdit}
             status={line.toolStatus || 'success'}
@@ -376,7 +518,7 @@ const SoloEventLine: React.FC<{
       )}
 
       {open && isFileRead && line.fileEdit && (
-        <div className="mt-1 mb-1.5">
+        <div className="mt-1 mb-1.5 pl-4">
           <FileDiffBlock
             info={line.fileEdit}
             status={line.toolStatus || 'success'}
@@ -387,17 +529,22 @@ const SoloEventLine: React.FC<{
       )}
 
       {open && line.kind === 'tool' && !isFileEdit && !isFileRead && (
-        <SoloToolExpandPanel
-          toolName={line.toolName || line.primary}
-          args={line.toolArgs}
-          result={line.toolResult || ''}
-          running={line.running}
-        />
+        <div className="pl-4">
+          <SoloToolExpandPanel
+            toolName={line.toolName || line.primary}
+            args={line.toolArgs}
+            result={line.toolResult || ''}
+            running={line.running}
+          />
+        </div>
       )}
 
       {open && line.kind === 'info' && line.detail && (
-        <div className="mt-1 mb-1.5 rounded-md border border-border/40 bg-black/[0.03] px-2.5 py-2">
-          <pre className="text-[12px] text-textMuted/70 whitespace-pre-wrap break-words font-sans m-0">
+        <div className="mt-1 mb-1.5 pl-4 rounded-md border border-border/40 bg-black/[0.03] px-2.5 py-2">
+          <pre
+            className="text-[12px] whitespace-pre-wrap break-words font-sans m-0"
+            style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
+          >
             {line.detail}
           </pre>
         </div>
@@ -433,24 +580,49 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   const hasRunning = block.events.some(
     (e) => e.type === 'tool_call' && !e.result && !block.completed,
   );
-  const turnDone = block.completed && !hasRunning;
+  const hasLiveCompression = block.events.some((e) => {
+    if (block.completed) return false;
+    if (e.type === 'summary_stream') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      return !data.done;
+    }
+    if (e.type === 'compression_progress') {
+      const data = typeof e.content === 'object' && e.content ? e.content : {};
+      return !data.is_final;
+    }
+    return false;
+  });
+  // Parent only passes turnStartedMs for the active incomplete group.
+  // Also keep open during context compression (no turn_start / turnStartedMs).
+  const isLiveTurn =
+    (!block.completed && turnStartedMs != null) || hasLiveCompression || hasRunning;
 
-  const [outerOpen, setOuterOpen] = useState(() => expandDetails || !turnDone);
+  const [outerOpen, setOuterOpen] = useState(isLiveTurn || expandDetails);
+  const prevExpandRef = useRef(expandDetails);
 
   useEffect(() => {
     if (expandDetails) {
       setOuterOpen(true);
+      prevExpandRef.current = expandDetails;
       return;
     }
-    if (turnDone) setOuterOpen(false);
-    else setOuterOpen(true);
-  }, [turnDone, expandDetails]);
+    // User just turned expandDetails off → collapse
+    if (prevExpandRef.current && !expandDetails) {
+      setOuterOpen(false);
+      prevExpandRef.current = expandDetails;
+      return;
+    }
+    prevExpandRef.current = expandDetails;
+
+    if (isLiveTurn) setOuterOpen(true);
+    else setOuterOpen(false);
+  }, [isLiveTurn, expandDetails]);
 
   useEffect(() => {
-    if (turnDone || (!hasRunning && turnStartedMs == null)) return;
+    if (!isLiveTurn && !hasRunning && !hasLiveCompression) return;
     const t = setInterval(() => setTick((n) => n + 1), 400);
     return () => clearInterval(t);
-  }, [turnDone, hasRunning, turnStartedMs]);
+  }, [isLiveTurn, hasRunning, hasLiveCompression]);
 
   const lines = useMemo(() => buildLines(block), [block, tick]);
   const summary = useMemo(
@@ -460,6 +632,96 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   if (!lines.length) return null;
 
+  // Thought-only (no tools / compression / delegate): single fold → body text.
+  const isThoughtOnly = !lines.some(
+    (l) => l.kind === 'tool' || l.kind === 'summary' || l.kind === 'progress' || l.kind === 'delegation',
+  );
+  // Compression-only: one fold → summary body (avoid "Context compressed" + "Context summary done").
+  const isCompressionOnly =
+    !isThoughtOnly &&
+    lines.every((l) => l.kind === 'summary' || l.kind === 'progress') &&
+    lines.some((l) => l.kind === 'summary');
+
+  const thoughtBodies = lines
+    .filter((l) => l.kind === 'thought' && l.detail.trim())
+    .map((l) => l.detail);
+
+  if (isThoughtOnly) {
+    return (
+      <div className="my-1.5 w-full select-text">
+        <TextChevronToggle
+          primary={summary.primary}
+          secondary={summary.secondary}
+          open={outerOpen}
+          onToggle={() => setOuterOpen((v) => !v)}
+          running={isLiveTurn}
+          depth={0}
+        />
+        {outerOpen && thoughtBodies.length > 0 && (
+          <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+            {thoughtBodies.map((text, i) => (
+              <pre
+                key={i}
+                className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
+                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
+              >
+                {text}
+              </pre>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (isCompressionOnly) {
+    // Prefer the latest summary line (streaming updates merge into one event usually).
+    const summaryLines = lines.filter((l) => l.kind === 'summary');
+    const summaryLine = summaryLines[summaryLines.length - 1];
+    const live = !!(summaryLine?.running || hasLiveCompression);
+
+    return (
+      <div className="my-1.5 w-full select-text">
+        <TextChevronToggle
+          primary={summary.primary}
+          secondary={summary.secondary}
+          open={outerOpen}
+          onToggle={() => setOuterOpen((v) => !v)}
+          running={live}
+          depth={0}
+        />
+        {outerOpen && summaryLine && (summaryLine.detail || summaryLine.running) && (
+          <div
+            className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
+              summaryLine.summaryDone
+                ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                : 'border-indigo-500/25 bg-indigo-500/[0.04]'
+            }`}
+          >
+            {summaryLine.summaryPending && !summaryLine.detail ? (
+              <div
+                className="text-[12px] animate-pulse"
+                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)' }}
+              >
+                Waiting for context compression…
+              </div>
+            ) : (
+              <pre
+                className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
+                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
+              >
+                {summaryLine.detail || 'Summarizing…'}
+                {summaryLine.running && !summaryLine.summaryPending ? (
+                  <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
+                ) : null}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="my-1.5 w-full select-text">
       <TextChevronToggle
@@ -467,15 +729,17 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         secondary={summary.secondary}
         open={outerOpen}
         onToggle={() => setOuterOpen((v) => !v)}
-        running={!turnDone}
+        running={isLiveTurn || hasRunning || hasLiveCompression}
+        depth={0}
       />
+      {/* Depth 1: event lines indented under the outer fold */}
       {outerOpen && (
-        <div className="mt-0.5 space-y-0.5 pl-0">
+        <div className="mt-0.5 space-y-0.5 pl-4">
           {lines.map((line) => (
             <SoloEventLine
               key={line.key}
               line={line}
-              defaultOpen={expandDetails}
+              defaultOpen={expandDetails || !!(line.kind === 'summary' && line.running)}
             />
           ))}
         </div>

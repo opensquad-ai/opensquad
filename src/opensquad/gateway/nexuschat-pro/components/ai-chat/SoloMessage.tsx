@@ -10,6 +10,8 @@ interface SoloMessageProps {
   isStreaming?: boolean;
   senderName?: string;
   senderAvatar?: string | null;
+  /** DOM id fragment for user-message nav jump targets */
+  anchorId?: string;
 }
 
 export const SoloMessage: React.FC<SoloMessageProps> = (props) => (

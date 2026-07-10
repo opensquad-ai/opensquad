@@ -2385,6 +2385,16 @@ class AgentRunner:
                     "session_title", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
                 )
 
+        # Agent-chosen session subject via <title>...</title>
+        title_tag = self._extract_tag(full_response, "title")
+        if title_tag and title_tag.strip():
+            title_name = title_tag.strip()
+            _get_session_manager().set_title(title_name)
+            sid = _get_session_manager().get_current_session_id()
+            await self._emit("current_session", {"id": sid, "title": title_name})
+            await bus.emit_async("session_list", _get_session_manager().get_session_list())
+            await self._emit("session_title", {"id": sid, "title": title_name})
+
         if sys_cmd in ["task_complete", "task_failed"]:
             self._in_task = False
             self._awaiting_user_reply = False

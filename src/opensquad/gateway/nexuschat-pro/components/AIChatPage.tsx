@@ -17,10 +17,10 @@
  */
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  Bot, ArrowLeft, Send, Square, Image as ImageIcon,
-  PanelLeftOpen, PanelLeftClose, X, Paperclip, FileIcon, Upload,
+  Bot, ArrowLeft, Send, Square,
+  PanelLeftOpen, PanelLeftClose, X, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Archive, ArchiveRestore, Clock, FolderOpen, AlignLeft, MessageSquare,
+  Loader2, Archive, ArchiveRestore, Clock, AlignLeft, MessageSquare,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -31,25 +31,35 @@ import {
   buildTimelineFromSession,
   genTimelineUID,
   timelineHasToolEvent,
+  workflowToolEventKey,
+  shouldTreatWorkflowComplete,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowBlock,
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
+import { pickFolderPath, pushCwdRecent } from '../utils/cwdRecents';
+import { setSessionProjectPath, getSessionMeta } from '../utils/sessionProjectMeta';
 
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
 import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
+import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
+import { SoloModelPicker } from './ai-chat/SoloModelPicker';
+import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
+import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
 import { ToolCallBlock } from './ai-chat/ToolCallBlock';
+import { DelegateFold } from './ai-chat/DelegateFold';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { TokenProgressBar } from './ai-chat/TokenProgressBar';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
+import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
 
 const genUID = (): string => genTimelineUID();
 
@@ -148,7 +158,12 @@ const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; started
 const WORKFLOW_EVENTS_PAGE_SIZE = 10;
 
 const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turnStartedMs?: number }> = ({ block, blockKey, turnStartedMs }) => {
-  const totalEvents = block.events.length;
+  const displayItems = useMemo(
+    () => buildDisplayWorkflowItems(block.events),
+    [block.events],
+  );
+  const totalEvents = displayItems.length;
+  const effectivelyCompleted = shouldTreatWorkflowComplete(block);
   const [visibleCount, setVisibleCount] = useState(() =>
     totalEvents <= WORKFLOW_EVENTS_PAGE_SIZE ? totalEvents : WORKFLOW_EVENTS_PAGE_SIZE
   );
@@ -158,7 +173,7 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
   // tool calls out of the visible range.
   // For completed workflows, the count is frozen so the user can use "Show more".
   useEffect(() => {
-    if (!block.completed) {
+    if (!effectivelyCompleted) {
       // Active: show everything — no events ever get hidden during live work
       setVisibleCount(totalEvents);
     } else if (visibleCount > totalEvents) {
@@ -166,30 +181,31 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
       setVisibleCount(totalEvents);
     }
     // Completed + visibleCount <= totalEvents: leave as-is (user controls via "Show more")
-  }, [totalEvents, block.completed]);
+  }, [totalEvents, effectivelyCompleted]);
 
   // For active (non-completed) workflows, always show ALL events during render.
   // This prevents a one-frame flash where useEffect hasn't yet updated visibleCount,
   // causing expanded tool calls to be sliced out of the DOM and losing the
   // data-tool-expanded attribute that freezes auto-scroll.
-  const effectiveCount = block.completed ? visibleCount : totalEvents;
+  const effectiveCount = effectivelyCompleted ? visibleCount : totalEvents;
   const hiddenCount = Math.max(0, totalEvents - effectiveCount);
-  const visibleEvents = hiddenCount <= 0
-    ? block.events
-    : block.events.slice(totalEvents - effectiveCount);
+  const visibleItems = hiddenCount <= 0
+    ? displayItems
+    : displayItems.slice(totalEvents - effectiveCount);
 
   const handleShowMore = () => {
     setVisibleCount(prev => Math.min(prev + WORKFLOW_EVENTS_PAGE_SIZE, totalEvents));
   };
 
-  // Determine the status label to pass to WorkflowContainer
-  const displayStatus = block.completed ? undefined : (block.status || undefined);
+  // Trailing compression/summary blocks may never get a following chat message
+  // to flip `completed`; treat settled terminal work as finished for display.
+  const displayStatus = effectivelyCompleted ? undefined : (block.status || undefined);
 
   return (
     <WorkflowContainer
       status={displayStatus}
-      defaultOpen={!block.completed}
-      startedMs={block.completed ? undefined : turnStartedMs}
+      defaultOpen={!effectivelyCompleted}
+      startedMs={effectivelyCompleted ? undefined : turnStartedMs}
       finalElapsedMs={block.elapsed_ms}
     >
       {hiddenCount > 0 && (
@@ -200,9 +216,23 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
           Show {Math.min(WORKFLOW_EVENTS_PAGE_SIZE, hiddenCount)} more events ({hiddenCount} hidden)
         </button>
       )}
-      {visibleEvents.map((evt, i) => {
+      {visibleItems.map((item, i) => {
+        if (item.kind === 'delegation') {
+          return (
+            <DelegateFold
+              key={item.key}
+              bundle={item.bundle}
+              variant="classic"
+            />
+          );
+        }
+
+        const evt = item.event;
+        // Nested under a delegate window — do not duplicate in the main stream.
+        if (evt.subAgent) return null;
+
         // Use pre-assigned _uid for stable key during window shifts
-        const eventKey = evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
+        const eventKey = item.key || evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
 
         if (evt.type === 'thought') {
           return (
@@ -585,6 +615,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // same model_name (model_name alone is not a unique identity).
   const [currentCardName, setCurrentCardName] = useState<string | null>(null);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
+  /** Default workspace root from agent (used when user never picks a folder). */
+  const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
+  /** Path chosen for the in-progress new session before sid is known. */
+  const pendingProjectPathRef = useRef<string | null>(null);
+  /** Provisional title from first user message, applied once sid is known. */
+  const pendingSessionTitleRef = useRef<string | null>(null);
+  /** Count of user messages in the current timeline (for first-message title). */
+  const userMsgCountRef = useRef(0);
+  useEffect(() => {
+    userMsgCountRef.current = timeline.filter(
+      (e) => e.kind === 'message' && (e.data as ChatMessage).role === 'user',
+    ).length;
+  }, [timeline]);
   const [showContextViewer, setShowContextViewer] = useState(false);
   const [showPlanViewer, setShowPlanViewer] = useState<boolean>(() => {
     try {
@@ -663,6 +706,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
   }, []);
 
+  // Solo: expand-all is session-only and defaults OFF so refresh keeps folds collapsed.
+  const [soloExpandDetails, setSoloExpandDetails] = useState(false);
+
   // UI render mode: classic (chat bubbles) | solo (document stream). Global preference.
   type AiChatUiMode = 'classic' | 'solo';
   const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
@@ -680,6 +726,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, []);
 
   const soloColumnClass = isSolo ? 'max-w-3xl mx-auto w-full' : '';
+
+  const soloUserNavNodes = useMemo(() => {
+    if (!isSolo) return [];
+    const nodes: { id: string; preview: string }[] = [];
+    for (let i = 0; i < timeline.length; i++) {
+      const entry = timeline[i];
+      if (entry.kind !== 'message') continue;
+      const msg = entry.data as ChatMessage;
+      if (msg.role !== 'user') continue;
+      const id = entry._uid || `entry-${i}`;
+      nodes.push({ id, preview: previewUserMessage(msg.content || '') });
+    }
+    return nodes;
+  }, [isSolo, timeline]);
+
+  const jumpToSoloUserMessage = useCallback((id: string) => {
+    const container = messagesContainerRef.current;
+    const el = document.getElementById(`solo-msg-${id}`);
+    if (!container || !el) return;
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    const top = eRect.top - cRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, []);
 
   // Derived: is there an active (incomplete) workflow in the timeline?
   // A workflow is considered "active" only if it has unresolved tool_calls
@@ -819,7 +889,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (ap) setAgentApiProtocol(ap);
           if (pv) setAgentProvider(pv);
           if (card) setCurrentCardName(card);
-          if (runtimeWd) setAgentCwd(runtimeWd);
+          if (runtimeWd) {
+            setDefaultCwd(runtimeWd);
+            setAgentCwd((prev) => prev || runtimeWd);
+          }
         });
       })
       .catch(err => console.warn("[AIChatPage] Failed to load agent profile:", err.message));
@@ -832,7 +905,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (!agentProfile?.dir_name) return;
     adminAPI.getWorkingDirectory(agentProfile.dir_name)
       .then(res => {
+        const active = res.active_cwd || res.session_cwd || res.workspace_root || null;
+        if (res.workspace_root) setDefaultCwd(res.workspace_root);
+        else if (active) setDefaultCwd(active);
         if (res.session_cwd) setAgentCwd(res.session_cwd);
+        else if (active) setAgentCwd((prev) => prev || active);
       })
       .catch(() => {/* not critical, keep default */});
   }, [agentProfile?.dir_name]);
@@ -1140,6 +1217,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const title = typeof data === 'object' ? data.title : null;
       const sessionId = typeof data === 'object' && typeof data?.id === 'string' ? data.id : null;
       if (title) {
+        // Agent-chosen title wins over the provisional first-message title.
+        pendingSessionTitleRef.current = null;
         setCurrentSessionId(prev => prev || sessionId);
         if (sessionId) {
           setSessionTitleUpdate({ id: sessionId, title });
@@ -1155,7 +1234,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const unsubThought = aiWsService.on('thought', (msg: AIWSMessage) => {
       const text = _extractContent(msg);
       if (text) {
-        const event: WorkflowEvent = { type: 'thought', content: text, timestamp: Date.now() };
+        const raw = msg.content ?? msg.data;
+        const isSubAgent =
+          typeof raw === 'object' && raw !== null && !!(raw as any).sub_agent;
+        const subTaskLabel =
+          typeof raw === 'object' && raw !== null
+            ? String((raw as any).sub_task_label || '')
+            : '';
+        const event: WorkflowEvent = {
+          type: 'thought',
+          content: text,
+          timestamp: Date.now(),
+          subAgent: isSubAgent || undefined,
+          subTaskLabel: subTaskLabel || undefined,
+        };
         if (isHydratingSessionRef.current) {
           pendingHydrationWorkflowEventsRef.current.push({ event, status: 'Thinking...' });
           return;
@@ -1304,7 +1396,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           data: {
             ...wf,
             events,
-            status: done ? 'Summary completed' : 'Summarizing...',
+            // Compression finished with no following chat message — stop "working".
+            status: done ? null : 'Summarizing...',
+            completed: done ? true : wf.completed,
           }
         } as TimelineEntry;
         return updated;
@@ -1376,7 +1470,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             data: {
               ...wf,
               events,
-              status: isFinal ? 'Compression complete' : text,
+              status: isFinal ? null : text,
+              completed: isFinal ? true : wf.completed,
             }
           } as TimelineEntry;
           return updated;
@@ -2591,6 +2686,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Snapshot live area is the post-compress truth.
     let next = [...snapLive];
 
+    // Dedupe against BOTH live snapshot and archived entries — otherwise
+    // pre-compress tool_calls still sitting in an incomplete live workflow
+    // get appended again after the archive fold and scramble tool order.
+    const dedupeAgainst: TimelineEntry[] = archivedFromSnap
+      ? [archivedFromSnap, ...next]
+      : next;
+
     // Preserve unmatched optimistic user bubbles / incomplete workflows from
     // the live view that are not archived and not already in the snapshot.
     const liveWithoutArchive = prev.filter((e) => e.kind !== 'archived_section');
@@ -2606,16 +2708,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       if (e.kind === 'workflow') {
         const wf = e.data;
-        // Keep only incomplete workflows whose tool ids are not already in snap.
+        // Keep only incomplete workflows whose tool ids are not already in
+        // the post-compress snapshot OR the archived section.
         if (wf.completed) continue;
         const hasNew = wf.events.some((evt) => {
-          const tk = _workflowToolEventKey(evt);
-          if (!tk) return evt.type === 'summary_stream' || evt.type === 'thought';
-          return !timelineHasToolEvent(next, evt);
+          const tk = workflowToolEventKey(evt);
+          if (!tk) return evt.type === 'summary_stream';
+          return !timelineHasToolEvent(dedupeAgainst, evt);
         });
         if (!hasNew) continue;
-        // Dedup tools already present in snapshot, then append remainder.
-        const filteredEvents = wf.events.filter((evt) => !timelineHasToolEvent(next, evt));
+        // Drop tools/thoughts already present in snapshot or archive.
+        const filteredEvents = wf.events.filter((evt) => {
+          const tk = workflowToolEventKey(evt);
+          if (!tk) return evt.type === 'summary_stream';
+          return !timelineHasToolEvent(dedupeAgainst, evt);
+        });
         if (filteredEvents.length === 0) continue;
         next.push({
           kind: 'workflow',
@@ -2729,6 +2836,39 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       _uid: genUID(),
     }]);
 
+    // Lock project path for this session on first user message (Solo archive grouping).
+    {
+      const pathToLock = (agentCwd || defaultCwd || '').trim();
+      if (pathToLock) {
+        const sid = currentSessionIdRef.current;
+        if (sid) {
+          setSessionProjectPath(agentId, sid, pathToLock);
+          pendingProjectPathRef.current = null;
+        } else {
+          pendingProjectPathRef.current = pathToLock;
+        }
+      }
+    }
+
+    // Provisional session title from the first user message (agent <title>/<task_start> may overwrite later).
+    if (userMsgCountRef.current === 0) {
+      const provisional = (text || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 80)
+        || (allImages.length > 0 ? '[image]' : '')
+        || (fileAtts.length > 0 ? '[file]' : '');
+      if (provisional) {
+        const sid = currentSessionIdRef.current;
+        if (sid) {
+          setSessionTitleUpdate({ id: sid, title: provisional });
+          pendingSessionTitleRef.current = null;
+        } else {
+          pendingSessionTitleRef.current = provisional;
+        }
+      }
+    }
+
     _logMediaDebug('handleSend-payload', {
       text,
       wsTextHead: wsText.slice(0, 200),
@@ -2789,7 +2929,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setStreamingText('');
       setIsStreaming(false);
     }
-  }, [viewingHistorySession, currentSessionId]);
+  }, [viewingHistorySession, currentSessionId, agentCwd, defaultCwd, agentId]);
+
+  // When session id arrives after first send, persist pending project path / provisional title.
+  useEffect(() => {
+    if (!currentSessionId) return;
+    if (pendingProjectPathRef.current) {
+      setSessionProjectPath(agentId, currentSessionId, pendingProjectPathRef.current);
+      pendingProjectPathRef.current = null;
+    }
+    if (pendingSessionTitleRef.current) {
+      setSessionTitleUpdate({ id: currentSessionId, title: pendingSessionTitleRef.current });
+      pendingSessionTitleRef.current = null;
+    }
+  }, [currentSessionId, agentId]);
+
+  const cwdLocked = useMemo(() => {
+    if (viewingHistorySession) return true;
+    return timeline.some(
+      (e) => e.kind === 'message' && (e.data as ChatMessage).role === 'user',
+    );
+  }, [timeline, viewingHistorySession]);
 
   const handleSend = () => {
     const text = inputText.trim();
@@ -2968,6 +3128,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setTokenStats(null);
     setImages([]);
     setAttachments([]);
+    pendingProjectPathRef.current = null;
+    pendingSessionTitleRef.current = null;
+    // New session: unlock path picker; keep last cwd as default selection (or system default).
+    if (defaultCwd && !agentCwd) setAgentCwd(defaultCwd);
     // Reset lazy loading state
     setHasMoreHistory(false);
     setIsLoadingMore(false);
@@ -3055,6 +3219,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         loadingSessionIdRef.current = sessionId;
         historyOffsetRef.current = session.messages?.length || 0;
         setHasMoreHistory(session.has_more ?? false);
+        const meta = getSessionMeta(agentId, sessionId);
+        if (meta?.projectPath) setAgentCwd(meta.projectPath);
       }
     } catch (err: any) {
       console.error('[AIChatPage] Failed to load session:', err);
@@ -3330,77 +3496,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <Bot size={16} className="text-primary" />
               </div>
               <div className="min-w-0">
-                {/* Model-switch dropdown: replaces the former static model label.
-                    Only the card name is sent over WS; the agent resolves the
-                    full cfg (incl. api_key) locally. The `model_card_switched`
-                    info event confirms the switch and clears switchingModel.
-
-                    Selection identity is the card NAME (filename, unique), not
-                    model_name -- two vendors can share a model_name without one
-                    shadowing the other. Options are grouped by provider. */}
-                {modelCards.length > 0 ? (
-                  <div className="flex items-center gap-1">
-                    <select
-                      className="font-bold text-textMain text-sm truncate bg-transparent border-none outline-none cursor-pointer max-w-[200px] focus:ring-0"
-                      value={(() => {
-                        // Prefer exact card-name match (unique); fall back to
-                        // model_name only when no _card is known yet.
-                        if (currentCardName && modelCards.some(c => c.name === currentCardName)) {
-                          return currentCardName;
-                        }
-                        if (modelName) {
-                          const byModel = modelCards.find(c => c.model_name === modelName);
-                          if (byModel) return byModel.name;
-                        }
-                        return '';
-                      })()}
-                      disabled={switchingModel}
-                      onChange={(e) => {
-                        const cardName = e.target.value;
-                        if (!cardName) return;
-                        setSwitchingModel(true);
-                        wsServiceRef.current?.switchModel(cardName);
-                      }}
-                      title={switchingModel ? 'Switching model…' : 'Switch model'}
-                    >
-                      <option value="" disabled>
-                        {modelName || agentProfile?.agent_name || agentId}
-                      </option>
-                      {(() => {
-                        // Group cards by provider (empty provider -> a shared
-                        // "Other" bucket), preserving the original card order.
-                        const groups: { vendor: string; items: ModelCardInfo[] }[] = [];
-                        const idx: Record<string, number> = {};
-                        for (const c of modelCards) {
-                          const v = c.provider?.trim() || '';
-                          if (v in idx) {
-                            groups[idx[v]].items.push(c);
-                          } else {
-                            idx[v] = groups.length;
-                            groups.push({ vendor: v, items: [c] });
-                          }
-                        }
-                        return groups.map(g => (
-                          <optgroup
-                            key={g.vendor || '__other'}
-                            label={g.vendor || 'Other'}
-                          >
-                            {g.items.map(c => (
-                              <option key={c.name} value={c.name}>
-                                {c.title || c.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ));
-                      })()}
-                    </select>
-                    {switchingModel && (
-                      <span className="text-[10px] text-textMuted animate-pulse">…</span>
-                    )}
-                  </div>
-                ) : (
-                  <h2 className="font-bold text-textMain text-sm truncate">{modelName || agentProfile?.agent_name || agentId}</h2>
-                )}
+                <h2 className="font-bold text-textMain text-sm truncate">
+                  {agentProfile?.agent_name || modelName || agentId}
+                  {switchingModel ? (
+                    <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">switching…</span>
+                  ) : null}
+                </h2>
                 <StatusBadge status={agentStatus} />
               </div>
             </div>
@@ -3475,17 +3576,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <Gauge size={18} className={showTokenStats ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
-                onClick={toggleWorkflow}
+                onClick={() => {
+                  if (isSolo) setSoloExpandDetails((v) => !v);
+                  else toggleWorkflow();
+                }}
                 className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
-                  showWorkflow ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
+                  (isSolo ? soloExpandDetails : showWorkflow)
+                    ? 'bg-primary/15 hover:bg-primary/20'
+                    : 'hover:bg-primary/10'
                 }`}
                 title={
                   isSolo
-                    ? (showWorkflow ? 'Collapse activity details' : 'Expand activity details')
+                    ? (soloExpandDetails ? 'Collapse activity details' : 'Expand activity details')
                     : (showWorkflow ? 'Hide workflow details' : 'Show workflow details')
                 }
               >
-                {showWorkflow
+                {(isSolo ? soloExpandDetails : showWorkflow)
                   ? <Lightbulb size={18} className="text-primary" />
                   : <Lightbulb size={18} className="text-textMuted" />
                 }
@@ -3528,7 +3634,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
 
         {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+        <div className="flex-1 relative min-h-0" style={{ minHeight: 0 }}>
+        <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+          {isSolo && soloUserNavNodes.length > 0 && (
+            <div
+              className="pointer-events-none sticky top-0 z-30 float-right w-0 h-0"
+              aria-hidden={false}
+            >
+              <div className="pointer-events-auto absolute right-0 top-[42vh] -translate-y-1/2 translate-x-[-4px]">
+                <SoloUserNavRail
+                  nodes={soloUserNavNodes}
+                  activeId={soloUserNavNodes[soloUserNavNodes.length - 1]?.id}
+                  onJump={jumpToSoloUserMessage}
+                />
+              </div>
+            </div>
+          )}
           <div className={soloColumnClass}>
           {!hasContent && !isLoadingSession && (
             <div className="flex flex-col items-center justify-center h-full text-textMuted">
@@ -3578,7 +3699,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     : (agentProfile?.chat_profile?.chat_user_avatar || null),
               };
               return isSolo
-                ? <SoloMessage key={entryKey} {...msgProps} />
+                ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
                 : <MessageBubble key={entryKey} {...msgProps} />;
             }
             if (entry.kind === 'workflow') {
@@ -3589,22 +3710,38 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 return -1;
               })();
               if (isSolo) {
-                // Group consecutive workflow blocks into one outer fold (turn process).
-                if (i > 0 && timeline[i - 1].kind === 'workflow') return null;
-                const blocks: WorkflowBlock[] = [];
-                let j = i;
-                while (j < timeline.length && timeline[j].kind === 'workflow') {
-                  blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
-                  j += 1;
+                // Only merge consecutive *incomplete* workflow fragments (live turn).
+                // Merging all adjacent completed blocks collapses separate turns after
+                // compression/archive and makes tool calls appear in the wrong order.
+                const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
+                if (
+                  i > 0 &&
+                  timeline[i - 1].kind === 'workflow' &&
+                  !(timeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
+                  !curBlock.completed
+                ) {
+                  return null;
                 }
-                const merged = mergeWorkflowBlocks(blocks);
-                const groupHasIncomplete = blocks.some((b) => !b.completed);
+                const blocks: WorkflowBlock[] = [curBlock];
+                if (!curBlock.completed) {
+                  let j = i + 1;
+                  while (
+                    j < timeline.length &&
+                    timeline[j].kind === 'workflow' &&
+                    !(timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
+                  ) {
+                    blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                    j += 1;
+                  }
+                }
+                const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
+                const groupHasIncomplete = !merged.completed;
                 const turnMs = groupHasIncomplete ? turnStartedMs : undefined;
                 return (
                   <SoloActivityRow
                     key={entryKey}
                     block={merged}
-                    expandDetails={showWorkflow}
+                    expandDetails={soloExpandDetails}
                     turnStartedMs={turnMs}
                   />
                 );
@@ -3710,10 +3847,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           )}
           </div>
         </div>
+        </div>
 
         {/* Image & attachment preview */}
         {(images.length > 0 || attachments.length > 0 || isUploading) && (
-          <div className="px-2 sm:px-4 py-2 border-t border-border bg-panel flex gap-2 flex-wrap items-center">
+          <div className={`px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0 ${
+            isSolo ? 'bg-transparent' : 'border-t border-border bg-panel'
+          }`}>
             <div className={`${soloColumnClass} flex gap-2 flex-wrap items-center`}>
             {/* Images */}
             {images.map((img, i) => (
@@ -3920,100 +4060,176 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
-        {/* Input Area */}
-        <div className="p-2 sm:p-3 border-t border-border bg-panel flex-shrink-0">
-          <div className={`${soloColumnClass} flex items-end gap-1.5 sm:gap-2${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
-            {/* Attachment button (any file) */}
-            <button
-              onClick={() => {
-                // Create a temporary file input for any file type
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.multiple = true;
-                input.onchange = async (e) => {
-                  const files = (e.target as HTMLInputElement).files;
-                  if (!files) return;
-                  setIsUploading(true);
-                  try {
-                    const fileArray = Array.from(files) as File[];
-                    if (fileArray.length === 1) {
-                      const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
-                      if (resp.is_image) {
-                        setImages(prev => [...prev, resp.url]);
-                      } else {
-                        setAttachments(prev => [...prev, resp]);
-                      }
-                    } else {
-                      const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                      for (const f of resp.files) {
-                        if (f.is_image) {
-                          setImages(prev => [...prev, f.url]);
-                        } else {
-                          setAttachments(prev => [...prev, f]);
+        {/* Input Area — shared Solo-style composer for classic + solo */}
+        <div
+          className={`flex-shrink-0 overflow-visible px-2 sm:px-4 py-2 sm:py-3 ${
+            isSolo ? 'bg-transparent' : 'bg-transparent border-t border-border/30'
+          }`}
+        >
+          <div className={`${soloColumnClass}${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
+              <div
+                className={`w-full flex items-center gap-1 rounded-2xl border border-border/80 min-h-[40px] focus-within:ring-1 focus-within:ring-primary/50 shadow-sm ${
+                  isLoadingSession ? 'bg-border/40' : 'bg-bgLight/80 dark:bg-black/20'
+                }`}
+              >
+                <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px]">
+                  <SoloAttachMenu
+                    disabled={isLoadingSession}
+                    cwdActive={!!agentCwd}
+                    onUploadFiles={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.multiple = true;
+                      input.onchange = async (e) => {
+                        const files = (e.target as HTMLInputElement).files;
+                        if (!files) return;
+                        setIsUploading(true);
+                        try {
+                          const fileArray = Array.from(files) as File[];
+                          if (fileArray.length === 1) {
+                            const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
+                            if (resp.is_image) setImages((prev) => [...prev, resp.url]);
+                            else setAttachments((prev) => [...prev, resp]);
+                          } else {
+                            const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
+                            for (const f of resp.files) {
+                              if (f.is_image) setImages((prev) => [...prev, f.url]);
+                              else setAttachments((prev) => [...prev, f]);
+                            }
+                          }
+                        } catch (err: any) {
+                          console.error('[AIChatPage] File upload failed:', err);
+                        } finally {
+                          setIsUploading(false);
                         }
+                      };
+                      input.click();
+                    }}
+                    onUploadFolder={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      (input as any).webkitdirectory = true;
+                      (input as any).directory = true;
+                      input.multiple = true;
+                      input.onchange = async (e) => {
+                        const files = (e.target as HTMLInputElement).files;
+                        if (!files || files.length === 0) return;
+                        setIsUploading(true);
+                        try {
+                          const fileArray = Array.from(files) as File[];
+                          const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
+                          for (const f of resp.files) {
+                            if (f.is_image) setImages((prev) => [...prev, f.url]);
+                            else setAttachments((prev) => [...prev, f]);
+                          }
+                        } catch (err: any) {
+                          console.error('[AIChatPage] Folder upload failed:', err);
+                        } finally {
+                          setIsUploading(false);
+                        }
+                      };
+                      input.click();
+                    }}
+                    onUploadImages={() => fileInputRef.current?.click()}
+                    onSetWorkingDir={async () => {
+                      try {
+                        const pickedPath = await pickFolderPath();
+                        if (!pickedPath) return;
+                        const dirName = agentProfile?.dir_name || agentId;
+                        await adminAPI.setWorkingDirectory(dirName, pickedPath);
+                        pushCwdRecent(pickedPath);
+                        setAgentCwd(pickedPath);
+                      } catch (err: any) {
+                        console.error('[AIChatPage] Failed to set working directory:', err);
+                        alert(`Failed to set working directory: ${err.message || err}`);
                       }
-                    }
-                  } catch (err: any) {
-                    console.error('[AIChatPage] File upload failed:', err);
-                  } finally {
-                    setIsUploading(false);
-                  }
-                };
-                input.click();
-              }}
-              disabled={isLoadingSession}
-              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
-              title="Upload files"
-            >
-              <Paperclip size={18} className="text-textMuted" />
-            </button>
-
-            {/* Folder upload button */}
-            <button
-              onClick={() => {
-                const input = document.createElement('input');
-                input.type = 'file';
-                (input as any).webkitdirectory = true;
-                (input as any).directory = true;
-                input.multiple = true;
-                input.onchange = async (e) => {
-                  const files = (e.target as HTMLInputElement).files;
-                  if (!files || files.length === 0) return;
-                  setIsUploading(true);
+                    }}
+                  />
+                </div>
+                <textarea
+                  ref={inputRef}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  placeholder={isLoadingSession ? sessionLoadingLabel : 'Type a message...'}
+                  disabled={isLoadingSession}
+                  className={`flex-1 min-w-0 border-0 px-2 py-2 text-sm text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[38px] max-h-[120px] bg-transparent leading-5 ${
+                    isLoadingSession ? 'text-textMuted cursor-not-allowed' : ''
+                  }`}
+                  rows={1}
+                  style={{ height: 'auto' }}
+                  onInput={(e) => {
+                    const target = e.target as HTMLTextAreaElement;
+                    target.style.height = 'auto';
+                    target.style.height = Math.min(target.scrollHeight, 120) + 'px';
+                  }}
+                />
+                <div className="shrink-0 flex items-center gap-1 pr-1.5 self-end min-h-[38px]">
+                  <SoloModelPicker
+                    cards={modelCards}
+                    currentCardName={currentCardName}
+                    modelName={modelName}
+                    fallbackLabel={agentProfile?.agent_name || agentId}
+                    switching={switchingModel}
+                    disabled={isLoadingSession}
+                    onSelect={(cardName) => {
+                      setSwitchingModel(true);
+                      wsServiceRef.current?.switchModel(cardName);
+                    }}
+                    onAddModels={() => {
+                      window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                    }}
+                  />
+                  {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
+                    <>
+                      <button
+                        onClick={handleSend}
+                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
+                        className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+                        title={t('aiChat.queueMessage')}
+                      >
+                        <Send size={14} className="text-white" />
+                      </button>
+                      <button
+                        onClick={handleStop}
+                        className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
+                        title="Stop"
+                      >
+                        <Square size={14} className="text-white" />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={handleSend}
+                      disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
+                      className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+                      title="Send"
+                    >
+                      <Send size={14} className="text-white" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <SoloContextFooter
+                cwd={agentCwd || defaultCwd}
+                tokenStats={tokenStats}
+                locked={cwdLocked}
+                onViewReport={() => setShowContextViewer(true)}
+                onSelectCwd={async (pickedPath) => {
                   try {
-                    const fileArray = Array.from(files) as File[];
-                    const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                    for (const f of resp.files) {
-                      if (f.is_image) {
-                        setImages(prev => [...prev, f.url]);
-                      } else {
-                        setAttachments(prev => [...prev, f]);
-                      }
-                    }
+                    const dirName = agentProfile?.dir_name || agentId;
+                    await adminAPI.setWorkingDirectory(dirName, pickedPath);
+                    pushCwdRecent(pickedPath);
+                    setAgentCwd(pickedPath);
+                    pendingProjectPathRef.current = pickedPath;
                   } catch (err: any) {
-                    console.error('[AIChatPage] Folder upload failed:', err);
-                  } finally {
-                    setIsUploading(false);
+                    console.error('[AIChatPage] Failed to set working directory:', err);
+                    alert(`Failed to set working directory: ${err.message || err}`);
                   }
-                };
-                input.click();
-              }}
-              disabled={isLoadingSession}
-              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
-              title="Upload folder"
-            >
-              <Upload size={18} className="text-textMuted" />
-            </button>
+                }}
+              />
 
-            {/* Image upload button */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isLoadingSession}
-              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
-              title="Upload image"
-            >
-              <ImageIcon size={18} className="text-textMuted" />
-            </button>
             <input
               ref={fileInputRef}
               type="file"
@@ -4022,105 +4238,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               onChange={handleImageUpload}
               className="hidden"
             />
-
-            {/* Set working directory button — opens OS folder picker (Electron)
-                or manual input prompt (browser) */}
-            <button
-              onClick={async () => {
-                try {
-                  let pickedPath: string | null = null;
-
-                  // 1. Try Electron IPC (native folder picker)
-                  if (typeof (window as any).electronEnv?.pickWorkspaceFolder === 'function') {
-                    pickedPath = await (window as any).electronEnv.pickWorkspaceFolder();
-                  }
-
-                  // 2. Browser fallback — prompt for path manually
-                  //    (browsers can't access the real filesystem path for security)
-                  if (!pickedPath) {
-                    const current = agentCwd || '(workspace root)';
-                    const input = window.prompt(
-                      'Enter working directory path:\n\n' +
-                      'This will be the default directory for agent shell commands\n' +
-                      '(ls, dir, run_command, file operations, etc.)\n\n' +
-                      `Current: ${current}`,
-                      agentCwd || ''
-                    );
-                    if (!input || !input.trim()) return;
-                    pickedPath = input.trim();
-                  }
-
-                  if (!pickedPath) return;
-
-                  // Send to backend via admin API
-                  const dirName = agentProfile?.dir_name || agentId;
-                  await adminAPI.setWorkingDirectory(dirName, pickedPath);
-                  // Update local state so ContextViewer reflects the change
-                  setAgentCwd(pickedPath);
-                  console.log('[AIChatPage] Working directory set to:', pickedPath);
-                } catch (err: any) {
-                  console.error('[AIChatPage] Failed to set working directory:', err);
-                  alert(`Failed to set working directory: ${err.message || err}`);
-                }
-              }}
-              disabled={isLoadingSession}
-              className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0 disabled:cursor-not-allowed"
-              title={agentCwd ? `Working dir: ${agentCwd} (click to change)` : 'Set working directory'}
-            >
-              <FolderOpen size={18} className={agentCwd ? 'text-primary' : 'text-textMuted'} />
-            </button>
-
-            {/* Text input */}
-            <textarea
-              ref={inputRef}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={isLoadingSession ? sessionLoadingLabel : 'Type a message...'}
-              disabled={isLoadingSession}
-              className={`flex-1 min-w-0 border border-border rounded-xl px-3 py-2 text-sm text-textMain placeholder-textMuted resize-none focus:outline-none focus:ring-1 focus:ring-primary/50 min-h-[38px] max-h-[120px] ${isLoadingSession ? 'bg-border text-textMuted cursor-not-allowed' : 'bg-bgLight'}`}
-              rows={1}
-              style={{ height: 'auto' }}
-              onInput={(e) => {
-                const target = e.target as HTMLTextAreaElement;
-                target.style.height = 'auto';
-                target.style.height = Math.min(target.scrollHeight, 120) + 'px';
-              }}
-            />
-
-            {/* Send / Stop buttons.
-                When the agent is busy, Send is still available — it parks the
-                message in the pending queue (auto-sent on idle, or via "Send
-                now"). Stop is shown alongside as a separate red button. */}
-            {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
-              <>
-                <button
-                  onClick={handleSend}
-                  disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
-                  className="p-2 bg-amber-500 hover:bg-amber-600 rounded-lg transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                  title={t('aiChat.queueMessage')}
-                >
-                  <Send size={18} className="text-white" />
-                </button>
-                <button
-                  onClick={handleStop}
-                  className="p-2 bg-red-500 hover:bg-red-600 rounded-lg transition-colors flex-shrink-0"
-                  title="Stop"
-                >
-                  <Square size={18} className="text-white" />
-                </button>
-              </>
-            ) : (
-              <button
-                onClick={handleSend}
-                disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
-                className="p-2 bg-primary hover:bg-primary/90 rounded-lg transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Send"
-              >
-                <Send size={18} className="text-white" />
-              </button>
-            )}
           </div>
         </div>
       </div>

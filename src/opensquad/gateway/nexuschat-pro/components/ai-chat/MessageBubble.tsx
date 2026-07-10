@@ -46,6 +46,8 @@ interface MessageBubbleProps {
   senderAvatar?: string | null;
   /** classic = chat bubbles; solo = document-stream (Codex / Cursor Agent style) */
   variant?: 'classic' | 'solo';
+  /** DOM id for Solo user-message nav jump targets */
+  anchorId?: string;
 }
 
 /** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
@@ -73,14 +75,26 @@ const FILE_PATTERN = /\[File:\s*(.+?)\s*\(([^)]+)\)(?:\s*path=([^\]\n]+))?(?:\s*
 const MARKDOWN_UPLOAD_LINK_PATTERN = /\[([^\]]+?)\]\((\/uploads\/[^)\s]+)\)/g;
 // Pattern to match assistant plain text style:
 // 1) "name.ext 文件 (/uploads/xxx.ext)"
-// 2) "name.ext 文件" (without path/url)
-const ASSISTANT_UPLOAD_WITH_PATH_PATTERN = /([^\n]+?)\s+文件\s*\(([^\s)]+)\)/g;
-const ASSISTANT_UPLOAD_NAME_ONLY_PATTERN = /([^\n]+?)\s+文件(?:\s|$)/g;
+// 2) "name.ext 文件" (without path/url) — must look like a real filename so
+//    markdown table headers like "| 文件 | 大小 |" are NOT treated as attachments.
+const ASSISTANT_UPLOAD_WITH_PATH_PATTERN = /([^\n|]+?\.[A-Za-z0-9]{1,16})\s+文件\s*\(([^\s)]+)\)/g;
+const ASSISTANT_UPLOAD_NAME_ONLY_PATTERN = /(?:^|\n)\s*([A-Za-z0-9._\-()+\u4e00-\u9fff]+?\.[A-Za-z0-9]{1,16})\s+文件(?:\s|$|[。．.！!？?,，、])/gm;
 // Two-line fallback often seen in pushed messages:
 // line1: "filename.ext"
 // line2: "(/uploads/xxxx.ext)"
-const ASSISTANT_NAME_URL_TWO_LINE_PATTERN = /([^\n()]+?)\n+\(([^\s)]+)\)/g;
+const ASSISTANT_NAME_URL_TWO_LINE_PATTERN = /([^\n()|]+?\.[A-Za-z0-9]{1,16})\n+\((\/uploads\/[^\s)]+|https?:\/\/[^\s)]+)\)/g;
 const UPLOAD_URL_IN_PARENS_PATTERN = /\((\/uploads\/[^\s)]+)\)/g;
+
+/** Reject markdown-table junk / empty labels falsely parsed as file cards. */
+function isPlausibleFileAttachmentName(name: string): boolean {
+  const n = (name || '').trim();
+  if (!n || n.length > 240) return false;
+  if (/^[|\-`:.\s]+$/.test(n)) return false;
+  if (n === '文件' || n === 'file' || n === 'FILE') return false;
+  // Table cells often leave a lone pipe or "文件" fragment.
+  if (n.includes('|')) return false;
+  return true;
+}
 
 export const MessageBubble: React.FC<MessageBubbleProps> = ({
   message,
@@ -88,6 +102,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   senderName,
   senderAvatar,
   variant = 'classic',
+  anchorId,
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
@@ -113,6 +128,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     if (matches.length > 0 && atts.length === 0) {
       for (const m of matches) {
         const name = (m[1] || '').trim();
+        if (!isPlausibleFileAttachmentName(name)) continue;
         const size = (m[2] || '').trim();
         const rawPathOrUrl = (m[3] || m[5] || '').trim();
         const kind = (m[4] as 'audio' | 'video' | 'file' | undefined) || 'file';
@@ -126,7 +142,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     for (const m of mdLinks) {
       const name = (m[1] || '').trim();
       const url = normalizeUrl((m[2] || '').trim());
-      if (!name || !url) continue;
+      if (!name || !url || !isPlausibleFileAttachmentName(name)) continue;
       const exists = atts.some(a => (a.url && a.url === url) || a.name === name);
       if (!exists) {
         const lower = name.toLowerCase();
@@ -143,7 +159,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       for (const m of uploadMatches) {
         const name = (m[1] || '').trim();
         const rawUrl = (m[2] || '').trim();
-        if (!name) continue;
+        if (!name || !isPlausibleFileAttachmentName(name)) continue;
         const url = rawUrl ? normalizeUrl(rawUrl) : '';
         const exists = atts.some(a => (url && a.url && a.url === url) || a.name === name);
         if (!exists) {
@@ -166,7 +182,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       for (const m of twoLineMatches) {
         const name = (m[1] || '').trim();
         const rawUrl = (m[2] || '').trim();
-        if (!name || !rawUrl) continue;
+        if (!name || !rawUrl || !isPlausibleFileAttachmentName(name)) continue;
         const url = rawUrl.startsWith('http') ? rawUrl : rawUrl.startsWith('/') ? rawUrl : `/uploads/${rawUrl.split(/[/\\]/).pop()}`;
         const exists = atts.some(a => (a.url && a.url === url) || a.name === name);
         if (!exists) {
@@ -199,7 +215,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     if (nameOnlyMatches.length > 0) {
       for (const m of nameOnlyMatches) {
         const name = (m[1] || '').trim();
-        if (!name) continue;
+        if (!name || !isPlausibleFileAttachmentName(name)) continue;
         const exists = atts.some(a => a.name === name);
         if (!exists) {
           const lower = name.toLowerCase();
@@ -214,6 +230,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       }
     }
 
+    // Drop nameless / table-junk attachments (e.g. name="|" from "| 文件 |" headers).
+    const cleanedAtts = atts.filter((a) => isPlausibleFileAttachmentName(a.name));
+
     // Remove parsed file lines from display text
     content = content
       .replace(FILE_PATTERN, '')
@@ -225,7 +244,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       .replace(/\n{2,}$/g, '')
       .trim();
 
-    return { displayContent: content, fileAttachments: atts };
+    return { displayContent: content, fileAttachments: cleanedAtts };
   }, [message.content, message.attachments]);
 
   const renderedHtml = useMemo(() => {
@@ -245,6 +264,12 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       await navigator.clipboard.writeText(message.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } catch { /* ignore */ }
+  };
+
+  const handleCopyPath = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
     } catch { /* ignore */ }
   };
 
@@ -281,6 +306,42 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       a.click();
       a.remove();
     }
+  };
+
+  const renderFileCard = (att: FileAttachment, key: string) => {
+    const fileUrl = att.url
+      ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
+      : undefined;
+    const copyTarget = att.path || att.url || att.name;
+    const canDownload = !!fileUrl;
+    const meta = [att.type ? att.type.toUpperCase() : '', att.size].filter(Boolean).join(' · ');
+
+    return (
+      <button
+        key={key}
+        type="button"
+        onClick={() => {
+          if (canDownload && fileUrl) void handleDownload(fileUrl, att.name);
+          else if (copyTarget) void handleCopyPath(copyTarget);
+        }}
+        title={canDownload ? t('chat.downloadFile') : (copyTarget ? `Copy path: ${copyTarget}` : att.name)}
+        className={`flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px] text-left transition-colors ${
+          canDownload || copyTarget
+            ? 'hover:bg-bgPanel cursor-pointer'
+            : 'cursor-default opacity-70'
+        }`}
+      >
+        <FileText size={16} className="text-textMuted flex-shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-xs text-textMain truncate">{att.name}</p>
+          {meta ? (
+            <p className="text-[10px] text-textMuted">{meta}</p>
+          ) : !canDownload ? (
+            <p className="text-[10px] text-textMuted">Click to copy path</p>
+          ) : null}
+        </div>
+      </button>
+    );
   };
 
   if (message.role === 'system') {
@@ -350,32 +411,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           )}
           {fileAttachments.length > 0 && (
             <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
-              {fileAttachments.map((att, i) => {
-                const fileUrl = att.url
-                  ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
-                  : undefined;
-                return (
-                  <div key={`u-att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
-                    <FileText size={16} className="text-textMuted flex-shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-textMain truncate">{att.name}</p>
-                      <p className="text-[10px] text-textMuted">
-                        {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
-                      </p>
-                    </div>
-                    {fileUrl && (
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(fileUrl, att.name)}
-                        className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
-                        title={t('chat.downloadFile')}
-                      >
-                        {t('chat.download')}
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
+              {fileAttachments.map((att, i) => renderFileCard(att, `u-att-${i}`))}
             </div>
           )}
         </>
@@ -416,30 +452,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
                     </div>
                   );
                 }
-                const fileUrl = att.url
-                  ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
-                  : undefined;
-                return (
-                  <div key={`att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
-                    <FileText size={16} className="text-textMuted flex-shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-textMain truncate">{att.name}</p>
-                      <p className="text-[10px] text-textMuted">
-                        {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
-                      </p>
-                    </div>
-                    {fileUrl && (
-                      <button
-                        type="button"
-                        onClick={() => handleDownload(fileUrl, att.name)}
-                        className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
-                        title={t('chat.downloadFile')}
-                      >
-                        {t('chat.download')}
-                      </button>
-                    )}
-                  </div>
-                );
+                return renderFileCard(att, `att-${i}`);
               })}
             </div>
           )}
@@ -478,8 +491,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   );
 
   if (isSolo) {
+    const domId = anchorId ? `solo-msg-${anchorId}` : undefined;
     return (
-      <div className={`mb-5 w-full group relative ${isStreaming ? 'ai-streaming' : ''}`}>
+      <div
+        id={domId}
+        data-solo-msg-id={anchorId}
+        className={`mb-5 w-full group relative scroll-mt-4 ${isStreaming ? 'ai-streaming' : ''}`}
+      >
         <div className="flex items-center gap-2 mb-1.5">
           <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
             {label}
@@ -495,7 +513,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           )}
         </div>
         {isUser ? (
-          <div className="border-l-2 border-primary/35 pl-3 py-0.5 text-sm leading-relaxed text-textMain">
+          <div
+            className="w-full rounded-2xl bg-white dark:bg-[#2a2a2c] border border-black/[0.08] dark:border-white/[0.1] shadow-[0_1px_3px_rgba(0,0,0,0.06),0_0_0_1px_rgba(0,0,0,0.02)] px-4 py-3 text-sm leading-relaxed text-textMain"
+          >
             {mediaAndBody}
           </div>
         ) : (

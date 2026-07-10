@@ -175,9 +175,20 @@ class AgentSessionReader:
         def _extract_title(messages: list, fallback: str) -> str:
             for m in messages:
                 if m.get("role") == "assistant":
-                    match = re.search(r"<title>(.*?)</title>", m.get("content", ""))
+                    match = re.search(r"<title>(.*?)</title>", m.get("content", "") or "", re.DOTALL)
                     if match:
-                        return match.group(1).strip()
+                        t = match.group(1).strip()
+                        if t:
+                            return t
+            for m in messages:
+                if m.get("role") == "user":
+                    content = (m.get("content", "") or "").strip()
+                    if content:
+                        content = re.sub(r"<image>.*?</image>", "[image]", content, flags=re.DOTALL | re.IGNORECASE)
+                        content = re.sub(r"\[File:[^\]]*\]", "", content)
+                        content = re.sub(r"\s+", " ", content).strip()
+                        if content:
+                            return content[:80]
             return fallback
 
         def _extract_preview(messages: list) -> str:
@@ -231,12 +242,14 @@ class AgentSessionReader:
                                 content = jf.read()
                                 try:
                                     data = json.loads(content)
-                                    if isinstance(data, dict) and data.get("title"):
-                                        title = data.get("title")
+                                    if isinstance(data, dict):
+                                        messages = data.get("messages", []) or []
+                                        title = data.get("title") or _extract_title(messages, sid)
+                                        preview = _extract_preview(messages)
                                 except Exception:
-                                    match = re.search(r"<title>(.*?)</title>", content)
+                                    match = re.search(r"<title>(.*?)</title>", content, re.DOTALL)
                                     if match:
-                                        title = match.group(1).strip()
+                                        title = match.group(1).strip() or sid
                         except Exception:
                             pass
                     sessions.append(
