@@ -178,14 +178,14 @@ const TextChevronToggle: React.FC<{
   >
     <span
       className={`text-[13px] leading-relaxed min-w-0 ${
-        muted ? 'text-textMuted/70' : 'text-textMain/80'
+        muted ? 'text-textMuted/70' : 'text-textMuted/85'
       }`}
     >
       <span className="font-normal">{primary}</span>
-      {secondary ? <span className="text-textMuted/55"> {secondary}</span> : null}
-      {running ? <span className="text-textMuted/45"> …</span> : null}
+      {secondary ? <span className="text-textMuted/50"> {secondary}</span> : null}
+      {running ? <span className="text-textMuted/40"> …</span> : null}
     </span>
-    <span className="text-[13px] text-textMuted/70 font-normal leading-relaxed shrink-0">
+    <span className="text-[13px] text-textMuted/55 font-normal leading-relaxed shrink-0">
       {open ? '⌄' : '>'}
     </span>
   </button>
