@@ -20,7 +20,7 @@ import {
   Bot, ArrowLeft, Send, Square, Image as ImageIcon,
   PanelLeftOpen, PanelLeftClose, X, Paperclip, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Archive, ArchiveRestore, Clock, FolderOpen,
+  Loader2, Archive, ArchiveRestore, Clock, FolderOpen, AlignLeft, MessageSquare,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -40,6 +40,8 @@ import {
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
 import { StreamingMessage } from './ai-chat/StreamingMessage';
+import { SoloMessage } from './ai-chat/SoloMessage';
+import { SoloActivityRow } from './ai-chat/SoloActivityRow';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
 import { ToolCallBlock } from './ai-chat/ToolCallBlock';
@@ -401,9 +403,11 @@ const ArchivedSection: React.FC<{
   };
   currentUser: { id?: string; name?: string; avatar?: string | null } | null | undefined;
   agentProfile: AdminAgent | null;
-}> = ({ data, currentUser, agentProfile }) => {
+  uiMode?: 'classic' | 'solo';
+}> = ({ data, currentUser, agentProfile, uiMode = 'classic' }) => {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
+  const isSolo = uiMode === 'solo';
 
   const totalCount = data.messageCount + data.eventCount;
   if (totalCount === 0) return null;
@@ -420,7 +424,7 @@ const ArchivedSection: React.FC<{
   };
 
   return (
-    <div className="my-3 mx-2 sm:mx-9" data-testid="archived-section">
+    <div className={`my-3 ${isSolo ? 'mx-0' : 'mx-2 sm:mx-9'}`} data-testid="archived-section">
       <button
         type="button"
         onClick={() => setIsOpen((o) => !o)}
@@ -452,25 +456,29 @@ const ArchivedSection: React.FC<{
           {data.entries.map((entry, i) => {
             const entryKey = entry._uid || `archived-entry-${i}`;
             if (entry.kind === 'message') {
-              return (
-                <MessageBubble
-                  key={entryKey}
-                  message={entry.data}
-                  senderName={
-                    entry.data.role === 'user'
-                      ? (currentUser?.name || undefined)
-                      : (agentProfile?.agent_name || undefined)
-                  }
-                  senderAvatar={
-                    entry.data.role === 'user'
-                      ? (currentUser?.avatar || null)
-                      : (agentProfile?.chat_profile?.chat_user_avatar || null)
-                  }
-                />
-              );
+              const msgProps = {
+                message: entry.data,
+                senderName:
+                  entry.data.role === 'user'
+                    ? (currentUser?.name || undefined)
+                    : (agentProfile?.agent_name || undefined),
+                senderAvatar:
+                  entry.data.role === 'user'
+                    ? (currentUser?.avatar || null)
+                    : (agentProfile?.chat_profile?.chat_user_avatar || null),
+              };
+              return isSolo
+                ? <SoloMessage key={entryKey} {...msgProps} />
+                : <MessageBubble key={entryKey} {...msgProps} />;
             }
             if (entry.kind === 'workflow') {
-              return (
+              return isSolo ? (
+                <SoloActivityRow
+                  key={entryKey}
+                  block={entry.data}
+                  expandDetails={false}
+                />
+              ) : (
                 <WorkflowBlockView
                   key={entryKey}
                   block={entry.data}
@@ -654,6 +662,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return next;
     });
   }, []);
+
+  // UI render mode: classic (chat bubbles) | solo (document stream). Global preference.
+  type AiChatUiMode = 'classic' | 'solo';
+  const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
+    try {
+      const stored = localStorage.getItem('ai_chat_ui_mode');
+      return stored === 'solo' ? 'solo' : 'classic';
+    } catch {
+      return 'classic';
+    }
+  });
+  const isSolo = uiMode === 'solo';
+  const setUiModePersisted = useCallback((mode: AiChatUiMode) => {
+    setUiMode(mode);
+    try { localStorage.setItem('ai_chat_ui_mode', mode); } catch {}
+  }, []);
+
+  const soloColumnClass = isSolo ? 'max-w-3xl mx-auto w-full' : '';
 
   // Derived: is there an active (incomplete) workflow in the timeline?
   // A workflow is considered "active" only if it has unresolved tool_calls
@@ -3381,6 +3407,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
             {/* Header actions (right side) */}
             <div className="flex items-center gap-1.5">
+              {/* Classic | Solo render mode */}
+              <div
+                className="flex items-center rounded-lg border border-border overflow-hidden flex-shrink-0"
+                title="Chat UI mode"
+              >
+                <button
+                  type="button"
+                  onClick={() => setUiModePersisted('classic')}
+                  className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 ${
+                    !isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
+                  }`}
+                  title="Classic chat bubbles"
+                >
+                  <MessageSquare size={14} />
+                  <span className="hidden sm:inline">经典</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUiModePersisted('solo')}
+                  className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 border-l border-border ${
+                    isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
+                  }`}
+                  title="Solo document stream (Codex / Cursor Agent style)"
+                >
+                  <AlignLeft size={14} />
+                  <span className="hidden sm:inline">Solo</span>
+                </button>
+              </div>
               <button
                 onClick={() => {
                   setShowPlanViewer(v => {
@@ -3425,7 +3479,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
                   showWorkflow ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
                 }`}
-                title={showWorkflow ? 'Hide workflow details' : 'Show workflow details'}
+                title={
+                  isSolo
+                    ? (showWorkflow ? 'Collapse activity details' : 'Expand activity details')
+                    : (showWorkflow ? 'Hide workflow details' : 'Show workflow details')
+                }
               >
                 {showWorkflow
                   ? <Lightbulb size={18} className="text-primary" />
@@ -3471,6 +3529,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+          <div className={soloColumnClass}>
           {!hasContent && !isLoadingSession && (
             <div className="flex flex-col items-center justify-center h-full text-textMuted">
               <Bot size={48} className="mb-4 opacity-30" />
@@ -3507,37 +3566,46 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             const entryKey = entry._uid || `entry-${i}`;
 
             if (entry.kind === 'message') {
-              return (
-                <MessageBubble
-                  key={entryKey}
-                  message={entry.data}
-                  senderName={
-                    entry.data.role === 'user'
-                      ? (currentUser?.name || undefined)
-                      : (agentProfile?.agent_name || undefined)
-                  }
-                  senderAvatar={
-                    entry.data.role === 'user'
-                      ? (currentUser?.avatar || null)
-                      : (agentProfile?.chat_profile?.chat_user_avatar || null)
-                  }
-                />
-              );
+              const msgProps = {
+                message: entry.data,
+                senderName:
+                  entry.data.role === 'user'
+                    ? (currentUser?.name || undefined)
+                    : (agentProfile?.agent_name || undefined),
+                senderAvatar:
+                  entry.data.role === 'user'
+                    ? (currentUser?.avatar || null)
+                    : (agentProfile?.chat_profile?.chat_user_avatar || null),
+              };
+              return isSolo
+                ? <SoloMessage key={entryKey} {...msgProps} />
+                : <MessageBubble key={entryKey} {...msgProps} />;
             }
-            if (entry.kind === 'workflow' && showWorkflow) {
-              // Find the last incomplete workflow block index to pass turnStartedMs
+            if (entry.kind === 'workflow') {
               const lastIncompleteIdx = (() => {
                 for (let j = timeline.length - 1; j >= 0; j--) {
                   if (timeline[j].kind === 'workflow' && !(timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed) return j;
                 }
                 return -1;
               })();
+              const turnMs = i === lastIncompleteIdx ? turnStartedMs : undefined;
+              if (isSolo) {
+                return (
+                  <SoloActivityRow
+                    key={entryKey}
+                    block={entry.data}
+                    expandDetails={showWorkflow}
+                    turnStartedMs={turnMs}
+                  />
+                );
+              }
+              if (!showWorkflow) return null;
               return (
                 <WorkflowBlockView
                   key={entryKey}
                   block={entry.data}
                   blockKey={i}
-                  turnStartedMs={i === lastIncompleteIdx ? turnStartedMs : undefined}
+                  turnStartedMs={turnMs}
                 />
               );
             }
@@ -3556,7 +3624,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 label = t('aiChat.stateLabel', { content: hint.content });
               }
               return (
-                <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-2 sm:mx-9">
+                <div key={entryKey} className={`flex items-center gap-1.5 py-0.5 my-0.5 ${isSolo ? 'mx-0' : 'mx-2 sm:mx-9'}`}>
                   <div className="flex-1 h-px bg-border/25" />
                   {icon}
                   <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
@@ -3571,14 +3639,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   data={entry.data}
                   currentUser={currentUser}
                   agentProfile={agentProfile}
+                  uiMode={uiMode}
                 />
               );
             }
             return null;
           })}
 
-          {/* Agent working indicator (shown when workflow is hidden but agent is active) */}
-          {!showWorkflow && hasActiveWorkflow && (
+          {/* Agent working indicator (classic only when workflow hidden) */}
+          {!isSolo && !showWorkflow && hasActiveWorkflow && (
             <div className="mb-1">
               <AgentWorkingIndicator
                 agentProfile={agentProfile}
@@ -3593,6 +3662,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               content={streamingText}
               isComplete={!isStreaming}
               avatarSrc={agentProfile?.chat_profile?.chat_user_avatar}
+              variant={isSolo ? 'solo' : 'classic'}
+              senderName={agentProfile?.agent_name}
             />
           )}
 
@@ -3626,11 +3697,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               </div>
             </div>
           )}
+          </div>
         </div>
 
         {/* Image & attachment preview */}
         {(images.length > 0 || attachments.length > 0 || isUploading) && (
           <div className="px-2 sm:px-4 py-2 border-t border-border bg-panel flex gap-2 flex-wrap items-center">
+            <div className={`${soloColumnClass} flex gap-2 flex-wrap items-center`}>
             {/* Images */}
             {images.map((img, i) => (
               <div key={`img-${i}`} className="relative group">
@@ -3696,6 +3769,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <span className="text-xs text-textMuted">Uploading...</span>
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -3714,6 +3788,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         */}
         {pendingMessages.length > 0 && (
           <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border bg-panel flex-shrink-0">
+            <div className={soloColumnClass}>
             <div className="rounded-lg border border-amber-200/70 bg-amber-50/40 dark:bg-amber-500/5 overflow-hidden">
               {/* Header bar: status + actions */}
               <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-amber-200/60 bg-amber-50/60 dark:bg-amber-500/10">
@@ -3814,12 +3889,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 </div>
               )}
             </div>
+            </div>
           </div>
         )}
 
         {/* Inline Plan Panel (docked above input) */}
         {showPlanViewer && (
           <div className="px-2 sm:px-3 pt-2 border-t border-border bg-panel flex-shrink-0">
+            <div className={soloColumnClass}>
             {effectivePlanSteps.length > 0 ? (
               <PlanBlock
                 steps={effectivePlanSteps}
@@ -3828,12 +3905,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             ) : (
               <div className="text-xs text-textMuted bg-white dark:bg-bgPage border border-border rounded-lg px-3 py-2 shadow-sm">{t('aiChat.noPlanYet')}</div>
             )}
+            </div>
           </div>
         )}
 
         {/* Input Area */}
         <div className="p-2 sm:p-3 border-t border-border bg-panel flex-shrink-0">
-          <div className={`flex items-end gap-1.5 sm:gap-2${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
+          <div className={`${soloColumnClass} flex items-end gap-1.5 sm:gap-2${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
             {/* Attachment button (any file) */}
             <button
               onClick={() => {

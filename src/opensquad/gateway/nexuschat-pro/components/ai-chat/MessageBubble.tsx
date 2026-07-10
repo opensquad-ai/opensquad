@@ -44,6 +44,8 @@ interface MessageBubbleProps {
   senderName?: string;
   /** Avatar URL (absolute or relative). Falls back to icon when absent. */
   senderAvatar?: string | null;
+  /** classic = chat bubbles; solo = document-stream (Codex / Cursor Agent style) */
+  variant?: 'classic' | 'solo';
 }
 
 /** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
@@ -85,11 +87,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   isStreaming,
   senderName,
   senderAvatar,
+  variant = 'classic',
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
   const [avatarError, setAvatarError] = React.useState(false);
   const isUser = message.role === 'user';
+  const isSolo = variant === 'solo';
 
   // Parse file attachments from message text (for historical messages loaded
   // from disk that don't have structured attachments).
@@ -314,6 +318,200 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   const resolvedAvatar =
     senderAvatar && !avatarError ? resolveAvatarUrl(senderAvatar) : null;
 
+  const label = senderName || (isUser ? 'You' : 'Agent');
+
+  const mediaAndBody = (
+    <>
+      {message.images && message.images.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {message.images.map((img, i) => {
+            const src = img.startsWith('http')
+              ? img
+              : img.startsWith('/')
+                ? `${SERVER_BASE_URL}${img}`
+                : `${SERVER_BASE_URL}/uploads/${img.split(/[/\\]/).pop()}`;
+            return (
+              <img
+                key={i}
+                src={src}
+                alt=""
+                className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-pointer"
+                onClick={() => window.open(src, '_blank')}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {isUser ? (
+        <>
+          {displayContent && (
+            <div className="whitespace-pre-wrap break-words">{displayContent}</div>
+          )}
+          {fileAttachments.length > 0 && (
+            <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
+              {fileAttachments.map((att, i) => {
+                const fileUrl = att.url
+                  ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
+                  : undefined;
+                return (
+                  <div key={`u-att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
+                    <FileText size={16} className="text-textMuted flex-shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-textMain truncate">{att.name}</p>
+                      <p className="text-[10px] text-textMuted">
+                        {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
+                      </p>
+                    </div>
+                    {fileUrl && (
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(fileUrl, att.name)}
+                        className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
+                        title={t('chat.downloadFile')}
+                      >
+                        {t('chat.download')}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div
+            className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown"
+            dangerouslySetInnerHTML={{ __html: renderedHtml }}
+          />
+          {fileAttachments.length > 0 && (
+            <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
+              {fileAttachments.map((att, i) => {
+                if (att.type === 'video' && att.url) {
+                  const videoSrc = att.url.startsWith('http') ? att.url : att.url.startsWith('/') ? att.url : `/uploads/${att.url.split(/[/\\]/).pop()}`;
+                  return (
+                    <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[280px]">
+                      <video
+                        src={`${SERVER_BASE_URL}${videoSrc.startsWith('/') ? videoSrc : `/${videoSrc}`}`}
+                        controls
+                        className="max-w-full max-h-48 rounded-lg"
+                        preload="metadata"
+                      />
+                      <p className="text-xs text-textMuted truncate mt-0.5 px-0.5">{att.name}</p>
+                    </div>
+                  );
+                }
+                if ((att.type === 'audio' || att.type === 'voice') && att.url) {
+                  const audioSrc = att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`;
+                  return (
+                    <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[260px] border border-border bg-bgLight">
+                      <audio
+                        src={audioSrc}
+                        controls
+                        className="w-full h-9"
+                        preload="metadata"
+                      />
+                      <p className="text-xs text-textMuted truncate px-2 pb-1.5">{att.name}</p>
+                    </div>
+                  );
+                }
+                const fileUrl = att.url
+                  ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
+                  : undefined;
+                return (
+                  <div key={`att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
+                    <FileText size={16} className="text-textMuted flex-shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-textMain truncate">{att.name}</p>
+                      <p className="text-[10px] text-textMuted">
+                        {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
+                      </p>
+                    </div>
+                    {fileUrl && (
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(fileUrl, att.name)}
+                        className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
+                        title={t('chat.downloadFile')}
+                      >
+                        {t('chat.download')}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {message.output_audio && message.output_audio.length > 0 && (
+            <div className="mt-2 flex flex-col gap-2">
+              {message.output_audio.map((a, i) => (
+                <audio
+                  key={i}
+                  controls
+                  src={`${SERVER_BASE_URL}${a.url}`}
+                  className="w-full max-w-xs h-8"
+                />
+              ))}
+            </div>
+          )}
+          {message.output_images && message.output_images.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {message.output_images.map((url, i) => (
+                <img
+                  key={i}
+                  src={`${SERVER_BASE_URL}${url}`}
+                  alt=""
+                  className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-pointer"
+                  onClick={() => window.open(`${SERVER_BASE_URL}${url}`, '_blank')}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {isStreaming && (
+        <span className="inline-block w-1.5 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
+      )}
+    </>
+  );
+
+  if (isSolo) {
+    return (
+      <div className={`mb-5 w-full group relative ${isStreaming ? 'ai-streaming' : ''}`}>
+        <div className="flex items-center gap-2 mb-1.5">
+          <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
+            {label}
+          </span>
+          {!isStreaming && message.content && (
+            <button
+              onClick={handleCopy}
+              className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
+              title="Copy"
+            >
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+          )}
+        </div>
+        {isUser ? (
+          <div className="border-l-2 border-primary/35 pl-3 py-0.5 text-sm leading-relaxed text-textMain">
+            {mediaAndBody}
+          </div>
+        ) : (
+          <div className="text-sm leading-relaxed text-textMain w-full min-w-0">
+            {mediaAndBody}
+          </div>
+        )}
+        {message.timestamp && (
+          <div className="text-[10px] text-textMuted mt-1 opacity-60">
+            {new Date(message.timestamp).toLocaleTimeString()}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={`flex gap-2 mb-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
       {/* Avatar */}
@@ -336,7 +534,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
       {/* Bubble */}
       <div className={`max-w-[85%] sm:max-w-[80%] min-w-0 group relative ${isUser ? 'items-end' : 'items-start'}`}>
-        {/* Sender name label */}
         {senderName && (
           <div className={`text-[11px] font-medium text-textMuted mb-0.5 ${isUser ? 'text-right' : 'text-left'}`}>
             {senderName}
@@ -348,173 +545,9 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             ? 'bg-white text-gray-800 rounded-tr-sm shadow-sm'
             : 'bg-chatBubbleOther text-textMain rounded-tl-sm border border-border'
         } ${isStreaming ? 'ai-streaming' : ''}`}>
-          {/* Images */}
-          {message.images && message.images.length > 0 && (
-            <div className="flex flex-wrap gap-2 mb-2">
-              {message.images.map((img, i) => {
-                // img may be:
-                // 1) absolute URL (http/https)
-                // 2) web-relative path (/uploads/xxx)
-                // 3) legacy absolute filesystem path (C:\...\xxx)
-                // Always normalize to a browser-accessible URL.
-                const src = img.startsWith('http')
-                  ? img
-                  : img.startsWith('/')
-                    ? `${SERVER_BASE_URL}${img}`
-                    : `${SERVER_BASE_URL}/uploads/${img.split(/[/\\]/).pop()}`;
-                return (
-                  <img
-                    key={i}
-                    src={src}
-                    alt=""
-                    className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-pointer"
-                    onClick={() => window.open(src, '_blank')}
-                  />
-                );
-              })}
-            </div>
-          )}
-
-          {/* Content */}
-          {isUser ? (
-            <>
-              {displayContent && (
-                <div className="whitespace-pre-wrap break-words">{displayContent}</div>
-              )}
-              {/* User file attachment cards (show download too) */}
-              {fileAttachments.length > 0 && (
-                <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
-                  {fileAttachments.map((att, i) => {
-                    const fileUrl = att.url
-                      ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
-                      : undefined;
-                    return (
-                      <div key={`u-att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
-                        <FileText size={16} className="text-textMuted flex-shrink-0" />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-textMain truncate">{att.name}</p>
-                          <p className="text-[10px] text-textMuted">
-                            {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
-                          </p>
-                        </div>
-                        {fileUrl && (
-                          <button
-                            type="button"
-                            onClick={() => handleDownload(fileUrl, att.name)}
-                            className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
-                            title={t('chat.downloadFile')}
-                          >
-                            {t('chat.download')}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              <div
-                className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown"
-                dangerouslySetInnerHTML={{ __html: renderedHtml }}
-              />
-              {/* Assistant file attachment cards */}
-              {fileAttachments.length > 0 && (
-                <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
-                  {fileAttachments.map((att, i) => {
-                    if (att.type === 'video' && att.url) {
-                      const videoSrc = att.url.startsWith('http') ? att.url : att.url.startsWith('/') ? att.url : `/uploads/${att.url.split(/[/\\]/).pop()}`;
-                      return (
-                        <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[280px]">
-                          <video
-                            src={`${SERVER_BASE_URL}${videoSrc.startsWith('/') ? videoSrc : `/${videoSrc}`}`}
-                            controls
-                            className="max-w-full max-h-48 rounded-lg"
-                            preload="metadata"
-                          />
-                          <p className="text-xs text-textMuted truncate mt-0.5 px-0.5">{att.name}</p>
-                        </div>
-                      );
-                    }
-                    if ((att.type === 'audio' || att.type === 'voice') && att.url) {
-                      const audioSrc = att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`;
-                      return (
-                        <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[260px] border border-border bg-bgLight">
-                          <audio
-                            src={audioSrc}
-                            controls
-                            className="w-full h-9"
-                            preload="metadata"
-                          />
-                          <p className="text-xs text-textMuted truncate px-2 pb-1.5">{att.name}</p>
-                        </div>
-                      );
-                    }
-                    const fileUrl = att.url
-                      ? (att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`)
-                      : undefined;
-                    return (
-                      <div key={`att-${i}`} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-bgLight max-w-[260px]">
-                        <FileText size={16} className="text-textMuted flex-shrink-0" />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-textMain truncate">{att.name}</p>
-                          <p className="text-[10px] text-textMuted">
-                            {att.type ? `${att.type.toUpperCase()} • ` : ''}{att.size}
-                          </p>
-                        </div>
-                        {fileUrl && (
-                          <button
-                            type="button"
-                            onClick={() => handleDownload(fileUrl, att.name)}
-                            className="text-[10px] px-2 py-1 rounded border border-border hover:bg-bgPanel text-textMuted hover:text-textMain whitespace-nowrap"
-                            title={t('chat.downloadFile')}
-                          >
-                            {t('chat.download')}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {/* Model output audio */}
-              {message.output_audio && message.output_audio.length > 0 && (
-                <div className="mt-2 flex flex-col gap-2">
-                  {message.output_audio.map((a, i) => (
-                    <audio
-                      key={i}
-                      controls
-                      src={`${SERVER_BASE_URL}${a.url}`}
-                      className="w-full max-w-xs h-8"
-                    />
-                  ))}
-                </div>
-              )}
-              {/* Model output images */}
-              {message.output_images && message.output_images.length > 0 && (
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {message.output_images.map((url, i) => (
-                    <img
-                      key={i}
-                      src={`${SERVER_BASE_URL}${url}`}
-                      alt=""
-                      className="max-w-[200px] max-h-[200px] rounded-lg object-cover cursor-pointer"
-                      onClick={() => window.open(`${SERVER_BASE_URL}${url}`, '_blank')}
-                    />
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Streaming cursor */}
-          {isStreaming && (
-            <span className="inline-block w-1.5 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
-          )}
+          {mediaAndBody}
         </div>
 
-        {/* Copy button */}
         {!isStreaming && message.content && (
           <button
             onClick={handleCopy}
@@ -525,7 +558,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           </button>
         )}
 
-        {/* Timestamp */}
         {message.timestamp && (
           <div className={`text-[10px] text-textMuted mt-0.5 ${isUser ? 'text-right' : 'text-left'}`}>
             {new Date(message.timestamp).toLocaleTimeString()}
