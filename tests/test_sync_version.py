@@ -40,8 +40,10 @@ def test_pep440_to_npm(sync_version, pep440, npm):
 
 def test_repo_version_files_match_pyproject(sync_version):
     pep440 = sync_version.read_pyproject_version()
+    npm = sync_version.pep440_to_npm(pep440)
     assert sync_version.read_init_version() == pep440
-    assert sync_version.read_package_json_version() == sync_version.pep440_to_npm(pep440)
+    assert sync_version.read_package_json_version() == npm
+    assert sync_version.read_package_json_version(sync_version.NEXUSCHAT_PACKAGE_JSON) == npm
 
 
 def test_sync_version_check_passes_from_repo_root():

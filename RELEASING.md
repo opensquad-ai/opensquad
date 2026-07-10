@@ -29,8 +29,15 @@ The whole flow normally takes 30–60 minutes if the gates are green.
   python scripts/sync_version.py
   ```
 
-  This updates `src/opensquad/__init__.py::__version__` (same PEP 440 string)
-  and root `package.json` (npm semver, e.g. `0.4.2.dev0` → `0.4.2-dev.0`).
+  This updates `src/opensquad/__init__.py::__version__` (same PEP 440 string),
+  root `package.json`, and `src/opensquad/gateway/nexuschat-pro/package.json`
+  (Electron `app.getVersion()`, npm semver e.g. `0.4.2.dev0` → `0.4.2-dev.0`).
+  Then refresh the lockfile so editable package metadata matches:
+
+  ```bash
+  uv lock
+  ```
+
   CI runs `python scripts/sync_version.py --check` on every push to `dev`/`main`.
   Pre-commit auto-syncs when `pyproject.toml` is staged.
 - See [BRANCHING.md](BRANCHING.md) → "When to bump minor vs patch" for the cheat sheet (SemVer rule 4 for `0.x.y`, PEP 440 markers, deployer-effort heuristic).
