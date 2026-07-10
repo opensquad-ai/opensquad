@@ -1,184 +1,237 @@
 /**
- * SoloActivityRow — compact collapsed workflow summary for Solo UI mode.
- * Default: one-line summary (thoughts / tools). Expand to show ThoughtBlock / ToolCallBlock.
+ * SoloActivityRow — Cursor-style document-flow activity lines for Solo UI.
+ *
+ * Collapsed: plain text + ">" (no borders / cards / icons).
+ * Expanded: plain indented detail text (still no fold boxes).
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Wrench, Brain } from 'lucide-react';
-import { ThoughtBlock } from './ThoughtBlock';
-import { ToolCallBlock } from './ToolCallBlock';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
-  /** When true, expand details by default (Header "workflow details" toggle in Solo). */
+  /** When true, expand all event lines by default (Header lightbulb in Solo). */
   expandDetails?: boolean;
   turnStartedMs?: number;
 }
 
 function toolName(evt: WorkflowEvent): string {
   const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
-  return data.name || data.tool || 'Tool';
+  return String(data.name || data.tool || 'Tool');
 }
 
-function summarize(events: WorkflowEvent[]): { label: string; running: boolean } {
-  const thoughts = events.filter((e) => e.type === 'thought').length;
-  const tools = events.filter((e) => e.type === 'tool_call' || e.type === 'tool_result');
-  const running = tools.some(
-    (e) => e.type === 'tool_call' && !e.result,
-  );
-  const names = tools
-    .filter((e) => e.type === 'tool_call')
-    .map(toolName)
-    .filter((n, i, arr) => arr.indexOf(n) === i);
-  const parts: string[] = [];
-  if (thoughts > 0) parts.push(thoughts === 1 ? 'Thinking' : `Thinking ×${thoughts}`);
-  if (names.length > 0) {
-    const shown = names.slice(0, 3).join(', ');
-    parts.push(names.length > 3 ? `${shown} +${names.length - 3}` : shown);
-  }
-  if (parts.length === 0) {
-    const infos = events.filter((e) => e.type === 'info' || e.type === 'plan' || e.type === 'summary_stream');
-    if (infos.length > 0) parts.push(`${infos.length} update${infos.length > 1 ? 's' : ''}`);
-  }
-  return {
-    label: parts.length > 0 ? parts.join(' · ') : 'Activity',
-    running,
-  };
+function thoughtText(evt: WorkflowEvent): string {
+  return typeof evt.content === 'string' ? evt.content : JSON.stringify(evt.content ?? '');
 }
+
+function formatArgs(args: unknown): string {
+  if (args == null) return '';
+  if (typeof args === 'string') return args;
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
+function formatResult(result: unknown): string {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
+}
+
+function thoughtLabel(text: string): { primary: string; secondary: string } {
+  const trimmed = text.trim();
+  if (!trimmed) return { primary: 'Thought', secondary: '' };
+  if (trimmed.length < 40) return { primary: 'Thought', secondary: 'briefly' };
+  if (trimmed.length < 120) return { primary: 'Thought', secondary: 'for a moment' };
+  return { primary: 'Thought', secondary: 'for a bit' };
+}
+
+function toolWorkLabel(
+  evt: WorkflowEvent,
+  elapsedMs?: number | null,
+  running?: boolean,
+): { primary: string; secondary: string } {
+  const name = toolName(evt);
+  if (running) return { primary: 'Working', secondary: name };
+  if (elapsedMs != null && elapsedMs > 0) {
+    const secs = Math.max(1, Math.round(elapsedMs / 1000));
+    return { primary: `Worked for ${secs}s`, secondary: name };
+  }
+  return { primary: 'Worked', secondary: name };
+}
+
+type LineKind = 'thought' | 'tool' | 'info';
+
+interface ActivityLine {
+  key: string;
+  kind: LineKind;
+  primary: string;
+  secondary: string;
+  detail: string;
+  running?: boolean;
+}
+
+function buildLines(block: WorkflowBlock, turnStartedMs?: number): ActivityLine[] {
+  const lines: ActivityLine[] = [];
+
+  for (let i = 0; i < block.events.length; i++) {
+    const evt = block.events[i];
+    const key = evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
+
+    if (evt.type === 'thought') {
+      const text = thoughtText(evt);
+      if (!text.trim()) continue;
+      const { primary, secondary } = thoughtLabel(text);
+      lines.push({ key, kind: 'thought', primary, secondary, detail: text });
+      continue;
+    }
+
+    if (evt.type === 'tool_call') {
+      const running = !evt.result && !block.completed;
+      const started = typeof evt.timestamp === 'number' ? evt.timestamp : undefined;
+      let elapsed: number | null = null;
+      if (evt.result && started != null) {
+        // Approximate: we don't store end ts on the event; use block elapsed when available
+        elapsed = block.elapsed_ms ?? Math.max(0, Date.now() - started);
+      } else if (running && started != null) {
+        elapsed = Math.max(0, Date.now() - started);
+      } else if (running && turnStartedMs != null) {
+        elapsed = Math.max(0, Date.now() - turnStartedMs);
+      } else if (block.elapsed_ms != null) {
+        elapsed = block.elapsed_ms;
+      }
+      const { primary, secondary } = toolWorkLabel(evt, elapsed, running);
+      const args = formatArgs(
+        typeof evt.content === 'object' ? (evt.content.arguments || evt.content.args || evt.content.input) : '',
+      );
+      const result = formatResult(evt.result);
+      const detailParts = [
+        secondary ? `Tool: ${secondary}` : '',
+        args ? `Args:\n${args}` : '',
+        result ? `Result:\n${result}` : running ? 'Running…' : '',
+      ].filter(Boolean);
+      lines.push({
+        key,
+        kind: 'tool',
+        primary,
+        secondary: running ? secondary : '',
+        detail: detailParts.join('\n\n'),
+        running,
+      });
+      continue;
+    }
+
+    if (evt.type === 'tool_result') {
+      // Usually merged into tool_call; orphan results still show as a line
+      const data = typeof evt.content === 'object' ? evt.content : {};
+      const name = data.name || data.tool || 'Tool';
+      const result = formatResult(data.result ?? data.output ?? data);
+      lines.push({
+        key,
+        kind: 'tool',
+        primary: 'Worked',
+        secondary: String(name),
+        detail: result ? `Result:\n${result}` : '',
+      });
+      continue;
+    }
+
+    if (evt.type === 'info') {
+      const text =
+        typeof evt.content === 'string'
+          ? evt.content
+          : evt.content?.text || '';
+      if (!text) continue;
+      lines.push({
+        key,
+        kind: 'info',
+        primary: text.length > 60 ? `${text.slice(0, 60)}…` : text,
+        secondary: '',
+        detail: text,
+      });
+    }
+  }
+
+  return lines;
+}
+
+const SoloEventLine: React.FC<{
+  line: ActivityLine;
+  defaultOpen?: boolean;
+}> = ({ line, defaultOpen = false }) => {
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) setOpen(true);
+  }, [defaultOpen]);
+
+  return (
+    <div className="w-full select-text">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="group flex items-baseline gap-1.5 py-0.5 text-left w-full max-w-full bg-transparent border-0 p-0 cursor-pointer"
+      >
+        <span className="text-[13px] text-textMuted/80 font-normal leading-relaxed shrink-0 w-3 text-center">
+          {open ? '⌄' : '>'}
+        </span>
+        <span className="text-[13px] leading-relaxed text-textMain/80 min-w-0">
+          <span className="font-normal">{line.primary}</span>
+          {line.secondary ? (
+            <span className="text-textMuted/55"> {line.secondary}</span>
+          ) : null}
+          {line.running ? (
+            <span className="text-textMuted/45"> …</span>
+          ) : null}
+        </span>
+      </button>
+      {open && line.detail && (
+        <div className="pl-4 pr-1 pb-1.5 pt-0.5">
+          <pre className="text-[12px] leading-relaxed text-textMuted/75 whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto">
+            {line.detail}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   block,
   expandDetails = false,
   turnStartedMs,
 }) => {
-  const [open, setOpen] = useState(expandDetails || !block.completed);
-  const { label, running } = useMemo(() => summarize(block.events), [block.events]);
-
+  const [tick, setTick] = useState(0);
+  const hasRunning = block.events.some(
+    (e) => e.type === 'tool_call' && !e.result && !block.completed,
+  );
   useEffect(() => {
-    if (expandDetails) setOpen(true);
-  }, [expandDetails]);
-
-  // Auto-expand while the turn is still running (unless user collapsed and expandDetails is false).
-  useEffect(() => {
-    if (!block.completed && (expandDetails || running)) {
-      setOpen(true);
-    }
-  }, [block.completed, running, expandDetails]);
-
-  // Force re-render for live elapsed
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (block.completed || turnStartedMs == null) return;
-    const t = setInterval(() => setTick((n) => n + 1), 200);
+    if (block.completed || (!hasRunning && turnStartedMs == null)) return;
+    const t = setInterval(() => setTick((n) => n + 1), 400);
     return () => clearInterval(t);
-  }, [block.completed, turnStartedMs]);
+  }, [block.completed, hasRunning, turnStartedMs]);
 
-  if (!block.events.length) return null;
+  const lines = useMemo(
+    () => buildLines(block, turnStartedMs),
+    [block, turnStartedMs, tick],
+  );
 
-  const elapsedLabel =
-    !block.completed && turnStartedMs != null
-      ? `${((Date.now() - turnStartedMs) / 1000).toFixed(1)}s`
-      : block.completed && block.elapsed_ms != null
-        ? `${(block.elapsed_ms / 1000).toFixed(1)}s`
-        : null;
+  if (!lines.length) return null;
 
   return (
-    <div className="my-2 w-full">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-1 py-1.5 text-left rounded-md hover:bg-primary/5 transition-colors group"
-      >
-        {open ? (
-          <ChevronDown size={14} className="text-textMuted flex-shrink-0" />
-        ) : (
-          <ChevronRight size={14} className="text-textMuted flex-shrink-0" />
-        )}
-        {running && !block.completed ? (
-          <Loader2 size={13} className="text-primary animate-spin flex-shrink-0" />
-        ) : label.startsWith('Thinking') ? (
-          <Brain size={13} className="text-textMuted flex-shrink-0" />
-        ) : (
-          <Wrench size={13} className="text-textMuted flex-shrink-0" />
-        )}
-        <span className="text-xs text-textMuted truncate flex-1 font-mono">
-          {label}
-          {block.status && !block.completed ? ` — ${block.status}` : ''}
-        </span>
-        {elapsedLabel && (
-          <span className="text-[10px] text-textMuted/70 font-mono flex-shrink-0">
-            {elapsedLabel}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div className="ml-5 pl-2 border-l border-border/60 space-y-1.5 pb-1">
-          {block.events.map((evt, i) => {
-            const eventKey = evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
-            if (evt.type === 'thought') {
-              return (
-                <ThoughtBlock
-                  key={eventKey}
-                  content={typeof evt.content === 'string' ? evt.content : JSON.stringify(evt.content)}
-                  defaultOpen={false}
-                />
-              );
-            }
-            if (evt.type === 'tool_call') {
-              const data = typeof evt.content === 'object' ? evt.content : {};
-              const status = evt.result
-                ? evt.resultStatus === 'error'
-                  ? 'error'
-                  : 'success'
-                : 'running';
-              return (
-                <ToolCallBlock
-                  key={eventKey}
-                  persistKey={eventKey}
-                  toolName={data.name || data.tool || 'Tool'}
-                  args={data.arguments || data.args || data.input}
-                  result={evt.result}
-                  status={status}
-                  subAgent={evt.subAgent}
-                  subTaskLabel={evt.subTaskLabel}
-                />
-              );
-            }
-            if (evt.type === 'tool_result') {
-              const data = typeof evt.content === 'object' ? evt.content : {};
-              return (
-                <ToolCallBlock
-                  key={eventKey}
-                  persistKey={eventKey}
-                  toolName={data.name || data.tool || 'Tool'}
-                  result={
-                    typeof data.result === 'string'
-                      ? data.result
-                      : data.output || JSON.stringify(data)
-                  }
-                  status={data.error ? 'error' : 'success'}
-                  subAgent={evt.subAgent}
-                  subTaskLabel={evt.subTaskLabel}
-                />
-              );
-            }
-            if (evt.type === 'info') {
-              const text =
-                typeof evt.content === 'string'
-                  ? evt.content
-                  : evt.content?.text || JSON.stringify(evt.content);
-              if (!text) return null;
-              return (
-                <div key={eventKey} className="text-[11px] text-textMuted px-1 py-0.5">
-                  {text}
-                </div>
-              );
-            }
-            return null;
-          })}
-        </div>
-      )}
+    <div className="my-1 w-full space-y-0.5">
+      {lines.map((line) => (
+        <SoloEventLine
+          key={line.key}
+          line={line}
+          defaultOpen={expandDetails}
+        />
+      ))}
     </div>
   );
 };
