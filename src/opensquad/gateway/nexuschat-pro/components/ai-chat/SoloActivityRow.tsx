@@ -8,10 +8,12 @@
  *   - other tools (websearch, etc.): expand → light box with Args + Result
  */
 import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { CircleDashed, CheckCircle2, XCircle, ListTodo, ArrowRightCircle } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
 import { DelegateFold } from './DelegateFold';
+import { parsePlanContent, type PlanStep } from './PlanBlock';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
@@ -77,7 +79,7 @@ function thoughtLabel(text: string): { primary: string; secondary: string } {
   return { primary: 'Thought', secondary: 'for a bit' };
 }
 
-type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation';
+type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan';
 
 interface ActivityLine {
   key: string;
@@ -97,6 +99,8 @@ interface ActivityLine {
   summaryPending?: boolean;
   /** Cursor-style delegate bundle (opens SubAgentPanel) */
   delegation?: DelegateBundle;
+  /** Parsed <plan> steps for Solo To-dos fold */
+  planSteps?: PlanStep[];
 }
 
 function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean): ActivityLine[] {
@@ -167,12 +171,12 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     let secondary = '';
     if (fileEdit) {
       if (fileEdit.kind === 'read') {
-        primary = `Read ${fileEdit.fileName}`;
+        primary = running ? `Reading ${fileEdit.fileName}` : `Read ${fileEdit.fileName}`;
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit.kind === 'write') {
-        primary = `Wrote ${fileEdit.fileName}`;
+        primary = running ? `Writing ${fileEdit.fileName}` : `Wrote ${fileEdit.fileName}`;
       } else {
-        primary = `Edited ${fileEdit.fileName}`;
+        primary = running ? `Editing ${fileEdit.fileName}` : `Edited ${fileEdit.fileName}`;
       }
     } else if (running) {
       primary = 'Running';
@@ -227,6 +231,23 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
       secondary: '',
       detail: text,
     });
+    return lines;
+  }
+
+  if (evt.type === 'plan') {
+    const steps = parsePlanContent(evt.content);
+    if (steps.length === 0) return lines;
+    const running = steps.some((s) => s.status === 'running');
+    const done = steps.filter((s) => s.status === 'done').length;
+    lines.push({
+      key,
+      kind: 'plan',
+      primary: 'To-dos',
+      secondary: String(steps.length),
+      detail: done > 0 ? `${done}/${steps.length}` : '',
+      running: running && !blockCompleted,
+      planSteps: steps,
+    });
   }
 
   return lines;
@@ -271,9 +292,11 @@ function outerSummary(
   const secs = elapsedMs != null ? Math.max(1, Math.round(elapsedMs / 1000)) : null;
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
   const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation').length;
+  const plans = lines.filter((l) => l.kind === 'plan');
   const summaries = lines.filter((l) => l.kind === 'summary');
   const liveSummary = summaries.some((l) => l.running);
   const liveTool = lines.some((l) => l.kind === 'tool' && l.running);
+  const livePlan = plans.some((l) => l.running);
   const hasLiveLine = lines.some((l) => l.running);
 
   if (liveSummary) {
@@ -284,7 +307,7 @@ function outerSummary(
   if (summaries.length > 0 && summaries.every((l) => !l.running)) {
     return { primary: 'Context compressed', secondary: '' };
   }
-  if (liveTool || (hasLiveLine && !block.completed)) {
+  if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
     if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
@@ -294,12 +317,43 @@ function outerSummary(
   }
   if (tools > 0 && secs != null) return { primary: `Worked for ${secs}s`, secondary: '' };
   if (tools > 0) return { primary: 'Worked', secondary: '' };
+  if (plans.length > 0) {
+    const n = plans.reduce((sum, l) => sum + (l.planSteps?.length || 0), 0);
+    if (n > 0) return { primary: 'To-dos', secondary: String(n) };
+    return { primary: 'Planned', secondary: '' };
+  }
   if (thoughts > 0) {
     if (secs != null && secs >= 2) return { primary: 'Thought', secondary: `for ${secs}s` };
     return { primary: 'Thought', secondary: 'for a bit' };
   }
   return { primary: 'Activity', secondary: '' };
 }
+
+/** Soft white-light sweep across live activity title text. */
+const ShimmerLabel: React.FC<{
+  children: React.ReactNode;
+  color: string;
+  className?: string;
+}> = ({ children, color, className }) => (
+  <span className={`solo-text-shimmer ${className || ''}`} style={{ color }}>
+    {children}
+  </span>
+);
+
+/** Waiting buffer while the next thought / tool call is being prepared. */
+const NextPlanningPlaceholder: React.FC<{ depth?: 0 | 1 }> = ({ depth = 1 }) => {
+  const faint =
+    depth === 0
+      ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
+      : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+  return (
+    <div className="w-full select-none py-0.5">
+      <ShimmerLabel color={faint} className="text-[13px] leading-relaxed font-normal">
+        next planing...
+      </ShimmerLabel>
+    </div>
+  );
+};
 
 /** Cursor-like faint activity chrome: outer slightly stronger, nested lighter. */
 const TextChevronToggle: React.FC<{
@@ -308,17 +362,26 @@ const TextChevronToggle: React.FC<{
   open: boolean;
   onToggle: () => void;
   running?: boolean;
+  /** Soft light sweep on the title while this line is in progress */
+  shimmer?: boolean;
   /** 0 = outer turn, 1 = event line */
   depth?: 0 | 1;
   addedLines?: number;
   removedLines?: number;
-}> = ({ primary, secondary, open, onToggle, running, depth = 0, addedLines, removedLines }) => {
+}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines }) => {
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
   const faint =
     depth === 0
       ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
       : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+
+  const title = (
+    <>
+      <span className="font-normal">{primary}</span>
+      {secondary ? <span>{' '}{secondary}</span> : null}
+    </>
+  );
 
   return (
   <button
@@ -328,11 +391,8 @@ const TextChevronToggle: React.FC<{
     className="group inline-flex items-baseline gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
   >
     <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
-      <span className="font-normal" style={{ color: faint }}>{primary}</span>
-      {secondary ? (
-        <span style={{ color: faint }}>{' '}{secondary}</span>
-      ) : null}
-      {running ? <span style={{ color: faint, opacity: 0.85 }}> …</span> : null}
+      {shimmer ? <ShimmerLabel color={faint}>{title}</ShimmerLabel> : title}
+      {running && !shimmer ? <span style={{ color: faint, opacity: 0.85 }}> …</span> : null}
     </span>
     {(addedLines != null && addedLines > 0) && (
       <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #059669 55%, transparent)' }}>
@@ -410,6 +470,85 @@ const SoloToolExpandPanel: React.FC<{
   );
 };
 
+const SoloPlanStepIcon: React.FC<{ status: PlanStep['status'] }> = ({ status }) => {
+  const muted = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+  switch (status) {
+    case 'done':
+      return <CheckCircle2 size={14} className="text-emerald-500/80 flex-shrink-0 mt-0.5" />;
+    case 'running':
+      return <ArrowRightCircle size={14} className="text-primary/80 flex-shrink-0 mt-0.5" />;
+    case 'failed':
+      return <XCircle size={14} className="text-red-500/80 flex-shrink-0 mt-0.5" />;
+    default:
+      return <CircleDashed size={14} className="flex-shrink-0 mt-0.5" style={{ color: muted }} strokeWidth={1.5} />;
+  }
+};
+
+/** Cursor-style To-dos fold inside Solo activity stream. */
+const SoloPlanFold: React.FC<{
+  steps: PlanStep[];
+  running?: boolean;
+  defaultOpen?: boolean;
+}> = ({ steps, running, defaultOpen = true }) => {
+  const [open, setOpen] = useState(defaultOpen || !!running);
+  useEffect(() => {
+    if (defaultOpen || running) setOpen(true);
+  }, [defaultOpen, running]);
+
+  const faint = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+
+  return (
+    <div className="w-full select-text my-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{ color: faint }}
+        className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
+      >
+        <ListTodo size={13} className="shrink-0 opacity-80" style={{ color: faint }} />
+        <span className="text-[13px] leading-relaxed" style={{ color: faint }}>
+          <span className="font-medium">To-dos</span>
+          <span>{' '}{steps.length}</span>
+          {running ? <span style={{ opacity: 0.85 }}> …</span> : null}
+        </span>
+        <span className="text-[13px] shrink-0" style={{ color: faint }}>
+          {open ? '⌄' : '>'}
+        </span>
+      </button>
+
+      {open && (
+        <div className="mt-1 mb-1 rounded-lg border border-border/55 bg-black/[0.02] dark:bg-white/[0.03] overflow-hidden">
+          <div className="px-3 py-2 space-y-1.5">
+            {steps.map((step, i) => (
+              <div key={i} className="flex items-start gap-2">
+                <SoloPlanStepIcon status={step.status} />
+                <span
+                  className={`text-[12.5px] leading-snug break-words ${
+                    step.status === 'done'
+                      ? 'line-through'
+                      : step.status === 'running'
+                        ? 'font-medium text-textMain/90'
+                        : step.status === 'failed'
+                          ? 'text-red-500/90'
+                          : ''
+                  }`}
+                  style={
+                    step.status === 'done' || step.status === 'pending'
+                      ? { color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }
+                      : undefined
+                  }
+                >
+                  {step.content}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const SoloEventLine: React.FC<{
   line: ActivityLine;
   defaultOpen?: boolean;
@@ -434,6 +573,17 @@ const SoloEventLine: React.FC<{
     return <DelegateFold bundle={line.delegation} variant="solo" />;
   }
 
+  // Plan / To-dos: Cursor-style bordered list fold.
+  if (line.kind === 'plan' && line.planSteps && line.planSteps.length > 0) {
+    return (
+      <SoloPlanFold
+        steps={line.planSteps}
+        running={line.running}
+        defaultOpen={defaultOpen || !!line.running}
+      />
+    );
+  }
+
   // Progress lines are compact status rows (no nested fold needed).
   if (isProgress) {
     return (
@@ -455,6 +605,7 @@ const SoloEventLine: React.FC<{
         open={open}
         onToggle={() => setOpen((v) => !v)}
         running={line.running}
+        shimmer={!!line.running && line.kind === 'tool'}
         depth={1}
         addedLines={isFileEdit ? added : undefined}
         removedLines={isFileEdit ? removed : undefined}
@@ -630,17 +781,42 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     [block, lines, turnStartedMs, tick],
   );
 
-  if (!lines.length) return null;
+  // Between steps: turn is live, but no concrete tool / compression / plan is in flight.
+  const showNextPlanning =
+    isLiveTurn &&
+    !hasRunning &&
+    !hasLiveCompression &&
+    !lines.some((l) => !!l.running);
 
-  // Thought-only (no tools / compression / delegate): single fold → body text.
+  if (!lines.length) {
+    if (!showNextPlanning) return null;
+    return (
+      <div className="my-1.5 w-full select-text">
+        <NextPlanningPlaceholder depth={0} />
+      </div>
+    );
+  }
+
+  // Thought-only (no tools / compression / delegate / plan): single fold → body text.
   const isThoughtOnly = !lines.some(
-    (l) => l.kind === 'tool' || l.kind === 'summary' || l.kind === 'progress' || l.kind === 'delegation',
+    (l) =>
+      l.kind === 'tool' ||
+      l.kind === 'summary' ||
+      l.kind === 'progress' ||
+      l.kind === 'delegation' ||
+      l.kind === 'plan',
   );
   // Compression-only: one fold → summary body (avoid "Context compressed" + "Context summary done").
   const isCompressionOnly =
     !isThoughtOnly &&
     lines.every((l) => l.kind === 'summary' || l.kind === 'progress') &&
     lines.some((l) => l.kind === 'summary');
+  // Plan-only (+ optional thoughts): outer fold opens to To-dos box.
+  const isPlanOnly =
+    !isThoughtOnly &&
+    !isCompressionOnly &&
+    lines.every((l) => l.kind === 'plan' || l.kind === 'thought') &&
+    lines.some((l) => l.kind === 'plan');
 
   const thoughtBodies = lines
     .filter((l) => l.kind === 'thought' && l.detail.trim())
@@ -670,6 +846,11 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             ))}
           </div>
         )}
+        {showNextPlanning ? (
+          <div className={outerOpen ? 'pl-4' : undefined}>
+            <NextPlanningPlaceholder depth={outerOpen ? 1 : 0} />
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -718,6 +899,54 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             )}
           </div>
         )}
+        {showNextPlanning ? (
+          <div className={outerOpen ? 'pl-4' : undefined}>
+            <NextPlanningPlaceholder depth={outerOpen ? 1 : 0} />
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  // Plan-only: show optional thought body + Cursor-style To-dos fold (no extra outer wrapper).
+  if (isPlanOnly) {
+    const planLines = lines.filter((l) => l.kind === 'plan' && l.planSteps && l.planSteps.length > 0);
+    return (
+      <div className="my-1.5 w-full select-text space-y-0.5">
+        {thoughtBodies.length > 0 && (
+          <div className="mb-1">
+            <TextChevronToggle
+              primary={summary.primary.startsWith('To-dos') ? 'Thought' : summary.primary}
+              secondary={summary.primary.startsWith('To-dos') ? 'for a bit' : summary.secondary}
+              open={outerOpen}
+              onToggle={() => setOuterOpen((v) => !v)}
+              running={false}
+              depth={0}
+            />
+            {outerOpen && (
+              <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+                {thoughtBodies.map((text, i) => (
+                  <pre
+                    key={i}
+                    className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
+                    style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
+                  >
+                    {text}
+                  </pre>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {planLines.map((line) => (
+          <SoloPlanFold
+            key={line.key}
+            steps={line.planSteps!}
+            running={line.running}
+            defaultOpen
+          />
+        ))}
+        {showNextPlanning ? <NextPlanningPlaceholder /> : null}
       </div>
     );
   }
@@ -739,9 +968,14 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             <SoloEventLine
               key={line.key}
               line={line}
-              defaultOpen={expandDetails || !!(line.kind === 'summary' && line.running)}
+              defaultOpen={
+                expandDetails ||
+                !!(line.kind === 'summary' && line.running) ||
+                line.kind === 'plan'
+              }
             />
           ))}
+          {showNextPlanning ? <NextPlanningPlaceholder /> : null}
         </div>
       )}
     </div>

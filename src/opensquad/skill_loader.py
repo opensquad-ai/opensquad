@@ -388,6 +388,7 @@ def build_skills_prompt(skills: list[Skill], prompt_preload_cfg: dict[str, Any] 
             "- Use `agent_setup.read_skill(skill_name)` for one-time lookup.\n"
             "- Use `agent_setup.publish_skill(skill_dir)` to contribute a skill to the shared library for all agents to use (takes effect immediately, no restart needed).\n"
             "- When you find a skill that matches your current task, use `agent_setup.read_skill()` to load and apply it.\n"
+            "- If the user message includes `<user_send_skill>name</user_send_skill>`, treat that as an explicit request to apply that skill to the accompanying user text.\n"
         )
         for skill in summary_skills:
             desc = skill.description or "(no description)"
@@ -404,6 +405,65 @@ def build_skills_prompt(skills: list[Skill], prompt_preload_cfg: dict[str, Any] 
     result = "\n".join(sections)
     _build_skills_prompt_cache[cache_key] = result
     return result
+
+
+def expand_user_send_skill(user_text: str) -> str:
+    """
+    Expand <user_send_skill>name</user_send_skill> tags in a user message.
+
+    The UI composer may wrap a selected skill so the agent is instructed to
+    follow that skill for the accompanying user text. This expands the tag
+    into the skill's full SKILL.md content (when loaded) plus the remaining
+    user text, so behavior does not depend solely on the model calling
+    read_skill().
+    """
+    if not user_text or "<user_send_skill>" not in user_text.lower():
+        return user_text
+
+    pattern = re.compile(
+        r"<user_send_skill>\s*([^<]+?)\s*</user_send_skill>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(user_text)
+    if not match:
+        return user_text
+
+    skill_name = (match.group(1) or "").strip()
+    remainder = (user_text[: match.start()] + user_text[match.end() :]).strip()
+
+    skill_body = ""
+    skill_label = skill_name
+    for skill in get_loaded_skills():
+        if skill.name == skill_name or skill.display_name == skill_name:
+            skill_body = (skill.content or "").strip()
+            skill_label = skill.display_name or skill.name
+            break
+
+    if not skill_body:
+        # Keep the tag visible so the model can still try read_skill(name).
+        logger.warning(
+            "[skill_loader] user_send_skill '%s' not found in loaded skills; leaving tag for model",
+            skill_name,
+        )
+        hint = (
+            f"[User requested skill `{skill_name}` via <user_send_skill>. "
+            f"Call agent_setup.read_skill('{skill_name}') to load it, then follow the user's request.]\n\n"
+        )
+        return hint + (remainder if remainder else user_text)
+
+    parts = [
+        f"[User-selected skill: {skill_label} (`{skill_name}`)]",
+        "Follow the skill instructions below to complete the user's request.",
+        "",
+        "----- BEGIN SKILL -----",
+        skill_body,
+        "----- END SKILL -----",
+    ]
+    if remainder:
+        parts.extend(["", "[User request]", remainder])
+    else:
+        parts.extend(["", "[User request]", f"(Apply the `{skill_name}` skill.)"])
+    return "\n".join(parts)
 
 
 # ===================================================================

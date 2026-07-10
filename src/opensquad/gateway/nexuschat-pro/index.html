@@ -379,6 +379,29 @@
         animation: breathe-sleeping 4s ease-in-out infinite;
       }
 
+      /* Solo activity: soft white light sliding across live title text */
+      @keyframes solo-text-shimmer {
+        0% { background-position: 120% 0; }
+        100% { background-position: -120% 0; }
+      }
+      .solo-text-shimmer {
+        background-image: linear-gradient(
+          90deg,
+          currentColor 0%,
+          currentColor 38%,
+          color-mix(in srgb, #ffffff 88%, currentColor) 50%,
+          currentColor 62%,
+          currentColor 100%
+        );
+        background-size: 220% 100%;
+        background-repeat: no-repeat;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        color: transparent;
+        animation: solo-text-shimmer 1.7s ease-in-out infinite;
+      }
+
       html, body {
         margin: 0;
         padding: 0;

@@ -25,7 +25,7 @@ import {
 
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
-import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, SERVER_BASE_URL } from '../services/api';
+import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
@@ -536,6 +536,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [wsStatus, setWsStatus] = useState<AIWebSocketStatus>('disconnected');
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('disconnected');
   const [inputText, setInputText] = useState('');
+  /** Skill selected from the + menu; shown as /name chip until send/clear. */
+  const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
+  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const skillsLoadedRef = useRef(false);
   const [images, setImages] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -679,6 +684,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     images: string[];
     attachments: UploadedFile[];
     fileAtts: FileAttachment[];
+    skillDir?: string;
+    skillName?: string;
   }
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   // Collapse the queue list into a single line. Useful when the user has
@@ -2763,19 +2770,45 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
    * the timeline before the new turn — only desired for a live send, not for
    * flushing the pending queue.
    */
+  const loadSkillsIfNeeded = useCallback(async () => {
+    if (skillsLoadedRef.current || skillsLoading) return;
+    setSkillsLoading(true);
+    try {
+      const resp = await skillAPI.getSkills();
+      const list = Array.isArray(resp?.skills) ? resp.skills : [];
+      setAvailableSkills(
+        [...list].sort((a, b) =>
+          String(a.display_name || a.name || a.dir).localeCompare(
+            String(b.display_name || b.name || b.dir),
+            undefined,
+            { sensitivity: 'base' },
+          ),
+        ),
+      );
+      skillsLoadedRef.current = true;
+    } catch (err) {
+      console.error('[AIChatPage] Failed to load skills:', err);
+    } finally {
+      setSkillsLoading(false);
+    }
+  }, [skillsLoading]);
+
   const deliverMessage = useCallback((
     payload: {
       text: string;
       images: string[];
       attachments: UploadedFile[];
+      skillDir?: string;
+      skillName?: string;
     },
     opts?: { clearInputState?: boolean; salvageStream?: boolean },
   ) => {
-    const { text, images: imgState, attachments: attState } = payload;
+    const { text, images: imgState, attachments: attState, skillDir, skillName } = payload;
     const clearInputState = opts?.clearInputState ?? true;
     const salvageStream = opts?.salvageStream ?? true;
+    const skillId = (skillDir || '').trim();
 
-    if (!text && imgState.length === 0 && attState.length === 0) return;
+    if (!text && imgState.length === 0 && attState.length === 0 && !skillId) return;
 
     // Build attachment description to include in WS message text (for Agent)
     const nonImageAttachments = attState.filter(a => !a.is_image);
@@ -2787,6 +2820,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     ];
 
     let wsText = text;
+    if (skillId) {
+      const tag = `<user_send_skill>${skillId}</user_send_skill>`;
+      wsText = wsText ? `${tag}\n\n${wsText}` : tag;
+    }
     if (nonImageAttachments.length > 0) {
       const fileList = nonImageAttachments
         .map(a => {
@@ -2821,11 +2858,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       type: a.is_video ? 'video' : a.is_audio ? 'audio' : 'file',
     }));
 
+    // Display: show /skill chip text + user text (not the XML tag)
+    const displayText = skillId
+      ? (text ? `/${skillId} ${text}` : `/${skillId}`)
+      : text;
+
     // Add user message to timeline (display text without [File: ...],
     // attachments stored separately for card rendering)
     const userMsg: ChatMessage = {
       role: 'user',
-      content: text, // clean text without [File: ...] for display
+      content: displayText,
       timestamp: new Date().toISOString(),
       images: allImages.length > 0 ? allImages : undefined,
       attachments: fileAtts.length > 0 ? fileAtts : undefined,
@@ -2890,6 +2932,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (clearInputState) {
       // Clear input
       setInputText('');
+      setPendingSkill(null);
       setImages([]);
       setAttachments([]);
 
@@ -2953,7 +2996,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const handleSend = () => {
     const text = inputText.trim();
-    if (!text && images.length === 0 && attachments.length === 0) return;
+    const skillDir = pendingSkill?.dir || '';
+    if (!text && images.length === 0 && attachments.length === 0 && !skillDir) return;
 
     // When the agent is busy, park the message in the pending queue instead of
     // delivering immediately. It will be auto-sent once the agent returns to
@@ -2973,10 +3017,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             url: a.url,
             type: a.is_video ? 'video' : a.is_audio ? 'audio' : 'file',
           })),
+        skillDir: pendingSkill?.dir,
+        skillName: pendingSkill?.name,
       };
       setPendingMessages(prev => [...prev, snapshot]);
       // Clear the composer only — do not touch streaming state (agent is busy).
       setInputText('');
+      setPendingSkill(null);
       setImages([]);
       setAttachments([]);
       if (inputRef.current) {
@@ -2986,7 +3033,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
 
     deliverMessage(
-      { text, images, attachments },
+      {
+        text,
+        images,
+        attachments,
+        skillDir: pendingSkill?.dir,
+        skillName: pendingSkill?.name,
+      },
       { clearInputState: true, salvageStream: true },
     );
   };
@@ -3002,7 +3055,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // idle auto-flush.
     setPendingMessages(prev => prev.filter(m => m.id !== id));
     deliverMessage(
-      { text: target.text, images: target.images, attachments: target.attachments },
+      {
+        text: target.text,
+        images: target.images,
+        attachments: target.attachments,
+        skillDir: target.skillDir,
+        skillName: target.skillName,
+      },
       { clearInputState: false, salvageStream: false },
     );
   }, [deliverMessage]);
@@ -3024,7 +3083,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     isFlushingPendingRef.current = true;
     for (const msg of toFlush) {
       deliverMessage(
-        { text: msg.text, images: msg.images, attachments: msg.attachments },
+        {
+          text: msg.text,
+          images: msg.images,
+          attachments: msg.attachments,
+          skillDir: msg.skillDir,
+          skillName: msg.skillName,
+        },
         { clearInputState: false, salvageStream: false },
       );
     }
@@ -3051,7 +3116,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setPendingMessages([]);
     for (const msg of toFlush) {
       deliverMessage(
-        { text: msg.text, images: msg.images, attachments: msg.attachments },
+        {
+          text: msg.text,
+          images: msg.images,
+          attachments: msg.attachments,
+          skillDir: msg.skillDir,
+          skillName: msg.skillName,
+        },
         { clearInputState: false, salvageStream: false },
       );
     }
@@ -4075,7 +4146,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px]">
                   <SoloAttachMenu
                     disabled={isLoadingSession}
-                    cwdActive={!!agentCwd}
+                    skills={availableSkills}
+                    skillsLoading={skillsLoading}
+                    onOpenSkills={loadSkillsIfNeeded}
+                    onSelectSkill={(skill) => {
+                      const dir = (skill.dir || skill.name || '').trim();
+                      if (!dir) return;
+                      setPendingSkill({
+                        dir,
+                        name: skill.display_name || skill.name || dir,
+                      });
+                      // Focus composer so user can add follow-up text.
+                      requestAnimationFrame(() => inputRef.current?.focus());
+                    }}
                     onUploadFiles={() => {
                       const input = document.createElement('input');
                       input.type = 'file';
@@ -4131,28 +4214,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       input.click();
                     }}
                     onUploadImages={() => fileInputRef.current?.click()}
-                    onSetWorkingDir={async () => {
-                      try {
-                        const pickedPath = await pickFolderPath();
-                        if (!pickedPath) return;
-                        const dirName = agentProfile?.dir_name || agentId;
-                        await adminAPI.setWorkingDirectory(dirName, pickedPath);
-                        pushCwdRecent(pickedPath);
-                        setAgentCwd(pickedPath);
-                      } catch (err: any) {
-                        console.error('[AIChatPage] Failed to set working directory:', err);
-                        alert(`Failed to set working directory: ${err.message || err}`);
-                      }
-                    }}
                   />
                 </div>
+                {pendingSkill ? (
+                  <button
+                    type="button"
+                    onClick={() => setPendingSkill(null)}
+                    className="shrink-0 self-end mb-2 ml-0.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[13px] font-medium border-0 cursor-pointer"
+                    style={{ color: '#b08d57', background: 'color-mix(in srgb, #b08d57 12%, transparent)' }}
+                    title={`Remove skill /${pendingSkill.dir}`}
+                  >
+                    <span>/{pendingSkill.dir}</span>
+                    <X size={12} className="opacity-70" />
+                  </button>
+                ) : null}
                 <textarea
                   ref={inputRef}
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
-                  placeholder={isLoadingSession ? sessionLoadingLabel : 'Type a message...'}
+                  placeholder={
+                    isLoadingSession
+                      ? sessionLoadingLabel
+                      : pendingSkill
+                        ? 'Add details for this skill…'
+                        : 'Type a message...'
+                  }
                   disabled={isLoadingSession}
                   className={`flex-1 min-w-0 border-0 px-2 py-2 text-sm text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[38px] max-h-[120px] bg-transparent leading-5 ${
                     isLoadingSession ? 'text-textMuted cursor-not-allowed' : ''
@@ -4185,7 +4273,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     <>
                       <button
                         onClick={handleSend}
-                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
+                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
                         className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
                         title={t('aiChat.queueMessage')}
                       >
@@ -4202,7 +4290,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   ) : (
                     <button
                       onClick={handleSend}
-                      disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0)}
+                      disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
                       className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
                       title="Send"
                     >

@@ -808,6 +808,13 @@ class AgentRunner:
                         # Successful poll — reset cancel counter
                         self._cancel_count = 0
                 initial_query = user_input_data["content"]
+                if isinstance(initial_query, str) and "<user_send_skill>" in initial_query.lower():
+                    try:
+                        from opensquad.skill_loader import expand_user_send_skill
+
+                        initial_query = expand_user_send_skill(initial_query)
+                    except Exception as e:
+                        logger.warning(f"[Runner] expand_user_send_skill failed: {e}")
                 source = user_input_data.get("source", "unknown")
                 self._current_input_source = source
                 self._current_channel = user_input_data.get("channel", "")
