@@ -41,7 +41,7 @@ import {
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
 import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
-import { SoloActivityRow } from './ai-chat/SoloActivityRow';
+import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
 import { ToolCallBlock } from './ai-chat/ToolCallBlock';
@@ -3588,18 +3588,29 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 return -1;
               })();
-              const turnMs = i === lastIncompleteIdx ? turnStartedMs : undefined;
               if (isSolo) {
+                // Group consecutive workflow blocks into one outer fold (turn process).
+                if (i > 0 && timeline[i - 1].kind === 'workflow') return null;
+                const blocks: WorkflowBlock[] = [];
+                let j = i;
+                while (j < timeline.length && timeline[j].kind === 'workflow') {
+                  blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                  j += 1;
+                }
+                const merged = mergeWorkflowBlocks(blocks);
+                const groupHasIncomplete = blocks.some((b) => !b.completed);
+                const turnMs = groupHasIncomplete ? turnStartedMs : undefined;
                 return (
                   <SoloActivityRow
                     key={entryKey}
-                    block={entry.data}
+                    block={merged}
                     expandDetails={showWorkflow}
                     turnStartedMs={turnMs}
                   />
                 );
               }
               if (!showWorkflow) return null;
+              const turnMs = i === lastIncompleteIdx ? turnStartedMs : undefined;
               return (
                 <WorkflowBlockView
                   key={entryKey}
