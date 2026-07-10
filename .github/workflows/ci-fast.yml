@@ -92,6 +92,7 @@ jobs:
             tests/test_version_display.py \
             tests/test_version_channel.py \
             tests/test_system_config.py \
+            tests/test_session_manager_persistence.py::TestCompressSession \
             -v --tb=short -q --override-ini "addopts="
 
   frontend-smoke:
@@ -113,6 +114,7 @@ jobs:
         working-directory: src/opensquad/gateway/nexuschat-pro
         run: |
           npm install --no-package-lock
+          npm test
           npm run build
 
   secrets-scan:

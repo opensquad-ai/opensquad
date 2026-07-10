@@ -83,7 +83,8 @@ function pickAssetForPlatform(
   } else if (platform === 'darwin') {
     pattern = arch === 'arm64' ? /-mac-arm64\.dmg$/ : /-mac-x64\.dmg$/
   } else if (platform === 'linux') {
-    pattern = /-linux-x86_64\.AppImage$/
+    // electron-builder artifactName uses ${arch} → x64 (not x86_64)
+    pattern = /-linux-x64\.AppImage$/
   } else {
     return null
   }

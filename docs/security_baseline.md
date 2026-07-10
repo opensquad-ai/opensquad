@@ -1,34 +1,40 @@
 # Security Baseline
 
+OpenSquad runs two CI tracks. This document reflects what is actually enforced
+today (not aspirational targets).
+
+| Track | Workflow | When |
+|-------|----------|------|
+| Fast gate | [`ci-fast.yml`](../.github/workflows/ci-fast.yml) | Push to `main`/`dev`, PRs → `dev` |
+| Full gate | [`ci.yml`](../.github/workflows/ci.yml) | PRs → `main` (release gate) |
+
+---
+
 ## Static Analysis (SAST)
 
-**Tool**: bandit (CI job `sast`)
+**Tool**: bandit (CI job `sast` in `ci.yml`)
 
-**Current mode**: `--exit-zero` (informational, does not fail CI)
-
-**Target**: After 1 month of data collection, switch to strict mode:
-- High confidence + High severity → exit 1
-- All others → warnings only
+**Current mode**: strict — `--severity-level high --confidence-level high --exit-non-zero-on-failure`
 
 **Excluded checks**: B101 (assert statements — development use only)
+
+**ci-fast**: not run (keeps the daily gate cheap).
 
 ---
 
 ## Dependency Vulnerability Scan (SCA)
 
-**Tool**: pip-audit (CI job `sca`)
+**Tool**: pip-audit (CI job `sca` in `ci.yml`)
 
-**Current mode**: `--strict --progress-spinner=off` (reports but does not fail CI)
+**Current mode**: `--strict --progress-spinner=off` (fails the full gate on known issues)
 
-**Target**: After 1 month of data collection:
-- Known exploited CVEs → exit 1
-- All others → warnings only
+**ci-fast**: not run.
 
 ---
 
 ## CodeQL
 
-**Tool**: GitHub CodeQL (CI job `codeql`)
+**Tool**: GitHub CodeQL (CI job `codeql` in `ci.yml`)
 
 **Languages**: Python
 
@@ -36,13 +42,17 @@
 
 **Status**: Active, results visible in GitHub Security tab
 
+**ci-fast**: not run.
+
 ---
 
 ## Secrets Detection
 
-**Tool**: None (planned)
+**Tool**: gitleaks
 
-**Recommendation**: Add gitleaks or truffleHog to CI pipeline
+**Status**: Active in both `ci-fast.yml` (`secrets-scan`) and `ci.yml`
+
+**Config**: [`.gitleaks.toml`](../.gitleaks.toml)
 
 ---
 

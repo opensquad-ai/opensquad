@@ -4,7 +4,7 @@ import i18next from 'i18next';
 import { Bold, Italic, Link, List, Code, Smile, Folder, Paperclip, Send, X, Image as ImageIcon, Mic } from 'lucide-react';
 import { User } from '../types';
 import { parse } from 'marked';
-import { getAvatarUrl } from '../utils/image';
+import { AvatarImg } from './AvatarImg';
 
 interface MessageInputProps {
   value: string;
@@ -151,7 +151,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const onVoiceRecordRef = useRef(onVoiceRecord);
-  
+
   // 更新 ref 当 prop 变化时
   useEffect(() => {
     onVoiceRecordRef.current = onVoiceRecord;
@@ -271,13 +271,13 @@ export const MessageInput: React.FC<MessageInputProps> = ({
       alert(message);
     }
   };
-  
+
   // 停止录音
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      
+
       if (recordingTimerRef.current) {
         clearInterval(recordingTimerRef.current);
         recordingTimerRef.current = null;
@@ -338,7 +338,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
                 className="w-full text-left px-3 py-2 hover:bg-primary/10 flex items-center gap-2 transition-colors"
                 onClick={() => insertMention(user.name)}
               >
-                <img src={getAvatarUrl(user.avatar)} className="w-5 h-5 rounded-full" loading="lazy" />
+                <AvatarImg avatar={user.avatar} seed={user.id} label={user.name} className="w-5 h-5 rounded-full" />
                 <span className="text-sm text-textMain">{user.name}</span>
               </button>
             ))}
@@ -545,7 +545,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
           className="flex-1 px-2 py-1 md:px-3 md:py-2 h-[32px] md:h-[44px] max-h-[80px] md:max-h-[120px] resize-none focus:outline-none bg-bgLight border border-border rounded-md md:rounded-xl text-sm leading-relaxed min-w-0"
           rows={1}
         />
-        
+
         <button
           onClick={(e) => {
             e.preventDefault();
@@ -582,7 +582,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
           <Mic size={16} className="md:w-5 md:h-5" />
         </button>
       </div>
-      
+
       {/* 录制状态指示器 */}
       {isRecording && (
         <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-red-500 text-white px-3 py-1.5 rounded-full text-xs md:text-sm font-medium flex items-center gap-2 shadow-lg whitespace-nowrap z-50">

@@ -11,6 +11,17 @@ declare global {
       isMaximized?: () => Promise<boolean>
       pickWorkspaceFolder?: () => Promise<string | null>
       restartApp?: () => Promise<void>
+      checkForUpdates?: (channel?: 'stable' | 'beta') => Promise<{
+        hasUpdate: boolean
+        currentVersion: string
+        latestVersion: string
+        downloadUrl?: string
+        fileName?: string
+        releaseNotes?: string
+        isBeta: boolean
+        releaseUrl?: string
+        error?: string
+      }>
       downloadAndInstallUpdate?: (payload: {
         url: string
         fileName: string

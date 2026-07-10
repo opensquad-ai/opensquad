@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('electronEnv', {
   pickWorkspaceFolder: () =>
     ipcRenderer.invoke('electron:pick-workspace-folder') as Promise<string | null>,
   restartApp: () => ipcRenderer.invoke('electron:restart-app') as Promise<void>,
+  /** Manual update check; defaults to stable (beta reserved for future UI). */
+  checkForUpdates: (channel: 'stable' | 'beta' = 'stable') =>
+    ipcRenderer.invoke('electron:check-for-updates', channel),
   downloadAndInstallUpdate: (payload: { url: string; fileName: string }) =>
     ipcRenderer.invoke('electron:download-and-install-update', payload) as Promise<
       { ok: true } | { ok: false; error: string }

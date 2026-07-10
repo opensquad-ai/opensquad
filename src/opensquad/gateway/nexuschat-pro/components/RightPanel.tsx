@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { X, Search, Calendar, User as UserIcon, FileText, Image as ImageIcon, Video, File, LogOut, ArrowRight, Bell, BellOff, Copy, Check, MessageSquare, Edit2, Check as CheckIcon, Camera, Loader2, UserPlus } from 'lucide-react';
 import { Group, User, ChatState, Message, MessageType } from '../types';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
+import { AvatarImg } from './AvatarImg';
 import { uploadAPI, messageAPI, groupAPI } from '../services/api';
 
 interface RightPanelProps {
@@ -488,7 +489,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                           className="p-3 border-b border-border hover:bg-bgLight cursor-pointer transition-colors"
                         >
                           <div className="flex items-center gap-2 mb-1">
-                            <img src={getAvatarUrl(sender?.avatar)} className="w-5 h-5 rounded-full" alt="" loading="lazy" />
+                            <AvatarImg avatar={sender?.avatar} seed={sender?.id} label={sender?.name} className="w-5 h-5 rounded-full" alt="" />
                             <span className="text-xs font-semibold text-textMain truncate">{sender?.name}</span>
                             <span className="text-[10px] text-gray-400 ml-auto">
                               {new Date(msg.timestamp).toLocaleDateString('zh-CN')}
@@ -590,7 +591,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                           alert(err?.message || 'Failed to add agent');
                         }
                       }}>
-                      <img src={getAvatarUrl(a.avatar)} className="w-8 h-8 rounded-full bg-bgLight" loading="lazy" />
+                      <AvatarImg avatar={a.avatar} seed={a.id} label={a.name} className="w-8 h-8 rounded-full bg-bgLight" />
                       <span className="text-sm font-medium text-textMain">{a.name}</span>
                     </div>
                   ))}

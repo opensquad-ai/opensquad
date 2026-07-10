@@ -6,7 +6,7 @@ import { Message, User, Group, MessageType, Attachment } from '../types';
 import { MessageInput } from './MessageInput';
 import { uploadAPI, SERVER_BASE_URL, messageAPI } from '../services/api';
 import { parse } from 'marked';
-import { getAvatarUrl } from '../utils/image';
+import { AvatarImg } from './AvatarImg';
 
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
@@ -2223,7 +2223,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                             }}
                                         >
                                             <div className="flex items-center gap-2 mb-1">
-                                                <img src={getAvatarUrl(pSender?.avatar)} className="w-5 h-5 rounded-full" loading="lazy" />
+                                                <AvatarImg avatar={pSender?.avatar} seed={pSender?.id} label={pSender?.name} className="w-5 h-5 rounded-full" />
                                                 <span className="text-xs font-semibold text-textMain">{pSender?.name}</span>
                                                 <span className="text-[10px] text-textMuted ml-auto">{new Date(pm.timestamp).toLocaleDateString('zh-CN')}</span>
                                             </div>
@@ -2407,7 +2407,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     {/* Avatar */}
                     <div className="w-8 md:w-10 flex-shrink-0 flex flex-col items-center">
                         {!isSequence && (
-                            <img src={getAvatarUrl(sender?.avatar)} className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100" title={sender?.name} loading="lazy" />
+                            <AvatarImg avatar={sender?.avatar} seed={sender?.id} label={sender?.name} className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100" title={sender?.name} />
                         )}
                     </div>
 

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Bold, Italic, Link, List, Code, Smile, Eye, EyeOff } from 'lucide-react';
 import { User } from '../types';
 import { parse } from 'marked';
-import { getAvatarUrl } from '../utils/image';
+import { AvatarImg } from './AvatarImg';
 
 interface RichTextEditorProps {
   value: string;
@@ -76,7 +76,7 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange,
 
   return (
     <div className={`flex flex-col border rounded-xl bg-panel transition-colors duration-200 relative ${isFocused ? 'border-primary ring-1 ring-primary' : 'border-border'}`}>
-      
+
       {/* Mention Popup */}
       {showMentionList && groupMembers.length > 0 && (
           <div className="absolute bottom-full left-0 mb-2 w-48 bg-panel border border-border rounded-lg shadow-xl z-50 overflow-hidden animate-in fade-in slide-in-from-bottom-2">
@@ -88,7 +88,7 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange,
                         className="w-full text-left px-3 py-2 hover:bg-primary/10 flex items-center gap-2 transition-colors"
                         onClick={() => insertMention(user.name)}
                       >
-                          <img src={getAvatarUrl(user.avatar)} className="w-5 h-5 rounded-full" loading="lazy" />
+                          <AvatarImg avatar={user.avatar} seed={user.id} label={user.name} className="w-5 h-5 rounded-full" />
                           <span className="text-sm text-textMain">{user.name}</span>
                       </button>
                   ))}
@@ -152,7 +152,7 @@ export const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange,
         placeholder={placeholder}
         className="w-full p-3 min-h-[80px] max-h-[200px] resize-none focus:outline-none bg-transparent text-sm leading-relaxed"
       />
-      
+
       <div className="flex justify-between items-center p-2">
          <button className="text-textMuted hover:text-textMuted p-1"><Smile size={20} /></button>
          <span className="text-xs text-textMuted">Enter to send, Shift+Enter for new line</span>

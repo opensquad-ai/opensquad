@@ -14,7 +14,7 @@ import { ChatState, Message, MessageType, Attachment, Group, User } from './type
 import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
-import { getAvatarUrl } from './utils/image';
+import { AvatarImg } from './components/AvatarImg';
 import { setLanguage } from './i18n';
 
 // First-launch wizard — driven by the BACKEND, not localStorage.
@@ -1402,7 +1402,7 @@ const App: React.FC = () => {
 
                 <div className="p-6 flex flex-col items-center text-textMain">
                     <div className="relative mb-6 group">
-                        <img src={getAvatarUrl(editAvatar)} className="w-24 h-24 rounded-full object-cover border-4 border-border shadow-lg" alt="Avatar Preview" loading="lazy" />
+                        <AvatarImg avatar={editAvatar} className="w-24 h-24 rounded-full object-cover border-4 border-border shadow-lg" alt="Avatar Preview" />
                         <button
                             onClick={() => fileInputRef.current?.click()}
                             className="absolute bottom-0 right-0 p-2 bg-panel rounded-full shadow-md text-textMuted hover:text-primary transition-colors border border-border"

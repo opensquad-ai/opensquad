@@ -9,6 +9,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.4.12] | 2026-07-09 | [0.4.11 → 0.4.12](https://github.com/opensquad-ai/opensquad/compare/v0.4.11...v0.4.12) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.12) |
+| [0.4.11] | 2026-07-08 | [0.4.10 → 0.4.11](https://github.com/opensquad-ai/opensquad/compare/v0.4.10...v0.4.11) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.11) |
 | [0.4.3] | 2026-07-01 | [0.4.2 → 0.4.3](https://github.com/opensquad-ai/opensquad/compare/v0.4.2...v0.4.3) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.3) |
 | [0.4.2] | 2026-06-30 | [0.4.1 → 0.4.2](https://github.com/opensquad-ai/opensquad/compare/v0.4.1...v0.4.2) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.2) |
 | [0.4.1] | 2026-06-30 | [0.4.0 → 0.4.1](https://github.com/opensquad-ai/opensquad/compare/v0.4.0...v0.4.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.1) |
@@ -22,7 +24,67 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.3]. Will be folded into the next release section when cut.
+> Changes since [0.4.12]. Will be folded into the next release section when cut.
+
+### Fixed
+
+- **chat: context compression archive UI.** Chronological message/event archive,
+  tool_call/result atomic pairs, frontend hydration merge + tool-id dedup so
+  「已归档」 appears without refresh and without duplicated tool streams.
+- **chat: avatar local fallback.** Dicebear CDN defaults replaced with local SVG
+  initials; `AvatarImg` + `onError` across chat surfaces.
+- **session: working-directory signal.** Atomic `.session_cwd` write (`version: 1`,
+  `.tmp` + `os.replace`); shared read helper tolerates legacy files.
+- **desktop: Linux AppImage update asset match.** Updater regex aligned to
+  `-linux-x64.AppImage` (electron-builder `${arch}`).
+
+### Changed
+
+- **compress: auto/manual archive path unified.** Auto-compression uses the same
+  `compress_current_session` cut as manual (`keep_from_timestamp_ms` / keep
+  fraction from system config); dead `handle_auto_compression` removed.
+- **release: version sync.** `scripts/sync_version.py` also updates
+  `nexuschat-pro/package.json`; release flow is `pyproject` → sync → `uv lock`.
+
+---
+
+## [0.4.12] — 2026-07-09
+
+> Session working directory + desktop reload fixes.
+
+### Added
+
+- **session working directory.** Per-agent folder picker; tools/shell respect
+  session cwd for the current conversation.
+
+### Fixed
+
+- **desktop:** stop chat UI auto-reload loops after gateway restart; working-directory
+  API 405 on packaged Electron builds.
+
+---
+
+## [0.4.11] — 2026-07-08
+
+> Plugin uninstall robustness, websearch Playwright fixes, installer process kill.
+
+### Fixed
+
+- **plugins:** uninstall handles locked `.git` files; allow dots in plugin names.
+- **websearch:** Playwright driver/chromium install in frozen builds; Windows GBK
+  print crash; auto-start service.
+- **installer:** kill `run.exe` children before NSIS upgrade.
+- **config:** infer `model.api_protocol` in defaults; preserve protocol on save.
+
+---
+
+## [0.4.4]–[0.4.10] — 2026-07
+
+> Incremental desktop, gateway, and CI hardening between 0.4.3 and 0.4.11
+> (beta tags `v0.4.10beta.*` / `v0.4.11beta.*` included). Highlights: in-app
+> update polish, token analytics units, launcher health grace, frontend smoke
+> without `package-lock`, and assorted agent/runtime stability fixes. See
+> GitHub compare links on the release tags for full commit lists.
 
 ---
 
