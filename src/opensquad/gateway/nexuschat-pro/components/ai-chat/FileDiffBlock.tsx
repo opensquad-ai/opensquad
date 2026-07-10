@@ -16,7 +16,7 @@
  *   - Collapsed header: "编辑 routes.py  +68  -10"
  *   - Expanded: unified diff with syntax highlighted lines
  */
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, CheckCircle, XCircle, Loader2, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
 import hljs from 'highlight.js/lib/core';
@@ -525,12 +525,21 @@ interface FileDiffBlockProps {
   note?: string;
   /** Full result string for read_file — rendered as syntax-highlighted code */
   resultContent?: string;
+  /**
+   * Solo mode: parent owns the fold header. When true, always render the
+   * diff/body chrome without the FileDiffBlock header toggle.
+   */
+  embedded?: boolean;
 }
 
-export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note, resultContent }) => {
+export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note, resultContent, embedded = false }) => {
   const { t } = useTranslation();
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(embedded);
   const [expandedFolds, setExpandedFolds] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (embedded) setIsOpen(true);
+  }, [embedded]);
 
   const lang = useMemo(() => getLangForFile(info.fileName), [info.fileName]);
 
@@ -578,31 +587,34 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
   // ── Read operation: simple viewer ──────────────────────────
   if (info.kind === 'read') {
     const canExpand = !!resultContent;
+    const showBody = embedded ? !!resultContent : isOpen && !!resultContent;
     return (
       <div className="rounded-md border border-sky-500/20 bg-sky-500/5 overflow-hidden">
-        <div
-          className={`flex items-center gap-1.5 px-2 py-1.5 transition-colors select-none ${canExpand ? 'cursor-pointer hover:bg-sky-500/10' : ''}`}
-          onClick={() => canExpand && setIsOpen(!isOpen)}
-        >
-          {statusIcon}
-          <FileText size={11} className="text-textMuted flex-shrink-0" />
-          <span className="text-[11px] text-textMuted font-mono">{t('aiChat.readFile')}</span>
-          <span className="text-[11px] text-textMuted font-mono truncate flex-1">
-            {info.fileName}
-          </span>
-          {info.lineRange && (
-            <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono font-semibold flex-shrink-0">
-              {info.lineRange}
+        {!embedded && (
+          <div
+            className={`flex items-center gap-1.5 px-2 py-1.5 transition-colors select-none ${canExpand ? 'cursor-pointer hover:bg-sky-500/10' : ''}`}
+            onClick={() => canExpand && setIsOpen(!isOpen)}
+          >
+            {statusIcon}
+            <FileText size={11} className="text-textMuted flex-shrink-0" />
+            <span className="text-[11px] text-textMuted font-mono">{t('aiChat.readFile')}</span>
+            <span className="text-[11px] text-textMuted font-mono truncate flex-1">
+              {info.fileName}
             </span>
-          )}
-          {canExpand && (
-            isOpen
-              ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
-              : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
-          )}
-        </div>
-        {isOpen && resultContent && (
-          <div className="border-t border-sky-500/10">
+            {info.lineRange && (
+              <span className="text-[10px] text-sky-500 dark:text-sky-400 font-mono font-semibold flex-shrink-0">
+                {info.lineRange}
+              </span>
+            )}
+            {canExpand && (
+              isOpen
+                ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
+                : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
+            )}
+          </div>
+        )}
+        {showBody && resultContent && (
+          <div className={embedded ? '' : 'border-t border-sky-500/10'}>
             <div className="px-2 py-1 bg-black/20 border-b border-sky-500/10">
               <span className="text-[10px] text-textMuted font-mono">{info.filePath}</span>
               {info.lineRange && (
@@ -628,35 +640,37 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
   return (
     <div className="rounded-md border border-amber-500/20 bg-amber-500/5 overflow-hidden">
       {/* ── Header ── */}
-      <div
-        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-amber-500/10 transition-colors select-none"
-        onClick={() => setIsOpen(!isOpen)}
-      >
-        {statusIcon}
-        <OpIcon size={11} className="text-textMuted flex-shrink-0" />
-        <span className="text-[11px] text-textMuted font-mono">{opLabel}</span>
-        <span className="text-[11px] text-gray-700 dark:text-gray-200 font-mono font-semibold truncate flex-1">
-          {info.fileName}
-        </span>
-        {actualAdded > 0 && (
-          <span className="text-[11px] font-mono font-bold text-green-600 dark:text-green-400 flex-shrink-0">
-            +{actualAdded}
+      {!embedded && (
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-amber-500/10 transition-colors select-none"
+          onClick={() => setIsOpen(!isOpen)}
+        >
+          {statusIcon}
+          <OpIcon size={11} className="text-textMuted flex-shrink-0" />
+          <span className="text-[11px] text-textMuted font-mono">{opLabel}</span>
+          <span className="text-[11px] text-gray-700 dark:text-gray-200 font-mono font-semibold truncate flex-1">
+            {info.fileName}
           </span>
-        )}
-        {actualRemoved > 0 && (
-          <span className="text-[11px] font-mono font-bold text-red-500 dark:text-red-400 flex-shrink-0 ml-0.5">
-            -{actualRemoved}
-          </span>
-        )}
-        {isOpen
-          ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
-          : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
-        }
-      </div>
+          {actualAdded > 0 && (
+            <span className="text-[11px] font-mono font-bold text-green-600 dark:text-green-400 flex-shrink-0">
+              +{actualAdded}
+            </span>
+          )}
+          {actualRemoved > 0 && (
+            <span className="text-[11px] font-mono font-bold text-red-500 dark:text-red-400 flex-shrink-0 ml-0.5">
+              -{actualRemoved}
+            </span>
+          )}
+          {isOpen
+            ? <ChevronDown size={12} className="text-textMuted flex-shrink-0 ml-1" />
+            : <ChevronRight size={12} className="text-textMuted flex-shrink-0 ml-1" />
+          }
+        </div>
+      )}
 
       {/* ── Expanded diff ── */}
-      {isOpen && (
-        <div className="border-t border-amber-500/10">
+      {(embedded || isOpen) && (
+        <div className={embedded ? '' : 'border-t border-amber-500/10'}>
           {/* File path + note */}
           <div className="px-2 py-1.5 bg-black/20 border-b border-amber-500/10 space-y-0.5">
             <span className="block text-[10px] text-textMuted font-mono">{info.filePath}</span>
