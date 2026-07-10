@@ -175,11 +175,8 @@ const SoloEventLine: React.FC<{
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="group flex items-baseline gap-1.5 py-0.5 text-left w-full max-w-full bg-transparent border-0 p-0 cursor-pointer"
+        className="group inline-flex items-baseline gap-1 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
       >
-        <span className="text-[13px] text-textMuted/80 font-normal leading-relaxed shrink-0 w-3 text-center">
-          {open ? '⌄' : '>'}
-        </span>
         <span className="text-[13px] leading-relaxed text-textMain/80 min-w-0">
           <span className="font-normal">{line.primary}</span>
           {line.secondary ? (
@@ -189,9 +186,12 @@ const SoloEventLine: React.FC<{
             <span className="text-textMuted/45"> …</span>
           ) : null}
         </span>
+        <span className="text-[13px] text-textMuted/70 font-normal leading-relaxed shrink-0">
+          {open ? '⌄' : '>'}
+        </span>
       </button>
       {open && line.detail && (
-        <div className="pl-4 pr-1 pb-1.5 pt-0.5">
+        <div className="pl-0 pr-1 pb-1.5 pt-0.5">
           <pre className="text-[12px] leading-relaxed text-textMuted/75 whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto">
             {line.detail}
           </pre>
