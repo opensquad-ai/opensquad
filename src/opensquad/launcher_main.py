@@ -1117,7 +1117,6 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             Returns the agent's current session working directory (if set
             via the folder-picker UI) and the permanent workspace root.
             """
-            import json as _json
 
             agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
             if not os.path.isdir(agent_dir):
@@ -1125,14 +1124,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             # Read .session_cwd signal file (written by PUT handler)
             session_cwd = ""
-            cwd_file = os.path.join(agent_dir, ".session_cwd")
-            if os.path.isfile(cwd_file):
-                try:
-                    with open(cwd_file, encoding="utf-8") as f:
-                        data = _json.load(f)
-                        session_cwd = data.get("path", "")
-                except Exception:
-                    pass
+            try:
+                from opensquad.utils.session_cwd import read_session_cwd
+
+                data = read_session_cwd(agent_dir)
+                if data:
+                    session_cwd = data.get("path", "")
+            except Exception:
+                pass
 
             # Get permanent workspace root
             workspace_root = ""
@@ -1164,7 +1163,6 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             To reset back to the permanent workspace root, send
             ``{"path": ""}`` or ``{"path": null}``.
             """
-            import json as _json
 
             agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
             if not os.path.isdir(agent_dir):
@@ -1172,13 +1170,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             path = body.get("path", "").strip() if body else ""
 
-            cwd_file = os.path.join(agent_dir, ".session_cwd")
-
             if not path:
                 # Reset to workspace root: remove the signal file
                 try:
-                    if os.path.isfile(cwd_file):
-                        os.remove(cwd_file)
+                    from opensquad.utils.session_cwd import clear_session_cwd
+
+                    clear_session_cwd(agent_dir)
                 except Exception:
                     pass
                 _log.info(f"[Launcher] Reset working directory for agent '{name}' to workspace root")
@@ -1194,10 +1191,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             if not os.path.isdir(path):
                 return self._send_json({"error": f"Directory does not exist: {path}"}, 400)
 
-            # Write signal file
+            # Write signal file atomically
             try:
-                with open(cwd_file, "w", encoding="utf-8") as f:
-                    _json.dump({"path": os.path.abspath(path), "ts": time.time()}, f)
+                from opensquad.utils.session_cwd import write_session_cwd
+
+                payload = write_session_cwd(agent_dir, path)
             except Exception as e:
                 return self._send_json({"error": f"Failed to write session cwd file: {e}"}, 500)
 
@@ -1206,7 +1204,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 {
                     "status": "success",
                     "message": f"Working directory set to: {path}",
-                    "path": os.path.abspath(path),
+                    "path": payload.get("path") or os.path.abspath(path),
                 }
             )
 

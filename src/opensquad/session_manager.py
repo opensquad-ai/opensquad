@@ -604,22 +604,29 @@ class SessionManager:
         return str(tid) if tid else None
 
     def compress_current_session(
-        self, keep_ratio: float = 0.1, previous_summary: str = "", external_summary: str = ""
+        self,
+        keep_ratio: float | None = None,
+        previous_summary: str = "",
+        external_summary: str = "",
+        keep_from_timestamp_ms: float | None = None,
     ) -> dict[str, Any]:
-        """Compress session context based on token count.
+        """Compress session context based on token count or a timestamp cut.
 
-        Keeps the newest `keep_ratio` (default 10%) of tokens from messages + events.
-        Everything older is compressed into CONTEXT_SUMMARY.
-        No dependency on message count.
+        Keeps the newest `keep_ratio` of tokens from messages + events, unless
+        `keep_from_timestamp_ms` is set — then every unit whose newest item is
+        strictly before that timestamp is archived (aligns disk archive with
+        chat_api auto-compression's recent_start boundary).
 
-        Removed items are also stored in session_data["archived_messages"] /
-        ["archived_events"] (append-only, capped) so the frontend can still
-        display the original conversation in a collapsible section.
-
-        Items are ordered by timestamp (messages and events interleaved) so the
-        archive cut never splits a chronological turn. tool_call / tool_result
-        pairs that share an id are kept or archived atomically.
+        Removed items are stored in archived_messages / archived_events.
         """
+        if keep_ratio is None:
+            try:
+                from opensquad.system_config import syscfg
+
+                keep_ratio = float(syscfg.ctx_keep_recent_fraction())
+            except Exception:
+                keep_ratio = 0.1
+
         messages = list(self.session_data.get("messages", []))
         events = list(self.session_data.get("events", []))
 
@@ -693,15 +700,20 @@ class SessionManager:
         compressed_messages: list[dict[str, Any]] = []
         compressed_events: list[dict[str, Any]] = []
         budget = keep_tokens
+        used_timestamp_cut = keep_from_timestamp_ms is not None and keep_from_timestamp_ms < float("inf")
 
         # Walk units newest → oldest; each unit is kept or archived as a whole.
         # Prepend the whole unit (in chronological order) so tool_call stays
         # before its tool_result — per-item insert(0) would reverse pairs.
         for unit in reversed(units):
             unit_tokens = sum(it["tokens"] for it in unit)
-            keep_unit = budget > 0 and unit_tokens <= budget
-            if keep_unit:
-                budget -= unit_tokens
+            if used_timestamp_cut:
+                unit_newest_ts = max(it["ts"] for it in unit)
+                keep_unit = unit_newest_ts >= float(keep_from_timestamp_ms)
+            else:
+                keep_unit = budget > 0 and unit_tokens <= budget
+                if keep_unit:
+                    budget -= unit_tokens
             unit_msgs = [it["item"] for it in unit if it["kind"] == "message"]
             unit_evts = [it["item"] for it in unit if it["kind"] == "event"]
             if keep_unit:
@@ -710,6 +722,9 @@ class SessionManager:
             else:
                 compressed_messages = unit_msgs + compressed_messages
                 compressed_events = unit_evts + compressed_events
+
+        if used_timestamp_cut:
+            budget = sum(self._estimate_tokens(str(m.get("content", ""))) for m in kept_messages)
 
         summary_content = external_summary.strip() if external_summary else ""
         if not summary_content:
@@ -750,8 +765,9 @@ class SessionManager:
         return {
             "compressed": True,
             "total_tokens": total_tokens,
-            "kept_tokens": total_tokens - budget,
+            "kept_tokens": total_tokens - budget if not used_timestamp_cut else budget,
             "keep_ratio": keep_ratio,
+            "keep_from_timestamp_ms": keep_from_timestamp_ms,
             "compressed_messages": len(compressed_messages),
             "compressed_events": len(compressed_events),
             "kept_messages": len(kept_messages),

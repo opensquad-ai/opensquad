@@ -174,53 +174,6 @@ class LlmCallOrchestrator:
             elapsed_ms = int((__import__("time").perf_counter() - t0) * 1000)
             perf_event("runner", "llm_call_done", agent_id=getattr(self.runner, "_agent_id", ""), elapsed_ms=elapsed_ms)
 
-    async def handle_auto_compression(self) -> None:
-        if not getattr(self.runner.chat_api, "_auto_compressed", False):
-            return
-        summary = getattr(self.runner.chat_api, "_latest_summary", "")
-        # Mirror runner: persist archived_* so the UI can show "已归档".
-        prev = summary or ""
-        self.runner._session_manager.compress_current_session(
-            keep_ratio=0.1,
-            previous_summary=prev,
-            external_summary=summary or "",
-        )
-        if summary:
-            self.runner.chat_api._latest_summary = summary
-            summary_event = {
-                "event": "context_summary_generated",
-                "text": "Context auto-compacted",
-                "summary": summary,
-            }
-            self.runner._session_manager.add_event(
-                "info", summary_event, turn_id=self.runner._current_turn, round_id=self.runner._current_round
-            )
-            self.runner._session_manager.add_message("system", summary, msg_type="context_summary")
-            self.runner._session_manager.session_data["latest_summary"] = summary
-            await self.runner._emit("info", summary_event)
-            summary_stream_id = f"auto_compress_{self.runner._session_manager.get_current_session_id()}"
-            await self.runner._emit(
-                "summary_stream",
-                {"id": summary_stream_id, "delta": summary, "text": summary, "done": True, "trace_id": "auto"},
-            )
-
-        self.runner._context_builder._has_prompt_snapshot = False
-        await self.runner._setup_prompt()
-        sid = self.runner._session_manager.get_current_session_id()
-        history_data = {
-            "messages": self.runner._session_manager.get_messages(),
-            "events": self.runner._session_manager.get_events(),
-            "session_id": sid,
-            "is_working_session": True,
-        }
-        history_data["reason"] = "compression"
-        await self.runner._bus.emit_async("history_sync", history_data)
-        await self.runner._bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
-        await self.runner._bus.emit_async("session_list", self.runner._session_manager.get_session_list())
-        # Do NOT emit turn_elapsed mid tool-loop — see runner auto-compression note.
-        await self.runner._broadcast_token_stats()
-        self.runner.chat_api._auto_compressed = False
-
     async def normalize_response(self, ai_response: Any) -> LlmNormalizedResponse:
         if isinstance(ai_response, dict):
             response_text = ai_response.get("text", "")

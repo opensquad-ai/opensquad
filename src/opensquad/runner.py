@@ -1069,7 +1069,7 @@ class AgentRunner:
                     )
 
                     result = _get_session_manager().compress_current_session(
-                        keep_ratio=0.1, previous_summary=prev_summary, external_summary=summary_text
+                        previous_summary=prev_summary, external_summary=summary_text
                     )
                     if result.get("compressed"):
                         self.chat_api._latest_summary = result.get("summary_content", "")
@@ -1713,13 +1713,31 @@ class AgentRunner:
                 # --- Auto-compression post-processing ---
                 if getattr(self.chat_api, "_auto_compressed", False):
                     _summary = getattr(self.chat_api, "_latest_summary", "")
-                    # Persist archive on disk so the UI can show the collapsible
-                    # "已归档" section (chat_api only compacted self.req before).
-                    _prev = getattr(self.chat_api, "_latest_summary", "") or ""
+                    _stats = getattr(self.chat_api, "_auto_compress_stats", {}) or {}
+                    _prev = (_stats.get("previous_summary") or "").strip()
+                    # Align disk archive cut with chat_api recent_start when possible.
+                    keep_from_ms = None
+                    first_role = _stats.get("first_kept_role") or ""
+                    first_content = (_stats.get("first_kept_content") or "").strip()
+                    if first_role and first_content:
+                        for m in _get_session_manager().get_messages() or []:
+                            if (m.get("role") or "") != first_role:
+                                continue
+                            mc = str(m.get("content") or "").strip()
+                            if not mc:
+                                continue
+                            if mc[:240] == first_content or first_content in mc or mc[:120] in first_content:
+                                keep_from_ms = _get_session_manager()._item_timestamp_ms(m)
+                                if keep_from_ms == float("inf"):
+                                    keep_from_ms = None
+                                break
+                    from opensquad.system_config import syscfg as _syscfg
+
                     _get_session_manager().compress_current_session(
-                        keep_ratio=0.1,
+                        keep_ratio=_syscfg.ctx_keep_recent_fraction(),
                         previous_summary=_prev,
                         external_summary=_summary or "",
+                        keep_from_timestamp_ms=keep_from_ms,
                     )
                     if _summary:
                         self.chat_api._latest_summary = _summary

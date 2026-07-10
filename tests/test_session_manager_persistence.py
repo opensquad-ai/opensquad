@@ -364,3 +364,24 @@ class TestCompressSession:
         assert not any(e.get("type") == "thought" for e in live_evts), (
             "old thought must not remain live after its message was archived"
         )
+
+    def test_compress_keep_from_timestamp_ms_cut(self, sm):
+        """Timestamp cut archives units strictly before the keep boundary."""
+        sm.add_message("user", "old-a-" + ("x" * 50))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:00:00+00:00"
+        sm.add_message("assistant", "old-b-" + ("y" * 50))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:00:30+00:00"
+        sm.add_message("user", "keep-me-" + ("z" * 50))
+        sm.session_data["messages"][-1]["timestamp"] = "2024-01-01T00:01:00+00:00"
+
+        cut_ms = 1_704_067_260_000.0  # 2024-01-01T00:01:00Z
+        result = sm.compress_current_session(keep_from_timestamp_ms=cut_ms)
+
+        live = sm.get_messages()
+        archived = sm.session_data.get("archived_messages") or []
+        assert result["compressed"] is True
+        assert any("keep-me-" in (m.get("content") or "") for m in live)
+        assert all("keep-me-" not in (m.get("content") or "") for m in archived)
+        assert any("old-a-" in (m.get("content") or "") for m in archived)
+        assert any("old-b-" in (m.get("content") or "") for m in archived)
+        assert len(live) + len(archived) == 3

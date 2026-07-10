@@ -973,6 +973,10 @@ class ChatAPI:
             _t2 - _t1,
         )
 
+        # Capture prior summary BEFORE overwriting — runner needs it for
+        # compress_current_session(previous_summary=...).
+        previous_summary_snapshot = (getattr(self, "_latest_summary", "") or "").strip()
+
         self._latest_summary = f"[Context summary | Compressed {dropped_count} messages]\n{summary_content}"
 
         compacted_req = [system_msg]
@@ -1012,6 +1016,28 @@ class ChatAPI:
                 f"[CompressTrace] Preserved _prev_reasoning_content after auto-compression, len={len(_last_reasoning)}"
             )
 
+        # Fingerprint of the first kept recent message so runner can align the
+        # disk archive cut with this recent_start boundary.
+        first_kept_role = ""
+        first_kept_content = ""
+        for m in recent_msgs:
+            role = m.get("role") or ""
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        parts.append(str(item.get("text") or ""))
+                content = "\n".join(parts)
+            content = str(content or "").strip()
+            if not content:
+                continue
+            first_kept_role = role
+            first_kept_content = content[:240]
+            break
+
         # Signal auto-compression to runner (which will emit summary_stream + history_sync)
         self._auto_compressed = True
         self._auto_compress_stats = {
@@ -1021,7 +1047,12 @@ class ChatAPI:
             "messages_after": len(self.req),
             "dropped_count": dropped_count,
             "summarize_range": [start_scan, end_scan],
+            "recent_start": recent_start,
             "recent_tokens": recent_token_sum,
+            "keep_frac": keep_frac,
+            "previous_summary": previous_summary_snapshot,
+            "first_kept_role": first_kept_role,
+            "first_kept_content": first_kept_content,
         }
         logger.info(
             "[CompressTrace] auto-compression COMPLETE (total_elapsed=%.2fs): %d -> %d tokens, %d messages retained",

@@ -47,10 +47,11 @@ class InputHub:
         if not self.agent_dir:
             logger.debug("[InputHub] _check_session_cwd: agent_dir not set, skipping")
             return
-        import json as _json
         import os as _os
 
-        cwd_file = _os.path.join(self.agent_dir, ".session_cwd")
+        from opensquad.utils.session_cwd import read_session_cwd, session_cwd_path
+
+        cwd_file = session_cwd_path(self.agent_dir)
         if not _os.path.isfile(cwd_file):
             try:
                 from opensquad._context import get_current_context
@@ -65,13 +66,10 @@ class InputHub:
                 logger.debug(f"[InputHub] _check_session_cwd reset skipped: {e}")
             return
 
-        try:
-            with open(cwd_file, encoding="utf-8") as f:
-                data = _json.load(f)
-            new_cwd = data.get("path", "").strip()
-        except Exception as e:
-            logger.warning(f"[InputHub] _check_session_cwd: failed to read {cwd_file}: {e}")
+        data = read_session_cwd(self.agent_dir)
+        if not data:
             return
+        new_cwd = (data.get("path") or "").strip()
 
         if not new_cwd or not _os.path.isdir(new_cwd):
             logger.warning(
