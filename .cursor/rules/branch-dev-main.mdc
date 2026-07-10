@@ -1,0 +1,11 @@
+---
+description: Always develop on dev; merge to main after verified; keep both in sync
+alwaysApply: true
+---
+
+# Branch workflow (dev → main)
+
+- **Default branch for all development**: `dev`. Before starting work, check out `dev` and pull; do not commit feature work on `main`.
+- **After changes are tested and look good**: merge `dev` into `main` (fast-forward when possible) and push **both** `origin/dev` and `origin/main` so they stay aligned.
+- **After any update/push**: ensure `dev` and `main` point at the same commit (or merge immediately); do not leave them diverged.
+- Prefer: develop on `dev` → verify → merge to `main` → push both. Avoid developing on `main` then back-merging to `dev` unless recovering from an accidental main-only push.
