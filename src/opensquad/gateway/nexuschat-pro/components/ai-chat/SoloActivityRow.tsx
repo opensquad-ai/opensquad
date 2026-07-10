@@ -196,24 +196,32 @@ const SoloEventLine: React.FC<{
   defaultOpen?: boolean;
 }> = ({ line, defaultOpen = false }) => {
   const [open, setOpen] = useState(defaultOpen);
+  const isThought = line.kind === 'thought';
 
   useEffect(() => {
     if (defaultOpen) setOpen(true);
   }, [defaultOpen]);
 
   return (
-    <div className="w-full select-text">
+    <div className={`w-full select-text ${isThought && open ? 'rounded-sm bg-black/[0.03] dark:bg-white/[0.04] px-1.5 py-1 -mx-0.5' : ''}`}>
       <TextChevronToggle
         primary={line.primary}
         secondary={line.secondary}
         open={open}
         onToggle={() => setOpen((v) => !v)}
         running={line.running}
-        muted
+        // Thought title stays readable; body below is intentionally washed out.
+        muted={!isThought}
       />
       {open && line.detail && (
-        <div className="pl-0 pr-1 pb-1.5 pt-0.5">
-          <pre className="text-[12px] leading-relaxed text-textMuted/75 whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto">
+        <div className="pl-0 pr-1 pb-0.5 pt-0.5">
+          <pre
+            className={`text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto ${
+              isThought
+                ? 'text-textMuted/45 dark:text-textMuted/40'
+                : 'text-textMuted/70'
+            }`}
+          >
             {line.detail}
           </pre>
         </div>
