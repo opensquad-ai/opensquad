@@ -255,9 +255,40 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning(f"[ContextBuilder] on_before_prompt hook error: {e}")
 
-        # Anti-repetition reminder
-        if not final.endswith(self._REPETITION_REMINDER):
+        # Agent Plan/Build mode instructions + tool schema gate
+        try:
+            from opensquad.agent_mode import (
+                MODE_PLAN,
+                apply_plan_gate_to_llm_params,
+                get_current_mode,
+                mode_prompt_section,
+            )
+
+            mode = get_current_mode()
+            mode_section = mode_prompt_section(mode)
+            if mode_section and mode_section not in final:
+                final += "\n\n" + mode_section
+            apply_plan_gate_to_llm_params(llm_params, mode)
+        except Exception as e:
+            logger.warning(f"[ContextBuilder] agent_mode injection error: {e}")
+
+        # Anti-repetition reminder (skip shell guidance in Plan mode)
+        try:
+            from opensquad.agent_mode import MODE_PLAN, get_current_mode
+
+            in_plan = get_current_mode() == MODE_PLAN
+        except Exception:
+            in_plan = False
+        if not in_plan and not final.endswith(self._REPETITION_REMINDER):
             final += self._REPETITION_REMINDER
+        elif in_plan:
+            plan_reminder = (
+                "\n\n[STRICT OPERATIONAL RULES]\n"
+                "1. ANTI-REPETITION: Do NOT repeat previous sentences.\n"
+                "2. PLAN MODE: Do not attempt file edits or shell commands; tools are blocked.\n"
+            )
+            if not final.endswith(plan_reminder):
+                final += plan_reminder
 
         # Change detection
         prev_prompt = self.chat_api.get_system_prompt()

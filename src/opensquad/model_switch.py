@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 # Event name for the (untyped) bus channel.  Matches the codebase convention of
 # bare-string event names with dict payloads for runtime control events.
 EVENT_MODEL_SWITCH_REQUESTED = "model.switch.requested"
+EVENT_REASONING_EFFORT_REQUESTED = "model.reasoning_effort.requested"
+EVENT_AGENT_MODE_REQUESTED = "agent.mode.requested"
 
 # Module-level handles, injected once at boot via init().  The AgentRunner
 # instance is reused across runner-task restarts (see agent_boot_phases.
@@ -65,6 +67,8 @@ def init(runner, config_path: str = "") -> None:
         _config_path = config_path
     if not _initialized:
         bus.subscribe(EVENT_MODEL_SWITCH_REQUESTED, _on_switch_requested)
+        bus.subscribe(EVENT_REASONING_EFFORT_REQUESTED, _on_reasoning_effort_requested)
+        bus.subscribe(EVENT_AGENT_MODE_REQUESTED, _on_agent_mode_requested)
         _initialized = True
         logger.info(
             "[model_switch] Coordinator registered (config_path=%s).",
@@ -256,6 +260,22 @@ async def switch_to_card(card_name: str) -> dict:
         logger.warning("[model_switch] %s", e)
         return {"ok": False, "error": str(e)}
 
+    # Preserve session reasoning_effort across card switches when the card
+    # does not define its own default.
+    try:
+        chat_api = getattr(_runner, "chat_api", None) if _runner else None
+        current_effort = getattr(chat_api, "reasoning_effort", None) if chat_api else None
+        if current_effort and "reasoning_effort" not in new_cfg:
+            new_cfg["reasoning_effort"] = current_effort
+        elif _config_path and os.path.isfile(_config_path) and "reasoning_effort" not in new_cfg:
+            with open(_config_path, encoding="utf-8") as f:
+                prev = json.load(f)
+            prev_effort = (prev.get("model") or {}).get("reasoning_effort")
+            if prev_effort:
+                new_cfg["reasoning_effort"] = prev_effort
+    except Exception:
+        pass
+
     model_name = new_cfg.get("model_name", "?")
     # api_protocol: API 协议类型 (openai / openai_compat / claude / google)
     api_protocol = new_cfg.get("api_protocol", "?")
@@ -301,6 +321,182 @@ async def switch_to_card(card_name: str) -> dict:
         api_protocol,
     )
     return {"ok": True, "card": card_name, "model": model_name, "api_protocol": api_protocol}
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort (thinking depth) — Cursor-style low/medium/high
+# ---------------------------------------------------------------------------
+async def apply_reasoning_effort(effort: str) -> dict:
+    """Update live chat_api reasoning_effort and persist to config.json."""
+    from opensquad.reasoning_effort import effort_to_claude_budget, normalize_effort
+
+    if _runner is None:
+        return {"ok": False, "error": "model_switch not initialised (no runner)"}
+
+    effort_n = normalize_effort(effort)
+    chat_api = getattr(_runner, "chat_api", None)
+    if chat_api is None:
+        return {"ok": False, "error": "no chat_api"}
+
+    try:
+        chat_api.reasoning_effort = effort_n
+        if getattr(chat_api, "is_think", False) and hasattr(chat_api, "thinking_budget_tokens"):
+            chat_api.thinking_budget_tokens = effort_to_claude_budget(effort_n)
+    except Exception as e:
+        logger.warning("[model_switch] Failed to apply reasoning_effort on chat_api: %s", e)
+        return {"ok": False, "error": str(e)}
+
+    # Soft-update delegate cfg so new sub-agents inherit the effort
+    try:
+        from .tools.delegate import get_chat_api_cfg, set_chat_api_cfg
+
+        cfg = dict(get_chat_api_cfg() or {})
+        if cfg:
+            cfg["reasoning_effort"] = effort_n
+            if cfg.get("is_think"):
+                cfg["thinking_budget_tokens"] = effort_to_claude_budget(effort_n)
+            set_chat_api_cfg(cfg)
+    except Exception:
+        pass
+
+    # Persist into config.json model section without replacing the whole card
+    if _config_path and os.path.isfile(_config_path):
+        try:
+            with open(_config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            model = cfg.get("model") or {}
+            if not isinstance(model, dict):
+                model = {}
+            model["reasoning_effort"] = effort_n
+            if model.get("is_think"):
+                model["thinking_budget_tokens"] = effort_to_claude_budget(effort_n)
+            cfg["model"] = model
+            with open(_config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            if _runner is not None:
+                _runner._config_mtime = os.path.getmtime(_config_path)
+        except Exception as e:
+            logger.warning("[model_switch] Failed to persist reasoning_effort: %s", e)
+
+    try:
+        await bus.emit_async(
+            "info",
+            {
+                "event": "reasoning_effort_changed",
+                "effort": effort_n,
+                "text": f"Reasoning effort set to {effort_n}",
+            },
+        )
+    except Exception as e:
+        logger.warning("[model_switch] reasoning_effort info emit failed: %s", e)
+
+    logger.info("[model_switch] reasoning_effort=%s", effort_n)
+    return {"ok": True, "effort": effort_n}
+
+
+async def _on_reasoning_effort_requested(data: dict) -> None:
+    if not isinstance(data, dict):
+        return
+    effort = data.get("effort") or data.get("reasoning_effort")
+    if not effort:
+        logger.warning("[model_switch] reasoning_effort requested with no effort: %s", data)
+        return
+    await apply_reasoning_effort(str(effort))
+
+
+# ---------------------------------------------------------------------------
+# Agent Plan / Build mode
+# ---------------------------------------------------------------------------
+async def apply_agent_mode(mode: str, *, approved_request_id: str | None = None) -> dict:
+    """Set Plan/Build mode on the running agent and persist to config.json."""
+    from opensquad.agent_mode import normalize_mode, set_current_mode
+
+    if _runner is None:
+        return {"ok": False, "error": "model_switch not initialised (no runner)"}
+
+    mode_n = normalize_mode(mode)
+    try:
+        _runner.agent_mode = mode_n
+        set_current_mode(mode_n)
+        # Clear tool schema cache so next turn regenerates (filter still applied in ContextBuilder)
+        tr = getattr(_runner, "tool_registry", None)
+        if tr is not None and hasattr(tr, "_openai_tools_cache"):
+            tr._openai_tools_cache.clear()
+    except Exception as e:
+        logger.warning("[model_switch] Failed to apply agent_mode: %s", e)
+        return {"ok": False, "error": str(e)}
+
+    if _config_path and os.path.isfile(_config_path):
+        try:
+            with open(_config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg["agent_mode"] = mode_n
+            with open(_config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            _runner._config_mtime = os.path.getmtime(_config_path)
+        except Exception as e:
+            logger.warning("[model_switch] Failed to persist agent_mode: %s", e)
+
+    payload = {
+        "event": "agent_mode_changed",
+        "mode": mode_n,
+        "text": f"Agent mode set to {mode_n}",
+    }
+    if approved_request_id:
+        payload["approved_request_id"] = approved_request_id
+        payload["event"] = "mode_switch_resolved"
+        payload["status"] = "approved"
+        payload["id"] = approved_request_id
+        payload["to_mode"] = mode_n
+
+    try:
+        await bus.emit_async("info", payload)
+        if approved_request_id:
+            # Also emit a plain mode change for UI state sync
+            await bus.emit_async(
+                "info",
+                {
+                    "event": "agent_mode_changed",
+                    "mode": mode_n,
+                    "text": f"Agent mode set to {mode_n}",
+                },
+            )
+    except Exception as e:
+        logger.warning("[model_switch] agent_mode info emit failed: %s", e)
+
+    logger.info("[model_switch] agent_mode=%s", mode_n)
+    return {"ok": True, "mode": mode_n}
+
+
+async def deny_mode_switch(request_id: str, reason: str = "") -> dict:
+    try:
+        await bus.emit_async(
+            "info",
+            {
+                "event": "mode_switch_resolved",
+                "id": request_id,
+                "status": "denied",
+                "reason": reason or "User denied",
+                "text": "Mode switch denied",
+            },
+        )
+    except Exception as e:
+        logger.warning("[model_switch] deny emit failed: %s", e)
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+async def _on_agent_mode_requested(data: dict) -> None:
+    if not isinstance(data, dict):
+        return
+    if data.get("action") == "deny":
+        await deny_mode_switch(str(data.get("id") or ""), str(data.get("reason") or ""))
+        return
+    mode = data.get("mode") or data.get("agent_mode")
+    if not mode:
+        logger.warning("[model_switch] agent_mode requested with no mode: %s", data)
+        return
+    await apply_agent_mode(str(mode), approved_request_id=data.get("id") or data.get("approved_request_id"))
 
 
 # ---------------------------------------------------------------------------

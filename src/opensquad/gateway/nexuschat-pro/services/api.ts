@@ -1510,7 +1510,7 @@ export interface ModelCardInfo {
   frequency_penalty?: number;
   presence_penalty?: number;
   top_k?: number;
-  is_think: boolean;
+  is_think?: boolean;
   is_image: boolean;
   is_audio: boolean;
   is_video: boolean;

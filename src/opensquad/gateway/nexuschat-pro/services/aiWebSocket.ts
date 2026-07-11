@@ -203,6 +203,25 @@ class AIWebSocketService {
     this._sendCommand('switch_model', { card: cardName });
   }
 
+  /** Set Cursor-style reasoning effort (low | medium | high) on the running agent. */
+  setReasoningEffort(effort: 'low' | 'medium' | 'high') {
+    this._sendCommand('set_reasoning_effort', { effort });
+  }
+
+  /** Set Plan / Build agent mode. Optionally pass approval request id. */
+  setAgentMode(mode: 'plan' | 'build', approvedRequestId?: string) {
+    this._sendCommand('set_agent_mode', {
+      mode,
+      id: approvedRequestId,
+      approved_request_id: approvedRequestId,
+    });
+  }
+
+  /** Deny an agent-requested mode switch. */
+  denyModeSwitch(requestId: string, reason?: string) {
+    this._sendCommand('deny_mode_switch', { id: requestId, reason: reason || '' });
+  }
+
   /**
    * Switch to a session and send a message.
    * If content is empty, just switches to the session without sending a message.

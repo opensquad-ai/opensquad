@@ -520,6 +520,27 @@ class ToolRegistry:
 
         args = args or {}
 
+        # Plan-mode gate (defense-in-depth; schema is also filtered)
+        try:
+            from opensquad.agent_mode import (
+                MODE_PLAN,
+                get_current_mode,
+                is_tool_blocked_in_plan,
+                plan_block_message,
+            )
+
+            # Always allow the mode-switch request tool
+            canon = tool_name.replace(".", "__") if "." in tool_name and "__" not in tool_name else tool_name
+            if get_current_mode() == MODE_PLAN and canon not in (
+                "agent_mode__request_switch",
+                "agent_mode.request_switch",
+            ):
+                if is_tool_blocked_in_plan(tool_name):
+                    tc_log.warning("[registry.call] Blocked in Plan mode: %s", tool_name)
+                    return plan_block_message(tool_name)
+        except Exception as e:
+            logger.debug("[registry.call] Plan gate skipped: %s", e)
+
         if tool_name == "help.get_tool_help":
             return self.get_tool_help(args.get("namespace", ""))
 

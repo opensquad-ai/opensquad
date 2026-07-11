@@ -49,6 +49,9 @@ import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
+import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
+import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
+import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
@@ -302,6 +305,28 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
             return null;
           }
 
+          // Plan ↔ Build approval — interactive card lives above the composer;
+          // timeline shows a compact status line.
+          if (infoObj?.event === 'mode_switch_approval') {
+            const fromL = infoObj.from_mode === 'plan' ? 'Plan' : 'Build';
+            const toL = infoObj.to_mode === 'plan' ? 'Plan' : 'Build';
+            return (
+              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
+                Mode switch requested: {fromL} → {toL}
+                {infoObj.reason ? ` — ${infoObj.reason}` : ''}
+              </div>
+            );
+          }
+          if (infoObj?.event === 'mode_switch_resolved') {
+            const st = infoObj.status === 'denied' ? 'Denied' : 'Approved';
+            const toL = (infoObj.to_mode || infoObj.mode) === 'plan' ? 'Plan' : 'Build';
+            return (
+              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
+                Mode switch {st.toLowerCase()}: now {toL}
+              </div>
+            );
+          }
+
           // --- Task Supervisor check-in: special badge rendering ---
           if (infoObj?.event === 'task_supervisor_checkin') {
             const stall = infoObj.stall_count || 0;
@@ -550,6 +575,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // the selected <option> even when two cards from different vendors share the
   // same model_name (model_name alone is not a unique identity).
   const [currentCardName, setCurrentCardName] = useState<string | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
+  const [agentMode, setAgentMode] = useState<AgentMode>('build');
+  const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
   /** Default workspace root from agent (used when user never picks a folder). */
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
@@ -876,11 +904,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const ap: string | undefined = cfg?.config?.model?.api_protocol;
           const pv: string | undefined = cfg?.config?.model?.provider;
           const card: string | undefined = cfg?.config?.model?._card;
+          const effortRaw: string | undefined = cfg?.config?.model?.reasoning_effort;
           const runtimeWd: string | undefined = (cfg as any)?.runtime_working_directory;
           if (mn) setModelName(mn);
           if (ap) setAgentApiProtocol(ap);
           if (pv) setAgentProvider(pv);
           if (card) setCurrentCardName(card);
+          if (effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high') {
+            setReasoningEffort(effortRaw);
+          }
+          const modeRaw: string | undefined = cfg?.config?.agent_mode;
+          if (modeRaw === 'plan' || modeRaw === 'build') {
+            setAgentMode(modeRaw);
+          }
           if (runtimeWd) {
             setDefaultCwd(runtimeWd);
             setAgentCwd((prev) => prev || runtimeWd);
@@ -1571,6 +1607,55 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (typeof switchedModel === 'string' && switchedModel) setModelName(switchedModel);
           if (typeof switchedCard === 'string' && switchedCard) setCurrentCardName(switchedCard);
           setSwitchingModel(false);
+        }
+
+        if (evt === 'reasoning_effort_changed') {
+          const next = (detailed as any).effort;
+          if (next === 'low' || next === 'medium' || next === 'high') {
+            setReasoningEffort(next);
+          }
+          return; // don't spam timeline
+        }
+
+        if (evt === 'mode_switch_approval') {
+          const id = String((detailed as any).id || '');
+          const fromMode = (detailed as any).from_mode;
+          const toMode = (detailed as any).to_mode;
+          if (id && (toMode === 'plan' || toMode === 'build')) {
+            const approval: ModeSwitchApproval = {
+              id,
+              from_mode: fromMode === 'plan' || fromMode === 'build' ? fromMode : 'build',
+              to_mode: toMode,
+              reason: String((detailed as any).reason || (detailed as any).text || ''),
+              status: 'pending',
+            };
+            setModeApprovals((prev) => {
+              if (prev.some((a) => a.id === id)) return prev;
+              return [...prev, approval];
+            });
+          }
+          // Fall through so the timeline also shows the approval card
+        }
+
+        if (evt === 'agent_mode_changed') {
+          const next = (detailed as any).mode;
+          if (next === 'plan' || next === 'build') setAgentMode(next);
+          return;
+        }
+
+        if (evt === 'mode_switch_resolved') {
+          const id = String((detailed as any).id || (detailed as any).approved_request_id || '');
+          const status = (detailed as any).status === 'denied' ? 'denied' : 'approved';
+          const toMode = (detailed as any).to_mode || (detailed as any).mode;
+          if (id) {
+            setModeApprovals((prev) =>
+              prev.map((a) => (a.id === id ? { ...a, status } : a)),
+            );
+          }
+          if (status === 'approved' && (toMode === 'plan' || toMode === 'build')) {
+            setAgentMode(toMode);
+          }
+          // Fall through to update timeline card status via re-render of pending→resolved
         }
 
         // Task supervisor check-in: pass full payload but use a short status label
@@ -3569,39 +3654,40 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full min-w-0">
-        {/* Header */}
-        <div className="p-2 sm:p-3 border-b border-border bg-panel flex-shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
-              <button
-                onClick={onBack}
-                className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-              >
-                <ArrowLeft size={20} className="text-textMuted" />
-              </button>
-              <button
-                onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
-                className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-                title={sessionSidebarOpen ? 'Close sessions' : 'Open sessions'}
-              >
-                {sessionSidebarOpen
-                  ? <PanelLeftClose size={18} className="text-textMuted" />
-                  : <PanelLeftOpen size={18} className="text-textMuted" />
-                }
-              </button>
-              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                <Bot size={16} className="text-primary" />
+        {/* Header — match SessionSidebar title bar height + theme bg */}
+        <div className="flex-shrink-0 border-b border-border bg-bgLight">
+          <div className="h-14 px-2 sm:px-3 flex items-center">
+            <div className="flex items-center justify-between w-full">
+              <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
+                <button
+                  onClick={onBack}
+                  className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                >
+                  <ArrowLeft size={20} className="text-textMuted" />
+                </button>
+                <button
+                  onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
+                  className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                  title={sessionSidebarOpen ? 'Close sessions' : 'Open sessions'}
+                >
+                  {sessionSidebarOpen
+                    ? <PanelLeftClose size={18} className="text-textMuted" />
+                    : <PanelLeftOpen size={18} className="text-textMuted" />
+                  }
+                </button>
+                <div className="w-7 h-7 sm:w-8 sm:h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+                  <Bot size={16} className="text-primary" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="font-bold text-textMain text-sm truncate leading-tight">
+                    {agentProfile?.agent_name || modelName || agentId}
+                    {switchingModel ? (
+                      <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">switching…</span>
+                    ) : null}
+                  </h2>
+                  <StatusBadge status={agentStatus} />
+                </div>
               </div>
-              <div className="min-w-0">
-                <h2 className="font-bold text-textMain text-sm truncate">
-                  {agentProfile?.agent_name || modelName || agentId}
-                  {switchingModel ? (
-                    <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">switching…</span>
-                  ) : null}
-                </h2>
-                <StatusBadge status={agentStatus} />
-              </div>
-            </div>
 
             {/* Header actions (right side) */}
             <div className="flex items-center gap-1.5">
@@ -3703,6 +3789,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               </button>
 
             </div>
+          </div>
           </div>
 
           {showTokenStats && tokenStats && tokenStats.max > 0 && (
@@ -4157,6 +4244,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }`}
         >
           <div className={`${soloColumnClass}${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
+              {modeApprovals.filter((a) => a.status === 'pending').map((req) => (
+                <ModeSwitchApprovalCard
+                  key={req.id}
+                  request={req}
+                  onApprove={(reqId, mode) => {
+                    setModeApprovals((prev) =>
+                      prev.map((a) => (a.id === reqId ? { ...a, status: 'approved' } : a)),
+                    );
+                    setAgentMode(mode);
+                    wsServiceRef.current?.setAgentMode(mode, reqId);
+                  }}
+                  onDeny={(reqId) => {
+                    setModeApprovals((prev) =>
+                      prev.map((a) => (a.id === reqId ? { ...a, status: 'denied' } : a)),
+                    );
+                    wsServiceRef.current?.denyModeSwitch(reqId);
+                  }}
+                />
+              ))}
               <div
                 className={`w-full flex items-center gap-1 rounded-2xl border border-border/80 min-h-[40px] focus-within:ring-1 focus-within:ring-primary/50 shadow-sm ${
                   isLoadingSession ? 'bg-border/40' : 'bg-bgLight/80 dark:bg-black/20'
@@ -4273,21 +4379,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   }}
                 />
                 <div className="shrink-0 flex items-center gap-1 pr-1.5 self-end min-h-[38px]">
-                  <SoloModelPicker
-                    cards={modelCards}
-                    currentCardName={currentCardName}
-                    modelName={modelName}
-                    fallbackLabel={agentProfile?.agent_name || agentId}
-                    switching={switchingModel}
-                    disabled={isLoadingSession}
-                    onSelect={(cardName) => {
-                      setSwitchingModel(true);
-                      wsServiceRef.current?.switchModel(cardName);
-                    }}
-                    onAddModels={() => {
-                      window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
-                    }}
-                  />
                   {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
                     <>
                       <button
@@ -4317,6 +4408,53 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     </button>
                   )}
                 </div>
+              </div>
+              {/* Cursor-style toolbar: Mode | Model | Effort */}
+              <div className="flex items-center gap-1.5 mt-1.5 px-0.5 min-h-[28px]">
+                <ModePicker
+                  mode={agentMode}
+                  disabled={isLoadingSession}
+                  onSelect={(mode) => {
+                    setAgentMode(mode);
+                    wsServiceRef.current?.setAgentMode(mode);
+                  }}
+                />
+                <SoloModelPicker
+                  cards={modelCards}
+                  currentCardName={currentCardName}
+                  modelName={modelName}
+                  fallbackLabel={agentProfile?.agent_name || agentId}
+                  switching={switchingModel}
+                  disabled={isLoadingSession}
+                  onSelect={(cardName) => {
+                    setSwitchingModel(true);
+                    wsServiceRef.current?.switchModel(cardName);
+                  }}
+                  onAddModels={() => {
+                    window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                  }}
+                />
+                {(() => {
+                  const selected =
+                    (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
+                    (modelName && modelCards.find((c) => c.model_name === modelName)) ||
+                    null;
+                  if (!selected?.is_think) return null;
+                  const deepseekish = /deepseek/i.test(
+                    `${selected.model_name || ''} ${selected.base_url || ''} ${selected.name || ''}`,
+                  );
+                  return (
+                    <EffortPicker
+                      effort={reasoningEffort}
+                      deepseekStyle={deepseekish}
+                      disabled={isLoadingSession || switchingModel}
+                      onSelect={(effort) => {
+                        setReasoningEffort(effort);
+                        wsServiceRef.current?.setReasoningEffort(effort);
+                      }}
+                    />
+                  );
+                })()}
               </div>
               <SoloContextFooter
                 cwd={agentCwd || defaultCwd}

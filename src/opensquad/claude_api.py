@@ -77,6 +77,7 @@ class ClaudeAPI:
         top_k: int | None = None,
         is_think: bool | None = None,
         thinking_budget_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ):
         """
         P2-1: Accepts either a ModelConfig dataclass (preferred) or legacy kwargs.
@@ -108,6 +109,7 @@ class ClaudeAPI:
                 top_k=top_k if top_k is not None else 0,
                 is_think=is_think if is_think is not None else False,
                 thinking_budget_tokens=thinking_budget_tokens if thinking_budget_tokens is not None else 10000,
+                reasoning_effort=reasoning_effort or "high",
             )
         self.config = config
 
@@ -125,7 +127,13 @@ class ClaudeAPI:
         self.max_video_frames = max(1, min(config.max_video_frames, 20))
         self.top_k = config.top_k
         self.is_think = config.is_think
-        self.thinking_budget_tokens = config.thinking_budget_tokens
+        from opensquad.reasoning_effort import effort_to_claude_budget, normalize_effort
+
+        self.reasoning_effort = normalize_effort(config.reasoning_effort)
+        # Prefer effort→budget when thinking; keep explicit budget as fallback baseline
+        self.thinking_budget_tokens = (
+            effort_to_claude_budget(self.reasoning_effort) if self.is_think else config.thinking_budget_tokens
+        )
         self._prev_reasoning_content = ""  # Must be passed back when tools are involved
         # file_id cache: path -> file_id, avoids re-uploading the same file within a session
         self._file_id_cache: dict[str, str] = {}
@@ -189,7 +197,16 @@ class ClaudeAPI:
         self.max_video_frames = max(1, min(model_cfg.get("max_video_frames", self.max_video_frames), 20))
         self.top_k = model_cfg.get("top_k", self.top_k)
         self.is_think = model_cfg.get("is_think", self.is_think)
-        self.thinking_budget_tokens = model_cfg.get("thinking_budget_tokens", self.thinking_budget_tokens)
+        from opensquad.reasoning_effort import effort_to_claude_budget, normalize_effort
+
+        if "reasoning_effort" in model_cfg:
+            self.reasoning_effort = normalize_effort(model_cfg.get("reasoning_effort"))
+        if self.is_think:
+            self.thinking_budget_tokens = effort_to_claude_budget(
+                getattr(self, "reasoning_effort", model_cfg.get("reasoning_effort", "high"))
+            )
+        else:
+            self.thinking_budget_tokens = model_cfg.get("thinking_budget_tokens", self.thinking_budget_tokens)
         # Recreate Anthropic client
         client_params = {"api_key": self.api_key, "timeout": self.timeout}
         if self.base_url:

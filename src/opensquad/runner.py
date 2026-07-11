@@ -403,6 +403,19 @@ class AgentRunner:
         self.tool_call_strategy = ToolCallStrategySelector.select(_tool_strategy_config, tool_registry)
         logger.info(f"[Runner] Tool call strategy: {self.tool_call_strategy.get_strategy_name()}")
 
+        # Plan / Build mode (Cursor-style)
+        from opensquad.agent_mode import (
+            DEFAULT_MODE,
+            normalize_mode,
+            set_current_mode,
+            set_mode_provider,
+        )
+
+        self.agent_mode = normalize_mode(_tool_strategy_config.get("agent_mode", DEFAULT_MODE))
+        set_current_mode(self.agent_mode)
+        set_mode_provider(lambda: getattr(self, "agent_mode", DEFAULT_MODE))
+        logger.info(f"[Runner] Agent mode: {self.agent_mode}")
+
         # P1-1: ContextBuilder extracts prompt-building logic from the runner
         self._context_builder = ContextBuilder(
             chat_api=self.chat_api,

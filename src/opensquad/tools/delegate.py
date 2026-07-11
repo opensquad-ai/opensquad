@@ -74,6 +74,12 @@ def set_chat_api_cfg(cfg: dict) -> None:
     )
 
 
+def get_chat_api_cfg() -> dict | None:
+    """Return a shallow copy of the current ChatAPI cfg (or None)."""
+    with _chat_api_cfg_lock:
+        return dict(_chat_api_cfg) if _chat_api_cfg is not None else None
+
+
 def _check_init() -> str | None:
     """Check whether initialized. Returns an error string if not, or None if ready."""
     if _chat_api_cfg is None or _tool_registry is None:

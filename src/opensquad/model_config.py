@@ -52,10 +52,11 @@ class ModelConfig:
     presence_penalty: float = 0.0
     enable_repetition_check: bool = False
 
-    # ── Claude-specific ──
+    # ── Claude-specific / thinking ──
     max_video_frames: int = 8
     is_think: bool = False
     thinking_budget_tokens: int = 10_000
+    reasoning_effort: str = "high"  # low | medium | high
 
     # ── Google-specific ──
     is_image_output: bool = False
@@ -114,6 +115,7 @@ class ModelConfig:
             max_video_frames=min(int(_get("max_video_frames", 8)), 20),
             is_think=_get("is_think", False),
             thinking_budget_tokens=int(_get("thinking_budget_tokens", 10_000)),
+            reasoning_effort=str(_get("reasoning_effort", "high") or "high").strip().lower(),
             # Google-specific
             is_image_output=_get("is_image_output", False),
             # Shared

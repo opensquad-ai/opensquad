@@ -142,6 +142,7 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
             top_k=model_cfg.get("top_k", 0),
             is_think=model_cfg.get("is_think", False),
             thinking_budget_tokens=model_cfg.get("thinking_budget_tokens", 10000),
+            reasoning_effort=model_cfg.get("reasoning_effort", "high"),
         )
     elif provider in ("google", "gemini"):
         return GoogleAPI(
@@ -179,6 +180,8 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
             frequency_penalty=model_cfg.get("frequency_penalty", 0.0),
             presence_penalty=model_cfg.get("presence_penalty", 0.0),
             enable_repetition_check=model_cfg.get("enable_repetition_check", False),
+            is_think=model_cfg.get("is_think", False),
+            reasoning_effort=model_cfg.get("reasoning_effort", "high"),
         )
 
 
@@ -255,6 +258,7 @@ TOOL_MODULES = {
     "delegate_task": "opensquad.tools.delegate",
     "workspace": "opensquad.tools.workspace",
     "task_watch": "opensquad.tools.task_watch",
+    "agent_mode": "opensquad.tools.agent_mode_tools",
     # --- Plugin-owned tools: resolved via PluginManager, not direct import here ---
     # websearch        -> plugins/websearch/
     # vision           -> plugins/vision/
@@ -267,7 +271,7 @@ TOOL_MODULES = {
 }
 
 # Core-level tools get detailed docs in prompts; extended-level get summary only
-CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration"}
+CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration", "agent_mode"}
 
 # Mandatory tools: automatically injected into every agent regardless of config.json tools list.
 # These are the built-in core tools shown in the UI as "系统内置".
@@ -280,6 +284,7 @@ MANDATORY_TOOLS = {
     "delegate_task",
     "workspace",
     "task_watch",
+    "agent_mode",
 }
 
 BOOT_PHASES = AgentBootPhases(

@@ -51,6 +51,7 @@ class ModelConfigSchema(BaseModel):
     max_video_frames: int = Field(default=8, ge=1, le=20)
     is_think: bool = Field(default=False)
     thinking_budget_tokens: int = Field(default=10000, gt=0)
+    reasoning_effort: str = Field(default="high")  # low | medium | high (Cursor-style)
     is_image_output: bool = Field(default=False)
     top_k: int = Field(default=0, ge=0)
 

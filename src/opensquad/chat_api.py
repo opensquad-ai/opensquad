@@ -105,6 +105,8 @@ class ChatAPI:
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
         enable_repetition_check: bool | None = None,
+        is_think: bool | None = None,
+        reasoning_effort: str | None = None,
     ):
         """
         P2-1: Accepts either a ModelConfig dataclass (preferred) or legacy kwargs.
@@ -138,6 +140,8 @@ class ChatAPI:
                 frequency_penalty=frequency_penalty if frequency_penalty is not None else 0.0,
                 presence_penalty=presence_penalty if presence_penalty is not None else 0.0,
                 enable_repetition_check=enable_repetition_check if enable_repetition_check is not None else False,
+                is_think=is_think if is_think is not None else False,
+                reasoning_effort=reasoning_effort or "high",
             )
         self.config = config
 
@@ -159,6 +163,10 @@ class ChatAPI:
         self.frequency_penalty = config.frequency_penalty
         self.presence_penalty = config.presence_penalty
         self.enable_repetition_check = config.enable_repetition_check
+        self.is_think = config.is_think
+        from opensquad.reasoning_effort import normalize_effort
+
+        self.reasoning_effort = normalize_effort(config.reasoning_effort)
         self.output_media_dir: str = ""  # Set externally (agents_boot)
         self._prompt_template = config.prompt  # Raw placeholder template (does not change with per-turn replacements)
         self.prompt_message = {"role": "system", "content": config.prompt}
@@ -274,6 +282,11 @@ class ChatAPI:
         self.audio_output_voice = model_cfg.get("audio_output_voice", self.audio_output_voice)
         self.frequency_penalty = model_cfg.get("frequency_penalty", self.frequency_penalty)
         self.presence_penalty = model_cfg.get("presence_penalty", self.presence_penalty)
+        self.is_think = model_cfg.get("is_think", getattr(self, "is_think", False))
+        from opensquad.reasoning_effort import normalize_effort
+
+        if "reasoning_effort" in model_cfg:
+            self.reasoning_effort = normalize_effort(model_cfg.get("reasoning_effort"))
 
         # Close old client connection pool before recreating,
         # otherwise httpx connections leak until garbage collection.
@@ -1595,6 +1608,16 @@ class ChatAPI:
 
         # Build API request parameters
         request_params = {"model": self.model, "messages": messages, "stream": True, "temperature": self.temperature}
+
+        from opensquad.reasoning_effort import apply_openai_compat_thinking_params
+
+        apply_openai_compat_thinking_params(
+            request_params,
+            is_think=bool(getattr(self, "is_think", False)),
+            effort=getattr(self, "reasoning_effort", "high"),
+            model=self.model or "",
+            base_url=self.base_url or "",
+        )
 
         extra_headers = {}
         sid = self._sid_provider() if self._sid_provider else None

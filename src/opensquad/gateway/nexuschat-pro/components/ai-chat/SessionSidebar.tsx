@@ -341,15 +341,17 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return (
       <div
         key={session.id}
-        className={`${nested ? 'pl-7' : 'pl-2'} pr-2 py-1.5 cursor-pointer transition-colors group rounded-md mx-1 ${
-          isActive ? 'bg-primary/10' : 'hover:bg-bgLight'
+        className={`${nested ? 'pl-7' : 'pl-2'} pr-2 py-1 cursor-pointer transition-colors group rounded-md mx-1 ${
+          isActive
+            ? 'bg-primary/10 hover:bg-primary/15'
+            : 'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]'
         }`}
         onClick={() => !isConfirming && !isEditing && onViewSession(session.id)}
         onDoubleClick={() => !isConfirming && !isEditing && onSwitchAndReply(session.id)}
         title={session.created_at || session.last_updated || undefined}
       >
-        <div className="flex items-start gap-1.5">
-          <div className="mt-1.5 flex-shrink-0 w-3 flex items-center justify-center">
+        <div className="flex items-center gap-1.5 min-h-[22px]">
+          <div className="flex-shrink-0 w-3 flex items-center justify-center">
             {isCurrent && agentBusy ? (
               <OpensquadWorkingDot size={12} className="text-primary" />
             ) : (
@@ -387,15 +389,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 {session.title || session.id}
               </div>
             )}
-            {!isEditing && session.preview && (
-              <div className="text-[10px] text-textMuted/70 truncate mt-0.5">
-                {session.preview}
-              </div>
-            )}
           </div>
-          <div className="flex items-center gap-0.5 flex-shrink-0 pt-0.5">
+          {/* Fixed right column: age stays right-aligned; hover actions overlay so they never shift time. */}
+          <div className="relative flex-shrink-0 min-w-[3.25rem] h-[18px] flex items-center justify-end">
             {isEditing ? (
-              <>
+              <div className="flex items-center gap-0.5">
                 <button
                   type="button"
                   onClick={(e) => void commitRename(e)}
@@ -412,70 +410,65 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 >
                   <X size={11} className="text-textMuted" />
                 </button>
-              </>
+              </div>
+            ) : isConfirming ? (
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={(e) => handleDeleteConfirm(e, session.id)}
+                  className="p-0.5 rounded bg-red-500/15 hover:bg-red-500/30 transition-colors"
+                  title={t('aiChat.sessionSidebar.confirmDelete')}
+                >
+                  <Check size={11} className="text-red-500" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteCancel}
+                  className="p-0.5 rounded hover:bg-bgLight transition-colors"
+                  title={t('common.cancel')}
+                >
+                  <X size={11} className="text-textMuted" />
+                </button>
+              </div>
             ) : (
               <>
-                {/* Cursor-style relative age — always visible beside hover actions */}
-                {ageLabel && !isConfirming && (
-                  <span className="text-[10px] text-textMuted tabular-nums px-0.5 select-none">
+                {ageLabel && (
+                  <span className="text-[10px] text-textMuted tabular-nums select-none text-right group-hover:opacity-0 transition-opacity">
                     {ageLabel}
                   </span>
                 )}
-                {!isConfirming && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={(e) => startRename(e, session)}
-                      className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-primary/10 rounded transition-all"
-                      title={t('aiChat.sessionSidebar.rename')}
-                    >
-                      <Pencil size={11} className="text-textMuted" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => togglePin(e, session.id, !pinned)}
-                      className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-primary/10 rounded transition-all"
-                      title={pinned ? t('aiChat.sessionSidebar.unpin') : t('aiChat.sessionSidebar.pin')}
-                    >
-                      {pinned ? (
-                        <PinOff size={11} className="text-primary" />
-                      ) : (
-                        <Pin size={11} className="text-textMuted" />
-                      )}
-                    </button>
-                  </>
-                )}
-                {!isCurrent && (
-                  isConfirming ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={(e) => handleDeleteConfirm(e, session.id)}
-                        className="p-0.5 rounded bg-red-500/15 hover:bg-red-500/30 transition-colors"
-                        title={t('aiChat.sessionSidebar.confirmDelete')}
-                      >
-                        <Check size={11} className="text-red-500" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleDeleteCancel}
-                        className="p-0.5 rounded hover:bg-bgLight transition-colors"
-                        title={t('common.cancel')}
-                      >
-                        <X size={11} className="text-textMuted" />
-                      </button>
-                    </>
-                  ) : (
+                <div className="absolute inset-y-0 right-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    type="button"
+                    onClick={(e) => startRename(e, session)}
+                    className="p-0.5 hover:bg-primary/10 rounded transition-colors"
+                    title={t('aiChat.sessionSidebar.rename')}
+                  >
+                    <Pencil size={11} className="text-textMuted" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => togglePin(e, session.id, !pinned)}
+                    className="p-0.5 hover:bg-primary/10 rounded transition-colors"
+                    title={pinned ? t('aiChat.sessionSidebar.unpin') : t('aiChat.sessionSidebar.pin')}
+                  >
+                    {pinned ? (
+                      <PinOff size={11} className="text-primary" />
+                    ) : (
+                      <Pin size={11} className="text-textMuted" />
+                    )}
+                  </button>
+                  {!isCurrent && (
                     <button
                       type="button"
                       onClick={(e) => handleDeleteClick(e, session.id)}
-                      className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-red-500/10 rounded transition-all"
+                      className="p-0.5 hover:bg-red-500/10 rounded transition-colors"
                       title={t('aiChat.sessionSidebar.deleteSession')}
                     >
                       <Trash2 size={11} className="text-red-500" />
                     </button>
-                  )
-                )}
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -486,7 +479,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   return (
     <div className="w-64 h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0">
-      <div className="p-3 border-b border-border flex items-center justify-between">
+      <div className="h-14 px-3 border-b border-border flex items-center justify-between flex-shrink-0">
         <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
         <div className="flex items-center gap-1">
           <button
@@ -521,7 +514,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         <div className="px-3 py-2 text-[11px] text-red-500 bg-red-500/10">{error}</div>
       )}
 
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
         {sessions.length === 0 && !loading && (
           <div className="px-3 py-6 text-center text-xs text-textMuted">{t('aiChat.noSessions')}</div>
         )}
@@ -552,7 +545,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
           return (
             <div key={group.name} className="mb-1">
-              <div className="group/folder w-full flex items-center gap-0.5 pl-0.5 pr-1 py-1 hover:bg-bgLight rounded-md mx-0.5">
+              <div className="group/folder flex items-center gap-0.5 pl-0.5 pr-1 py-1 hover:bg-black/[0.06] dark:hover:bg-white/[0.08] rounded-md mx-0.5">
                 <button
                   type="button"
                   onClick={() =>

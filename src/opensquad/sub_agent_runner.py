@@ -351,15 +351,15 @@ class SubAgentRunner:
         common_kwargs = dict(
             api_key=cfg.get("api_key", ""),
             base_url=cfg.get("base_url", ""),
-            model=cfg.get("model", ""),
+            model=cfg.get("model", "") or cfg.get("model_name", ""),
             prompt=prompt,
             stream_parser=stream_parser,
             token_max=cfg.get("token_max", 32000),
             temperature=cfg.get("temperature", 0.3),
             timeout=cfg.get("timeout", 60.0),
-            is_img_model=cfg.get("is_img_model", False),
+            is_img_model=cfg.get("is_img_model", False) or cfg.get("is_image", False),
             is_audio_model=cfg.get("is_audio_model", False),
-            is_video_model=cfg.get("is_video_model", False),
+            is_video_model=cfg.get("is_video_model", False) or cfg.get("is_video", False),
             use_file_api=cfg.get("use_file_api", False),
             file_api_size_threshold=cfg.get("file_api_size_threshold", 4 * 1024 * 1024),
         )
@@ -367,7 +367,12 @@ class SubAgentRunner:
         if provider in ("claude", "anthropic"):
             from opensquad.claude_api import ClaudeAPI
 
-            api = ClaudeAPI(**common_kwargs)
+            api = ClaudeAPI(
+                **common_kwargs,
+                is_think=cfg.get("is_think", False),
+                thinking_budget_tokens=cfg.get("thinking_budget_tokens", 10000),
+                reasoning_effort=cfg.get("reasoning_effort", "high"),
+            )
         elif provider in ("google", "gemini"):
             from opensquad.google_api import GoogleAPI
 
@@ -375,7 +380,11 @@ class SubAgentRunner:
         else:
             from opensquad.chat_api import ChatAPI
 
-            api = ChatAPI(**common_kwargs)
+            api = ChatAPI(
+                **common_kwargs,
+                is_think=cfg.get("is_think", False),
+                reasoning_effort=cfg.get("reasoning_effort", "high"),
+            )
 
         # Native reasoning_content / stream emits go through ChatAPI._emit_with_sid.
         # Without this, those thoughts hit the parent session untagged and break

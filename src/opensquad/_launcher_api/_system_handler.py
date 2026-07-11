@@ -674,6 +674,7 @@ class SystemHandlerMixin:
                             "api_protocol": data.get("api_protocol", ""),
                             "provider": data.get("provider", ""),
                             "model_name": data.get("model_name", ""),
+                            "is_think": bool(data.get("is_think", False)),
                             "size": os.path.getsize(fpath),
                             "updated": os.path.getmtime(fpath),
                         }

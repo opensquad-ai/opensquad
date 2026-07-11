@@ -238,6 +238,34 @@ class GatewayAdapter(BaseAgent):
                 logger.warning("[Adapter] switch_model command missing 'card' field")
             return
 
+        if command == "set_reasoning_effort":
+            effort = cmd_data.get("effort", "") or cmd_data.get("reasoning_effort", "")
+            if effort:
+                bus.emit("model.reasoning_effort.requested", {"effort": effort})
+                logger.info(f"[Adapter] set_reasoning_effort requested: effort={effort}")
+            else:
+                logger.warning("[Adapter] set_reasoning_effort command missing 'effort' field")
+            return
+
+        if command == "set_agent_mode":
+            mode = cmd_data.get("mode", "") or cmd_data.get("agent_mode", "")
+            req_id = cmd_data.get("id") or cmd_data.get("approved_request_id")
+            if mode:
+                bus.emit(
+                    "agent.mode.requested",
+                    {"mode": mode, "id": req_id, "approved_request_id": req_id},
+                )
+                logger.info(f"[Adapter] set_agent_mode requested: mode={mode}")
+            else:
+                logger.warning("[Adapter] set_agent_mode command missing 'mode' field")
+            return
+
+        if command == "deny_mode_switch":
+            req_id = cmd_data.get("id", "")
+            bus.emit("agent.mode.requested", {"action": "deny", "id": req_id, "reason": cmd_data.get("reason", "")})
+            logger.info(f"[Adapter] deny_mode_switch: id={req_id}")
+            return
+
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")
         await super()._handle_command(data)
 
