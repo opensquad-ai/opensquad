@@ -58,6 +58,38 @@ class SubAgentJobManager:
 
     def __init__(self):
         self._jobs: dict[str, _JobEntry] = {}
+        # Sync + async runners currently executing (for abort/stop/new_session).
+        self._active_runners: set[SubAgentRunner] = set()
+
+    def register_runner(self, runner: "SubAgentRunner") -> None:
+        self._active_runners.add(runner)
+
+    def unregister_runner(self, runner: "SubAgentRunner") -> None:
+        self._active_runners.discard(runner)
+
+    def cancel_all(self, reason: str = "aborted") -> int:
+        """
+        Abort every in-flight sub-agent (sync + async) and cancel asyncio jobs.
+        Returns the number of runners/jobs signalled.
+        """
+        n = 0
+        for runner in list(self._active_runners):
+            try:
+                runner.abort(reason)
+                n += 1
+            except Exception:
+                logger.debug("[JobManager] runner.abort failed", exc_info=True)
+        for jid, entry in list(self._jobs.items()):
+            if entry.status in ("done", "error", "cancelled"):
+                continue
+            entry.status = "cancelled"
+            entry.result = f"Cancelled: {reason}"
+            task = entry._asyncio_task
+            if task is not None and not task.done():
+                task.cancel()
+                n += 1
+                logger.warning(f"[JobManager] cancelled job {jid} ({reason})")
+        return n
 
     def submit(self, runner: "SubAgentRunner", task: str) -> str:
         """
@@ -68,16 +100,39 @@ class SubAgentJobManager:
         entry = _JobEntry(job_id=job_id, label=task[:60])
         entry.status = "running"
         self._jobs[job_id] = entry
+        # Stamp job_id onto the runner so every streamed event nests under
+        # the correct async submit fold in the UI (incl. after refresh).
+        runner._job_id = job_id
+        self.register_runner(runner)
 
         async def _run():
             try:
                 entry.result = await runner.run_task(task)
-                entry.status = "done"
-                logger.info(f"[JobManager] job {job_id} done, result_len={len(entry.result)}")
+                if runner.is_aborted:
+                    entry.status = "cancelled"
+                    entry.result = entry.result or f"Cancelled: {runner.abort_reason}"
+                else:
+                    entry.status = "done"
+                logger.info(f"[JobManager] job {job_id} {entry.status}, result_len={len(entry.result or '')}")
+            except asyncio.CancelledError:
+                entry.result = "Cancelled: aborted"
+                entry.status = "cancelled"
+                logger.warning(f"[JobManager] job {job_id} CancelledError")
+                raise
             except Exception as e:
-                entry.result = f"Error: sub-task exception -- {e}"
-                entry.status = "error"
-                logger.error(f"[JobManager] job {job_id} error: {e}")
+                if runner.is_aborted:
+                    entry.result = f"Cancelled: {runner.abort_reason}"
+                    entry.status = "cancelled"
+                else:
+                    entry.result = f"Error: sub-task exception -- {e}"
+                    entry.status = "error"
+                    logger.error(f"[JobManager] job {job_id} error: {e}")
+            finally:
+                try:
+                    runner._flush_thought_persist()
+                except Exception:
+                    pass
+                self.unregister_runner(runner)
 
         entry._asyncio_task = asyncio.create_task(_run())
         logger.info(f"[JobManager] submitted job {job_id}: {entry.label}")
@@ -144,6 +199,7 @@ class SubAgentRunner:
         delegation_depth: int = 1,
         sid: str | None = None,
         sub_task_label: str = "",
+        job_id: str | None = None,
     ):
         """
         chat_api_cfg: dict containing all parameters needed to instantiate ChatAPI;
@@ -156,6 +212,7 @@ class SubAgentRunner:
         sid: Parent agent session_id; when set, sub-agent events are emitted to this session
              so the parent's workflow panel shows sub-agent progress in real time.
         sub_task_label: Short label (first ~60 chars of task) used in frontend events.
+        job_id: Async job id (delegate_task_submit); stamped on every event for UI nesting.
         """
         self.chat_api_cfg = chat_api_cfg
         self.tool_registry = tool_registry
@@ -163,6 +220,40 @@ class SubAgentRunner:
         self._chat_api = None
         self._sid = sid
         self._sub_task_label = sub_task_label or ""
+        self._job_id = job_id or ""
+        # Live thought chunks are still streamed; persistence coalesces to one
+        # event per thought phase so refresh does not explode into fragments.
+        self._thought_persist_buf: list[str] = []
+        self._aborted = False
+        self._abort_reason = ""
+
+    @property
+    def is_aborted(self) -> bool:
+        return self._aborted
+
+    @property
+    def abort_reason(self) -> str:
+        return self._abort_reason or "aborted"
+
+    def abort(self, reason: str = "aborted") -> None:
+        """Signal this runner to stop emitting and exit its turn loop ASAP."""
+        self._aborted = True
+        self._abort_reason = reason or "aborted"
+        logger.info(f"[SubAgentRunner] abort requested depth={self.delegation_depth} reason={self._abort_reason}")
+
+    def _should_stop(self) -> bool:
+        if self._aborted:
+            return True
+        try:
+            from opensquad.input_hub import input_hub
+
+            if input_hub is not None and getattr(input_hub, "is_stop_requested", None):
+                if input_hub.is_stop_requested():
+                    self.abort("stop_task")
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _tag_payload(self, data) -> dict:
         """Normalize emit payload and always stamp sub-agent metadata."""
@@ -174,7 +265,18 @@ class SubAgentRunner:
             payload = {"text": str(data)}
         payload["sub_agent"] = True
         payload["sub_task_label"] = self._sub_task_label
+        if self._job_id:
+            payload["job_id"] = self._job_id
         return payload
+
+    def _flush_thought_persist(self) -> None:
+        """Persist coalesced thought text (one row per thought phase)."""
+        if not self._thought_persist_buf:
+            return
+        text = "".join(self._thought_persist_buf)
+        self._thought_persist_buf.clear()
+        if text.strip():
+            self._persist_sub_event("thought", self._tag_payload(text))
 
     def _persist_sub_event(self, etype: str, data: dict) -> None:
         """Best-effort persist so refresh/history_sync can rebuild the nest."""
@@ -189,22 +291,40 @@ class SubAgentRunner:
 
     def _emit_sub_sync(self, etype: str, data) -> None:
         """Sync bus emit used by ChatAPI stream callbacks (must stay tagged)."""
+        if self._aborted:
+            return
         payload = self._tag_payload(data)
         if self._sid:
             bus.emit(etype, {"sid": self._sid, "data": payload})
         else:
             bus.emit(etype, payload)
-        self._persist_sub_event(etype, payload)
+        # Thought: stream live, but coalesce on disk. Other events flush any
+        # pending thought phase first so order stays correct on refresh.
+        if etype == "thought":
+            text = payload.get("text", "") if isinstance(payload, dict) else str(data)
+            if text:
+                self._thought_persist_buf.append(str(text))
+        else:
+            self._flush_thought_persist()
+            self._persist_sub_event(etype, payload)
 
     async def _emit_sub(self, etype: str, data: dict):
         """Emit a frontend event under the parent agent's session_id, tagged as sub-agent."""
+        if self._aborted:
+            return
         payload = self._tag_payload(data)
         if self._sid:
             await bus.emit_async(etype, {"sid": self._sid, "data": payload})
         else:
             # Still emit so local/dev UIs can see activity even without sid.
             await bus.emit_async(etype, payload)
-        self._persist_sub_event(etype, payload)
+        if etype == "thought":
+            text = payload.get("text", "") if isinstance(payload, dict) else ""
+            if text:
+                self._thought_persist_buf.append(str(text))
+        else:
+            self._flush_thought_persist()
+            self._persist_sub_event(etype, payload)
 
     def _build_chat_api(self):
         """Instantiate the appropriate ChatAPI subclass based on api_protocol."""
@@ -283,17 +403,26 @@ class SubAgentRunner:
             return f"Error: Sub-agent delegation depth exceeds limit {MAX_DEPTH}; execution refused."
 
         logger.info(f"[SubAgentRunner] depth={self.delegation_depth} starting task (len={len(task)}): {task[:100]}...")
-
+        job_manager.register_runner(self)
         try:
             result = await asyncio.wait_for(self._execute(task), timeout=TASK_TIMEOUT)
             logger.info(f"[SubAgentRunner] depth={self.delegation_depth} task completed, result_len={len(result)}")
             return result
+        except asyncio.CancelledError:
+            self.abort("cancelled")
+            logger.warning(f"[SubAgentRunner] depth={self.delegation_depth} task cancelled")
+            return f"Cancelled: {self.abort_reason}"
         except asyncio.TimeoutError:
             logger.error(f"[SubAgentRunner] depth={self.delegation_depth} task timed out after {TASK_TIMEOUT}s")
             return f"Error: Sub-task timed out ({TASK_TIMEOUT}s); try splitting into smaller tasks."
         except Exception as e:
+            if self._aborted:
+                return f"Cancelled: {self.abort_reason}"
             logger.exception(f"[SubAgentRunner] depth={self.delegation_depth} task failed: {e}")
             return f"Error: Sub-task execution failed -- {e}"
+        finally:
+            self._flush_thought_persist()
+            job_manager.unregister_runner(self)
 
     async def _execute(self, task: str) -> str:
         """Internal execution loop (no timeout wrapper)."""
@@ -340,6 +469,12 @@ class SubAgentRunner:
         last_text = ""
 
         for turn in range(1, MAX_TURNS + 1):
+            if self._should_stop():
+                logger.info(
+                    f"[SubAgentRunner] depth={self.delegation_depth} stopping at turn={turn} ({self.abort_reason})"
+                )
+                return f"Cancelled: {self.abort_reason}"
+
             logger.debug(f"[SubAgentRunner] depth={self.delegation_depth} turn={turn}")
 
             # Call LLM (async chat())
@@ -386,6 +521,8 @@ class SubAgentRunner:
                 # Execute all tool calls sequentially
                 all_results = []
                 for call_index, (t_name, t_args) in enumerate(tool_calls):
+                    if self._should_stop():
+                        return f"Cancelled: {self.abort_reason}"
                     logger.info(f"[SubAgentRunner] turn={turn} tool_call #{call_index}: {t_name}")
 
                     # Build call_id consistent with main runner format

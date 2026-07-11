@@ -145,12 +145,19 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
         }
       </div>
 
-      {/* Content */}
-      {isOpen && (
-        <div ref={scrollRef} onScroll={handleInnerScroll} className="border-t border-border px-3 py-2 space-y-2 max-h-[600px] overflow-y-auto text-xs">
-          {children}
-        </div>
-      )}
+      {/* Content — keep mounted (hidden when collapsed) so open SubAgentPanel
+          portals keep receiving live async-delegate updates after the parent
+          turn seals and this container auto-collapses. */}
+      <div
+        ref={scrollRef}
+        onScroll={handleInnerScroll}
+        className={`border-t border-border px-3 py-2 space-y-2 max-h-[600px] overflow-y-auto text-xs ${
+          isOpen ? '' : 'hidden'
+        }`}
+        aria-hidden={!isOpen}
+      >
+        {children}
+      </div>
     </div>
   );
 };

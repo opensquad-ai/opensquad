@@ -87,9 +87,8 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'stream',
   'to_user_final',
   'to_user_reply',
-  'thought',
-  'tool_call',
-  'tool_result',
+  // thought / tool_* / info are session-scoped: when they carry `sid` for an
+  // old session (e.g. orphaned sub-agent after new_session), drop them.
   'plan',
   'turn_start',
   'turn_elapsed',
@@ -97,7 +96,6 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'prompt_update',
   'file_push',
   'error',
-  'info',
   'session_title',
   'summary_stream',
 ]);

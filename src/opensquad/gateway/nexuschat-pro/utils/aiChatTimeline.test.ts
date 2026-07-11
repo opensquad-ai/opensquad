@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
+  formatUserSkillDisplayContent,
   mergeOrphanedToolResultsAcrossWorkflows,
   shouldTreatWorkflowComplete,
   timelineHasToolEvent,
@@ -142,12 +143,36 @@ describe('mergeOrphanedToolResultsAcrossWorkflows', () => {
   });
 });
 
+describe('formatUserSkillDisplayContent', () => {
+  it('collapses user_send_skill tags to /name form', () => {
+    expect(
+      formatUserSkillDisplayContent('<user_send_skill>babysit</user_send_skill>\n\nfix the PR'),
+    ).toBe('/babysit fix the PR');
+  });
+
+  it('hides expanded SKILL.md bodies leaked into history', () => {
+    const expanded = [
+      '[User-selected skill: Babysit (`babysit`)]',
+      'Follow the skill instructions below to complete the user\'s request.',
+      '',
+      '----- BEGIN SKILL -----',
+      '# Babysit',
+      'Do lots of secret skill stuff...',
+      '----- END SKILL -----',
+      '',
+      '[User request]',
+      'fix the open PR',
+    ].join('\n');
+    expect(formatUserSkillDisplayContent(expanded)).toBe('/babysit fix the open PR');
+  });
+});
+
 describe('buildTimelineFromSession', () => {
   it('returns empty timeline for empty session', () => {
     expect(buildTimelineFromSession([], [])).toEqual([]);
   });
 
-  it('preserves message order and prepends archived section', () => {
+  it('flattens archived messages into the normal timeline (no fold)', () => {
     const messages = [
       { role: 'user', content: 'hello', timestamp: '2026-01-01T00:00:00.000Z' },
       { role: 'assistant', content: 'hi', timestamp: '2026-01-01T00:00:01.000Z' },
@@ -156,12 +181,41 @@ describe('buildTimelineFromSession', () => {
       { role: 'user', content: 'old', timestamp: '2025-12-31T00:00:00.000Z' },
     ];
     const tl = buildTimelineFromSession(messages, [], archived, []);
-    expect(tl[0].kind).toBe('archived_section');
-    expect(tl.filter((e) => e.kind === 'message')).toHaveLength(2);
+    expect(tl.every((e) => e.kind !== 'archived_section')).toBe(true);
+    expect(tl.filter((e) => e.kind === 'message')).toHaveLength(3);
     expect(tl.filter((e) => e.kind === 'message').map((e) => (e.kind === 'message' ? e.data.content : ''))).toEqual([
+      'old',
       'hello',
       'hi',
     ]);
+  });
+
+  it('does not expose expanded skill body after session rebuild', () => {
+    const messages = [
+      {
+        role: 'user',
+        content: [
+          '[User-selected skill: Babysit (`babysit`)]',
+          'Follow the skill instructions below to complete the user\'s request.',
+          '',
+          '----- BEGIN SKILL -----',
+          '# secret skill body',
+          '----- END SKILL -----',
+          '',
+          '[User request]',
+          'please help',
+        ].join('\n'),
+        timestamp: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, []);
+    expect(tl).toHaveLength(1);
+    expect(tl[0].kind).toBe('message');
+    if (tl[0].kind === 'message') {
+      expect(tl[0].data.content).toBe('/babysit please help');
+      expect(tl[0].data.content).not.toContain('BEGIN SKILL');
+      expect(tl[0].data.content).not.toContain('secret skill body');
+    }
   });
 
   it('keeps thought workflow above assistant reply even when thought was saved later', () => {
@@ -295,6 +349,149 @@ describe('shouldTreatWorkflowComplete', () => {
         completed: false,
         status: 'Thinking...',
         events: [{ type: 'thought', content: 'hmm', timestamp: 1 }],
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('appendWorkflowEvent thought coalesce across interleaved scopes', () => {
+  it('merges parent thought fragments interrupted by sub-agent tools', () => {
+    let timeline: TimelineEntry[] = [];
+    timeline = appendWorkflowEvent(
+      timeline,
+      { type: 'thought', content: 'deer_flow ', timestamp: 1 },
+      'Thinking...',
+    );
+    timeline = appendWorkflowEvent(
+      timeline,
+      {
+        type: 'tool_call',
+        content: { id: 's1', name: 'list_dir' },
+        timestamp: 2,
+        subAgent: true,
+        jobId: 'j1',
+        subTaskLabel: 'Explore',
+      },
+      'Calling...',
+    );
+    timeline = appendWorkflowEvent(
+      timeline,
+      { type: 'thought', content: '还在探索中', timestamp: 3 },
+      'Thinking...',
+    );
+    const wf = timeline.find((e) => e.kind === 'workflow');
+    expect(wf?.kind).toBe('workflow');
+    if (wf?.kind !== 'workflow') return;
+    const parentThoughts = wf.data.events.filter((e) => e.type === 'thought' && !e.subAgent);
+    expect(parentThoughts).toHaveLength(1);
+    expect(parentThoughts[0].content).toBe('deer_flow 还在探索中');
+  });
+});
+
+describe('appendWorkflowEvent routes async sub-agent events across sealed workflows', () => {
+  it('appends job_id sub-agent steps into the completed host block after parent to_user_reply', () => {
+    const submitAck = JSON.stringify({ job_id: 'job-42', status: 'running', result: null });
+    let timeline: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            {
+              type: 'tool_call',
+              content: { id: 'd1', name: 'delegate_task_submit', arguments: { task: 'Explore dir' } },
+              timestamp: 1,
+              result: submitAck,
+              resultStatus: 'success',
+              jobId: 'job-42',
+            },
+            {
+              type: 'thought',
+              content: 'early step',
+              timestamp: 2,
+              subAgent: true,
+              jobId: 'job-42',
+            },
+          ],
+          status: null,
+          completed: true,
+        },
+        _uid: 'w-host',
+      },
+      {
+        kind: 'message',
+        data: { role: 'assistant', content: 'Started exploring in background.' },
+        _uid: 'm1',
+      },
+    ];
+
+    timeline = appendWorkflowEvent(
+      timeline,
+      {
+        type: 'tool_call',
+        content: { id: 's2', name: 'filesystem__list_directory', arguments: { path: 'C:\\x' } },
+        timestamp: 3,
+        subAgent: true,
+        jobId: 'job-42',
+      },
+      'Calling...',
+    );
+    timeline = appendWorkflowEvent(
+      timeline,
+      {
+        type: 'tool_result',
+        content: { id: 's2', result: '{"status":"error","message":"Security Denied"}' },
+        timestamp: 4,
+        subAgent: true,
+        jobId: 'job-42',
+      },
+      'Done',
+    );
+    timeline = appendWorkflowEvent(
+      timeline,
+      {
+        type: 'thought',
+        content: 'will try another path',
+        timestamp: 5,
+        subAgent: true,
+        jobId: 'job-42',
+      },
+      'Thinking...',
+    );
+
+    const workflows = timeline.filter((e) => e.kind === 'workflow');
+    expect(workflows).toHaveLength(1);
+    const host = workflows[0];
+    expect(host.kind).toBe('workflow');
+    if (host.kind !== 'workflow') return;
+    expect(host.data.completed).toBe(true);
+    const subTools = host.data.events.filter(
+      (e) => e.subAgent && (e.type === 'tool_call' || e.type === 'tool_result'),
+    );
+    // tool_result merges into tool_call → one tool_call with result + one thought after early
+    expect(host.data.events.filter((e) => e.subAgent && e.type === 'tool_call')).toHaveLength(1);
+    expect(host.data.events.filter((e) => e.subAgent && e.type === 'tool_call')[0].result).toContain(
+      'Security Denied',
+    );
+    expect(host.data.events.filter((e) => e.subAgent && e.type === 'thought')).toHaveLength(2);
+    expect(subTools.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('does not treat async submit ack alone as workflow settled', () => {
+    const submitAck = JSON.stringify({ job_id: 'job-9', status: 'running' });
+    expect(
+      shouldTreatWorkflowComplete({
+        completed: false,
+        status: 'Thinking...',
+        events: [
+          {
+            type: 'tool_call',
+            content: { id: 'd1', name: 'delegate_task_submit' },
+            timestamp: 1,
+            result: submitAck,
+            resultStatus: 'success',
+            jobId: 'job-9',
+          },
+        ],
       }),
     ).toBe(false);
   });

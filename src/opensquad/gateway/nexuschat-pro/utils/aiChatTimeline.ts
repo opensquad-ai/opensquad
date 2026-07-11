@@ -15,6 +15,57 @@ export function genTimelineUID(): string {
   }
 }
 
+/**
+ * Collapse skill payloads for chat display.
+ * - `<user_send_skill>name</user_send_skill>` → `/name …`
+ * - Expanded SKILL.md bodies (BEGIN/END SKILL) → `/name` + user request only
+ */
+export function formatUserSkillDisplayContent(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+
+  const tagRe = /<user_send_skill>\s*([^<]+?)\s*<\/user_send_skill>/i;
+  const tagMatch = content.match(tagRe);
+  if (tagMatch) {
+    const name = (tagMatch[1] || '').trim();
+    const rest = content.replace(tagRe, '').trim();
+    if (!name) return rest || content;
+    return rest ? `/${name} ${rest}` : `/${name}`;
+  }
+
+  const looksExpanded =
+    /----- BEGIN SKILL -----/i.test(content) ||
+    /\[User-selected skill:/i.test(content);
+  if (!looksExpanded) return content;
+
+  let skillName = '';
+  const tickName = content.match(/\[User-selected skill:[^\]]*?\(`([^`]+)`\)/i);
+  if (tickName) {
+    skillName = (tickName[1] || '').trim();
+  } else {
+    const plain = content.match(/\[User-selected skill:\s*([^\]]+?)\]/i);
+    if (plain) skillName = (plain[1] || '').trim().replace(/`/g, '');
+  }
+
+  let userReq = '';
+  const reqMatch = content.match(/\[User request\]\s*([\s\S]*)$/i);
+  if (reqMatch) {
+    userReq = (reqMatch[1] || '').trim();
+    if (/^\(Apply the .+ skill\.\)$/i.test(userReq)) userReq = '';
+  }
+
+  if (skillName) {
+    return userReq ? `/${skillName} ${userReq}` : `/${skillName}`;
+  }
+
+  const stripped = content
+    .replace(/----- BEGIN SKILL -----[\s\S]*?----- END SKILL -----/gi, '')
+    .replace(/\[User-selected skill:[^\]]*\]/gi, '')
+    .replace(/Follow the skill instructions below[^\n]*/gi, '')
+    .replace(/\[User request\]/gi, '')
+    .trim();
+  return stripped || '/skill';
+}
+
 export interface WorkflowEvent {
   _uid?: string;
   type: 'thought' | 'tool_call' | 'tool_result' | 'info' | 'plan' | 'summary_stream' | 'compression_progress';
@@ -24,6 +75,13 @@ export interface WorkflowEvent {
   resultStatus?: 'success' | 'error';
   subAgent?: boolean;
   subTaskLabel?: string;
+  /** Async delegate_task_submit job id (nests parallel sub-agents). */
+  jobId?: string;
+}
+
+/** Scope key so parent / sub-agent / job thoughts do not merge across each other. */
+export function thoughtScopeKey(e: Pick<WorkflowEvent, 'subAgent' | 'subTaskLabel' | 'jobId'>): string {
+  return `${e.subAgent ? 1 : 0}\0${e.subTaskLabel || ''}\0${e.jobId || ''}`;
 }
 
 export interface WorkflowBlock {
@@ -32,6 +90,175 @@ export interface WorkflowBlock {
   completed: boolean;
   started_ms?: number;
   elapsed_ms?: number;
+}
+
+/** Parent-level async/sync delegate entry tool (not nested under a sub-agent). */
+function isParentDelegateToolCall(evt: WorkflowEvent): boolean {
+  if (evt.type !== 'tool_call' || evt.subAgent) return false;
+  const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  const n = String(data.name || data.tool || '').trim();
+  if (!n) return false;
+  if (/(?:^|[.__])delegate_task_(result|list)$/i.test(n)) return false;
+  return /(?:^|[.__])delegate_task(_submit)?$/i.test(n);
+}
+
+function parseJobIdFromToolResult(result: unknown): string {
+  const raw = typeof result === 'string' ? result.trim() : '';
+  if (!raw) return '';
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o === 'object' && (o as any).job_id) return String((o as any).job_id);
+  } catch {
+    /* ignore */
+  }
+  return '';
+}
+
+/** True when parent tool_result is only an async job ack, not the real answer. */
+function isAsyncDelegateAck(result: unknown): boolean {
+  const raw = typeof result === 'string' ? result.trim() : '';
+  if (!raw) return false;
+  try {
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+    if (!(o as any).job_id) return false;
+    const status = String((o as any).status || '').toLowerCase();
+    if (status === 'done' || status === 'error' || status === 'not_found') return false;
+    if (status === 'running' || status === 'pending' || status === '') return true;
+    if ((o as any).result == null && status !== 'done') return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function eventJobId(evt: Pick<WorkflowEvent, 'jobId' | 'result'>): string {
+  return (evt.jobId || parseJobIdFromToolResult(evt.result) || '').trim();
+}
+
+function workflowHasSubAgentFinal(events: WorkflowEvent[], jobId: string): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type !== 'info') continue;
+    const c = typeof e.content === 'object' && e.content ? (e.content as Record<string, unknown>) : null;
+    if (!c || c.event !== 'sub_agent_result') continue;
+    if (jobId && c.job_id != null && String(c.job_id) !== jobId) continue;
+    return true;
+  }
+  return false;
+}
+
+/** True when a block still has an async delegate job without a final result. */
+export function hasOpenAsyncDelegate(events: WorkflowEvent[]): boolean {
+  for (const e of events) {
+    if (!isParentDelegateToolCall(e)) continue;
+    const jobId = eventJobId(e);
+    if (!jobId) continue;
+    if (!isAsyncDelegateAck(e.result)) continue;
+    if (!workflowHasSubAgentFinal(events, jobId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Find the workflow that owns this sub-agent event (by job_id / open async
+ * delegate). Searches completed blocks too — async jobs outlive the parent turn.
+ */
+function findAsyncDelegateHostIdx(timeline: TimelineEntry[], event: WorkflowEvent): number {
+  if (!event.subAgent && !event.jobId) return -1;
+  const wantJob = (event.jobId || '').trim();
+
+  if (wantJob) {
+    for (let wi = timeline.length - 1; wi >= 0; wi--) {
+      if (timeline[wi].kind !== 'workflow') continue;
+      const wf = (timeline[wi] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
+      for (const evt of wf.events) {
+        if (!isParentDelegateToolCall(evt)) continue;
+        if (eventJobId(evt) === wantJob) return wi;
+      }
+      // Also match prior nested children already stamped with this job_id
+      for (const evt of wf.events) {
+        if (evt.subAgent && evt.jobId === wantJob) return wi;
+      }
+    }
+  }
+
+  // Label / nearest open async fallback (sync delegates or missing job_id)
+  if (event.subAgent) {
+    const label = (event.subTaskLabel || '').trim();
+    for (let wi = timeline.length - 1; wi >= 0; wi--) {
+      if (timeline[wi].kind !== 'workflow') continue;
+      const wf = (timeline[wi] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
+      for (let ei = wf.events.length - 1; ei >= 0; ei--) {
+        const evt = wf.events[ei];
+        if (!isParentDelegateToolCall(evt)) continue;
+        const jobId = eventJobId(evt);
+        if (jobId && workflowHasSubAgentFinal(wf.events, jobId)) continue;
+        if (label && evt.subTaskLabel) {
+          const a = label.slice(0, 40);
+          const b = evt.subTaskLabel.trim().slice(0, 40);
+          if (a && b && (label.includes(b) || evt.subTaskLabel.includes(a))) return wi;
+        }
+        if (!evt.result || isAsyncDelegateAck(evt.result)) return wi;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function appendEventIntoWorkflowBlock(
+  wf: WorkflowBlock,
+  event: WorkflowEvent,
+): WorkflowEvent[] {
+  if (event.type === 'thought' && wf.events.length > 0) {
+    const key = thoughtScopeKey(event);
+    let mergeIdx = -1;
+    for (let i = wf.events.length - 1; i >= 0; i--) {
+      const e = wf.events[i];
+      const eKey = thoughtScopeKey(e);
+      if (e.type === 'thought' && eKey === key) {
+        mergeIdx = i;
+        break;
+      }
+      if (eKey === key && e.type !== 'thought') break;
+    }
+    if (mergeIdx >= 0) {
+      const newEvents = [...wf.events];
+      const prev = newEvents[mergeIdx];
+      newEvents[mergeIdx] = {
+        ...prev,
+        content: String(prev.content ?? '') + String(event.content ?? ''),
+      };
+      return newEvents;
+    }
+    return [...wf.events, event];
+  }
+
+  if (event.type === 'tool_result') {
+    const resultData = event.content;
+    const resultId = typeof resultData === 'object' ? (resultData.id || resultData.tool_use_id) : null;
+    const newEvents = [...wf.events];
+    for (let i = newEvents.length - 1; i >= 0; i--) {
+      const evt = newEvents[i];
+      if (evt.type === 'tool_call' && !evt.result && !!evt.subAgent === !!event.subAgent) {
+        const callData = typeof evt.content === 'object' ? evt.content : {};
+        const callId = callData.id || callData.tool_use_id;
+        if (!resultId || !callId || resultId === callId) {
+          newEvents[i] = {
+            ...evt,
+            result: extractToolResultText(resultData),
+            resultStatus:
+              typeof resultData === 'object' && resultData && resultData.error ? 'error' : 'success',
+          };
+          return newEvents;
+        }
+      }
+    }
+    return [...newEvents, event];
+  }
+
+  return [...wf.events, event];
 }
 
 /** True when nothing in the block is still in-flight (open tools / live summary). */
@@ -47,6 +274,9 @@ export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
       if (!data.is_final) return false;
     }
   }
+  // Async delegate_task_submit returns an ack immediately but the sub-agent
+  // keeps streaming — treat that as still in-flight for UI settlement.
+  if (hasOpenAsyncDelegate(events)) return false;
   return true;
 }
 
@@ -168,6 +398,9 @@ export function mergeToolResultIntoTimeline(
     for (let ei = wf.events.length - 1; ei >= 0; ei--) {
       const evt = wf.events[ei];
       if (evt.type !== 'tool_call' || evt.result) continue;
+      // Prefer same parent/sub scope so a parent result never latches onto a
+      // nested sub-agent tool_call (or vice versa) when ids are missing.
+      if (!!evt.subAgent !== !!event.subAgent) continue;
       const callData = typeof evt.content === 'object' && evt.content ? evt.content : {};
       const callId = callData.id || callData.tool_use_id;
       if (!resultId || !callId || resultId === callId) {
@@ -211,6 +444,29 @@ export function appendWorkflowEvent(
   }
 
   const updated = [...prev];
+
+  // Async/sync sub-agent streams can outlive the parent turn. Route them back
+  // to the workflow that owns the matching delegate_task(_submit) — including
+  // completed blocks — so the open SubAgentPanel keeps receiving live steps.
+  if (event.subAgent || event.jobId) {
+    const hostIdx = findAsyncDelegateHostIdx(updated, event);
+    if (hostIdx >= 0) {
+      const entry = updated[hostIdx] as Extract<TimelineEntry, { kind: 'workflow' }>;
+      const wf = entry.data;
+      const newEvents = appendEventIntoWorkflowBlock(wf, event);
+      updated[hostIdx] = {
+        ...entry,
+        data: {
+          ...wf,
+          events: newEvents,
+          // Keep completed as-is (parent turn may already be sealed). Still
+          // refresh status so live UIs that key off it can notice activity.
+          status: wf.completed ? wf.status : status,
+        },
+      };
+      return updated;
+    }
+  }
 
   // Find the last incomplete workflow block, skipping over any trailing 'prompt' or
   // 'status_hint' entries (these can be interleaved within the same turn).
@@ -278,55 +534,7 @@ export function appendWorkflowEvent(
   if (targetIdx >= 0) {
     // Existing incomplete workflow block — append or merge event
     const wf = (updated[targetIdx] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
-    let newEvents: WorkflowEvent[];
-
-    if (event.type === 'thought' && wf.events.length > 0) {
-      // For thoughts, accumulate consecutive chunks into one block
-      // (do not merge parent thoughts with sub-agent thoughts).
-      const lastEvt = wf.events[wf.events.length - 1];
-      if (lastEvt.type === 'thought' && !!lastEvt.subAgent === !!event.subAgent) {
-        newEvents = [...wf.events];
-        newEvents[newEvents.length - 1] = {
-          ...lastEvt,
-          content: lastEvt.content + event.content,
-        };
-      } else {
-        newEvents = [...wf.events, event];
-      }
-    } else if (event.type === 'tool_result') {
-      // Merge tool_result INTO the matching tool_call event
-      const resultData = event.content;
-      const resultId = typeof resultData === 'object' ? (resultData.id || resultData.tool_use_id) : null;
-      newEvents = [...wf.events];
-
-      // Find matching tool_call: by id if available, otherwise last tool_call without result
-      let merged = false;
-      for (let i = newEvents.length - 1; i >= 0; i--) {
-        const evt = newEvents[i];
-        if (evt.type === 'tool_call' && !evt.result && !!evt.subAgent === !!event.subAgent) {
-          const callData = typeof evt.content === 'object' ? evt.content : {};
-          const callId = callData.id || callData.tool_use_id;
-          if (!resultId || !callId || resultId === callId) {
-            // Merge: add result to the tool_call event
-            const resStr = extractToolResultText(resultData);
-            newEvents[i] = {
-              ...evt,
-              result: resStr,
-              resultStatus: (typeof resultData === 'object' && resultData && resultData.error) ? 'error' : 'success',
-            };
-            merged = true;
-            break;
-          }
-        }
-      }
-
-      if (!merged) {
-        // Fallback: add as standalone event (should be rare)
-        newEvents.push(event);
-      }
-    } else {
-      newEvents = [...wf.events, event];
-    }
+    const newEvents = appendEventIntoWorkflowBlock(wf, event);
 
     updated[targetIdx] = {
       ...updated[targetIdx],
@@ -528,6 +736,19 @@ export function buildTimelineFromSession(
   archivedMessages?: any[],
   archivedEvents?: any[],
 ): TimelineEntry[] {
+  // Context compression still stores older turns in archived_* on disk, but the
+  // UI no longer folds them into an "已归档" section (that scrambled tool order).
+  // Flatten archived + live into one stream so history stays chronological.
+  if (
+    (archivedMessages && archivedMessages.length > 0) ||
+    (archivedEvents && archivedEvents.length > 0)
+  ) {
+    return buildTimelineFromSession(
+      [...(archivedMessages || []), ...(messages || [])],
+      [...(archivedEvents || []), ...(events || [])],
+    );
+  }
+
   const timeline: TimelineEntry[] = [];
   const getTs = (value: any): number => {
     const ts = value?.timestamp ? new Date(value.timestamp).getTime() : NaN;
@@ -760,10 +981,12 @@ export function buildTimelineFromSession(
       : (Array.isArray((extra as any).output_audio) ? (extra as any).output_audio : []);
 
     const cleanedContent = typeof m.content === 'string'
-      ? m.content
-          .replace(/\n?\s*<image>.*?<\/image>/gis, '')
-          .replace(/\n?\s*\[File:\s*.*?\]\(.*?\)/g, '')
-          .trim()
+      ? formatUserSkillDisplayContent(
+          m.content
+            .replace(/\n?\s*<image>.*?<\/image>/gis, '')
+            .replace(/\n?\s*\[File:\s*.*?\]\(.*?\)/g, '')
+            .trim(),
+        )
       : m.content;
 
     // CRITICAL: Skip creating a message entry if the cleaned content is empty AND there's no
@@ -879,46 +1102,6 @@ export function buildTimelineFromSession(
   // tool_call card instead of a permanently "running" one.
   const mergedTimeline = mergeOrphanedToolResultsAcrossWorkflows(timeline);
 
-  // Prepend a single collapsed "已归档" section if the session has
-  // archived content (messages / events removed by context compression
-  // but preserved for UI display). Only do this for the outermost call
-  // — recursive inner calls (for the archived sub-timeline itself) pass
-  // undefined archived fields, so we don't nest.
-  if (
-    (archivedMessages && archivedMessages.length > 0) ||
-    (archivedEvents && archivedEvents.length > 0)
-  ) {
-    const inner = buildTimelineFromSession(
-      archivedMessages || [],
-      archivedEvents || [],
-    );
-    // Defensive: never let archived_section nest inside itself.
-    const innerFiltered = inner.filter((e) => e.kind !== 'archived_section');
-    if (innerFiltered.length > 0) {
-      const messageCount = archivedMessages?.length || 0;
-      const eventCount = archivedEvents?.length || 0;
-      const allTs = [
-        ...((archivedMessages || [])
-          .map((m: any) => m?.timestamp)
-          .filter((s: any) => typeof s === 'string')),
-        ...((archivedEvents || [])
-          .map((e: any) => e?.timestamp)
-          .filter((s: any) => typeof s === 'string')),
-      ].sort();
-      mergedTimeline.unshift({
-        kind: 'archived_section',
-        data: {
-          messageCount,
-          eventCount,
-          entries: innerFiltered,
-          startTs: allTs[0],
-          endTs: allTs[allTs.length - 1],
-        },
-        _uid: genTimelineUID(),
-      });
-    }
-  }
-
   return mergedTimeline;
 }
 
@@ -940,22 +1123,38 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       if (!text) continue;
       const isSub = typeof data === 'object' && data !== null && !!data.sub_agent;
       const subLabel = typeof data === 'object' && data !== null ? (data.sub_task_label || '') : '';
-      // Merge consecutive thoughts (same sub-agent scope only)
-      const last = result[result.length - 1];
-      if (last && last.type === 'thought' && !!last.subAgent === isSub) {
-        last.content += '\n' + text;
+      const jobId =
+        typeof data === 'object' && data !== null && data.job_id
+          ? String(data.job_id)
+          : undefined;
+      const incoming: WorkflowEvent = {
+        _uid: genTimelineUID(),
+        type: 'thought',
+        content: text,
+        timestamp: eventTimestamp,
+        subAgent: isSub || undefined,
+        subTaskLabel: subLabel || undefined,
+        jobId,
+      };
+      const key = thoughtScopeKey(incoming);
+      let mergeIdx = -1;
+      for (let i = result.length - 1; i >= 0; i--) {
+        const e = result[i];
+        const eKey = thoughtScopeKey(e);
+        if (e.type === 'thought' && eKey === key) {
+          mergeIdx = i;
+          break;
+        }
+        if (eKey === key && e.type !== 'thought') break;
+      }
+      if (mergeIdx >= 0) {
+        result[mergeIdx].content = String(result[mergeIdx].content ?? '') + text;
       } else {
-        result.push({
-          _uid: genTimelineUID(),
-          type: 'thought',
-          content: text,
-          timestamp: eventTimestamp,
-          subAgent: isSub || undefined,
-          subTaskLabel: subLabel || undefined,
-        });
+        result.push(incoming);
       }
     } else if (type === 'tool_call') {
       const isSub = !!data.sub_agent;
+      const jobId = data.job_id ? String(data.job_id) : undefined;
       result.push({
         _uid: genTimelineUID(),
         type: 'tool_call',
@@ -967,11 +1166,13 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
         timestamp: eventTimestamp,
         subAgent: isSub || undefined,
         subTaskLabel: data.sub_task_label || undefined,
+        jobId,
       });
     } else if (type === 'tool_result') {
       // Merge into matching tool_call
       const resultId = data.id || data.tool_use_id;
       const isSub = !!data.sub_agent;
+      const jobId = data.job_id ? String(data.job_id) : undefined;
       let merged = false;
       for (let i = result.length - 1; i >= 0; i--) {
         const evt = result[i];
@@ -981,6 +1182,7 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
             const resStr = extractToolResultText(data);
             evt.result = resStr;
             evt.resultStatus = data.error ? 'error' : 'success';
+            if (jobId && !evt.jobId) evt.jobId = jobId;
             merged = true;
             break;
           }
@@ -996,6 +1198,7 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           timestamp: eventTimestamp,
           subAgent: isSub || undefined,
           subTaskLabel: data.sub_task_label || undefined,
+          jobId,
         });
       }
     } else if (type === 'plan') {
@@ -1021,10 +1224,11 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       // Skip system info prompts — these are internal state messages
       // that shouldn't display in the workflow UI (e.g. "Agent entering
       // wait mode", "Context summary generated", "Workflow started").
-      if (detailed.text && /entering wait mode|listening for events|Workflow started|Context summary|Context compressed|compression skipped|injected into prompt/i.test(detailed.text)) {
+      if (detailed.text && /entering wait mode|listening for events|Workflow started|New session started|Context summary|Context compressed|compression skipped|injected into prompt/i.test(detailed.text)) {
         continue;
       }
       const isSub = !!detailed.sub_agent;
+      const jobId = detailed.job_id ? String(detailed.job_id) : undefined;
       result.push({
         _uid: genTimelineUID(),
         type: 'info',
@@ -1032,6 +1236,7 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
         timestamp: eventTimestamp,
         subAgent: isSub || undefined,
         subTaskLabel: detailed.sub_task_label || undefined,
+        jobId,
       });
     }
     // Skip other event types (option, etc.) — or add handling as needed

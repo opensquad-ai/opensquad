@@ -194,6 +194,15 @@ class GatewayAdapter(BaseAgent):
             return
 
         if command == "new_session":
+            # Abort sub-agents immediately (don't wait for Runner to drain urgent queue).
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                n = job_manager.cancel_all("new_session")
+                if n:
+                    logger.info(f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on new_session")
+            except Exception:
+                logger.debug("[Adapter] sub-agent cancel_all on new_session skipped", exc_info=True)
             input_hub.push_urgent("__NEW_SESSION__", source="gateway")
             logger.info("[Adapter] New session command sent via urgent queue")
             await self._try_wake_agent("urgent-command")
@@ -232,7 +241,17 @@ class GatewayAdapter(BaseAgent):
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")
         await super()._handle_command(data)
 
-    async def _try_wake_agent(self, reason: str = "urgent-command"):
+    async def _try_wake_agent(self, reason: str = "urgent-command", *, inject_sentinel: bool = False):
+        """Wake the agent if it is sleeping.
+
+        Args:
+            reason: Passed to sleep_controller.wake_up (appears in wake tool result).
+            inject_sentinel: When True, also push a synthetic ``[wakeup-urgent-command]``
+                into input_hub so the idle loop notices the wake even without a real
+                user message.  MUST be False for normal chat — the real user payload
+                is pushed right after wake, and the sentinel would otherwise be
+                treated as the user's message (or drown it out).
+        """
         try:
             from opensquad.sleep_controller import sleep_controller
             from opensquad.state_manager import state_manager
@@ -240,8 +259,9 @@ class GatewayAdapter(BaseAgent):
             ai_state = await state_manager.get_state()
             if ai_state == "sleeping":
                 sleep_controller.wake_up(reason)
-                input_hub.push("[wakeup-urgent-command]", source="wake")
-                logger.info(f"[Adapter] Woke agent from sleep for {reason}")
+                if inject_sentinel:
+                    input_hub.push("[wakeup-urgent-command]", source="wake")
+                logger.info(f"[Adapter] Woke agent from sleep for {reason} (sentinel={inject_sentinel})")
         except Exception as e:
             logger.warning(f"[Adapter] Wake-up for {reason} failed: {e}")
 
@@ -263,8 +283,8 @@ class GatewayAdapter(BaseAgent):
             + (f" attachments={len(attachments)}" if attachments else "")
         )
 
-        # Push message to InputHub; Runner in main.py handles it uniformly.
-        await self._try_wake_agent("web-message")
+        # Wake only — do NOT inject a fake wakeup message; the real payload follows.
+        await self._try_wake_agent("web-message", inject_sentinel=False)
 
         logger.debug(f"[Adapter] About to push to input_hub: content_len={len(content)}, channel={channel}")
         input_hub.push(

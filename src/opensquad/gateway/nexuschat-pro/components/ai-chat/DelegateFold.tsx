@@ -41,7 +41,7 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
       title={bundle.label}
       prompt={bundle.prompt}
       events={bundle.children}
-      finalResult={bundle.finalResult || bundle.parent.result || ''}
+      finalResult={bundle.finalResult}
       running={bundle.running}
     />
   );

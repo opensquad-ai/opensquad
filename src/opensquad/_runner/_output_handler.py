@@ -10,7 +10,6 @@ Extracted from runner.py to reduce its size.  Handles:
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from typing import Any
 
@@ -123,122 +122,18 @@ class OutputHandler:
             emit:    runner._emit.
         """
         try:
+            from opensquad.token_breakdown import compute_token_breakdown
+
             chat_api = runner.chat_api
             tools = getattr(chat_api, "_last_tools", None)
             total = chat_api._count_tokens(chat_api.req, tools)
-            stats: dict[str, int] = {
-                "system": 0,
-                "user": 0,
-                "thought": 0,
-                "tool": 0,
-                "response": 0,
-            }
-
             encoding = getattr(chat_api, "encoding", None)
-
-            def _count_str(text: str) -> int:
-                if text is None:
-                    return 0
-                if encoding:
-                    try:
-                        return len(encoding.encode(text))
-                    except Exception:
-                        pass
-                return len(text) // 4
-
-            # ---- Tool definitions (schemas) count as tool overhead ----
-            if tools:
-                for tool in tools:
-                    fn = tool.get("function", {}) if isinstance(tool, dict) else getattr(tool, "function", {})
-                    stats["tool"] += 6
-                    if fn.get("name"):
-                        stats["tool"] += _count_str(fn["name"])
-                    if fn.get("description"):
-                        stats["tool"] += _count_str(fn["description"])
-                    if fn.get("parameters"):
-                        stats["tool"] += _count_str(json.dumps(fn["parameters"], ensure_ascii=False))
-
-            _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
-            _TOOL_CALL_RE = re.compile(r"<tool_call[^>]*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
-            _TOOL_RESULT_RE = re.compile(r"<tool_result[^>]*>(.*?)</tool_result>", re.DOTALL | re.IGNORECASE)
-
-            def _count_content_list(items: list, target: str) -> None:
-                has_tool_result = any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items)
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type")
-                    if t == "text":
-                        text = item.get("text", "")
-                        if has_tool_result:
-                            stats["tool"] += _count_str(text)
-                        elif target == "user":
-                            stats["user"] += _count_str(text)
-                        elif target == "assistant":
-                            thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
-                            if thought_sum:
-                                stats["thought"] += thought_sum
-                                text = _THOUGHT_RE.sub("", text).strip()
-                            stats["response"] += _count_str(text)
-                    elif t == "tool_result":
-                        for c in item.get("content") or []:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                stats["tool"] += _count_str(c["text"])
-                    elif t == "tool_use":
-                        inp = item.get("input", {})
-                        stats["tool"] += _count_str(item.get("name", "") + str(inp))
-
-            for msg in chat_api.req:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-
-                if role == "tool":
-                    if isinstance(content, str):
-                        stats["tool"] += _count_str(content)
-                    elif isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                stats["tool"] += _count_str(item["text"])
-                    continue
-
-                if role == "assistant":
-                    reasoning = msg.get("reasoning_content")
-                    if reasoning:
-                        stats["thought"] += _count_str(reasoning)
-
-                    if msg.get("tool_calls"):
-                        for tc in msg["tool_calls"]:
-                            fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", {})
-                            stats["tool"] += _count_str(fn.get("name", "") + fn.get("arguments", ""))
-
-                if isinstance(content, list):
-                    target = "user" if role == "user" else "assistant" if role == "assistant" else role
-                    _count_content_list(content, target)
-                elif isinstance(content, str):
-                    if role == "system":
-                        stats["system"] += _count_str(content)
-                    elif role == "user":
-                        if "<tool_result>" in content or "<tool_result " in content:
-                            tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
-                            stats["tool"] += tool_sum
-                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub("", content).strip())
-                        elif re.match(r"^\[\d{2}:\d{2}:\d{2}\] Tool \'", content):
-                            stats["tool"] += _count_str(content)
-                        else:
-                            stats["user"] += _count_str(content)
-                    elif role == "assistant":
-                        thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
-                        stats["thought"] += thought_sum
-                        text_no_thought = _THOUGHT_RE.sub("", content).strip()
-
-                        tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
-                        stats["tool"] += tool_sum
-                        text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
-
-                        stats["response"] += _count_str(text_response)
-
-            breakdown_total = sum(stats.values())
-            stats["overhead"] = max(0, total - breakdown_total)
+            stats = compute_token_breakdown(
+                chat_api.req,
+                tools,
+                encoding=encoding,
+                total=total,
+            )
 
             # Cumulative totals (history + current session)
             hist_in = runner._hist_input_tokens

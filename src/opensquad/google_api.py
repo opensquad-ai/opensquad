@@ -568,7 +568,8 @@ class GoogleAPI:
             if msg["role"] == "user":
                 content = msg.get("content", "")
                 is_tool_result = isinstance(content, list) and any(
-                    isinstance(item, dict) and item.get("type") == "tool_result" for item in content
+                    isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse")
+                    for item in content
                 )
                 if not is_tool_result:
                     first_user_idx = i
@@ -680,7 +681,10 @@ class GoogleAPI:
             is_tool_result = (
                 role == "user"
                 and isinstance(content, list)
-                and any(isinstance(item, dict) and item.get("type") == "tool_result" for item in content)
+                and any(
+                    isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse")
+                    for item in content
+                )
             )
             if role == "user" and not is_tool_result:
                 user_turn_count += 1

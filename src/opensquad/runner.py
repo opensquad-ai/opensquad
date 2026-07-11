@@ -808,13 +808,10 @@ class AgentRunner:
                         # Successful poll — reset cancel counter
                         self._cancel_count = 0
                 initial_query = user_input_data["content"]
-                if isinstance(initial_query, str) and "<user_send_skill>" in initial_query.lower():
-                    try:
-                        from opensquad.skill_loader import expand_user_send_skill
-
-                        initial_query = expand_user_send_skill(initial_query)
-                    except Exception as e:
-                        logger.warning(f"[Runner] expand_user_send_skill failed: {e}")
+                # NOTE: Do NOT expand <user_send_skill> here. Expansion injects the
+                # full SKILL.md body for the model, but that must not be persisted to
+                # session history / user_msg (UI would show the entire skill after
+                # compress/reload). Expand only when building current_input below.
                 source = user_input_data.get("source", "unknown")
                 self._current_input_source = source
                 self._current_channel = user_input_data.get("channel", "")
@@ -1158,7 +1155,7 @@ class AgentRunner:
                 if initial_query.startswith("__SWITCH_AND_REPLY__:"):
                     parts = initial_query.split(":", 2)
                     if len(parts) >= 3:
-                        sid, reply_content = parts[1], parts[2]
+                        sid, reply_content = parts[1], (parts[2] or "").strip()
                         current_sid = _get_session_manager().get_current_session_id()
                         if sid != current_sid:
                             # Different session: need to switch context
@@ -1166,18 +1163,25 @@ class AgentRunner:
                             if _get_session_manager().load_history_session(sid):
                                 self._turn_sid = sid
                                 self._load_history()
-                                await self._emit("turn_start", 0)
+                                # Only start a turn when there is actual reply content.
+                                # Empty switch must not emit turn_start (would flip UI to thinking).
+                                if reply_content:
+                                    await self._emit("turn_start", 0)
                                 await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                                 await bus.emit_async("session_list", _get_session_manager().get_session_list())
-                                initial_query = reply_content
                             else:
-                                # Switch failed (target session does not exist), stay on current session and process message
+                                # Switch failed (target session does not exist), stay on current session
                                 logger.warning(f"[Runner] Session {sid} not found, staying on {current_sid}")
-                                initial_query = reply_content
                         else:
-                            # Same session: skip reload, process message directly
+                            # Same session: skip reload
                             logger.info(f"[Runner] Same session {sid}, skip context switch")
-                            initial_query = reply_content
+                        # Empty content = switch only (do not feed blank user turn to the LLM)
+                        if not reply_content:
+                            initial_query = None
+                            await _get_state_manager().set_state("idle")
+                            await self._emit("state", "idle")
+                            continue
+                        initial_query = reply_content
                 # -----------------------
 
                 # NOTE: __PROCESS_QUEUE__ handling used to live here, but the equality check
@@ -1267,7 +1271,18 @@ class AgentRunner:
             # LLM decides when to use <plan> based on task complexity
             await self._setup_prompt()
 
-            current_input = f"User input: {initial_query}"
+            # Expand skill tags only for the model prompt — session already stored the
+            # compact <user_send_skill> form for UI / history.
+            _llm_user_text = initial_query
+            if isinstance(_llm_user_text, str) and "<user_send_skill>" in _llm_user_text.lower():
+                try:
+                    from opensquad.skill_loader import expand_user_send_skill
+
+                    _llm_user_text = expand_user_send_skill(_llm_user_text)
+                except Exception as e:
+                    logger.warning(f"[Runner] expand_user_send_skill failed: {e}")
+
+            current_input = f"User input: {_llm_user_text}"
             if self._dynamic_context_prefix:
                 current_input = self._dynamic_context_prefix + current_input
             if self._current_attachments:
@@ -1379,7 +1394,7 @@ class AgentRunner:
                             # Handle switch-and-reply command (urgent queue version)
                             parts = content.split(":", 2)
                             if len(parts) >= 3:
-                                sid, reply_content = parts[1], parts[2]
+                                sid, reply_content = parts[1], (parts[2] or "").strip()
                                 # Extract images attached to the urgent queue command
                                 cmd_images = cmd.get("images", [])
                                 if cmd_images:
@@ -1398,14 +1413,15 @@ class AgentRunner:
                                     if _get_session_manager().load_history_session(sid):
                                         self._turn_sid = sid
                                         self._load_history()
-                                        await self._emit("turn_start", 0)
+                                        if reply_content:
+                                            await self._emit("turn_start", 0)
                                         await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                                         await bus.emit_async("session_list", _get_session_manager().get_session_list())
                                 else:
                                     # Same session: skip reload
                                     logger.info(f"[Runner] Urgent same session {sid}, skip context switch")
-                                # Set the new initial query; the outer loop will process it
-                                initial_query = reply_content
+                                # Empty content = switch only; do not start an empty LLM turn
+                                initial_query = reply_content or None
                                 task_finished = True
                                 break
                     if task_finished:
@@ -1419,8 +1435,21 @@ class AgentRunner:
                     from opensquad.event_pipeline import event_pipeline
 
                     for item in supplements:
-                        content = item["content"]
+                        content = item.get("content", "") or ""
+                        # Ignore synthetic wake sentinel left by older adapters
+                        if content.strip() == "[wakeup-urgent-command]":
+                            continue
                         logger.info(f"[Runner] Mid-work supplement from input_hub: {content[:80]}")
+                        # Preserve images / attachments that arrived mid-turn
+                        _sup_imgs = item.get("images") or []
+                        if _sup_imgs:
+                            self._current_images.extend(_sup_imgs)
+                            logger.info(
+                                f"[Runner] Mid-work supplement carried {len(_sup_imgs)} image(s) into _current_images"
+                            )
+                        _sup_atts = item.get("attachments") or []
+                        if _sup_atts:
+                            self._current_attachments = list(self._current_attachments or []) + list(_sup_atts)
                         # Push into event_pipeline so it gets delivered via role=tool
                         event_pipeline.push_nowait(
                             source=item.get("source", "web"),
@@ -1429,6 +1458,8 @@ class AgentRunner:
                                 "sender_name": item.get("sender_name", ""),
                                 "channel": item.get("channel", ""),
                                 "source": "input_hub",
+                                "images": _sup_imgs,
+                                "attachments": _sup_atts,
                             },
                         )
 
@@ -1559,13 +1590,27 @@ class AgentRunner:
                         )
                         await self._emit("info", f"Sending {len(_images)} image(s) to model")
                     else:
-                        # Main model does not support native image input (is_image=false)
+                        # Main model does not support native image input (is_image=false).
+                        # Still tell the model that images arrived + text must be answered.
+                        import os as _os
+
+                        _basenames = [_os.path.basename(p) for p in _images]
+                        _note = (
+                            f"\n\n[System notice] The user sent {len(_images)} image(s) "
+                            f"({', '.join(_basenames)}), but the current model does not support "
+                            f"image input (model.is_image=false). You cannot see the pixels. "
+                            f"You MUST still respond to the user's text, acknowledge that "
+                            f"image(s) were received, and say vision is unavailable on this model."
+                        )
+                        current_input = (current_input or "") + _note
                         logger.warning(
-                            f"[Runner] [VISION] Model doesn't support native vision (is_image=False), skipping {len(_images)} image(s)"
+                            f"[Runner] [VISION] Model doesn't support native vision (is_image=False), "
+                            f"skipped {len(_images)} image(s) but injected text notice"
                         )
                         await self._emit(
                             "info",
-                            f"Current model does not support image input; skipped {len(_images)} image(s). To enable image recognition, set model.is_image to true in config.json.",
+                            f"Current model does not support image input; skipped {len(_images)} image(s). "
+                            f"Text notice injected so the agent still sees that images arrived.",
                         )
 
                 if _audio_paths or _video_paths:
@@ -1963,7 +2008,7 @@ class AgentRunner:
                                 elif content.startswith("__SWITCH_AND_REPLY__:"):
                                     parts = content.split(":", 2)
                                     if len(parts) >= 3:
-                                        sid, reply_content = parts[1], parts[2]
+                                        sid, reply_content = parts[1], (parts[2] or "").strip()
                                         cmd_images = cmd.get("images", [])
                                         if cmd_images:
                                             self._current_images = cmd_images
@@ -1976,7 +2021,8 @@ class AgentRunner:
                                             if _get_session_manager().load_history_session(sid):
                                                 self._turn_sid = sid
                                                 self._load_history()
-                                                await self._emit("turn_start", 0)
+                                                if reply_content:
+                                                    await self._emit("turn_start", 0)
                                                 await bus.emit_async(
                                                     "current_session", {"id": sid, "title": "Current Session"}
                                                 )
@@ -1985,7 +2031,7 @@ class AgentRunner:
                                                 )
                                         else:
                                             logger.info(f"[Runner] Same session {sid}, skip context switch")
-                                        initial_query = reply_content
+                                        initial_query = reply_content or None
                                         task_finished = True
                                         break
                             if task_finished:
@@ -2006,11 +2052,24 @@ class AgentRunner:
 
                         supplements = input_hub.get_all_pending()
                         if supplements:
+                            # Drop synthetic wake sentinel; keep real user payloads.
+                            supplements = [
+                                item
+                                for item in supplements
+                                if (item.get("content") or "").strip() != "[wakeup-urgent-command]"
+                            ]
+                        if supplements:
                             for item in supplements:
-                                content = item["content"]
+                                content = item.get("content", "")
                                 logger.info(
                                     f"[Runner] User message detected during wait (source={item.get('source', 'web')}, working_mode={_last_was_tool_call}): {content[:80]}"
                                 )
+                                _imgs = item.get("images") or []
+                                if _imgs:
+                                    self._current_images.extend(_imgs)
+                                _atts = item.get("attachments") or []
+                                if _atts:
+                                    self._current_attachments = list(self._current_attachments or []) + list(_atts)
 
                             await self._emit("status", "working")
 
@@ -2031,6 +2090,10 @@ class AgentRunner:
                                         logger.info(
                                             f"[Runner] Persisted supplement as user message (working mode): {content[:80]}"
                                         )
+                                # Also feed text into the next LLM turn via current_input so
+                                # the model does not only see a bare wake/tool marker.
+                                _parts = [item.get("content", "") for item in supplements if item.get("content")]
+                                current_input = "\n---\n".join(_parts) if _parts else ""
                             else:
                                 # LLM replied with plain text (not working): new message should be
                                 # injected as role=user so the conversation can continue naturally.
@@ -2050,12 +2113,12 @@ class AgentRunner:
                                         logger.info(
                                             f"[Runner] Woke up from wait (idle mode), added message as role=user. req_len={len(self.chat_api.req)}"
                                         )
+                                current_input = ""
 
                             # Reset counters for next LLM call
                             self._inner_loop_count = 1
                             self._turn_start_time = time.perf_counter()
 
-                            current_input = ""
                             break  # Break out of wait loop, continue with LLM call
 
                         # Pipeline events: break and process via add_pipeline_events.
@@ -2851,6 +2914,37 @@ class AgentRunner:
                         if wake_reason and wake_reason != "Sleep duration ended":
                             wake_msg += f", reason: {wake_reason}"
                         wake_msg += "]"
+
+                        # Merge any user messages that arrived during sleep so the
+                        # next LLM turn sees real user content (text + image notice),
+                        # not only the wake marker.
+                        try:
+                            _sleep_pending = input_hub.get_all_pending()
+                        except Exception:
+                            _sleep_pending = []
+                        _user_parts: list[str] = []
+                        for _item in _sleep_pending or []:
+                            _c = (_item.get("content") or "").strip()
+                            if not _c or _c == "[wakeup-urgent-command]":
+                                continue
+                            _user_parts.append(_c)
+                            _imgs = _item.get("images") or []
+                            if _imgs:
+                                self._current_images.extend(_imgs)
+                            _atts = _item.get("attachments") or []
+                            if _atts:
+                                self._current_attachments = list(self._current_attachments or []) + list(_atts)
+                        if _user_parts:
+                            wake_msg = (
+                                wake_msg
+                                + "\n\n[Messages received while sleeping — treat these as the user's real input; "
+                                "do not dismiss them as wake notifications]\n" + "\n---\n".join(_user_parts)
+                            )
+                            logger.info(
+                                f"[Runner] system.wait merged {len(_user_parts)} pending user msg(s) "
+                                f"and {len(self._current_images)} image(s) into wake context"
+                            )
+
                         _wait_result_text = wake_msg
 
                         self.chat_api.add_tool_result(
@@ -3195,17 +3289,22 @@ class AgentRunner:
 
     def _extract_tag(self, response: str, tag: str) -> str | None:
         """Robustly extract XML tag content, supporting tag attributes and extra whitespace, with debug logging."""
+        search = response or ""
+        # Avoid matching tag names mentioned inside reasoning (e.g. `<plan>` in <think>).
+        if tag.lower() not in ("think", "thought"):
+            search = ResponseParser.strip_reasoning_blocks(search)
+
         # Match <tag ...>content</tag>
-        pattern = rf"<{tag}\b[^>]*>(.*?)</{tag}>"
-        match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+        pattern = rf"<{re.escape(tag)}\b[^>]*>(.*?)</{re.escape(tag)}>"
+        match = re.search(pattern, search, re.DOTALL | re.IGNORECASE)
         if match:
             val = match.group(1).strip()
             logger.info(f"[Extractor] Found tag <{tag}>: {val}")
             return val
 
         # Fallback 1: if no closing tag, try extracting up to the next < symbol
-        pattern_fallback = rf"<{tag}\b[^>]*>(.*)"
-        match_fb = re.search(pattern_fallback, response, re.IGNORECASE | re.DOTALL)
+        pattern_fallback = rf"<{re.escape(tag)}\b[^>]*>(.*)"
+        match_fb = re.search(pattern_fallback, search, re.IGNORECASE | re.DOTALL)
         if match_fb:
             val = match_fb.group(1).split("<")[0].strip()  # Extract up to next tag start
             logger.info(f"[Extractor] Found unclosed tag <{tag}>: {val}")
@@ -3213,8 +3312,8 @@ class AgentRunner:
 
         # Fallback 2: support possibly missing < (for lazy AI output patterns)
         if tag in ["state", "wake", "sleep"]:
-            pattern_lazy = rf"{tag}\s*>\s*(.*?)\s*</{tag}>"
-            match_lazy = re.search(pattern_lazy, response, re.IGNORECASE)
+            pattern_lazy = rf"{re.escape(tag)}\s*>\s*(.*?)\s*</{re.escape(tag)}>"
+            match_lazy = re.search(pattern_lazy, search, re.IGNORECASE)
             if match_lazy:
                 val = match_lazy.group(1).strip()
                 logger.info(f"[Extractor] Found lazy tag {tag}: {val}")
@@ -3504,167 +3603,19 @@ class AgentRunner:
         try:
             import json
 
+            from opensquad.token_breakdown import compute_token_breakdown
+
             tools = getattr(self.chat_api, "_last_tools", None)
             total = self.chat_api._count_tokens(self.chat_api.req, tools)
-            # `tool` = real tool IO (tool_call args, tool_result content).
-            # `tool_defs` = the OpenAI tools JSON schema sent via the API `tools`
-            # param (name + description + parameters of every registered, non-hidden
-            # tool). Splitting these lets the UI distinguish "the model called tools
-            # and got N tokens of results" from "the API is billed M tokens/turn just
-            # to advertise the tool catalogue" — the latter dominates and was
-            # previously hidden inside `tool`, making "工具调用" misleading.
-            stats = {"system": 0, "user": 0, "thought": 0, "tool": 0, "tool_defs": 0, "response": 0}
-
-            # Use tiktoken to accurately count tokens per category (consistent with _count_tokens)
+            # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
+            # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
             encoding = getattr(self.chat_api, "encoding", None)
-
-            def _count_str(text: str) -> int:
-                if text is None:
-                    return 0
-                if encoding:
-                    try:
-                        return len(encoding.encode(text))
-                    except Exception:
-                        pass
-                return len(text) // 4  # fallback
-
-            # ---- Tool definitions (schemas) count as tool_defs overhead ----
-            # This is the per-turn cost of advertising the tool catalogue to the
-            # model via the API `tools` param. It is billed every call and usually
-            # dwarfs real tool IO. Tracked separately from `tool` (real IO) so the
-            # UI can show it distinctly.
-            if tools:
-                for tool in tools:
-                    fn = tool.get("function", {}) if isinstance(tool, dict) else getattr(tool, "function", {})
-                    stats["tool_defs"] += 6
-                    if fn.get("name"):
-                        stats["tool_defs"] += _count_str(fn["name"])
-                    if fn.get("description"):
-                        stats["tool_defs"] += _count_str(fn["description"])
-                    if fn.get("parameters"):
-                        stats["tool_defs"] += _count_str(json.dumps(fn["parameters"], ensure_ascii=False))
-
-            # Pre-compile regexes once
-            _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
-            _TOOL_CALL_RE = re.compile(r"<tool_call[^>]*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
-            _TOOL_RESULT_RE = re.compile(r"<tool_result[^>]*>(.*?)</tool_result>", re.DOTALL | re.IGNORECASE)
-
-            def _count_content_list(items: list, target: str) -> None:
-                """Count tokens in a Claude-style content list."""
-                has_tool_result = any(isinstance(item, dict) and item.get("type") == "tool_result" for item in items)
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    t = item.get("type")
-                    if t == "text":
-                        text = item.get("text", "")
-                        if has_tool_result:
-                            stats["tool"] += _count_str(text)
-                        elif target == "user":
-                            stats["user"] += _count_str(text)
-                        elif target == "assistant":
-                            thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(text))
-                            if thought_sum:
-                                stats["thought"] += thought_sum
-                                text = _THOUGHT_RE.sub("", text).strip()
-                            stats["response"] += _count_str(text)
-                    elif t == "tool_result":
-                        for c in item.get("content") or []:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                stats["tool"] += _count_str(c["text"])
-                    elif t == "tool_use":
-                        inp = item.get("input", {})
-                        stats["tool"] += _count_str(item.get("name", "") + str(inp))
-
-            for msg in self.chat_api.req:
-                role = msg.get("role")
-                content = msg.get("content", "")
-
-                # -- Native FC: role="tool" is a tool result --
-                if role == "tool":
-                    if isinstance(content, str):
-                        stats["tool"] += _count_str(content)
-                    elif isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and item.get("type") == "text":
-                                stats["tool"] += _count_str(item["text"])
-                            elif isinstance(item, dict) and item.get("type") == "tool_result":
-                                for c in item.get("content") or []:
-                                    if isinstance(c, dict) and c.get("type") == "text":
-                                        stats["tool"] += _count_str(c["text"])
-                    continue
-
-                # -- Native FC: role="assistant" + tool_calls field --
-                if role == "assistant":
-                    # Native reasoning content (DeepSeek/Claude extended thinking pass-back)
-                    reasoning = msg.get("reasoning_content")
-                    if reasoning:
-                        stats["thought"] += _count_str(reasoning)
-
-                    if msg.get("tool_calls"):
-                        for tc in msg["tool_calls"]:
-                            fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", {})
-                            stats["tool"] += _count_str(fn.get("name", "") + fn.get("arguments", ""))
-
-                # Count any text-like content into the appropriate category.
-                # Some agents store user/assistant content as a list of blocks
-                # (Claude format) or even as a non-standard object, so we try
-                # multiple representations.
-                counted_as_content = False
-
-                if isinstance(content, list):
-                    target = "user" if role == "user" else "assistant" if role == "assistant" else role
-                    _count_content_list(content, target)
-                    counted_as_content = True
-                elif isinstance(content, str):
-                    if role == "system":
-                        stats["system"] += _count_str(content)
-                        counted_as_content = True
-                    elif role == "user":
-                        # XML mode: tool results injected as user messages
-                        if "<tool_result>" in content or "<tool_result " in content:
-                            tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_RESULT_RE.finditer(content))
-                            stats["tool"] += tool_sum
-                            stats["user"] += _count_str(_TOOL_RESULT_RE.sub("", content).strip())
-                            counted_as_content = True
-                        elif re.match(r"^\[\d{2}:\d{2}:\d{2}\] Tool \'", content):
-                            # _summarize_result format: treat whole message as tool result
-                            stats["tool"] += _count_str(content)
-                            counted_as_content = True
-                        else:
-                            stats["user"] += _count_str(content)
-                            counted_as_content = True
-                    elif role == "assistant":
-                        # Extract thought blocks first
-                        thought_sum = sum(_count_str(m.group(2)) for m in _THOUGHT_RE.finditer(content))
-                        stats["thought"] += thought_sum
-                        text_no_thought = _THOUGHT_RE.sub("", content).strip()
-
-                        # Then tool_call blocks; remaining text is response
-                        tool_sum = sum(_count_str(m.group(1)) for m in _TOOL_CALL_RE.finditer(text_no_thought))
-                        stats["tool"] += tool_sum
-                        text_response = _TOOL_CALL_RE.sub("", text_no_thought).strip()
-
-                        stats["response"] += _count_str(text_response)
-                        counted_as_content = True
-
-                # Fallback: if content is missing/None/empty or an unexpected type,
-                # still account for assistant tool_calls we already counted above,
-                # and try to extract any text from dict-like content.
-                if not counted_as_content and role == "assistant":
-                    # Try to find any text field in the message
-                    if isinstance(content, dict):
-                        text = content.get("text", "") or content.get("content", "")
-                        if text and isinstance(text, str):
-                            stats["response"] += _count_str(text)
-                    elif content is None or content == "":
-                        # Empty assistant message: rely on tool_calls / reasoning already counted
-                        pass
-
-            # Overhead = tokens counted by _count_tokens but not captured above
-            # (message base/role/name/tool_call_id overhead, plus any unclassified content)
-            breakdown_total = sum(stats.values())
-            stats["overhead"] = max(0, total - breakdown_total)
+            stats = compute_token_breakdown(
+                self.chat_api.req,
+                tools,
+                encoding=encoding,
+                total=total,
+            )
 
             # Cumulative totals (history + current session).
             # chat_api.total_* only records the current session; runner._hist_*
@@ -3709,13 +3660,14 @@ class AgentRunner:
             }
 
             logger.warning(
-                "[Runner] _broadcast_token_stats: used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d thought=%d overhead=%d",
+                "[Runner] _broadcast_token_stats: used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d tool_defs=%d thought=%d overhead=%d",
                 total,
                 self.chat_api.token_max,
                 (total / max(self.chat_api.token_max, 1)) * 100,
                 len(self.chat_api.req),
                 stats.get("system", 0),
                 stats.get("tool", 0),
+                stats.get("tool_defs", 0),
                 stats.get("thought", 0),
                 stats.get("overhead", 0),
             )

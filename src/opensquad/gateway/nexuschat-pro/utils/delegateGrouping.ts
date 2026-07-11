@@ -17,17 +17,36 @@ export interface DelegateBundle {
   finalResult: string;
   running: boolean;
   toolCount: number;
+  /** Async submit job id when known (delegate_task_submit) */
+  jobId?: string;
 }
 
 export type DisplayWorkflowItem =
   | { kind: 'event'; event: WorkflowEvent; key: string }
   | { kind: 'delegation'; bundle: DelegateBundle; key: string };
 
-const DELEGATE_NAME_RE = /delegate_task/i;
+/** True parent delegate entrypoints — short, dotted, or Native FC `__` names. */
+const DELEGATE_ENTRY_RE =
+  /(?:^|[.__])delegate_task(_submit)?$/i;
+const DELEGATE_RESULT_RE =
+  /(?:^|[.__])delegate_task(_result)?$/i;
+
+function normalizeToolName(name: unknown): string {
+  return typeof name === 'string' ? name.trim() : '';
+}
 
 export function isDelegateToolName(name: unknown): boolean {
-  if (typeof name !== 'string') return false;
-  return DELEGATE_NAME_RE.test(name);
+  const n = normalizeToolName(name);
+  if (!n) return false;
+  // Exclude list/result helpers from "entry" detection
+  if (/(?:^|[.__])delegate_task_(result|list)$/i.test(n)) return false;
+  return DELEGATE_ENTRY_RE.test(n);
+}
+
+export function isDelegateResultToolName(name: unknown): boolean {
+  const n = normalizeToolName(name);
+  if (!n) return false;
+  return DELEGATE_RESULT_RE.test(n) || /(?:^|[.__])delegate_task$/i.test(n);
 }
 
 export function isDelegateToolCall(evt: WorkflowEvent): boolean {
@@ -48,6 +67,38 @@ function parseArgs(raw: unknown): Record<string, unknown> | null {
     }
   }
   return null;
+}
+
+/** True when parent tool_result is only an async job ack, not the real answer. */
+export function isAsyncSubmitAck(result: string | undefined | null): boolean {
+  const raw = (result || '').trim();
+  if (!raw) return false;
+  try {
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+    const jobId = (o as any).job_id;
+    if (!jobId) return false;
+    const status = String((o as any).status || '').toLowerCase();
+    if (status === 'done' || status === 'error' || status === 'not_found') return false;
+    // Classic submit ack: status running/pending, or result still null
+    if (status === 'running' || status === 'pending' || status === '') return true;
+    if ((o as any).result == null && status !== 'done') return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function parseJobIdFromResult(result: string | undefined | null): string {
+  const raw = (result || '').trim();
+  if (!raw) return '';
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o === 'object' && (o as any).job_id) return String((o as any).job_id);
+  } catch {
+    /* ignore */
+  }
+  return '';
 }
 
 export function extractDelegatePrompt(evt: WorkflowEvent): string {
@@ -82,7 +133,7 @@ function isMatchingParentResult(evt: WorkflowEvent, callId: string | null): bool
   const resultId = data.id || data.tool_use_id || null;
   if (callId && resultId) return callId === resultId;
   const name = String(data.name || data.tool || '');
-  return isDelegateToolName(name) || !name;
+  return isDelegateToolName(name) || isDelegateResultToolName(name) || !name;
 }
 
 function extractSubAgentFinalFromChildren(children: WorkflowEvent[]): string {
@@ -97,16 +148,74 @@ function extractSubAgentFinalFromChildren(children: WorkflowEvent[]): string {
   return '';
 }
 
+function bundleJobId(bundle: DelegateBundle): string {
+  return (
+    bundle.jobId ||
+    bundle.parent.jobId ||
+    parseJobIdFromResult(bundle.parent.result) ||
+    ''
+  );
+}
+
 function refreshBundleDerived(bundle: DelegateBundle): DelegateBundle {
   const fromChildren = extractSubAgentFinalFromChildren(bundle.children);
   const fromParent = (bundle.parent.result || '').trim();
-  const finalResult = fromChildren || fromParent;
+  const submitAck = fromParent && isAsyncSubmitAck(fromParent);
+  // Submit ack JSON is not the real answer — keep waiting for sub_agent_result
+  // or a later non-ack parent result (e.g. delegate_task_result).
+  const finalResult = fromChildren || (submitAck ? '' : fromParent);
+  const jobId = bundleJobId(bundle) || undefined;
   return {
     ...bundle,
+    jobId,
     finalResult,
     toolCount: bundle.children.filter((c) => c.type === 'tool_call' || c.type === 'tool_result').length,
-    running: !(bundle.parent.result || fromChildren),
+    running: !finalResult && (submitAck || !fromParent),
   };
+}
+
+function labelsOverlap(a: string, b: string): boolean {
+  const x = (a || '').trim();
+  const y = (b || '').trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const ax = x.slice(0, 40);
+  const ay = y.slice(0, 40);
+  return x.includes(ay) || y.includes(ax);
+}
+
+function findHostDelegation(
+  out: DisplayWorkflowItem[],
+  event: WorkflowEvent,
+): Extract<DisplayWorkflowItem, { kind: 'delegation' }> | null {
+  // Prefer job_id match (parallel async submits)
+  if (event.jobId) {
+    for (let k = out.length - 1; k >= 0; k--) {
+      const item = out[k];
+      if (item.kind !== 'delegation') continue;
+      if (bundleJobId(item.bundle) === event.jobId) return item;
+    }
+  }
+  // Then subTaskLabel vs prompt/label
+  if (event.subTaskLabel) {
+    for (let k = out.length - 1; k >= 0; k--) {
+      const item = out[k];
+      if (item.kind !== 'delegation') continue;
+      if (
+        labelsOverlap(event.subTaskLabel, item.bundle.label) ||
+        labelsOverlap(event.subTaskLabel, item.bundle.prompt)
+      ) {
+        return item;
+      }
+    }
+  }
+  // Fallback: nearest preceding open (or any) delegation
+  for (let k = out.length - 1; k >= 0; k--) {
+    if (out[k].kind === 'delegation') {
+      return out[k] as Extract<DisplayWorkflowItem, { kind: 'delegation' }>;
+    }
+  }
+  return null;
 }
 
 /**
@@ -116,6 +225,10 @@ function refreshBundleDerived(bundle: DelegateBundle): DelegateBundle {
  * events are also absorbed as children — sub-agent ChatAPI historically emitted
  * native reasoning without a sub_agent flag, which used to truncate the nest and
  * hide subsequent tagged tool_calls as orphans.
+ *
+ * Async submit (`delegate_task_submit`) returns a job ack immediately; the nest
+ * stays open so later tagged sub-agent events (matched by job_id / label) still
+ * appear in the delegate window like a sync delegate_task.
  */
 export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkflowItem[] {
   const items: DisplayWorkflowItem[] = [];
@@ -133,8 +246,24 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
 
       while (j < events.length) {
         const next = events[j];
+        const asyncOpen = !!(parent.result && isAsyncSubmitAck(parent.result));
 
         if (next.subAgent) {
+          // When multiple async submits are in flight, only absorb events that
+          // match this bundle's job / label; leave others for orphan attach.
+          const thisJob = parent.jobId || parseJobIdFromResult(parent.result);
+          if (thisJob && next.jobId && next.jobId !== thisJob) {
+            break;
+          }
+          if (
+            !thisJob &&
+            next.subTaskLabel &&
+            parent.subTaskLabel &&
+            !labelsOverlap(next.subTaskLabel, parent.subTaskLabel) &&
+            !labelsOverlap(next.subTaskLabel, extractDelegatePrompt(parent))
+          ) {
+            break;
+          }
           children.push(next);
           j += 1;
           continue;
@@ -148,8 +277,13 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
             resultStatus: (typeof next.content === 'object' && next.content && (next.content as any).error)
               ? 'error'
               : 'success',
+            jobId: parent.jobId || parseJobIdFromResult(resStr) || undefined,
           };
           j += 1;
+          // Async ack: keep scanning for immediate subAgent children
+          if (isAsyncSubmitAck(resStr || parent.result)) {
+            continue;
+          }
           break;
         }
 
@@ -159,6 +293,13 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
           children.push({ ...next, subAgent: true });
           j += 1;
           continue;
+        }
+
+        // Async submit still running: stop at next parent tool / narration
+        if (asyncOpen) {
+          if (next.type === 'tool_call') break;
+          if (next.type === 'thought' || next.type === 'info') break;
+          break;
         }
 
         // Parent result already merged onto the tool_call: keep collecting only
@@ -176,15 +317,17 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
 
       const prompt = extractDelegatePrompt(parent);
       const label = extractDelegateLabel(parent, prompt);
+      const jobId = parent.jobId || parseJobIdFromResult(parent.result) || undefined;
       const bundle = refreshBundleDerived({
         id: callId || key,
-        parent,
+        parent: jobId ? { ...parent, jobId } : parent,
         prompt,
         label,
         children,
         finalResult: '',
         running: !parent.result,
         toolCount: 0,
+        jobId,
       });
 
       items.push({
@@ -198,7 +341,7 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
 
     if (evt.type === 'tool_result' && !evt.subAgent) {
       const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
-      if (isDelegateToolName(data.name || data.tool)) {
+      if (isDelegateToolName(data.name || data.tool) || isDelegateResultToolName(data.name || data.tool)) {
         const last = items[items.length - 1];
         if (last?.kind === 'delegation' && last.bundle.parent.result) {
           i += 1;
@@ -211,17 +354,11 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
     i += 1;
   }
 
-  // Attach orphan subAgent events to the nearest preceding delegation
+  // Attach orphan subAgent events to the best matching preceding delegation
   const out: DisplayWorkflowItem[] = [];
   for (const item of items) {
     if (item.kind === 'event' && item.event.subAgent) {
-      let host: Extract<DisplayWorkflowItem, { kind: 'delegation' }> | null = null;
-      for (let k = out.length - 1; k >= 0; k--) {
-        if (out[k].kind === 'delegation') {
-          host = out[k] as Extract<DisplayWorkflowItem, { kind: 'delegation' }>;
-          break;
-        }
-      }
+      const host = findHostDelegation(out, item.event);
       if (host) {
         host.bundle = refreshBundleDerived({
           ...host.bundle,

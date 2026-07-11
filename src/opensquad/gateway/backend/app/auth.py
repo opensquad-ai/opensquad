@@ -162,12 +162,18 @@ async def create_user(db: AsyncSession, user_data: UserCreate, user_id: str | No
 
     hashed_password = get_password_hash(user_data.password)
 
+    avatar = user_data.avatar or ""
+    if not avatar and user_data.email and str(user_data.email).endswith("@ai"):
+        from opensquad.avatar_utils import local_bot_avatar_data_uri
+
+        avatar = local_bot_avatar_data_uri(str(final_id or user_data.name or "agent"))
+
     db_user = User(
         id=final_id,
         email=user_data.email,
         name=user_data.name,
         hashed_password=hashed_password,
-        avatar=user_data.avatar or "",
+        avatar=avatar,
         status="offline",
         created_at=datetime.now(timezone.utc),
         last_seen=datetime.now(timezone.utc),

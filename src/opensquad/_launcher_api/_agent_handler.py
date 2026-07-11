@@ -290,12 +290,7 @@ class AgentHandlerMixin:
         return {}
 
     def _read_chat_profile(self, agent_name: str) -> dict:
-        """Read agent profile for chat stats."""
-        profile_path = os.path.join(self.state.agents_dir, agent_name, "data", "profile.json")
-        if os.path.isfile(profile_path):
-            try:
-                with open(profile_path, encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {}
+        """Read agent profile for chat stats (normalized name/avatar aliases)."""
+        from opensquad.avatar_utils import read_agent_profile_file
+
+        return read_agent_profile_file(self.state.agents_dir, agent_name)

@@ -777,11 +777,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/plugin-services/") and path.endswith("/stop"):
                 pid = path.split("/")[3]
                 return self._handle_plugin_service_stop(pid)
-            # ── Agent session delete ──
+            # ── Agent session delete / rename ──
             elif re.search(r"^/api/sessions/[^/]+/[^/]+/delete$", path):
                 parts = path.split("/")
                 agent_id, session_id = parts[3], parts[4]
                 return self._handle_session_delete(agent_id, session_id)
+            elif re.search(r"^/api/sessions/[^/]+/[^/]+/rename$", path):
+                parts = path.split("/")
+                agent_id, session_id = parts[3], parts[4]
+                body = self._read_body()
+                return self._handle_session_rename(agent_id, session_id, body)
             elif path == "/api/workspace/create":
                 body = self._read_body()
                 return self._handle_workspace_create(body)
@@ -2483,6 +2488,29 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             ok = reader.delete_session(session_id)
             return self._send_json({"ok": ok})
 
+        def _handle_session_rename(self, agent_id: str, session_id: str, body: bytes | str | None):
+            """POST /api/sessions/{agent_id}/{session_id}/rename"""
+            reader = self._get_session_reader(agent_id)
+            if reader is None:
+                return self._send_json({"error": f"Agent not found: {agent_id}"}, 404)
+            try:
+                import json as _json
+
+                raw = body if isinstance(body, (bytes, bytearray, str)) else b""
+                data = _json.loads(raw or b"{}") if raw else {}
+                title = (data.get("title") or "").strip()
+            except Exception:
+                return self._send_json({"error": "Invalid JSON body"}, 400)
+            if not title:
+                return self._send_json({"error": "Title is required"}, 400)
+            rename = getattr(reader, "rename_session", None)
+            if rename is None:
+                return self._send_json({"error": "Rename not supported"}, 501)
+            ok = rename(session_id, title)
+            if not ok:
+                return self._send_json({"error": f"Session not found: {session_id}", "ok": False}, 404)
+            return self._send_json({"ok": True, "session_id": session_id, "title": title})
+
         def _read_token_stats(self, name: str) -> dict | None:
             """Read the agent's token_stats.json file"""
             # Try multiple possible paths
@@ -2501,14 +2529,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
         def _read_chat_profile(self, name: str) -> dict | None:
             """Read the agent's profile.json (group chat account name and avatar)"""
-            path = os.path.join(AGENTS_DIR, name, "data", "profile.json")
-            if os.path.isfile(path):
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    pass
-            return None
+            from opensquad.avatar_utils import read_agent_profile_file
+
+            profile = read_agent_profile_file(AGENTS_DIR, name)
+            # Empty normalized profile → None so callers keep prior "missing" semantics
+            if not profile.get("name") and not profile.get("avatar"):
+                return None
+            return profile
 
         def _handle_get_stats(self, name: str):
             """Return the agent's token statistics"""
