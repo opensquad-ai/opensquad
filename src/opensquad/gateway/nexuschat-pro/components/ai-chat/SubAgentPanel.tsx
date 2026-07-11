@@ -2,7 +2,7 @@
  * SubAgentPanel — Cursor-style delegate window.
  * Shows the sub-agent prompt + nested thought/tool stream; maximize / close to return.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
@@ -86,6 +86,12 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
     if (evt.type === 'thought') {
       const text = typeof evt.content === 'string' ? evt.content : JSON.stringify(evt.content ?? '');
       if (!text.trim()) continue;
+      // Coalesce consecutive thought fragments into one Thinking row
+      const last = lines[lines.length - 1];
+      if (last && last.kind === 'thought') {
+        last.text = `${last.text}${text}`;
+        continue;
+      }
       lines.push({ key, kind: 'thought', text });
       continue;
     }
@@ -245,6 +251,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
   const [maximized, setMaximized] = useState(false);
   const lines = useMemo(() => buildNestedLines(events), [events]);
   const resultText = (finalResult || '').trim();
+  const streamRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) setMaximized(false);
@@ -258,6 +265,14 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
+
+  // Keep the live tool stream pinned to the latest step while exploring.
+  useEffect(() => {
+    if (!open || !running) return;
+    const el = streamRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [open, running, lines.length, resultText]);
 
   if (!open) return null;
 
@@ -321,7 +336,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
         </div>
 
         {/* Nested activity stream */}
-        <div className="flex-1 min-h-0 overflow-y-auto px-4 pb-4 pt-1 space-y-1.5">
+        <div ref={streamRef} className="flex-1 min-h-0 overflow-y-auto px-4 pb-4 pt-1 space-y-1.5">
           {lines.length === 0 && !resultText ? (
             <div className="text-[13px] text-textMuted/70 py-6 text-center">
               {running ? 'Waiting for sub-agent activity…' : 'No nested activity recorded.'}

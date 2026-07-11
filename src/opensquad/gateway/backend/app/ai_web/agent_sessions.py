@@ -168,9 +168,35 @@ class AgentSessionReader:
 
     def get_session_list(self) -> list[dict[str, Any]]:
         """Return list of all sessions (current + history), newest first."""
-        self._reload()
+        # Always force-reload: after new_session the mtime cache can lag (esp. Windows)
+        # and the sidebar would keep showing the previous current session.
+        self._reload(force=True)
         sessions: list[dict[str, Any]] = []
         seen_ids: set = set()
+
+        def _file_ts(path: str) -> tuple[str | None, str | None]:
+            """Return (created_at, last_updated) ISO strings from filesystem."""
+            try:
+                st = os.stat(path)
+                updated = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                created_epoch = getattr(st, "st_ctime", st.st_mtime)
+                created = datetime.fromtimestamp(created_epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                return created, updated
+            except Exception:
+                return None, None
+
+        def _pick_ts(data: dict | None, file_path: str | None = None) -> tuple[str | None, str | None]:
+            created = (data or {}).get("created_at") if isinstance(data, dict) else None
+            updated = (data or {}).get("last_updated") if isinstance(data, dict) else None
+            if file_path and (not created or not updated):
+                f_created, f_updated = _file_ts(file_path)
+                created = created or f_created
+                updated = updated or f_updated
+            # Never leave both empty — sidebar needs a displayable age.
+            if not created and not updated:
+                now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                return now, now
+            return created or updated, updated or created
 
         def _extract_title(messages: list, fallback: str) -> str:
             for m in messages:
@@ -206,12 +232,15 @@ class AgentSessionReader:
             messages = self.session_data.get("messages", [])
             title = self.session_data.get("title") or _extract_title(messages, curr_id)
             preview = _extract_preview(messages)
+            created_at, last_updated = _pick_ts(self.session_data, self.current_session_file)
             sessions.append(
                 {
                     "id": curr_id,
                     "title": title,
                     "preview": preview,
                     "current": True,
+                    "created_at": created_at,
+                    "last_updated": last_updated,
                 }
             )
             seen_ids.add(curr_id)
@@ -230,19 +259,22 @@ class AgentSessionReader:
                         continue
                     title = sid
                     preview = ""
+                    data_for_ts: dict | None = None
+                    fp = os.path.join(self.history_dir, f)
                     cached = self._cache_get(sid)
                     if cached is not None:
                         messages = cached.get("messages", [])
                         title = cached.get("title") or _extract_title(messages, sid)
                         preview = _extract_preview(messages)
+                        data_for_ts = cached
                     else:
                         try:
-                            fp = os.path.join(self.history_dir, f)
                             with open(fp, encoding="utf-8") as jf:
                                 content = jf.read()
                                 try:
                                     data = json.loads(content)
                                     if isinstance(data, dict):
+                                        data_for_ts = data
                                         messages = data.get("messages", []) or []
                                         title = data.get("title") or _extract_title(messages, sid)
                                         preview = _extract_preview(messages)
@@ -252,12 +284,15 @@ class AgentSessionReader:
                                         title = match.group(1).strip() or sid
                         except Exception:
                             pass
+                    created_at, last_updated = _pick_ts(data_for_ts, fp)
                     sessions.append(
                         {
                             "id": sid,
                             "title": title,
                             "preview": preview,
                             "current": False,
+                            "created_at": created_at,
+                            "last_updated": last_updated,
                         }
                     )
                     seen_ids.add(sid)
@@ -265,6 +300,70 @@ class AgentSessionReader:
                 logger.error(f"Error scanning history: {e}")
 
         return sessions
+
+    def rename_session(self, session_id: str, title: str) -> bool:
+        """
+        Persist a user-chosen session title.
+        Sets title_locked so the running agent will not overwrite it via set_title.
+        """
+        title = (title or "").strip()
+        if not title or not session_id:
+            return False
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self._reload(force=True)
+
+        def _write_json(path: str, data: dict) -> bool:
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+                return True
+            except Exception as e:
+                logger.error(f"Failed to write session title to {path}: {e}")
+                return False
+
+        # Current in-memory / current_session.json
+        if session_id == self.session_data.get("id"):
+            self.session_data["title"] = title
+            self.session_data["title_locked"] = True
+            self.session_data["last_updated"] = now
+            ok = _write_json(self.current_session_file, self.session_data)
+            if ok:
+                self._current_session_mtime = None
+            return ok
+
+        # History file
+        file_path = os.path.join(self.history_dir, f"{session_id}.json")
+        if not os.path.exists(file_path):
+            return False
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                content = json.load(f)
+            if isinstance(content, list):
+                data = {
+                    "id": session_id,
+                    "messages": content,
+                    "events": [],
+                    "title": title,
+                    "title_locked": True,
+                    "last_updated": now,
+                    "created_at": now,
+                }
+            else:
+                data = content if isinstance(content, dict) else {}
+                data["id"] = session_id
+                data["title"] = title
+                data["title_locked"] = True
+                data["last_updated"] = now
+            if not _write_json(file_path, data):
+                return False
+            self._cache.pop(session_id, None)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to rename session {session_id}: {e}")
+            return False
 
     def get_session_history(self, session_id: str) -> dict[str, Any] | None:
         """Read-only: get a session's full data by id."""
@@ -356,6 +455,9 @@ class AgentSessionReader:
 
     async def async_delete_session(self, session_id: str) -> bool:
         return self.delete_session(session_id)
+
+    async def async_rename_session(self, session_id: str, title: str) -> bool:
+        return self.rename_session(session_id, title)
 
     def get_session_history_paged(
         self,
@@ -642,6 +744,18 @@ class _RemoteSessionReader:
             logger.error(f"Remote delete_session failed for {session_id}: {e}")
             return False
 
+    def rename_session(self, session_id: str, title: str) -> bool:
+        try:
+            import httpx
+
+            with httpx.Client(timeout=10) as c:
+                r = c.post(f"{self._base}/{session_id}/rename", json={"title": title})
+                r.raise_for_status()
+                return r.json().get("ok", False)
+        except Exception as e:
+            logger.error(f"Remote rename_session failed for {session_id}: {e}")
+            return False
+
     # ---- async interface (wraps sync HTTP calls via to_thread) ----
 
     async def async_get_session_list(self):
@@ -658,6 +772,9 @@ class _RemoteSessionReader:
 
     async def async_delete_session(self, session_id: str) -> bool:
         return await asyncio.to_thread(self.delete_session, session_id)
+
+    async def async_rename_session(self, session_id: str, title: str) -> bool:
+        return await asyncio.to_thread(self.rename_session, session_id, title)
 
 
 # ============================================================
@@ -722,6 +839,14 @@ class _WsSessionReader:
             return result.get("ok", False)
         except Exception as e:
             logger.error(f"WS delete_session failed for {session_id}: {e}")
+            return False
+
+    async def async_rename_session(self, session_id: str, title: str) -> bool:
+        try:
+            result = await self._call("POST", f"{self._base}/{session_id}/rename", {"title": title})
+            return result.get("ok", False)
+        except Exception as e:
+            logger.error(f"WS rename_session failed for {session_id}: {e}")
             return False
 
 

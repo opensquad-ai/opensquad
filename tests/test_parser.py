@@ -151,3 +151,36 @@ class TestParseXmlArguments:
     def test_multiline_values(self):
         result = self._target("<content>line1\nline2\nline3</content>")
         assert "line1" in result["content"]
+
+
+class TestExtractTagIgnoresReasoningMentions:
+    """Plan extraction must not latch onto `<plan>` mentioned inside <think>."""
+
+    def test_plan_inside_think_does_not_pollute(self):
+        from opensquad.parser import ResponseParser
+
+        text = (
+            "<think>\n"
+            "Just create a plan with the `<plan>` tag for an outdoor checklist.\n"
+            "Let me create a practical going-out checklist as a plan.\n"
+            "</think>\n"
+            "<plan>\n"
+            "出门计划清单\n"
+            "查看天气预报和预警\n"
+            "准备雨具（伞/雨衣）\n"
+            "</plan>\n"
+            "<to_user>出门计划清单已准备好。</to_user>"
+        )
+        plan = ResponseParser.extract_tag(text, "plan")
+        assert "出门计划清单" in plan
+        assert "查看天气预报和预警" in plan
+        assert "</think>" not in plan
+        assert "outdoor checklist" not in plan
+        assert "` tag" not in plan
+
+    def test_extract_think_still_works(self):
+        from opensquad.parser import ResponseParser
+
+        text = "<think>reasoning here</think>\n<plan>\nstep1\n</plan>"
+        assert ResponseParser.extract_tag(text, "think") == "reasoning here"
+        assert ResponseParser.extract_tag(text, "plan") == "step1"

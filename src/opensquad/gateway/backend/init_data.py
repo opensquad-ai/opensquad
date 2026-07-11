@@ -138,12 +138,14 @@ async def init_default_data():
             if existing.scalar_one_or_none():
                 continue
             uid = await _generate_user_id(db)
+            from opensquad.avatar_utils import local_bot_avatar_data_uri
+
             user = User(
                 id=uid,
                 name=sa["name"],
                 email=sa["email"],
                 hashed_password=get_password_hash(sa["password"]),
-                avatar="",
+                avatar=local_bot_avatar_data_uri(uid),
                 status=UserStatus.OFFLINE,
                 created_at=now,
                 last_seen=now,

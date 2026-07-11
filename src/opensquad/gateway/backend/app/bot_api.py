@@ -399,11 +399,17 @@ async def get_group_members(
     for member_id in member_ids:
         user = users_by_id.get(member_id)
         if user:
+            from opensquad.avatar_utils import ensure_agent_avatar, is_external_dicebear
+
+            avatar = user.avatar or ""
+            if (not avatar or is_external_dicebear(avatar)) and user.email and str(user.email).endswith("@ai"):
+                avatar = ensure_agent_avatar(avatar, str(user.id or user.name or "agent"))
+                user.avatar = avatar
             members.append(
                 {
                     "id": user.id,
                     "name": user.name,
-                    "avatar": user.avatar,
+                    "avatar": avatar,
                     "status": user.status.value if user.status else "offline",
                 }
             )

@@ -379,27 +379,30 @@
         animation: breathe-sleeping 4s ease-in-out infinite;
       }
 
-      /* Solo activity: soft white light sliding across live title text */
+      /* Solo activity: soft white light sliding across live title text.
+         Base color must be a CSS var — not currentColor — because text fill
+         is transparent for background-clip; currentColor would also be
+         transparent and the glyphs would vanish between shine passes. */
       @keyframes solo-text-shimmer {
-        0% { background-position: 120% 0; }
-        100% { background-position: -120% 0; }
+        0% { background-position: 100% 0; }
+        100% { background-position: -100% 0; }
       }
       .solo-text-shimmer {
         background-image: linear-gradient(
           90deg,
-          currentColor 0%,
-          currentColor 38%,
-          color-mix(in srgb, #ffffff 88%, currentColor) 50%,
-          currentColor 62%,
-          currentColor 100%
+          var(--solo-shimmer-base) 0%,
+          var(--solo-shimmer-base) 42%,
+          color-mix(in srgb, #ffffff 72%, var(--solo-shimmer-base)) 50%,
+          var(--solo-shimmer-base) 58%,
+          var(--solo-shimmer-base) 100%
         );
-        background-size: 220% 100%;
-        background-repeat: no-repeat;
+        background-size: 200% 100%;
+        background-repeat: repeat-x;
         -webkit-background-clip: text;
         background-clip: text;
         -webkit-text-fill-color: transparent;
-        color: transparent;
-        animation: solo-text-shimmer 1.7s ease-in-out infinite;
+        color: var(--solo-shimmer-base);
+        animation: solo-text-shimmer 1.7s linear infinite;
       }
 
       html, body {

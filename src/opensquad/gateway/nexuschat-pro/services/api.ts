@@ -712,9 +712,13 @@ export interface TokenStats {
 }
 
 export interface ChatProfile {
-  chat_user_name: string;
-  chat_user_avatar: string | null;
-  chat_user_id: string;
+  /** Canonical UI fields */
+  chat_user_name?: string;
+  chat_user_avatar?: string | null;
+  chat_user_id?: string;
+  /** Legacy profile.json fields (name/avatar) — still returned by launcher */
+  name?: string;
+  avatar?: string | null;
 }
 
  export interface AdminAgent {
@@ -1546,6 +1550,10 @@ export interface AgentSession {
   title: string;
   preview: string;
   current: boolean;
+  /** Session start time (ISO). */
+  created_at?: string | null;
+  /** Last activity time (ISO). */
+  last_updated?: string | null;
 }
 
 export interface AgentSessionData {
@@ -1643,6 +1651,17 @@ export const agentSessionAPI = {
     return apiRequest<{ message: string; session_id: string }>(
       `/ai-web/agent-sessions/${agentId}/${sessionId}/delete`,
       { method: 'POST' }
+    );
+  },
+
+  /** Persist a user-chosen session title (sticky / title_locked on disk). */
+  renameSession: async (agentId: string, sessionId: string, title: string) => {
+    return apiRequest<{ ok: boolean; session_id: string; title: string }>(
+      `/ai-web/agent-sessions/${agentId}/${sessionId}/rename`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ title }),
+      }
     );
   },
 

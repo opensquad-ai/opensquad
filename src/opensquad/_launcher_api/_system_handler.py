@@ -350,6 +350,29 @@ class SystemHandlerMixin:
         ok = reader.delete_session(session_id)
         return self._send_json({"ok": ok})
 
+    def _handle_session_rename(self, agent_id: str, session_id: str, body: bytes | str | None = None):
+        """POST /api/sessions/{agent_id}/{session_id}/rename — rename a session."""
+        reader = self._get_session_reader(agent_id)
+        if reader is None:
+            return self._send_json({"error": f"Agent not found: {agent_id}"}, 404)
+        try:
+            import json as _json
+
+            raw = body if isinstance(body, (bytes, bytearray, str)) else b""
+            data = _json.loads(raw or b"{}") if raw else {}
+            title = (data.get("title") or "").strip()
+        except Exception:
+            return self._send_json({"error": "Invalid JSON body"}, 400)
+        if not title:
+            return self._send_json({"error": "Title is required"}, 400)
+        rename = getattr(reader, "rename_session", None)
+        if rename is None:
+            return self._send_json({"error": "Rename not supported"}, 501)
+        ok = rename(session_id, title)
+        if not ok:
+            return self._send_json({"error": f"Session not found: {session_id}", "ok": False}, 404)
+        return self._send_json({"ok": True, "session_id": session_id, "title": title})
+
     # ── MCP handlers ───────────────────────────────────────────────────
 
     def _handle_get_mcp_central(self):

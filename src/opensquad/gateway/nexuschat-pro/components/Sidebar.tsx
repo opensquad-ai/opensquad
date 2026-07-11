@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio, Loader2 } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { User } from '../types';
-import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
+import { getAvatarUrl, getLocalAvatarFallback, resolveChatAvatar, resolveChatName } from '../utils/image';
 import { useTranslation } from 'react-i18next';
 import { setLanguage } from '../i18n';
 import { pluginAPI, PluginInfo, adminAPI, AdminAgent } from '../services/api';
@@ -145,8 +145,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
           .filter(item => !!item.cfg?.ui?.nav_shortcut)
           .map(item => ({
             agent_id: item.agent.agent_id,
-            label: item.agent.agent_name || item.agent.chat_profile?.chat_user_name || item.agent.dir_name || item.agent.agent_id,
-            avatar: item.agent.chat_profile?.chat_user_avatar || null,
+            label: item.agent.agent_name || resolveChatName(item.agent.chat_profile) || item.agent.dir_name || item.agent.agent_id,
+            avatar: resolveChatAvatar(item.agent.chat_profile),
           }));
         setAgentShortcuts(shortcuts);
         try {

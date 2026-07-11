@@ -488,6 +488,16 @@ class InputHub:
         """Request that the current task flow be stopped."""
         self._stop_requested = True
         self.push_urgent("__STOP__", source="system")
+        # Also abort in-flight sub-agents (sync + async) — otherwise they keep
+        # streaming into the UI / next session after the parent stops.
+        try:
+            from opensquad.sub_agent_runner import job_manager
+
+            n = job_manager.cancel_all("stop_task")
+            if n:
+                logger.info(f"[InputHub] cancelled {n} sub-agent job(s)/runner(s) on stop")
+        except Exception:
+            logger.debug("[InputHub] sub-agent cancel_all on stop skipped", exc_info=True)
 
     def clear_stop_request(self):
         """Clear the stop request."""

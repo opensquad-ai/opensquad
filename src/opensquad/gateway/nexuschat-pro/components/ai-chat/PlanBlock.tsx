@@ -89,37 +89,70 @@ export function parsePlanContent(content: any): PlanStep[] {
 
   // If content is already an array of steps
   if (Array.isArray(content)) {
-    return content.map((item: any) => {
-      if (typeof item === 'string') {
-        return { content: item, status: 'pending' as const };
-      }
-      return {
-        content: item.content || item.text || item.step || String(item),
-        status: (item.status as PlanStep['status']) || 'pending',
-      };
-    });
+    return content
+      .map((item: any) => {
+        if (typeof item === 'string') {
+          return { content: sanitizePlanStepText(item), status: 'pending' as const };
+        }
+        return {
+          content: sanitizePlanStepText(item.content || item.text || item.step || String(item)),
+          status: (item.status as PlanStep['status']) || 'pending',
+        };
+      })
+      .filter((s) => s.content.length > 0);
   }
 
-  // String content: parse line by line
-  const text = typeof content === 'string' ? content : JSON.stringify(content);
-  const lines = text.split('\n').filter((l: string) => l.trim());
+  // String content: isolate real <plan> body, drop leaked think fragments.
+  let text = typeof content === 'string' ? content : JSON.stringify(content);
+  text = isolatePlanBody(text);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
 
-  return lines.map((line: string) => {
-    const trimmed = line.replace(/^[-*\d.)\s]+/, '').trim();
-    let status: PlanStep['status'] = 'pending';
+  return lines
+    .map((line: string) => {
+      const trimmed = line.replace(/^[-*\d.)\s]+/, '').trim();
+      let status: PlanStep['status'] = 'pending';
 
-    if (/\[x\]/i.test(line) || /\[done\]/i.test(line) || /\[completed\]/i.test(line)) {
-      status = 'done';
-    } else if (/\[running\]/i.test(line) || /\[in.?progress\]/i.test(line) || /\[current\]/i.test(line) || /\[>\]/.test(line)) {
-      status = 'running';
-    } else if (/\[failed\]/i.test(line) || /\[error\]/i.test(line)) {
-      status = 'failed';
-    }
+      if (/\[x\]/i.test(line) || /\[done\]/i.test(line) || /\[completed\]/i.test(line)) {
+        status = 'done';
+      } else if (/\[running\]/i.test(line) || /\[in.?progress\]/i.test(line) || /\[current\]/i.test(line) || /\[>\]/.test(line)) {
+        status = 'running';
+      } else if (/\[failed\]/i.test(line) || /\[error\]/i.test(line)) {
+        status = 'failed';
+      }
 
-    const cleaned = trimmed
-      .replace(/\[(x|done|completed|running|in.?progress|current|failed|error|>|\s)\]/gi, '')
-      .trim();
+      const cleaned = sanitizePlanStepText(
+        trimmed
+          .replace(/\[(x|done|completed|running|in.?progress|current|failed|error|>|\s)\]/gi, '')
+          .trim(),
+      );
 
-    return { content: cleaned || trimmed, status };
-  });
+      return { content: cleaned, status };
+    })
+    .filter((s) => s.content.length > 0);
+}
+
+/** Prefer the real <plan>...</plan> body; strip think/thought wrappers. */
+function isolatePlanBody(raw: string): string {
+  let text = raw
+    .replace(/<\/?think\b[^>]*>/gi, '\n')
+    .replace(/<\/?thought\b[^>]*>/gi, '\n');
+
+  const openIdx = text.toLowerCase().lastIndexOf('<plan');
+  if (openIdx >= 0) {
+    const after = text.slice(openIdx);
+    const m = after.match(/<plan\b[^>]*>([\s\S]*?)(?:<\/plan\s*>|$)/i);
+    if (m) text = m[1];
+  } else {
+    text = text.replace(/<\/?plan\b[^>]*>/gi, '');
+  }
+  return text;
+}
+
+function sanitizePlanStepText(value: string): string {
+  return String(value || '')
+    .replace(/<\/?think\b[^>]*>/gi, '')
+    .replace(/<\/?thought\b[^>]*>/gi, '')
+    .replace(/<\/?plan\b[^>]*>/gi, '')
+    .replace(/^`+|`+$/g, '')
+    .trim();
 }

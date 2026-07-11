@@ -58,6 +58,12 @@ class InputHandler:
         # -- __STOP__ --------------------------------------------------------
         if cmd == "__STOP__":
             logger.info("[InputHandler] Ignoring __STOP__ command in main loop")
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                job_manager.cancel_all("stop_task")
+            except Exception:
+                pass
             input_hub.clear_stop_request()
             return True, None
 
@@ -75,6 +81,12 @@ class InputHandler:
         # -- __NEW_SESSION__ -----------------------------------------------
         if cmd == "__NEW_SESSION__":
             logger.info("[InputHandler] Command: Start New Session")
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                job_manager.cancel_all("new_session")
+            except Exception:
+                pass
             runner._reset_session_stats()
             sm = get_session_manager()
             sm.start_new_session()
@@ -146,6 +158,12 @@ class InputHandler:
         # -- __STOP__ ------------------------------------------------------
         if cmd == "__STOP__":
             logger.info("[InputHandler] Stop command received, safely stopping task")
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                job_manager.cancel_all("stop_task")
+            except Exception:
+                pass
             input_hub.clear_stop_request()
             await emit("status", "Task stopped by user")
             return True, None
@@ -153,6 +171,12 @@ class InputHandler:
         # -- __NEW_SESSION__ -----------------------------------------------
         if cmd == "__NEW_SESSION__":
             logger.info("[InputHandler] Urgent: New session requested during task")
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                job_manager.cancel_all("new_session")
+            except Exception:
+                pass
             runner._reset_session_stats()
             sm = get_session_manager()
             sm.start_new_session()
@@ -203,7 +227,21 @@ class InputHandler:
         if cmd.startswith("__SWITCH_AND_REPLY__:"):
             parts = cmd.split(":", 2)
             if len(parts) >= 3:
-                sid, reply_content = parts[1], parts[2]
+                sid, reply_content = parts[1], (parts[2] or "").strip()
+                sm = get_session_manager()
+                if sid and sid != sm.get_current_session_id():
+                    if sm.load_history_session(sid):
+                        runner._turn_sid = sid
+                        runner._load_history()
+                        if reply_content:
+                            await emit("turn_start", 0)
+                        from opensquad.events import bus
+
+                        await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                        await bus.emit_async("session_list", sm.get_session_list())
+                # Empty content = switch only; do not invent a blank user turn
+                if not reply_content:
+                    return True, None
                 cmd_images = runner._current_images
                 cmd_attachments = runner._current_attachments
                 if cmd_images:

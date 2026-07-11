@@ -18,8 +18,7 @@
     "auto_start": true
   },
   "config": {
-    "schema": {},
-    "section": "external_api"
+    "schema": {}
   },
   "config_schema": {},
   "contributes": {},

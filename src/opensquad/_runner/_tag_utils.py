@@ -134,17 +134,24 @@ def extract_tag(response: str, tag: str) -> str | None:
     2. Unclosed tag (content up to next <)
     3. Lazy matching for possibly missing '<' (for state/wake/sleep tags)
     """
+    search = response or ""
+    # Mentions of <plan> inside <think>/<thought> must not win the match.
+    if tag.lower() not in ("think", "thought"):
+        from opensquad.parser import ResponseParser
+
+        search = ResponseParser.strip_reasoning_blocks(search)
+
     # Match <tag ...>content</tag>
-    pattern = rf"<{tag}\b[^>]*>(.*?)</{tag}>"
-    match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+    pattern = rf"<{re.escape(tag)}\b[^>]*>(.*?)</{re.escape(tag)}>"
+    match = re.search(pattern, search, re.DOTALL | re.IGNORECASE)
     if match:
         val = match.group(1).strip()
         logger.debug("[Extractor] Found tag <%s>: %s", tag, val)
         return val
 
     # Fallback 1: if no closing tag, try extracting up to the next < symbol
-    pattern_fallback = rf"<{tag}\b[^>]*>(.*)"
-    match_fb = re.search(pattern_fallback, response, re.IGNORECASE | re.DOTALL)
+    pattern_fallback = rf"<{re.escape(tag)}\b[^>]*>(.*)"
+    match_fb = re.search(pattern_fallback, search, re.IGNORECASE | re.DOTALL)
     if match_fb:
         val = match_fb.group(1).split("<")[0].strip()
         logger.debug("[Extractor] Found unclosed tag <%s>: %s", tag, val)
@@ -152,8 +159,8 @@ def extract_tag(response: str, tag: str) -> str | None:
 
     # Fallback 2: support possibly missing '<' (for lazy AI output patterns)
     if tag in ["state", "wake", "sleep"]:
-        pattern_lazy = rf"{tag}\s*>\s*(.*?)\s*</{tag}>"
-        match_lazy = re.search(pattern_lazy, response, re.IGNORECASE)
+        pattern_lazy = rf"{re.escape(tag)}\s*>\s*(.*?)\s*</{re.escape(tag)}>"
+        match_lazy = re.search(pattern_lazy, search, re.IGNORECASE)
         if match_lazy:
             val = match_lazy.group(1).strip()
             logger.debug("[Extractor] Found lazy tag %s: %s", tag, val)

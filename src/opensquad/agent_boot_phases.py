@@ -728,22 +728,71 @@ class AgentBootPhases:
         task.add_done_callback(_bridge_bg_tasks.discard)
 
     def _write_chat_profile(self, data_dir: str, agent_bridge: Any, config: dict[str, Any]) -> None:
-        profile_dir = os.path.join(data_dir, "group_chat")
-        os.makedirs(profile_dir, exist_ok=True)
-        profile_path = os.path.join(profile_dir, "profile.json")
-        try:
-            display_name = getattr(agent_bridge, "nickname", None) or config.get("agent_name", "")
-            avatar_url = getattr(agent_bridge, "avatar", None) or ""
-            from opensquad.json_cache import invalidate_json_cache, load_json_cached
+        """Persist group-chat display name/avatar for launcher + web UI.
 
-            old = load_json_cached(profile_path, default=None)
-            if old is not None and old.get("name") == display_name and old.get("avatar") == avatar_url:
-                return  # unchanged, skip write
-            invalidate_json_cache(profile_path)
-            with open(profile_path, "w", encoding="utf-8") as handle:
-                json.dump({"name": display_name, "avatar": avatar_url}, handle, ensure_ascii=False, indent=2)
+        Canonical path: ``data/profile.json`` (what launcher ``_read_chat_profile`` reads).
+        Also mirrors to legacy ``data/group_chat/profile.json``.
+        """
+        from opensquad.avatar_utils import ensure_agent_avatar
+        from opensquad.json_cache import invalidate_json_cache, load_json_cached
+
+        display_name = (
+            getattr(agent_bridge, "user_name", None)
+            or getattr(agent_bridge, "nickname", None)
+            or config.get("agent_name", "")
+        )
+        seed = str(getattr(agent_bridge, "user_id", None) or config.get("agent_name", "") or "agent")
+        avatar_url = ensure_agent_avatar(
+            getattr(agent_bridge, "user_avatar", None) or getattr(agent_bridge, "avatar", None) or "",
+            seed,
+        )
+        # Keep bridge in sync so later callers see the resolved avatar.
+        try:
+            agent_bridge.user_avatar = avatar_url
+        except Exception:
+            pass
+
+        payload = {"name": display_name, "avatar": avatar_url}
+        paths = [
+            os.path.join(data_dir, "profile.json"),
+            os.path.join(data_dir, "group_chat", "profile.json"),
+        ]
+        try:
+            for profile_path in paths:
+                os.makedirs(os.path.dirname(profile_path), exist_ok=True)
+                old = load_json_cached(profile_path, default=None)
+                if old is not None and old.get("name") == display_name and old.get("avatar") == avatar_url:
+                    continue
+                invalidate_json_cache(profile_path)
+                with open(profile_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, indent=2)
+            # Backfill ChatPro User.avatar when the DB still has empty/Dicebear.
+            self._sync_chat_user_avatar(agent_bridge, avatar_url)
         except Exception as exc:
             logging.getLogger("Boot").warning(f"[Boot] Failed to write profile.json: {exc}")
+
+    def _sync_chat_user_avatar(self, agent_bridge: Any, avatar_url: str) -> None:
+        """PUT /api/users/me so group member lists show the agent avatar."""
+        if not avatar_url or not agent_bridge:
+            return
+        token = getattr(agent_bridge, "token", None)
+        base_url = getattr(agent_bridge, "base_url", None)
+        if not token or not base_url:
+            return
+        current = getattr(agent_bridge, "user_avatar", None) or ""
+        # Always push when we just resolved a local bot avatar for an empty/Dicebear account.
+        try:
+            import requests
+
+            requests.put(
+                f"{base_url}/api/users/me",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"avatar": avatar_url},
+                timeout=5,
+            )
+            agent_bridge.user_avatar = avatar_url or current
+        except Exception as exc:
+            logging.getLogger("Boot").debug(f"[Boot] Avatar sync skipped: {exc}")
 
     def _initialize_long_memory_runtime(
         self,

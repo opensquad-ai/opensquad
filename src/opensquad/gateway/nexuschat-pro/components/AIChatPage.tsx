@@ -20,12 +20,13 @@ import {
   Bot, ArrowLeft, Send, Square,
   PanelLeftOpen, PanelLeftClose, X, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Archive, ArchiveRestore, Clock, AlignLeft, MessageSquare,
+  Loader2, Clock, AlignLeft, MessageSquare,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
 import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
+import { resolveChatAvatar } from '../utils/image';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
@@ -39,7 +40,7 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pickFolderPath, pushCwdRecent } from '../utils/cwdRecents';
-import { setSessionProjectPath, getSessionMeta } from '../utils/sessionProjectMeta';
+import { setSessionProjectPath, getSessionMeta, requestSessionListRefresh } from '../utils/sessionProjectMeta';
 
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
@@ -100,7 +101,7 @@ const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; started
     return () => clearInterval(t);
   }, [startedMs]);
 
-  const avatarSrc = agentProfile?.chat_profile?.chat_user_avatar;
+  const avatarSrc = resolveChatAvatar(agentProfile?.chat_profile);
   const resolvedAvatar = avatarSrc
     ? (avatarSrc.startsWith('http') ? avatarSrc : `${SERVER_BASE_URL}${avatarSrc.startsWith('/') ? avatarSrc : '/' + avatarSrc}`)
     : null;
@@ -201,6 +202,25 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
   // to flip `completed`; treat settled terminal work as finished for display.
   const displayStatus = effectivelyCompleted ? undefined : (block.status || undefined);
 
+  // Skip empty / lifecycle-only blocks (e.g. "New session started" → bare Completed).
+  const hasRenderableContent = visibleItems.some((item) => {
+    if (item.kind === 'delegation') return true;
+    const evt = item.event;
+    if (evt.subAgent) return false;
+    if (evt.type === 'info') {
+      const infoObj = typeof evt.content === 'object' && evt.content !== null ? evt.content as any : null;
+      const text =
+        typeof evt.content === 'string'
+          ? evt.content
+          : (infoObj?.text || infoObj?.message || '');
+      if (/^New session started$/i.test(String(text).trim()) || /^Workflow started$/i.test(String(text).trim())) {
+        return false;
+      }
+    }
+    return true;
+  });
+  if (!hasRenderableContent) return null;
+
   return (
     <WorkflowContainer
       status={displayStatus}
@@ -276,6 +296,13 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
         if (evt.type === 'info') {
           const isSubInfo = !!evt.subAgent;
           const infoObj = typeof evt.content === 'object' && evt.content !== null ? evt.content as any : null;
+          const rawInfoText =
+            typeof evt.content === 'string'
+              ? evt.content
+              : (infoObj?.text || infoObj?.message || '');
+          if (/^New session started$/i.test(String(rawInfoText).trim()) || /^Workflow started$/i.test(String(rawInfoText).trim())) {
+            return null;
+          }
 
           // --- Task Supervisor check-in: special badge rendering ---
           if (infoObj?.event === 'task_supervisor_checkin') {
@@ -418,112 +445,18 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
   );
 };
 
-// ---- Archived Section ----
-// Renders a collapsible separator with a count of messages/events that
-// were removed from the LLM context by context compression but kept on
-// disk for UI display. When expanded, the original messages and
-// workflow events are rendered inline in chronological order.
-const ArchivedSection: React.FC<{
-  data: {
-    messageCount: number;
-    eventCount: number;
-    entries: TimelineEntry[];
-    startTs?: string;
-    endTs?: string;
-  };
-  currentUser: { id?: string; name?: string; avatar?: string | null } | null | undefined;
-  agentProfile: AdminAgent | null;
-  uiMode?: 'classic' | 'solo';
-}> = ({ data, currentUser, agentProfile, uiMode = 'classic' }) => {
-  const { t } = useTranslation();
-  const [isOpen, setIsOpen] = useState(false);
-  const isSolo = uiMode === 'solo';
-
-  const totalCount = data.messageCount + data.eventCount;
-  if (totalCount === 0) return null;
-
-  const tsLabel = (ts?: string) => {
-    if (!ts) return '';
-    try {
-      const d = new Date(ts);
-      if (Number.isNaN(d.getTime())) return '';
-      return d.toLocaleString();
-    } catch {
-      return '';
+/** Expand any legacy archived_section folds into a flat timeline. */
+function flattenArchivedSections(entries: TimelineEntry[]): TimelineEntry[] {
+  const out: TimelineEntry[] = [];
+  for (const e of entries) {
+    if (e.kind === 'archived_section') {
+      out.push(...flattenArchivedSections(e.data.entries));
+    } else {
+      out.push(e);
     }
-  };
-
-  return (
-    <div className={`my-3 ${isSolo ? 'mx-0' : 'mx-2 sm:mx-9'}`} data-testid="archived-section">
-      <button
-        type="button"
-        onClick={() => setIsOpen((o) => !o)}
-        className="w-full flex items-center gap-2 py-1.5 text-textMuted/60 hover:text-textMuted/90 transition-colors group"
-        aria-expanded={isOpen}
-      >
-        <div className="flex-1 h-px bg-border/30" />
-        {isOpen
-          ? <ArchiveRestore size={12} className="shrink-0 text-textMuted/60" />
-          : <Archive size={12} className="shrink-0 text-textMuted/60" />
-        }
-        <span className="text-[10px] font-mono shrink-0">
-          {isOpen
-            ? t('aiChat.archivedCollapse')
-            : t('aiChat.archivedSection', { count: totalCount })}
-        </span>
-        <span className="text-[10px] font-mono shrink-0 text-textMuted/40">
-          ({data.messageCount}m / {data.eventCount}e)
-        </span>
-        <div className="flex-1 h-px bg-border/30" />
-      </button>
-      {isOpen && (
-        <div className="mt-2 space-y-1 opacity-80">
-          {data.startTs && data.endTs && (
-            <div className="text-[10px] text-textMuted/45 font-mono text-center py-1">
-              {tsLabel(data.startTs)} — {tsLabel(data.endTs)}
-            </div>
-          )}
-          {data.entries.map((entry, i) => {
-            const entryKey = entry._uid || `archived-entry-${i}`;
-            if (entry.kind === 'message') {
-              const msgProps = {
-                message: entry.data,
-                senderName:
-                  entry.data.role === 'user'
-                    ? (currentUser?.name || undefined)
-                    : (agentProfile?.agent_name || undefined),
-                senderAvatar:
-                  entry.data.role === 'user'
-                    ? (currentUser?.avatar || null)
-                    : (agentProfile?.chat_profile?.chat_user_avatar || null),
-              };
-              return isSolo
-                ? <SoloMessage key={entryKey} {...msgProps} />
-                : <MessageBubble key={entryKey} {...msgProps} />;
-            }
-            if (entry.kind === 'workflow') {
-              return isSolo ? (
-                <SoloActivityRow
-                  key={entryKey}
-                  block={entry.data}
-                  expandDetails={false}
-                />
-              ) : (
-                <WorkflowBlockView
-                  key={entryKey}
-                  block={entry.data}
-                  blockKey={i}
-                />
-              );
-            }
-            // status_hint / prompt / nested archived_section — skip
-            return null;
-          })}
-        </div>
-      )}
-    </div>
-  );
-};
+  }
+  return out;
+}
 
 export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, currentUser }) => {
   const { t } = useTranslation();
@@ -673,11 +606,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const wsServiceRef = useRef<ReturnType<typeof getAiWsService> | null>(null);
 
   // ---- Pending message queue ----
-  // When the agent is busy (working/thinking), messages the user sends are not
-  // delivered immediately. Instead they land here and are auto-sent once the
-  // agent returns to idle. Each pending message also offers a "Send now" button
-  // that delivers it right away (the backend input_hub already queues working-
-  // state messages and injects them on the next turn via event_pipeline).
+  // When the agent is busy (or a turn was just released and we are waiting for
+  // busy→idle), new sends land here. Auto-drain sends ONE message at a time:
+  // release → wait for agent reply/task finish → release next. Queue is persisted
+  // per agent+session so refresh keeps the parked state.
   interface PendingMessage {
     id: string;
     text: string;
@@ -688,14 +620,69 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     skillName?: string;
   }
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
-  // Collapse the queue list into a single line. Useful when the user has
-  // parked many messages and wants a more compact view.
   const [pendingCollapsed, setPendingCollapsed] = useState(false);
-  // Ref mirror so the idle auto-send effect can read the latest queue without
-  // a stale closure, and a guard to prevent re-entrancy while flushing.
   const pendingMessagesRef = useRef<PendingMessage[]>([]);
   const isFlushingPendingRef = useRef(false);
+  /** After releasing a message, block further auto-drain until agent becomes busy once. */
+  const waitForBusyAfterPendingSendRef = useRef(false);
+  const pendingQueueHydratedKeyRef = useRef<string | null>(null);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
+
+  const pendingQueueStorageKey = useCallback((sid?: string | null) => {
+    const sessionPart = (sid || currentSessionId || 'nosession').trim() || 'nosession';
+    return `ai_chat_pending_queue:${agentId}:${sessionPart}`;
+  }, [agentId, currentSessionId]);
+
+  // Hydrate pending queue when agent/session is known (or nosession before sid arrives).
+  useEffect(() => {
+    if (!agentId) return;
+    const key = pendingQueueStorageKey(currentSessionId);
+    if (pendingQueueHydratedKeyRef.current === key) return;
+
+    // If we just learned the real session id, migrate any queue parked under nosession.
+    if (currentSessionId) {
+      const nosessionKey = pendingQueueStorageKey(null);
+      try {
+        const orphan = localStorage.getItem(nosessionKey);
+        if (orphan && !localStorage.getItem(key)) {
+          localStorage.setItem(key, orphan);
+          localStorage.removeItem(nosessionKey);
+        } else if (orphan && localStorage.getItem(key)) {
+          localStorage.removeItem(nosessionKey);
+        }
+      } catch { /* ignore */ }
+    }
+
+    pendingQueueHydratedKeyRef.current = key;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) {
+        // Keep in-memory queue when switching nosession→sid if we already have items.
+        if (currentSessionId && pendingMessagesRef.current.length > 0) return;
+        setPendingMessages([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setPendingMessages(parsed.filter((m) => m && typeof m.id === 'string'));
+      } else {
+        setPendingMessages([]);
+      }
+    } catch {
+      setPendingMessages([]);
+    }
+  }, [agentId, currentSessionId, pendingQueueStorageKey]);
+
+  // Persist pending queue for refresh recovery.
+  useEffect(() => {
+    if (!agentId) return;
+    if (pendingQueueHydratedKeyRef.current == null) return;
+    const key = pendingQueueStorageKey(currentSessionId);
+    try {
+      if (pendingMessages.length === 0) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(pendingMessages));
+    } catch { /* ignore quota */ }
+  }, [pendingMessages, agentId, currentSessionId, pendingQueueStorageKey]);
 
   // Workflow visibility toggle (persisted to localStorage, default: visible so users can see thought content)
   const [showWorkflow, setShowWorkflow] = useState<boolean>(() => {
@@ -1254,6 +1241,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           timestamp: Date.now(),
           subAgent: isSubAgent || undefined,
           subTaskLabel: subTaskLabel || undefined,
+          jobId:
+            typeof raw === 'object' && raw !== null && (raw as any).job_id
+              ? String((raw as any).job_id)
+              : undefined,
         };
         if (isHydratingSessionRef.current) {
           pendingHydrationWorkflowEventsRef.current.push({ event, status: 'Thinking...' });
@@ -1275,6 +1266,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         timestamp: Date.now(),
         subAgent: isSubAgent,
         subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
+        jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
       };
       if (isHydratingSessionRef.current) {
         pendingHydrationWorkflowEventsRef.current.push({ event, status: `Calling ${toolName}...` });
@@ -1301,6 +1293,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         timestamp: Date.now(),
         subAgent: typeof data === 'object' ? !!data.sub_agent : false,
         subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
+        jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
       };
       if (isHydratingSessionRef.current) {
         pendingHydrationWorkflowEventsRef.current.push({ event, status: `${toolName} completed` });
@@ -1551,6 +1544,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           ? { text: raw }
           : (typeof raw === 'object' && raw !== null ? raw : { text: String(raw) });
 
+      // System lifecycle noise — never show as a workflow "Activity" / empty block.
+      const infoText =
+        typeof detailed.text === 'string'
+          ? detailed.text
+          : (typeof (detailed as any).message === 'string' ? (detailed as any).message : '');
+      if (/^New session started$/i.test(infoText.trim()) || /^Workflow started$/i.test(infoText.trim())) {
+        return;
+      }
+
       if (typeof detailed === 'object' && detailed !== null) {
         const evt = (detailed as any).event;
         if (evt === 'context_compressed' || evt === 'context_compress_skipped') {
@@ -1602,6 +1604,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         timestamp: Date.now(),
         subAgent: isSubAgent,
         subTaskLabel: typeof detailed === 'object' && detailed !== null ? ((detailed as any).sub_task_label || '') : '',
+        jobId:
+          typeof detailed === 'object' && detailed !== null && (detailed as any).job_id
+            ? String((detailed as any).job_id)
+            : undefined,
       };
       setTimeline(prev => appendWorkflowEvent(prev, event, summary));
     });
@@ -1634,11 +1640,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setStreamingText('');
       setIsStreaming(false);
       finalizingRef.current = false;
-      setAgentStatus('thinking');
       // Only start the workflow timer when the backend supplies a real started_ms.
-      // turn_start(0) is emitted for session management operations (__NEW_SESSION__,
-      // __LOAD_SESSION__, etc.) and must NOT trigger the elapsed-time counter.
+      // turn_start(0) alone is session management (__NEW_SESSION__, empty switch, …)
+      // and must NOT flip the UI into "thinking" (looks like a blank turn started).
       const isRealWorkflow = typeof data === 'object' && data !== null && typeof (data as any).started_ms === 'number';
+      const numericTurn =
+        typeof data === 'number'
+          ? data
+          : typeof data === 'object' && data !== null
+            ? Number((data as any).turn || 0)
+            : 0;
+      if (isRealWorkflow || numericTurn >= 1) {
+        setAgentStatus('thinking');
+      }
       if (isRealWorkflow && isFirstTurn) {
         const startedMs = (data as any).started_ms as number;
         // Reset timer on each new workflow (turn=1). Subsequent turns (2+ after tool calls)
@@ -1971,8 +1985,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             compressionHydrationPendingRef.current = false;
 
             if (isCompressionHydration) {
-              // Keep live message order + in-flight tool stream; only graft
-              // archived_section (and missing summary) from the disk snapshot.
+              // Keep live message order + in-flight tool stream; disk snapshot
+              // already has archived turns flattened into the normal timeline.
               setTimeline((prev) => {
                 let merged = _mergeCompressionHydration(prev, nextEntries);
                 const bufferedWf = pendingHydrationWorkflowEventsRef.current;
@@ -2369,6 +2383,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         currentSessionIdRef.current = sid;
         wsServiceRef.current?.setActiveSession(sid);
         setCurrentSessionId(sid);
+        requestSessionListRefresh(agentId, sid);
       }
       // Clear new-session loading — current_session fires when server confirms the new session
       if (newSessionPendingRef.current) {
@@ -2384,7 +2399,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     const unsubSessionList = aiWsService.on('session_list', () => {
-      // Session list arrived via WS — sidebar will refresh via HTTP
+      requestSessionListRefresh(agentId, currentSessionIdRef.current);
     });
 
     // Use history_sync as a trigger to reload the canonical current session
@@ -2656,58 +2671,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }
 
   /**
-   * After context compression, the disk snapshot is authoritative for what is
-   * live vs archived. Keep only in-flight / optimistic live entries that are
-   * not yet on disk and not present in the archive — otherwise the UI keeps
-   * showing the full pre-compress conversation and the "已归档" section looks
-   * like a no-op until refresh.
+   * After context compression, the disk snapshot is authoritative (archived
+   * turns are already flattened into the normal timeline). Keep only
+   * in-flight / optimistic live entries that are not yet on disk.
    */
   function _mergeCompressionHydration(
     prev: TimelineEntry[],
     snapshot: TimelineEntry[],
   ): TimelineEntry[] {
-    const archivedFromSnap = snapshot.find((e) => e.kind === 'archived_section') as
-      | Extract<TimelineEntry, { kind: 'archived_section' }>
-      | undefined;
-    const snapLive = snapshot.filter((e) => e.kind !== 'archived_section');
+    const snapFlat = flattenArchivedSections(snapshot);
+    const prevFlat = flattenArchivedSections(prev);
 
     const collectMessageKeys = (entries: TimelineEntry[], into: Set<string>) => {
       for (const e of entries) {
-        if (e.kind === 'archived_section') {
-          collectMessageKeys(e.data.entries, into);
-          continue;
-        }
         if (e.kind !== 'message') continue;
         const k = _messageIdentityKey(e.data as ChatMessage);
         if (k) into.add(k);
       }
     };
 
-    const archivedKeys = new Set<string>();
-    if (archivedFromSnap) {
-      collectMessageKeys(archivedFromSnap.data.entries, archivedKeys);
-    }
     const snapLiveKeys = new Set<string>();
-    collectMessageKeys(snapLive, snapLiveKeys);
+    collectMessageKeys(snapFlat, snapLiveKeys);
 
-    // Snapshot live area is the post-compress truth.
-    let next = [...snapLive];
+    // Snapshot is the post-compress truth (already includes former archived turns).
+    let next = [...snapFlat];
 
-    // Dedupe against BOTH live snapshot and archived entries — otherwise
-    // pre-compress tool_calls still sitting in an incomplete live workflow
-    // get appended again after the archive fold and scramble tool order.
-    const dedupeAgainst: TimelineEntry[] = archivedFromSnap
-      ? [archivedFromSnap, ...next]
-      : next;
-
-    // Preserve unmatched optimistic user bubbles / incomplete workflows from
-    // the live view that are not archived and not already in the snapshot.
-    const liveWithoutArchive = prev.filter((e) => e.kind !== 'archived_section');
-    for (const e of liveWithoutArchive) {
+    for (const e of prevFlat) {
       if (e.kind === 'message') {
         const k = _messageIdentityKey(e.data as ChatMessage);
         if (!k) continue;
-        if (archivedKeys.has(k) || snapLiveKeys.has(k)) continue;
+        if (snapLiveKeys.has(k)) continue;
         // Optimistic message not yet flushed to disk — keep at the end.
         next.push(e);
         snapLiveKeys.add(k);
@@ -2715,20 +2708,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       if (e.kind === 'workflow') {
         const wf = e.data;
-        // Keep only incomplete workflows whose tool ids are not already in
-        // the post-compress snapshot OR the archived section.
         if (wf.completed) continue;
         const hasNew = wf.events.some((evt) => {
           const tk = workflowToolEventKey(evt);
           if (!tk) return evt.type === 'summary_stream';
-          return !timelineHasToolEvent(dedupeAgainst, evt);
+          return !timelineHasToolEvent(next, evt);
         });
         if (!hasNew) continue;
-        // Drop tools/thoughts already present in snapshot or archive.
         const filteredEvents = wf.events.filter((evt) => {
           const tk = workflowToolEventKey(evt);
           if (!tk) return evt.type === 'summary_stream';
-          return !timelineHasToolEvent(dedupeAgainst, evt);
+          return !timelineHasToolEvent(next, evt);
         });
         if (filteredEvents.length === 0) continue;
         next.push({
@@ -2739,9 +2729,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     }
 
-    if (archivedFromSnap) {
-      return [archivedFromSnap, ...next];
-    }
     return next;
   }
 
@@ -2754,7 +2741,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // Messages sent while busy are parked in the pending queue and auto-flushed
   // once the agent returns to idle (or sent immediately via "Send now").
   const isAgentBusy = useMemo(
-    () => isStreaming || agentStatus === 'working' || agentStatus === 'thinking',
+    () =>
+      isStreaming ||
+      agentStatus === 'working' ||
+      agentStatus === 'thinking' ||
+      agentStatus === 'sleeping',
     [isStreaming, agentStatus],
   );
 
@@ -2999,10 +2990,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const skillDir = pendingSkill?.dir || '';
     if (!text && images.length === 0 && attachments.length === 0 && !skillDir) return;
 
-    // When the agent is busy, park the message in the pending queue instead of
-    // delivering immediately. It will be auto-sent once the agent returns to
-    // idle, or the user can force it through right away with "Send now".
-    if (isAgentBusy) {
+    // Park when agent is busy, OR a turn was just released and we are waiting
+    // for busy status, OR there are already queued messages (keep FIFO order).
+    // This prevents rapid idle sends from all racing to the backend at once.
+    const shouldQueue =
+      isAgentBusy ||
+      waitForBusyAfterPendingSendRef.current ||
+      isFlushingPendingRef.current ||
+      pendingMessagesRef.current.length > 0;
+
+    if (shouldQueue) {
       const snapshot: PendingMessage = {
         id: genUID(),
         text,
@@ -3032,6 +3029,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return;
     }
 
+    waitForBusyAfterPendingSendRef.current = true;
     deliverMessage(
       {
         text,
@@ -3054,6 +3052,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Remove from the pending queue first so it doesn't get double-sent by the
     // idle auto-flush.
     setPendingMessages(prev => prev.filter(m => m.id !== id));
+    waitForBusyAfterPendingSendRef.current = true;
     deliverMessage(
       {
         text: target.text,
@@ -3071,63 +3070,58 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setPendingMessages(prev => prev.filter(m => m.id !== id));
   }, []);
 
-  // Send all queued messages immediately, in order. Used by the header's
-  // "Send all" button. We snapshot via ref to avoid a stale closure and
-  // clear the queue first so the idle auto-flush effect cannot re-trigger
-  // and double-send.
-  const handleSendAllPending = useCallback(() => {
+  // Header "Send now": release only the first queued message (sequential drain).
+  const handleSendNextPending = useCallback(() => {
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
-    const toFlush = [...queue];
-    setPendingMessages([]);
-    isFlushingPendingRef.current = true;
-    for (const msg of toFlush) {
-      deliverMessage(
-        {
-          text: msg.text,
-          images: msg.images,
-          attachments: msg.attachments,
-          skillDir: msg.skillDir,
-          skillName: msg.skillName,
-        },
-        { clearInputState: false, salvageStream: false },
-      );
-    }
-    setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
+    const next = queue[0];
+    setPendingMessages(prev => prev.filter(m => m.id !== next.id));
+    waitForBusyAfterPendingSendRef.current = true;
+    deliverMessage(
+      {
+        text: next.text,
+        images: next.images,
+        attachments: next.attachments,
+        skillDir: next.skillDir,
+        skillName: next.skillName,
+      },
+      { clearInputState: false, salvageStream: false },
+    );
   }, [deliverMessage]);
 
   // Clear the entire queue without sending anything.
   const handleCancelAllPending = useCallback(() => {
     setPendingMessages([]);
+    waitForBusyAfterPendingSendRef.current = false;
   }, []);
 
-  // Auto-flush the pending queue once the agent returns to idle. We mirror
-  // pendingMessages into a ref so the effect can read the latest snapshot
-  // without depending on the array (which would re-fire on every append and
-  // risk double delivery). A flush guard prevents re-entrancy.
+  // Auto-drain: when idle, release exactly ONE pending message, then wait until
+  // the agent becomes busy (and later idle again) before releasing the next.
   useEffect(() => {
-    if (isAgentBusy) return;
+    if (isAgentBusy) {
+      // Agent picked up the released turn — allow another drain on the next idle.
+      waitForBusyAfterPendingSendRef.current = false;
+      return;
+    }
     if (isFlushingPendingRef.current) return;
+    if (waitForBusyAfterPendingSendRef.current) return;
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
-    // Agent is idle and there are parked messages — deliver them in order.
+
+    const next = queue[0];
     isFlushingPendingRef.current = true;
-    const toFlush = [...queue];
-    setPendingMessages([]);
-    for (const msg of toFlush) {
-      deliverMessage(
-        {
-          text: msg.text,
-          images: msg.images,
-          attachments: msg.attachments,
-          skillDir: msg.skillDir,
-          skillName: msg.skillName,
-        },
-        { clearInputState: false, salvageStream: false },
-      );
-    }
-    // Defer clearing the guard to the next tick so a synchronous re-entry
-    // (e.g. agentStatus flicker) cannot trigger a second flush.
+    waitForBusyAfterPendingSendRef.current = true;
+    setPendingMessages((prev) => prev.filter((m) => m.id !== next.id));
+    deliverMessage(
+      {
+        text: next.text,
+        images: next.images,
+        attachments: next.attachments,
+        skillDir: next.skillDir,
+        skillName: next.skillName,
+      },
+      { clearInputState: false, salvageStream: false },
+    );
     setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
   }, [isAgentBusy, deliverMessage]);
 
@@ -3172,8 +3166,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setTimeout(() => setIsCompressingContext(false), 120000);
   };
 
-  const handleNewSession = () => {
+  const handleNewSession = (projectPath?: string) => {
     const previousSid = currentSessionIdRef.current;
+    // Stop parent + cancel in-flight sub-agents before switching sessions,
+    // otherwise orphaned delegates keep streaming into the new timeline.
+    wsServiceRef.current?.stopTask();
     newSessionPendingRef.current = true;
     setIsLoadingSession(true);
     setSessionLoadingLabel(t('aiChat.creatingSession'));
@@ -3183,6 +3180,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setCurrentSessionId(null);
     wsServiceRef.current?.setActiveSession(null);
     wsServiceRef.current?.newSession();
+    requestSessionListRefresh(agentId, null);
     setTimeline([]);
     streamingTextRef.current = '';
     setStreamingText('');
@@ -3199,10 +3197,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setTokenStats(null);
     setImages([]);
     setAttachments([]);
-    pendingProjectPathRef.current = null;
+    // Drop parked sends for the previous session; new session starts empty.
+    try {
+      if (previousSid) localStorage.removeItem(pendingQueueStorageKey(previousSid));
+      localStorage.removeItem(pendingQueueStorageKey(null));
+    } catch { /* ignore */ }
+    setPendingMessages([]);
+    waitForBusyAfterPendingSendRef.current = false;
+    pendingQueueHydratedKeyRef.current = null;
     pendingSessionTitleRef.current = null;
-    // New session: unlock path picker; keep last cwd as default selection (or system default).
-    if (defaultCwd && !agentCwd) setAgentCwd(defaultCwd);
+    // Folder-scoped new session: bind cwd to that project path immediately.
+    const boundPath = typeof projectPath === 'string' ? projectPath.trim() : '';
+    if (boundPath) {
+      pendingProjectPathRef.current = boundPath;
+      setAgentCwd(boundPath);
+      const dirName = agentProfile?.dir_name || agentId;
+      void adminAPI.setWorkingDirectory(dirName, boundPath).catch((err: any) => {
+        console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+      });
+      try {
+        pushCwdRecent(boundPath);
+      } catch { /* ignore */ }
+    } else {
+      pendingProjectPathRef.current = null;
+      // New session: unlock path picker; keep last cwd as default selection (or system default).
+      if (defaultCwd && !agentCwd) setAgentCwd(defaultCwd);
+    }
     // Reset lazy loading state
     setHasMoreHistory(false);
     setIsLoadingMore(false);
@@ -3238,6 +3258,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
             setCurrentSessionId(currentSid);
+            requestSessionListRefresh(agentId, currentSid);
           }
           diskSessionLoadedRef.current = msgCount > 0;
           historyOffsetRef.current = msgCount;
@@ -3482,6 +3503,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // Check if timeline has any messages (for empty state)
   const hasContent = timeline.length > 0 || isStreaming;
+  // Never render the old "已归档" fold — expand any leftover sections inline.
+  const displayTimeline = useMemo(() => flattenArchivedSections(timeline), [timeline]);
 
   // ---- Render ----
   return (
@@ -3524,6 +3547,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         isOpen={sessionSidebarOpen}
         onClose={() => setSessionSidebarOpen(false)}
         sessionTitleUpdate={sessionTitleUpdate}
+        agentBusy={
+          isStreaming ||
+          agentStatus === 'working' ||
+          agentStatus === 'thinking'
+        }
       />
 
       {showContextViewer && (
@@ -3753,7 +3781,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           )}
 
 
-          {timeline.map((entry, i) => {
+          {displayTimeline.map((entry, i) => {
             // Stable key from _uid prevents remounting during turn updates or lazy loading
             const entryKey = entry._uid || `entry-${i}`;
 
@@ -3767,7 +3795,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 senderAvatar:
                   entry.data.role === 'user'
                     ? (currentUser?.avatar || null)
-                    : (agentProfile?.chat_profile?.chat_user_avatar || null),
+                    : (resolveChatAvatar(agentProfile?.chat_profile) || null),
               };
               return isSolo
                 ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
@@ -3775,20 +3803,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             if (entry.kind === 'workflow') {
               const lastIncompleteIdx = (() => {
-                for (let j = timeline.length - 1; j >= 0; j--) {
-                  if (timeline[j].kind === 'workflow' && !(timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed) return j;
+                for (let j = displayTimeline.length - 1; j >= 0; j--) {
+                  if (displayTimeline[j].kind === 'workflow' && !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed) return j;
                 }
                 return -1;
               })();
               if (isSolo) {
                 // Only merge consecutive *incomplete* workflow fragments (live turn).
                 // Merging all adjacent completed blocks collapses separate turns after
-                // compression/archive and makes tool calls appear in the wrong order.
+                // compression and makes tool calls appear in the wrong order.
                 const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
                 if (
                   i > 0 &&
-                  timeline[i - 1].kind === 'workflow' &&
-                  !(timeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
+                  displayTimeline[i - 1].kind === 'workflow' &&
+                  !(displayTimeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
                   !curBlock.completed
                 ) {
                   return null;
@@ -3797,11 +3825,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 if (!curBlock.completed) {
                   let j = i + 1;
                   while (
-                    j < timeline.length &&
-                    timeline[j].kind === 'workflow' &&
-                    !(timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
+                    j < displayTimeline.length &&
+                    displayTimeline[j].kind === 'workflow' &&
+                    !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
                   ) {
-                    blocks.push((timeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                    blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
                     j += 1;
                   }
                 }
@@ -3852,15 +3880,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               );
             }
             if (entry.kind === 'archived_section') {
-              return (
-                <ArchivedSection
-                  key={entryKey}
-                  data={entry.data}
-                  currentUser={currentUser}
-                  agentProfile={agentProfile}
-                  uiMode={uiMode}
-                />
-              );
+              // Flattened by displayTimeline — should never reach here.
+              return null;
             }
             return null;
           })}
@@ -3880,7 +3901,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             <StreamingMessage
               content={streamingText}
               isComplete={!isStreaming}
-              avatarSrc={agentProfile?.chat_profile?.chat_user_avatar}
+              avatarSrc={resolveChatAvatar(agentProfile?.chat_profile)}
               variant={isSolo ? 'solo' : 'classic'}
               senderName={agentProfile?.agent_name}
             />
@@ -3997,45 +4018,45 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Pending message queue — docked above the input area (and above the
             plan panel when it is open). Messages here are NOT yet part of the
-            conversation: they only enter the timeline when the user clicks
-            "Send now" or when the agent returns to idle and auto-flushes them.
+            conversation: they only enter the timeline when drained one-by-one
+            after each agent reply, or when the user clicks send-next / send-now.
 
             UI shape (one large container, no per-message card):
               ┌────────────────────────────────────────────────────────────┐
-              │ ⏱ 2 Queued  ↗ auto-sent when idle    [Send all] [▾]       │
+              │ ⏱ 2 Queued  ↗ one-by-one when idle    [Send next] [▾]     │
               ├────────────────────────────────────────────────────────────┤
               │ #1  How are you?                              [⚡] [×]      │
               │ #2  Feeling alright?                          [⚡] [×]      │
               └────────────────────────────────────────────────────────────┘
         */}
         {pendingMessages.length > 0 && (
-          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border bg-panel flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-bgLight flex-shrink-0">
             <div className={soloColumnClass}>
-            <div className="rounded-lg border border-amber-200/70 bg-amber-50/40 dark:bg-amber-500/5 overflow-hidden">
+            <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
               {/* Header bar: status + actions */}
-              <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-amber-200/60 bg-amber-50/60 dark:bg-amber-500/10">
-                <Clock size={11} className="text-amber-500 flex-shrink-0" />
-                <span className="text-[11px] text-amber-700 dark:text-amber-300 font-semibold">
+              <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
+                <Clock size={11} className="text-primary flex-shrink-0" />
+                <span className="text-[11px] text-textMain font-semibold">
                   {t('aiChat.pendingCount', { count: pendingMessages.length })}
                 </span>
-                <span className="text-[10px] text-amber-600/80 dark:text-amber-300/70">
+                <span className="text-[10px] text-textMuted">
                   · ↗ {t('aiChat.pendingAutoSendHint')}
                 </span>
                 <div className="flex-1" />
                 {/* Send-all: flush the whole queue immediately. */}
                 <button
                   type="button"
-                  onClick={handleSendAllPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-amber-700 dark:text-amber-300 hover:bg-amber-200/60 dark:hover:bg-amber-500/20 transition-colors"
-                  title={t('aiChat.sendNow')}
+                  onClick={handleSendNextPending}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  title={t('aiChat.sendNext')}
                 >
                   <Zap size={10} />
-                  {t('aiChat.sendNow')}
+                  {t('aiChat.sendNext')}
                 </button>
                 <button
                   type="button"
                   onClick={handleCancelAllPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-gray-500 hover:bg-gray-200/60 dark:hover:bg-gray-700/40 transition-colors"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
                   title={t('aiChat.pendingClearAll')}
                 >
                   <X size={10} />
@@ -4044,7 +4065,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <button
                   type="button"
                   onClick={() => setPendingCollapsed(c => !c)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-gray-500 hover:bg-gray-200/60 dark:hover:bg-gray-700/40 transition-colors"
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
                   title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
                 >
                   {pendingCollapsed ? '▴' : '▾'}
@@ -4061,27 +4082,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     return (
                       <div
                         key={pm.id}
-                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-amber-200/40 last:border-b-0 hover:bg-amber-100/40 dark:hover:bg-amber-500/10 transition-colors"
+                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
                       >
                         {/* Queue position badge */}
-                        <span className="flex-shrink-0 text-[10px] font-mono text-amber-700/80 dark:text-amber-300/80 min-w-[28px]">
+                        <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
                           {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
                         </span>
                         {/* Message preview + attachment summary */}
                         <div className="flex-1 min-w-0 flex items-center gap-2">
                           {preview ? (
-                            <span className="truncate text-[12px] text-gray-700 dark:text-gray-200">
+                            <span className="truncate text-[12px] text-textMain">
                               {preview}
                             </span>
                           ) : (
-                            <span className="text-[12px] italic text-gray-400">
+                            <span className="text-[12px] italic text-textMuted">
                               {imgCount > 0 || fileCount > 0
                                 ? t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })
                                 : t('aiChat.pendingLabel')}
                             </span>
                           )}
                           {(imgCount > 0 || fileCount > 0) && preview && (
-                            <span className="flex-shrink-0 text-[10px] text-gray-400 whitespace-nowrap">
+                            <span className="flex-shrink-0 text-[10px] text-textMuted whitespace-nowrap">
                               {t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })}
                             </span>
                           )}
@@ -4091,7 +4112,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           <button
                             type="button"
                             onClick={() => handleSendPendingNow(pm.id)}
-                            className="p-1 rounded text-amber-600 hover:bg-amber-200/60 hover:text-amber-700 dark:text-amber-300 dark:hover:bg-amber-500/30 transition-colors"
+                            className="p-1 rounded text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
                             title={t('aiChat.sendNow')}
                           >
                             <Zap size={12} />
@@ -4099,7 +4120,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           <button
                             type="button"
                             onClick={() => handleCancelPending(pm.id)}
-                            className="p-1 rounded text-gray-400 hover:bg-gray-200/60 hover:text-gray-600 dark:hover:bg-gray-700/40 dark:hover:text-gray-200 transition-colors"
+                            className="p-1 rounded text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain transition-colors"
                             title={t('aiChat.cancelPending')}
                           >
                             <X size={12} />
@@ -4117,15 +4138,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Inline Plan Panel (docked above input) */}
         {showPlanViewer && (
-          <div className="px-2 sm:px-3 pt-2 border-t border-border bg-panel flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-bgLight flex-shrink-0">
             <div className={soloColumnClass}>
             {effectivePlanSteps.length > 0 ? (
               <PlanBlock
                 steps={effectivePlanSteps}
-                className="mb-0 ml-0 border border-border rounded-lg overflow-hidden bg-white dark:bg-bgPage shadow-sm"
+                className="mb-0 ml-0 border border-border/50 rounded-lg overflow-hidden bg-transparent"
               />
             ) : (
-              <div className="text-xs text-textMuted bg-white dark:bg-bgPage border border-border rounded-lg px-3 py-2 shadow-sm">{t('aiChat.noPlanYet')}</div>
+              <div className="text-xs text-textMuted bg-transparent border border-border/50 rounded-lg px-3 py-2">{t('aiChat.noPlanYet')}</div>
             )}
             </div>
           </div>

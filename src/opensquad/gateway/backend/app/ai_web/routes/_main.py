@@ -1043,6 +1043,39 @@ async def agent_session_delete(
     return {"message": "Session deleted", "session_id": session_id}
 
 
+class SessionRenameRequest(BaseModel):
+    title: str
+
+
+@router.post("/agent-sessions/{agent_id}/{session_id}/rename")
+async def agent_session_rename(
+    agent_id: str,
+    session_id: str,
+    body: SessionRenameRequest,
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Rename a session with a user-chosen title (sticky / title_locked)."""
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(400, "Title is required")
+    if len(title) > 200:
+        raise HTTPException(400, "Title too long (max 200)")
+
+    reader = await async_get_agent_session_reader(agent_id)
+    if not reader:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+
+    rename = getattr(reader, "async_rename_session", None)
+    if rename is None:
+        raise HTTPException(501, "Rename not supported for this agent session reader")
+
+    success = await rename(session_id, title)
+    if not success:
+        raise HTTPException(404, f"Session not found or rename failed: {session_id}")
+
+    return {"ok": True, "session_id": session_id, "title": title}
+
+
 # ============================================================
 # Agent Push API - Agents push files/messages to chat & groups
 # ============================================================

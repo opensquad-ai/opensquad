@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { marked } from 'marked';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
+import { resolveChatAvatar, resolveChatName } from '../utils/image';
 import { useTranslation, Trans } from 'react-i18next';
 import {
   adminHeaderBar,
@@ -1250,8 +1251,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
 
                   {/* Agent 头像 + 名称 */}
                   <div className="flex items-center gap-3 mb-3">
-                    {agent.chat_profile?.chat_user_avatar ? (
-                      <img src={agent.chat_profile.chat_user_avatar} alt={agent.chat_profile.chat_user_name} className="w-10 h-10 rounded-lg object-cover shrink-0" loading="lazy" />
+                    {resolveChatAvatar(agent.chat_profile) ? (
+                      <img src={resolveChatAvatar(agent.chat_profile)!} alt={resolveChatName(agent.chat_profile)} className="w-10 h-10 rounded-lg object-cover shrink-0" loading="lazy" />
                     ) : (
                       <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}`}>
                         {TYPE_ICONS[agent.agent_type] || <Wrench size={20} />}
@@ -1259,7 +1260,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     )}
                     <div className="min-w-0">
                       <h3 className="font-semibold text-textMain text-sm truncate">
-                        {agent.agent_name || agent.chat_profile?.chat_user_name || key}
+                        {agent.agent_name || resolveChatName(agent.chat_profile) || key}
                       </h3>
                       <p className="text-[10px] text-textMuted truncate">{agent.agent_type} | {key}</p>
                       {agent.model_card && (
@@ -1367,15 +1368,15 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             {/* 面板头 */}
             <div className="p-4 border-b border-border flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
-                {detailAgent.chat_profile?.chat_user_avatar ? (
-                  <img src={detailAgent.chat_profile.chat_user_avatar} alt={detailAgent.chat_profile.chat_user_name} className="w-8 h-8 rounded-lg object-cover" loading="lazy" />
+                {resolveChatAvatar(detailAgent.chat_profile) ? (
+                  <img src={resolveChatAvatar(detailAgent.chat_profile)!} alt={resolveChatName(detailAgent.chat_profile)} className="w-8 h-8 rounded-lg object-cover" loading="lazy" />
                 ) : (
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${detailAgent.process_status === 'running' ? 'bg-green-500/10 text-green-600' : 'bg-primary/10 text-primary'}`}>
                     {TYPE_ICONS[detailAgent.agent_type] || <Wrench size={18} />}
                   </div>
                 )}
                 <div>
-                  <h3 className="font-semibold text-textMain text-sm">{detailAgent.agent_name || detailAgent.chat_profile?.chat_user_name || getAgentKey(detailAgent)}</h3>
+                  <h3 className="font-semibold text-textMain text-sm">{detailAgent.agent_name || resolveChatName(detailAgent.chat_profile) || getAgentKey(detailAgent)}</h3>
                   <p className="text-[10px] text-textMuted">{getAgentKey(detailAgent)}</p>
                 </div>
               </div>

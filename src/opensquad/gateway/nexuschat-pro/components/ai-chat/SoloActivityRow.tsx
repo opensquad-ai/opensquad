@@ -10,10 +10,15 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { CircleDashed, CheckCircle2, XCircle, ListTodo, ArrowRightCircle } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
+import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
 import { DelegateFold } from './DelegateFold';
 import { parsePlanContent, type PlanStep } from './PlanBlock';
+
+/** When Solo workflow step count exceeds this, nest lines in a scroll box. */
+const SOLO_STEPS_SCROLL_THRESHOLD = 10;
+const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
@@ -224,6 +229,10 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
         ? evt.content
         : evt.content?.text || evt.content?.message || '';
     if (!text) return lines;
+    // Lifecycle noise (also filtered in timeline convert / live WS).
+    if (/^New session started$/i.test(String(text).trim()) || /^Workflow started$/i.test(String(text).trim())) {
+      return lines;
+    }
     lines.push({
       key,
       kind: 'info',
@@ -335,7 +344,10 @@ const ShimmerLabel: React.FC<{
   color: string;
   className?: string;
 }> = ({ children, color, className }) => (
-  <span className={`solo-text-shimmer ${className || ''}`} style={{ color }}>
+  <span
+    className={`solo-text-shimmer ${className || ''}`}
+    style={{ ['--solo-shimmer-base' as string]: color, color }}
+  >
     {children}
   </span>
 );
@@ -605,7 +617,7 @@ const SoloEventLine: React.FC<{
         open={open}
         onToggle={() => setOpen((v) => !v)}
         running={line.running}
-        shimmer={!!line.running && line.kind === 'tool'}
+        shimmer={!!line.running && (line.kind === 'tool' || line.kind === 'thought' || line.kind === 'summary')}
         depth={1}
         addedLines={isFileEdit ? added : undefined}
         removedLines={isFileEdit ? removed : undefined}
@@ -728,11 +740,15 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   turnStartedMs,
 }) => {
   const [tick, setTick] = useState(0);
-  const hasRunning = block.events.some(
+  const hasOpenTools = block.events.some(
     (e) => e.type === 'tool_call' && !e.result && !block.completed,
   );
+  // Async delegate_task_submit keeps the sub-agent window live after the parent
+  // turn seals — treat it as still running so the outer fold / panel stay mounted.
+  const hasAsyncDelegate = hasOpenAsyncDelegate(block.events);
+  const hasRunning = hasOpenTools || hasAsyncDelegate;
   const hasLiveCompression = block.events.some((e) => {
-    if (block.completed) return false;
+    if (block.completed && !hasAsyncDelegate) return false;
     if (e.type === 'summary_stream') {
       const data = typeof e.content === 'object' && e.content ? e.content : {};
       return !data.done;
@@ -744,12 +760,17 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     return false;
   });
   // Parent only passes turnStartedMs for the active incomplete group.
-  // Also keep open during context compression (no turn_start / turnStartedMs).
+  // Also keep open during context compression (no turn_start / turnStartedMs)
+  // and while async sub-agents are still streaming.
   const isLiveTurn =
-    (!block.completed && turnStartedMs != null) || hasLiveCompression || hasRunning;
+    (!block.completed && turnStartedMs != null) ||
+    hasLiveCompression ||
+    hasRunning;
 
   const [outerOpen, setOuterOpen] = useState(isLiveTurn || expandDetails);
   const prevExpandRef = useRef(expandDetails);
+  const stepsScrollRef = useRef<HTMLDivElement>(null);
+  const stepsAtBottomRef = useRef(true);
 
   useEffect(() => {
     if (expandDetails) {
@@ -781,12 +802,55 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     [block, lines, turnStartedMs, tick],
   );
 
-  // Between steps: turn is live, but no concrete tool / compression / plan is in flight.
+  // Active phase detection: while the latest step is still thought / plan /
+  // compression / a running tool, do NOT show "next planing…".
+  // That placeholder is only for the idle gap waiting on the agent's next move.
+  const lastActivity = useMemo(() => {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (l.kind === 'info') continue;
+      return l;
+    }
+    return null;
+  }, [lines]);
+
+  const thinkingActive =
+    isLiveTurn && !block.completed && lastActivity?.kind === 'thought';
+  const planningActive =
+    isLiveTurn &&
+    !block.completed &&
+    (lastActivity?.kind === 'plan' || lines.some((l) => l.kind === 'plan' && !!l.running));
+
+  const displayLines = useMemo(() => {
+    if (!thinkingActive) return lines;
+    let lastThoughtIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].kind === 'thought') {
+        lastThoughtIdx = i;
+        break;
+      }
+    }
+    if (lastThoughtIdx < 0) return lines;
+    return lines.map((l, i) => (i === lastThoughtIdx ? { ...l, running: true } : l));
+  }, [lines, thinkingActive]);
+
+  const useStepsScrollBox = displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD;
+
+  // Live turns: keep the steps box pinned to the bottom while the user hasn't scrolled up.
+  useEffect(() => {
+    if (!outerOpen || !useStepsScrollBox || !isLiveTurn) return;
+    const el = stepsScrollRef.current;
+    if (!el || !stepsAtBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [displayLines.length, outerOpen, useStepsScrollBox, isLiveTurn, tick]);
+
   const showNextPlanning =
     isLiveTurn &&
     !hasRunning &&
     !hasLiveCompression &&
-    !lines.some((l) => !!l.running);
+    !thinkingActive &&
+    !planningActive &&
+    !displayLines.some((l) => !!l.running);
 
   if (!lines.length) {
     if (!showNextPlanning) return null;
@@ -798,7 +862,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   }
 
   // Thought-only (no tools / compression / delegate / plan): single fold → body text.
-  const isThoughtOnly = !lines.some(
+  const isThoughtOnly = !displayLines.some(
     (l) =>
       l.kind === 'tool' ||
       l.kind === 'summary' ||
@@ -809,20 +873,23 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   // Compression-only: one fold → summary body (avoid "Context compressed" + "Context summary done").
   const isCompressionOnly =
     !isThoughtOnly &&
-    lines.every((l) => l.kind === 'summary' || l.kind === 'progress') &&
-    lines.some((l) => l.kind === 'summary');
+    displayLines.every((l) => l.kind === 'summary' || l.kind === 'progress') &&
+    displayLines.some((l) => l.kind === 'summary');
   // Plan-only (+ optional thoughts): outer fold opens to To-dos box.
   const isPlanOnly =
     !isThoughtOnly &&
     !isCompressionOnly &&
-    lines.every((l) => l.kind === 'plan' || l.kind === 'thought') &&
-    lines.some((l) => l.kind === 'plan');
+    displayLines.every((l) => l.kind === 'plan' || l.kind === 'thought') &&
+    displayLines.some((l) => l.kind === 'plan');
 
-  const thoughtBodies = lines
+  const thoughtBodies = displayLines
     .filter((l) => l.kind === 'thought' && l.detail.trim())
     .map((l) => l.detail);
 
   if (isThoughtOnly) {
+    // Info-only / empty chrome used to render a bare "Activity" fold on new session.
+    if (thoughtBodies.length === 0 && !showNextPlanning) return null;
+
     return (
       <div className="my-1.5 w-full select-text">
         <TextChevronToggle
@@ -831,6 +898,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
           open={outerOpen}
           onToggle={() => setOuterOpen((v) => !v)}
           running={isLiveTurn}
+          shimmer={thinkingActive}
           depth={0}
         />
         {outerOpen && thoughtBodies.length > 0 && (
@@ -857,7 +925,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   if (isCompressionOnly) {
     // Prefer the latest summary line (streaming updates merge into one event usually).
-    const summaryLines = lines.filter((l) => l.kind === 'summary');
+    const summaryLines = displayLines.filter((l) => l.kind === 'summary');
     const summaryLine = summaryLines[summaryLines.length - 1];
     const live = !!(summaryLine?.running || hasLiveCompression);
 
@@ -869,6 +937,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
           open={outerOpen}
           onToggle={() => setOuterOpen((v) => !v)}
           running={live}
+          shimmer={live}
           depth={0}
         />
         {outerOpen && summaryLine && (summaryLine.detail || summaryLine.running) && (
@@ -910,7 +979,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   // Plan-only: show optional thought body + Cursor-style To-dos fold (no extra outer wrapper).
   if (isPlanOnly) {
-    const planLines = lines.filter((l) => l.kind === 'plan' && l.planSteps && l.planSteps.length > 0);
+    const planLines = displayLines.filter((l) => l.kind === 'plan' && l.planSteps && l.planSteps.length > 0);
     return (
       <div className="my-1.5 w-full select-text space-y-0.5">
         {thoughtBodies.length > 0 && (
@@ -920,7 +989,8 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
               secondary={summary.primary.startsWith('To-dos') ? 'for a bit' : summary.secondary}
               open={outerOpen}
               onToggle={() => setOuterOpen((v) => !v)}
-              running={false}
+              running={thinkingActive}
+              shimmer={thinkingActive}
               depth={0}
             />
             {outerOpen && (
@@ -959,25 +1029,42 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         open={outerOpen}
         onToggle={() => setOuterOpen((v) => !v)}
         running={isLiveTurn || hasRunning || hasLiveCompression}
+        shimmer={thinkingActive || hasRunning || hasLiveCompression}
         depth={0}
       />
-      {/* Depth 1: event lines indented under the outer fold */}
-      {outerOpen && (
-        <div className="mt-0.5 space-y-0.5 pl-4">
-          {lines.map((line) => (
-            <SoloEventLine
-              key={line.key}
-              line={line}
-              defaultOpen={
-                expandDetails ||
-                !!(line.kind === 'summary' && line.running) ||
-                line.kind === 'plan'
-              }
-            />
-          ))}
-          {showNextPlanning ? <NextPlanningPlaceholder /> : null}
-        </div>
-      )}
+      {/* Depth 1: event lines indented under the outer fold.
+          >10 steps → fixed-height scroll box so the page doesn't grow forever.
+          Delegate folds stay mounted (hidden when collapsed) so an open
+          SubAgentPanel keeps receiving live job_id updates after the turn seals. */}
+      <div
+        ref={stepsScrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stepsAtBottomRef.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+        }}
+        className={
+          !outerOpen
+            ? 'hidden'
+            : useStepsScrollBox
+              ? `mt-0.5 space-y-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-black/[0.02] dark:bg-white/[0.03]`
+              : 'mt-0.5 space-y-0.5 pl-4'
+        }
+        aria-hidden={!outerOpen}
+      >
+        {displayLines.map((line) => (
+          <SoloEventLine
+            key={line.key}
+            line={line}
+            defaultOpen={
+              expandDetails ||
+              !!(line.kind === 'summary' && line.running) ||
+              line.kind === 'plan'
+            }
+          />
+        ))}
+        {showNextPlanning ? <NextPlanningPlaceholder /> : null}
+      </div>
     </div>
   );
 };

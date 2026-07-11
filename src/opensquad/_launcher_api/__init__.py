@@ -434,6 +434,11 @@ def create_management_handler(
                 parts = path.split("/")
                 agent_id, session_id = parts[3], parts[4]
                 return self._handle_session_delete(agent_id, session_id)
+            elif re.search(r"^/api/sessions/[^/]+/[^/]+/rename$", path):
+                parts = path.split("/")
+                agent_id, session_id = parts[3], parts[4]
+                body = self._read_body()
+                return self._handle_session_rename(agent_id, session_id, body)
 
             # ── Workspace endpoints ─────────────────────────────────────
             elif path == "/api/workspace/create":

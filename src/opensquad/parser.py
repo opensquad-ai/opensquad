@@ -119,9 +119,42 @@ class ResponseParser:
     """Parses XML-structured responses from AI models."""
 
     @staticmethod
+    def strip_reasoning_blocks(text: str) -> str:
+        """Remove <think>/<thought> regions so nested tag mentions cannot leak."""
+        if not text:
+            return ""
+        cleaned = re.sub(
+            r"<think\b[^>]*>.*?</think>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"<thought\b[^>]*>.*?</thought>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        return cleaned
+
+    @staticmethod
     def extract_tag(text: str, tag: str) -> str:
-        """Extract tag content from text; supports opening tags with attributes."""
-        match = re.search(rf"<{tag}(?:\s+[^>]*)?>(.*?)</{tag}>", text, re.DOTALL)
+        """Extract tag content from text; supports opening tags with attributes.
+
+        For non-reasoning tags (e.g. plan), strip <think>/<thought> first so a
+        literal mention like `` `<plan>` `` inside reasoning does not capture
+        everything through the real ``</plan>``.
+        """
+        if not text:
+            return ""
+        search_text = text
+        if tag.lower() not in ("think", "thought"):
+            search_text = ResponseParser.strip_reasoning_blocks(text)
+        match = re.search(
+            rf"<{re.escape(tag)}(?:\s+[^>]*)?>(.*?)</{re.escape(tag)}>",
+            search_text,
+            re.DOTALL | re.IGNORECASE,
+        )
         return match.group(1).strip() if match else ""
 
     @staticmethod

@@ -1081,7 +1081,10 @@ class ChatAPI:
             is_tool_result = (
                 role == "user"
                 and isinstance(content, list)
-                and any(isinstance(item, dict) and item.get("type") == "tool_result" for item in content)
+                and any(
+                    isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse")
+                    for item in content
+                )
             )
             # Also exclude role:"tool" messages — they are not user turns
             is_tool_role = role == "tool"
@@ -1103,7 +1106,9 @@ class ChatAPI:
         if role == "tool":
             return True
         if role == "user" and isinstance(content, list):
-            return any(isinstance(item, dict) and item.get("type") == "tool_result" for item in content)
+            return any(
+                isinstance(item, dict) and item.get("type") in ("tool_result", "functionResponse") for item in content
+            )
         return False
 
     def _build_conv_text(self, messages: list[dict], budget_chars: int) -> str:
@@ -1310,7 +1315,11 @@ class ChatAPI:
                         elif value is None:
                             num_tokens += 1
                         elif isinstance(value, list):
+                            from opensquad.token_breakdown import count_multimodal_content_tokens
+
                             for item in value:
+                                if not isinstance(item, dict):
+                                    continue
                                 if item.get("type") == "text":
                                     num_tokens += len(self.encoding.encode(item["text"]))
                                 elif item.get("type") == "image_url":
@@ -1318,17 +1327,20 @@ class ChatAPI:
                                     num_tokens += 1105 if detail == "high" else 85
                                 elif item.get("type") in ("audio_url", "video_url"):
                                     num_tokens += 120
+                            # Claude tool_result / Gemini functionResponse / tool_use
+                            num_tokens += count_multimodal_content_tokens(value, self.encoding)
                     elif key == "tool_calls" and isinstance(value, list):
+                        from opensquad.token_breakdown import tool_fn_text
+
                         for tc in value:
                             num_tokens += 8
-                            tc_id = tc.get("id", "")
+                            tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
                             if tc_id:
                                 num_tokens += len(self.encoding.encode(tc_id))
-                            fn = tc.get("function", {})
-                            if fn.get("name"):
-                                num_tokens += len(self.encoding.encode(fn["name"]))
-                            if fn.get("arguments"):
-                                num_tokens += len(self.encoding.encode(fn["arguments"]))
+                            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                            text = tool_fn_text(fn if fn else tc)
+                            if text:
+                                num_tokens += len(self.encoding.encode(text))
             if tools:
                 for tool in tools:
                     num_tokens += 6
@@ -1375,7 +1387,11 @@ class ChatAPI:
                 elif value is None:
                     num_tokens += 1
                 elif isinstance(value, list):
+                    from opensquad.token_breakdown import count_multimodal_content_tokens
+
                     for item in value:
+                        if not isinstance(item, dict):
+                            continue
                         if item.get("type") == "text":
                             num_tokens += len(self.encoding.encode(item["text"]))
                         elif item.get("type") == "image_url":
@@ -1383,17 +1399,19 @@ class ChatAPI:
                             num_tokens += 1105 if detail == "high" else 85
                         elif item.get("type") in ("audio_url", "video_url"):
                             num_tokens += 120
+                    num_tokens += count_multimodal_content_tokens(value, self.encoding)
             elif key == "tool_calls" and isinstance(value, list):
+                from opensquad.token_breakdown import tool_fn_text
+
                 for tc in value:
                     num_tokens += 8
-                    tc_id = tc.get("id", "")
+                    tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
                     if tc_id:
                         num_tokens += len(self.encoding.encode(tc_id))
-                    fn = tc.get("function", {})
-                    if fn.get("name"):
-                        num_tokens += len(self.encoding.encode(fn["name"]))
-                    if fn.get("arguments"):
-                        num_tokens += len(self.encoding.encode(fn["arguments"]))
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    text = tool_fn_text(fn if fn else tc)
+                    if text:
+                        num_tokens += len(self.encoding.encode(text))
         if msg_key is not None:
             self._msg_token_cache[msg_key] = num_tokens
             # True LRU eviction: pop oldest (first) items when over capacity
@@ -1825,6 +1843,27 @@ class ChatAPI:
                     # Model/provider doesn't support image input -- strip images and retry
                     logger.warning(f"[ChatAPI] Image not supported by model, stripping images and retrying: {e}")
                     request_params["messages"] = _strip_images_from_messages(request_params["messages"])
+                    # Append a text notice so the model still knows images arrived
+                    try:
+                        msgs = request_params["messages"]
+                        for m in reversed(msgs):
+                            if m.get("role") != "user":
+                                continue
+                            notice = (
+                                "[System notice] The user also sent image(s), but this model/provider "
+                                "rejected image input. Acknowledge that images were received and "
+                                "answer the user's text; do not claim you can see the images."
+                            )
+                            content = m.get("content")
+                            if isinstance(content, list):
+                                m["content"] = list(content) + [{"type": "text", "text": notice}]
+                            elif isinstance(content, str):
+                                m["content"] = (content or "") + "\n\n" + notice
+                            else:
+                                m["content"] = notice
+                            break
+                    except Exception as _ne:
+                        logger.debug(f"[ChatAPI] Failed to inject image-strip notice: {_ne}")
                     _images_stripped = True
                     # Also mark is_img_model=False so subsequent turns skip images
                     self.is_img_model = False

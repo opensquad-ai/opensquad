@@ -372,8 +372,20 @@ class StateMachine:
         elif content.startswith("__SWITCH_AND_REPLY__:"):
             parts = content.split(":", 2)
             if len(parts) >= 3:
-                sid, reply_content = parts[1], parts[2]
+                sid, reply_content = parts[1], (parts[2] or "").strip()
                 logger.info("[StateMachine] Switch and reply: session=%s", sid)
+                sm = get_session_manager()
+                if sid and sid != sm.get_current_session_id():
+                    if sm.load_history_session(sid):
+                        runner._turn_sid = sid
+                        runner._load_history()
+                        if reply_content:
+                            emit("turn_start", 0)
+                        from opensquad.events import get_event_bus
+
+                        await get_event_bus().emit_async("current_session", {"id": sid, "title": "Current Session"})
+                if not reply_content:
+                    return True, None
                 return False, reply_content
 
         return None

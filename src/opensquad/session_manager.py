@@ -813,7 +813,7 @@ class SessionManager:
             self.session_data["messages"].append(message)
             self.session_data["last_updated"] = utc_now_iso()
             # Provisional session title from the first user message until agent names it.
-            if role == "user" and not self.session_data.get("title"):
+            if role == "user" and not self.session_data.get("title") and not self.session_data.get("title_locked"):
                 provisional = self._title_from_user_content(content)
                 if provisional:
                     self.session_data["title"] = provisional
@@ -823,8 +823,32 @@ class SessionManager:
         # P0-1: enqueue mutation for async flush; sync fallback if writer not running
         self._enqueue_mutation(_mutate)
 
+    def _adopt_disk_title_lock(self) -> None:
+        """
+        If Gateway/UI renamed the current session on disk (title_locked), adopt it
+        before we overwrite the file — so user titles survive the live agent.
+        """
+        if self.session_data.get("title_locked"):
+            return
+        path = self.current_session_file
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                disk = json.load(f)
+            if not isinstance(disk, dict):
+                return
+            if disk.get("id") != self.session_data.get("id"):
+                return
+            if disk.get("title_locked") and str(disk.get("title") or "").strip():
+                self.session_data["title"] = str(disk["title"]).strip()
+                self.session_data["title_locked"] = True
+        except Exception:
+            pass
+
     def _save_session(self):
         try:
+            self._adopt_disk_title_lock()
             msg_count = len(self.session_data.get("messages", []))
             evt_count = len(self.session_data.get("events", []))
             sid = self.session_data.get("id", "unknown")
@@ -912,6 +936,9 @@ class SessionManager:
             return
 
         def _mutate():
+            # User-renamed titles stay sticky until unlocked.
+            if self.session_data.get("title_locked"):
+                return
             self.session_data["title"] = title
             self.session_data["last_updated"] = utc_now_iso()
 
@@ -986,7 +1013,16 @@ class SessionManager:
             messages = self.session_data.get("messages", [])
             title = self.resolve_session_title(messages, self.session_data.get("title"), curr_id)
             preview = _extract_preview(messages)
-            sessions.append({"id": curr_id, "title": title, "preview": preview, "current": True})
+            sessions.append(
+                {
+                    "id": curr_id,
+                    "title": title,
+                    "preview": preview,
+                    "current": True,
+                    "created_at": self.session_data.get("created_at"),
+                    "last_updated": self.session_data.get("last_updated"),
+                }
+            )
             seen_ids.add(curr_id)
 
         # 2. History files
@@ -1000,12 +1036,16 @@ class SessionManager:
                         continue
                     title = sid
                     preview = ""
+                    created_at = None
+                    last_updated = None
                     # Prefer reading title from cache (with mtime validation)
                     cached = self._cache_get(sid)
                     if cached is not None:
                         messages = cached.get("messages", [])
                         title = self.resolve_session_title(messages, cached.get("title"), sid)
                         preview = _extract_preview(messages)
+                        created_at = cached.get("created_at")
+                        last_updated = cached.get("last_updated")
                     else:
                         try:
                             with open(os.path.join(history_dir, f), encoding="utf-8") as jf:
@@ -1015,13 +1055,25 @@ class SessionManager:
                                     messages = parsed.get("messages", []) or []
                                     title = self.resolve_session_title(messages, parsed.get("title"), sid)
                                     preview = _extract_preview(messages)
+                                    if isinstance(parsed, dict):
+                                        created_at = parsed.get("created_at")
+                                        last_updated = parsed.get("last_updated")
                                 except Exception:
                                     match = re.search(r"<title>(.*?)</title>", content, re.DOTALL)
                                     if match:
                                         title = match.group(1).strip() or sid
                         except Exception:
                             pass
-                    sessions.append({"id": sid, "title": title, "preview": preview, "current": False})
+                    sessions.append(
+                        {
+                            "id": sid,
+                            "title": title,
+                            "preview": preview,
+                            "current": False,
+                            "created_at": created_at,
+                            "last_updated": last_updated,
+                        }
+                    )
                     seen_ids.add(sid)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")

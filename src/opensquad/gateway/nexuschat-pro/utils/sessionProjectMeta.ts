@@ -84,3 +84,17 @@ export function projectFolderName(path: string | null | undefined): string {
 }
 
 export const SESSION_META_EVENT = 'solo-session-meta-changed';
+/** Bump / notify SessionSidebar to re-fetch the HTTP session list. */
+export const SESSION_LIST_REFRESH_EVENT = 'solo-session-list-refresh';
+
+export function requestSessionListRefresh(agentId: string, sessionId?: string | null): void {
+  try {
+    window.dispatchEvent(
+      new CustomEvent(SESSION_LIST_REFRESH_EVENT, {
+        detail: { agentId, sessionId: sessionId || null },
+      }),
+    );
+  } catch {
+    /* ignore */
+  }
+}

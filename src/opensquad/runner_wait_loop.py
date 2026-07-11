@@ -85,7 +85,7 @@ class RunnerWaitLoop:
             if content.startswith("__SWITCH_AND_REPLY__:"):
                 parts = content.split(":", 2)
                 if len(parts) >= 3:
-                    sid, reply_content = parts[1], parts[2]
+                    sid, reply_content = parts[1], (parts[2] or "").strip()
                     cmd_images = cmd.get("images", [])
                     if cmd_images:
                         self.runner._current_images = cmd_images
@@ -96,12 +96,14 @@ class RunnerWaitLoop:
                     if sid != current_sid and self.runner._session_manager.load_history_session(sid):
                         self.runner._turn_sid = sid
                         self.runner._load_history()
-                        await self.runner._emit("turn_start", 0)
+                        if reply_content:
+                            await self.runner._emit("turn_start", 0)
                         await self.runner._bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
                         await self.runner._bus.emit_async(
                             "session_list", self.runner._session_manager.get_session_list()
                         )
-                    return WaitLoopResult(True, reply_content, "", False)
+                    # Empty content = switch only
+                    return WaitLoopResult(True, reply_content or None, "", False)
         return None
 
     async def _handle_supplements(self, initial_query: str | None) -> WaitLoopResult | None:

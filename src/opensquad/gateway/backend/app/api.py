@@ -78,6 +78,37 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 router = APIRouter()
 
 
+def _is_agent_email(email: str | None) -> bool:
+    return bool(email) and str(email).endswith("@ai")
+
+
+def _ensure_agent_user_avatar(user: User) -> str:
+    """Backfill empty/Dicebear agent avatars with a stable local robot SVG.
+
+    Persists onto the User row so subsequent group/member payloads stay consistent.
+    """
+    from opensquad.avatar_utils import ensure_agent_avatar, is_external_dicebear
+
+    current = user.avatar or ""
+    if current and not is_external_dicebear(current):
+        return current
+    if not _is_agent_email(getattr(user, "email", None)):
+        return current
+    resolved = ensure_agent_avatar(current, str(user.id or user.name or "agent"))
+    if resolved != current:
+        user.avatar = resolved
+    return resolved
+
+
+def _member_info(user: User, status: str | None = None) -> GroupMemberInfo:
+    return GroupMemberInfo(
+        id=user.id,
+        name=user.name,
+        avatar=_ensure_agent_user_avatar(user),
+        status=status if status is not None else user.status.value,
+    )
+
+
 def _sync_agent_name_to_config(user_id: str, new_name: str) -> None:
     """
     When a user's display name is updated, sync it to the corresponding agent's config.json (if a binding exists).
@@ -651,16 +682,14 @@ async def create_group(
 
     creator = await get_user_by_id(db, current_user.id)
     _log.info("[CREATE_GROUP] creator fetched: %s", creator.id if creator else None)
-    members_info = [
-        GroupMemberInfo(id=creator.id, name=creator.name, avatar=creator.avatar, status=creator.status.value)
-    ]
+    members_info = [_member_info(creator)]
 
     # Fetch info for other members
     if group_data.member_ids:
         other_members_res = await db.execute(select(User).where(User.id.in_(list(set(group_data.member_ids)))))
         for m in other_members_res.scalars():
             if m.id != creator.id:
-                members_info.append(GroupMemberInfo(id=m.id, name=m.name, avatar=m.avatar, status=m.status.value))
+                members_info.append(_member_info(m))
 
     response = GroupResponse(
         id=new_group.id,
@@ -707,9 +736,19 @@ async def get_group(
     settings = settings_result.scalar_one_or_none()
 
     member_statuses = {}
+    members_info = []
+    avatar_dirty = False
     for member in group.members:
         # Members already loaded via selectinload; no need to refresh again
         member_statuses[member.id] = member.status.value
+        before = member.avatar or ""
+        info = _member_info(member, member_statuses[member.id])
+        if (member.avatar or "") != before:
+            avatar_dirty = True
+        members_info.append(info)
+
+    if avatar_dirty:
+        await db.commit()
 
     return GroupResponse(
         id=group.id,
@@ -717,9 +756,7 @@ async def get_group(
         avatar=group.avatar,
         description=group.description,
         is_private=group.is_private,
-        members=[
-            GroupMemberInfo(id=m.id, name=m.name, avatar=m.avatar, status=member_statuses[m.id]) for m in group.members
-        ],
+        members=members_info,
         pinned_message_id=group.pinned_message_id,
         unread_count=settings.unread_count if settings else 0,
         has_unread_mention=settings.has_unread_mention if settings else False,
@@ -781,7 +818,7 @@ async def update_group(
         avatar=group.avatar,
         description=group.description,
         is_private=group.is_private,
-        members=[GroupMemberInfo(id=m.id, name=m.name, avatar=m.avatar, status=m.status.value) for m in members_list],
+        members=[_member_info(m) for m in members_list],
         created_by=group.created_by,
         created_at=group.created_at,
         notification_sound_enabled=group.notification_sound_enabled,
@@ -938,12 +975,18 @@ async def get_available_agents(
         agent_id = str(agent.get("agent_id", ""))
         if not agent_id or agent_id in member_ids:
             continue
-        chat_profile = agent.get("chat_profile", {})
+        chat_profile = agent.get("chat_profile") or {}
+        name = chat_profile.get("chat_user_name") or chat_profile.get("name") or agent.get("agent_name", "")
+        avatar = chat_profile.get("chat_user_avatar") or chat_profile.get("avatar") or ""
+        if not avatar:
+            from opensquad.avatar_utils import local_bot_avatar_data_uri
+
+            avatar = local_bot_avatar_data_uri(agent_id or name or "agent")
         results.append(
             {
                 "id": agent_id,
-                "name": chat_profile.get("name") or agent.get("agent_name", ""),
-                "avatar": chat_profile.get("avatar", ""),
+                "name": name,
+                "avatar": avatar,
                 "dir_name": agent.get("dir_name", ""),
             }
         )
