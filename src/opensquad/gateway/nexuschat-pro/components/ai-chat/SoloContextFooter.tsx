@@ -1,7 +1,6 @@
 /**
  * SoloContextFooter — Cursor-style status row under the Solo composer.
- * Left: project cwd picker (recents + Open Folder).
- * Right: token ring %; click expands Context Usage card.
+ * One line: project cwd | Mode (children) | … | Model/Effort (trailing) | token ring %.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Folder, FolderOpen, X } from 'lucide-react';
@@ -40,6 +39,10 @@ interface SoloContextFooterProps {
   /** Apply a chosen working directory path */
   onSelectCwd?: (path: string) => void | Promise<void>;
   onViewReport?: () => void;
+  /** Controls after folder (e.g. Mode) */
+  children?: React.ReactNode;
+  /** Controls immediately before the token ring (e.g. Model / Effort) */
+  trailing?: React.ReactNode;
 }
 
 function fmtTokens(n: number): string {
@@ -112,6 +115,8 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   locked = false,
   onSelectCwd,
   onViewReport,
+  children,
+  trailing,
 }) => {
   const [tokenOpen, setTokenOpen] = useState(false);
   const [cwdOpen, setCwdOpen] = useState(false);
@@ -276,8 +281,9 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-3 min-h-[22px] px-0.5">
-        <div ref={cwdRootRef} className="relative min-w-0 max-w-[70%]">
+      {/* One row: Folder | Mode | … | Model/Effort | Token ring */}
+      <div className="flex items-center gap-1.5 min-h-[28px] px-0.5">
+        <div ref={cwdRootRef} className="relative min-w-0 max-w-[min(28%,180px)] shrink">
           <button
             type="button"
             onClick={() => {
@@ -358,6 +364,16 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
             </div>
           )}
         </div>
+
+        {children ? (
+          <div className="flex items-center gap-1.5 min-w-0 shrink-0">{children}</div>
+        ) : null}
+
+        <div className="flex-1 min-w-0" />
+
+        {trailing ? (
+          <div className="flex items-center gap-1.5 min-w-0 shrink-0">{trailing}</div>
+        ) : null}
 
         <button
           type="button"

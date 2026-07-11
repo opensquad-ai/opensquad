@@ -1,5 +1,11 @@
 """Tests for Plan/Build agent mode gates."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+import opensquad.model_switch as model_switch
 from opensquad.agent_mode import (
     MODE_BUILD,
     MODE_PLAN,
@@ -62,3 +68,45 @@ def test_mode_prompt_section():
     assert "BUILD" in mode_prompt_section("build").upper()
     assert "request_switch" in mode_prompt_section("plan")
     assert "request_switch" in mode_prompt_section("build")
+
+
+@pytest.mark.asyncio
+async def test_apply_agent_mode_nudges_only_on_approval(monkeypatch):
+    nudges: list[str] = []
+
+    async def fake_nudge(message: str) -> None:
+        nudges.append(message)
+
+    monkeypatch.setattr(model_switch, "_nudge_agent_after_mode_decision", fake_nudge)
+    monkeypatch.setattr(model_switch, "_runner", SimpleNamespace(agent_mode="plan", tool_registry=None))
+    monkeypatch.setattr(model_switch, "_config_path", "")
+    monkeypatch.setattr(model_switch.bus, "emit_async", AsyncMock())
+
+    # Manual ModePicker change — no resume turn
+    result = await model_switch.apply_agent_mode("build")
+    assert result["ok"] is True
+    assert nudges == []
+
+    # Approval card — must auto-continue
+    result = await model_switch.apply_agent_mode("build", approved_request_id="req-1")
+    assert result["ok"] is True
+    assert len(nudges) == 1
+    assert "approved" in nudges[0].lower()
+    assert "build" in nudges[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_deny_mode_switch_nudges_agent(monkeypatch):
+    nudges: list[str] = []
+
+    async def fake_nudge(message: str) -> None:
+        nudges.append(message)
+
+    monkeypatch.setattr(model_switch, "_nudge_agent_after_mode_decision", fake_nudge)
+    monkeypatch.setattr(model_switch.bus, "emit_async", AsyncMock())
+
+    result = await model_switch.deny_mode_switch("req-2", reason="Not now")
+    assert result["ok"] is True
+    assert len(nudges) == 1
+    assert "denied" in nudges[0].lower()
+    assert "Not now" in nudges[0]

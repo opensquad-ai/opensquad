@@ -61,5 +61,7 @@ async def request_switch(target_mode: str, reason: str = "") -> str:
     return (
         f"Mode switch requested: {current} → {target}. "
         "Waiting for the user to Approve or Deny in the chat UI. "
-        "Do not assume the new mode is active yet."
+        "Do not assume the new mode is active yet. "
+        "Stop this turn after telling the user to Approve/Deny — "
+        "when they decide, you will automatically receive a system message to continue."
     )

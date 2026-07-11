@@ -4409,53 +4409,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   )}
                 </div>
               </div>
-              {/* Cursor-style toolbar: Mode | Model | Effort */}
-              <div className="flex items-center gap-1.5 mt-1.5 px-0.5 min-h-[28px]">
-                <ModePicker
-                  mode={agentMode}
-                  disabled={isLoadingSession}
-                  onSelect={(mode) => {
-                    setAgentMode(mode);
-                    wsServiceRef.current?.setAgentMode(mode);
-                  }}
-                />
-                <SoloModelPicker
-                  cards={modelCards}
-                  currentCardName={currentCardName}
-                  modelName={modelName}
-                  fallbackLabel={agentProfile?.agent_name || agentId}
-                  switching={switchingModel}
-                  disabled={isLoadingSession}
-                  onSelect={(cardName) => {
-                    setSwitchingModel(true);
-                    wsServiceRef.current?.switchModel(cardName);
-                  }}
-                  onAddModels={() => {
-                    window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
-                  }}
-                />
-                {(() => {
-                  const selected =
-                    (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
-                    (modelName && modelCards.find((c) => c.model_name === modelName)) ||
-                    null;
-                  if (!selected?.is_think) return null;
-                  const deepseekish = /deepseek/i.test(
-                    `${selected.model_name || ''} ${selected.base_url || ''} ${selected.name || ''}`,
-                  );
-                  return (
-                    <EffortPicker
-                      effort={reasoningEffort}
-                      deepseekStyle={deepseekish}
-                      disabled={isLoadingSession || switchingModel}
-                      onSelect={(effort) => {
-                        setReasoningEffort(effort);
-                        wsServiceRef.current?.setReasoningEffort(effort);
-                      }}
-                    />
-                  );
-                })()}
-              </div>
+              {/* One toolbar row: Folder | Mode | … | Model | Effort | Token ring */}
               <SoloContextFooter
                 cwd={agentCwd || defaultCwd}
                 tokenStats={tokenStats}
@@ -4473,7 +4427,56 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     alert(`Failed to set working directory: ${err.message || err}`);
                   }
                 }}
-              />
+                trailing={
+                  <>
+                    <SoloModelPicker
+                      cards={modelCards}
+                      currentCardName={currentCardName}
+                      modelName={modelName}
+                      fallbackLabel={agentProfile?.agent_name || agentId}
+                      switching={switchingModel}
+                      disabled={isLoadingSession}
+                      onSelect={(cardName) => {
+                        setSwitchingModel(true);
+                        wsServiceRef.current?.switchModel(cardName);
+                      }}
+                      onAddModels={() => {
+                        window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
+                      }}
+                    />
+                    {(() => {
+                      const selected =
+                        (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
+                        (modelName && modelCards.find((c) => c.model_name === modelName)) ||
+                        null;
+                      if (!selected?.is_think) return null;
+                      const deepseekish = /deepseek/i.test(
+                        `${selected.model_name || ''} ${selected.base_url || ''} ${selected.name || ''}`,
+                      );
+                      return (
+                        <EffortPicker
+                          effort={reasoningEffort}
+                          deepseekStyle={deepseekish}
+                          disabled={isLoadingSession || switchingModel}
+                          onSelect={(effort) => {
+                            setReasoningEffort(effort);
+                            wsServiceRef.current?.setReasoningEffort(effort);
+                          }}
+                        />
+                      );
+                    })()}
+                  </>
+                }
+              >
+                <ModePicker
+                  mode={agentMode}
+                  disabled={isLoadingSession}
+                  onSelect={(mode) => {
+                    setAgentMode(mode);
+                    wsServiceRef.current?.setAgentMode(mode);
+                  }}
+                />
+              </SoloContextFooter>
 
             <input
               ref={fileInputRef}

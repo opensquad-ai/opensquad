@@ -407,6 +407,32 @@ async def _on_reasoning_effort_requested(data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Agent Plan / Build mode
 # ---------------------------------------------------------------------------
+async def _nudge_agent_after_mode_decision(message: str) -> None:
+    """Wake a sleeping agent (if needed) and push a resume cue into input_hub.
+
+    Mode-switch approvals end the agent's turn while it waits for the user.
+    Without this nudge, Approve/Deny only updates mode state and the agent
+    never starts a follow-up turn.
+    """
+    try:
+        from opensquad.input_hub import input_hub
+
+        try:
+            from opensquad.sleep_controller import sleep_controller
+            from opensquad.state_manager import state_manager
+
+            ai_state = await state_manager.get_state()
+            if ai_state == "sleeping":
+                sleep_controller.wake_up("mode-switch-decision")
+        except Exception as wake_err:
+            logger.debug("[model_switch] wake after mode decision skipped: %s", wake_err)
+
+        input_hub.push(message, source="system")
+        logger.info("[model_switch] Nudged agent after mode decision")
+    except Exception as e:
+        logger.warning("[model_switch] Failed to nudge agent after mode decision: %s", e)
+
+
 async def apply_agent_mode(mode: str, *, approved_request_id: str | None = None) -> dict:
     """Set Plan/Build mode on the running agent and persist to config.json."""
     from opensquad.agent_mode import normalize_mode, set_current_mode
@@ -464,11 +490,21 @@ async def apply_agent_mode(mode: str, *, approved_request_id: str | None = None)
     except Exception as e:
         logger.warning("[model_switch] agent_mode info emit failed: %s", e)
 
+    # Only auto-continue when the user approved a pending request_switch card.
+    # Manual ModePicker changes (no request id) must not invent a new turn.
+    if approved_request_id:
+        await _nudge_agent_after_mode_decision(
+            f"[System] Mode switch approved. You are now in {mode_n} mode. "
+            "Continue the task you were waiting on. Do not ask for approval again."
+        )
+
     logger.info("[model_switch] agent_mode=%s", mode_n)
     return {"ok": True, "mode": mode_n}
 
 
 async def deny_mode_switch(request_id: str, reason: str = "") -> dict:
+    from opensquad.agent_mode import get_current_mode
+
     try:
         await bus.emit_async(
             "info",
@@ -483,6 +519,14 @@ async def deny_mode_switch(request_id: str, reason: str = "") -> dict:
     except Exception as e:
         logger.warning("[model_switch] deny emit failed: %s", e)
         return {"ok": False, "error": str(e)}
+
+    if request_id:
+        current = get_current_mode()
+        reason_text = (reason or "").strip() or "User denied"
+        await _nudge_agent_after_mode_decision(
+            f"[System] Mode switch denied ({reason_text}). "
+            f"You remain in {current} mode. Adapt your plan without assuming the switch happened."
+        )
     return {"ok": True}
 
 
