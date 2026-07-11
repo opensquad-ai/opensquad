@@ -3,6 +3,7 @@
  * Cursor-like: folder hierarchy, status dots, inline rename, new session beside folder.
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Plus, Trash2, RefreshCw, ChevronLeft, Check, X,
   Folder, Pin, PinOff, ChevronDown, ChevronRight, Pencil, MessageSquarePlus,
@@ -18,8 +19,11 @@ import {
 } from '../../utils/sessionProjectMeta';
 import { formatRelativeAge } from '../../utils/time';
 
-/** Classic-mode workflow spinner — violet arc (same language as AgentWorkingIndicator). */
-const OpensquadWorkingDot: React.FC<{ size?: number }> = ({ size = 12 }) => {
+/** Classic-mode workflow spinner — theme primary arc. */
+const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
+  size = 12,
+  className = 'text-primary',
+}) => {
   const rawId = React.useId().replace(/:/g, '');
   const gradId = `osq-sb-arc-${rawId}`;
   return (
@@ -29,14 +33,14 @@ const OpensquadWorkingDot: React.FC<{ size?: number }> = ({ size = 12 }) => {
       viewBox="0 0 32 32"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
-      className="shrink-0"
+      className={`shrink-0 ${className}`}
       aria-hidden
     >
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#818cf8" />
-          <stop offset="0.6" stopColor="#a78bfa" stopOpacity="0.5" />
-          <stop offset="1" stopColor="#818cf8" stopOpacity="0" />
+          <stop stopColor="currentColor" />
+          <stop offset="0.6" stopColor="currentColor" stopOpacity="0.45" />
+          <stop offset="1" stopColor="currentColor" stopOpacity="0" />
         </linearGradient>
       </defs>
       <g style={{ transformOrigin: '16px 16px', animation: 'osqSpin 1.4s linear infinite' }}>
@@ -82,6 +86,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   sessionTitleUpdate,
   agentBusy = false,
 }) => {
+  const { t, i18n } = useTranslation();
+  const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [metaMap, setMetaMap] = useState<Record<string, SessionProjectMeta>>({});
   const [loading, setLoading] = useState(false);
@@ -112,12 +118,12 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       return list;
     } catch (err: any) {
       console.error('[SessionSidebar] Failed to load sessions:', err);
-      setError(err.message || 'Failed to load sessions');
+      setError(err.message || t('aiChat.sessionSidebar.loadSessionsFailed'));
       return sessionsRef.current;
     } finally {
       setLoading(false);
     }
-  }, [agentId, reloadMeta]);
+  }, [agentId, reloadMeta, t]);
 
   useEffect(() => {
     if (isOpen) loadSessions();
@@ -232,7 +238,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     } catch (err: any) {
       console.error('[SessionSidebar] Delete failed:', err);
-      setError(err.message || 'Failed to delete session');
+      setError(err.message || t('aiChat.sessionSidebar.deleteSessionFailed'));
     }
   };
 
@@ -276,7 +282,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       await agentSessionAPI.renameSession(agentId, sid, next);
     } catch (err: any) {
       console.error('[SessionSidebar] Rename failed:', err);
-      setError(err.message || 'Failed to rename session');
+      setError(err.message || t('aiChat.sessionSidebar.renameSessionFailed'));
       setSessions((list) =>
         list.map((s) => (s.id === sid ? { ...s, title: prev.title || prev.id } : s)),
       );
@@ -329,14 +335,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     const meta = metaMap[session.id];
     const pinned = !!meta?.pinned;
     const ageLabel = formatRelativeAge(session.last_updated || session.created_at, {
-      locale: 'zh',
+      locale: ageLocale,
     });
 
     return (
       <div
         key={session.id}
         className={`${nested ? 'pl-7' : 'pl-2'} pr-2 py-1.5 cursor-pointer transition-colors group rounded-md mx-1 ${
-          isActive ? 'bg-black/[0.06] dark:bg-white/[0.08]' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+          isActive ? 'bg-primary/10' : 'hover:bg-bgLight'
         }`}
         onClick={() => !isConfirming && !isEditing && onViewSession(session.id)}
         onDoubleClick={() => !isConfirming && !isEditing && onSwitchAndReply(session.id)}
@@ -345,11 +351,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         <div className="flex items-start gap-1.5">
           <div className="mt-1.5 flex-shrink-0 w-3 flex items-center justify-center">
             {isCurrent && agentBusy ? (
-              <OpensquadWorkingDot size={12} />
+              <OpensquadWorkingDot size={12} className="text-primary" />
             ) : (
               <span
                 className={`block w-1.5 h-1.5 rounded-full ${
-                  isCurrent ? 'bg-violet-400/80' : 'bg-textMuted/45'
+                  isCurrent ? 'bg-primary' : 'bg-textMuted/45'
                 }`}
                 aria-hidden
               />
@@ -394,7 +400,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                   type="button"
                   onClick={(e) => void commitRename(e)}
                   className="p-0.5 rounded bg-primary/15 hover:bg-primary/25 transition-colors"
-                  title="Save"
+                  title={t('common.save')}
                 >
                   <Check size={11} className="text-primary" />
                 </button>
@@ -402,7 +408,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                   type="button"
                   onClick={cancelRename}
                   className="p-0.5 rounded hover:bg-bgLight transition-colors"
-                  title="Cancel"
+                  title={t('common.cancel')}
                 >
                   <X size={11} className="text-textMuted" />
                 </button>
@@ -411,7 +417,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
               <>
                 {/* Cursor-style relative age — always visible beside hover actions */}
                 {ageLabel && !isConfirming && (
-                  <span className="text-[10px] text-textMuted/55 tabular-nums px-0.5 select-none">
+                  <span className="text-[10px] text-textMuted tabular-nums px-0.5 select-none">
                     {ageLabel}
                   </span>
                 )}
@@ -421,7 +427,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       type="button"
                       onClick={(e) => startRename(e, session)}
                       className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-primary/10 rounded transition-all"
-                      title="重命名"
+                      title={t('aiChat.sessionSidebar.rename')}
                     >
                       <Pencil size={11} className="text-textMuted" />
                     </button>
@@ -429,7 +435,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       type="button"
                       onClick={(e) => togglePin(e, session.id, !pinned)}
                       className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-primary/10 rounded transition-all"
-                      title={pinned ? 'Unpin' : 'Pin'}
+                      title={pinned ? t('aiChat.sessionSidebar.unpin') : t('aiChat.sessionSidebar.pin')}
                     >
                       {pinned ? (
                         <PinOff size={11} className="text-primary" />
@@ -446,7 +452,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                         type="button"
                         onClick={(e) => handleDeleteConfirm(e, session.id)}
                         className="p-0.5 rounded bg-red-500/15 hover:bg-red-500/30 transition-colors"
-                        title="Confirm delete"
+                        title={t('aiChat.sessionSidebar.confirmDelete')}
                       >
                         <Check size={11} className="text-red-500" />
                       </button>
@@ -454,7 +460,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                         type="button"
                         onClick={handleDeleteCancel}
                         className="p-0.5 rounded hover:bg-bgLight transition-colors"
-                        title="Cancel"
+                        title={t('common.cancel')}
                       >
                         <X size={11} className="text-textMuted" />
                       </button>
@@ -464,7 +470,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       type="button"
                       onClick={(e) => handleDeleteClick(e, session.id)}
                       className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-red-500/10 rounded transition-all"
-                      title="Delete session"
+                      title={t('aiChat.sessionSidebar.deleteSession')}
                     >
                       <Trash2 size={11} className="text-red-500" />
                     </button>
@@ -479,16 +485,16 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   };
 
   return (
-    <div className="w-64 h-full border-r border-border bg-panel flex flex-col flex-shrink-0">
+    <div className="w-64 h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0">
       <div className="p-3 border-b border-border flex items-center justify-between">
-        <h3 className="text-sm font-medium text-textMain">Repositories</h3>
+        <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={loadSessions}
             disabled={loading}
             className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title="Refresh"
+            title={t('common.refresh')}
           >
             <RefreshCw size={14} className={`text-textMuted ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -496,7 +502,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             type="button"
             onClick={() => onNewSession()}
             className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title="New Session"
+            title={t('aiChat.newSession')}
           >
             <Plus size={14} className="text-primary" />
           </button>
@@ -504,7 +510,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             type="button"
             onClick={onClose}
             className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title="Close"
+            title={t('common.close')}
           >
             <ChevronLeft size={14} className="text-textMuted" />
           </button>
@@ -517,19 +523,19 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
       <div className="flex-1 overflow-y-auto py-1">
         {sessions.length === 0 && !loading && (
-          <div className="px-3 py-6 text-center text-xs text-textMuted">No sessions</div>
+          <div className="px-3 py-6 text-center text-xs text-textMuted">{t('aiChat.noSessions')}</div>
         )}
 
         <div className="mb-1">
           <div className="w-full flex items-center gap-1.5 px-3 py-1.5">
             <Pin size={13} className="text-textMuted/70 shrink-0" />
-            <span className="text-[12px] font-medium text-textMain truncate">Pinned</span>
+            <span className="text-[12px] font-medium text-textMain truncate">{t('aiChat.sessionSidebar.pinned')}</span>
             <span className="text-[10px] text-textMuted/45 ml-auto shrink-0">
               {pinnedSessions.length}
             </span>
           </div>
           {pinnedSessions.length === 0 ? (
-            <div className="px-3 pb-2 ml-1 text-[11px] text-textMuted/45">No pinned sessions</div>
+            <div className="px-3 pb-2 ml-1 text-[11px] text-textMuted/45">{t('aiChat.sessionSidebar.noPinnedSessions')}</div>
           ) : (
             <div className="pb-1">{pinnedSessions.map((s) => renderSessionRow(s, false))}</div>
           )}
@@ -546,7 +552,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
           return (
             <div key={group.name} className="mb-1">
-              <div className="group/folder w-full flex items-center gap-0.5 pl-0.5 pr-1 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] rounded-md mx-0.5">
+              <div className="group/folder w-full flex items-center gap-0.5 pl-0.5 pr-1 py-1 hover:bg-bgLight rounded-md mx-0.5">
                 <button
                   type="button"
                   onClick={() =>
@@ -562,7 +568,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                   )}
                   <Folder size={13} className="text-textMuted/70 shrink-0" />
                   <span className="text-[12px] font-medium text-textMain truncate">
-                    {group.name}
+                    {group.name === 'Default'
+                      ? t('aiChat.sessionSidebar.defaultFolder')
+                      : group.name}
                   </span>
                   <span className="text-[10px] text-textMuted/45 ml-auto shrink-0">
                     {group.sessions.length}
@@ -576,7 +584,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       onNewSession(group.path);
                     }}
                     className="p-1 opacity-0 group-hover/folder:opacity-100 hover:bg-primary/10 rounded transition-all shrink-0"
-                    title={`在此目录新建会话\n${group.path}`}
+                    title={`${t('aiChat.sessionSidebar.newInFolder')}\n${group.path}`}
                   >
                     <MessageSquarePlus size={13} className="text-primary" />
                   </button>
@@ -593,7 +601,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                       }
                       className="ml-10 px-2 py-1 text-[11px] text-textMuted hover:text-primary border-0 bg-transparent cursor-pointer"
                     >
-                      See more
+                      {t('aiChat.sessionSidebar.seeMore')}
                     </button>
                   )}
                 </div>

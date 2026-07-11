@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { marked } from 'marked';
 import { SERVER_BASE_URL } from '../../services/api';
+import { toAbsoluteMediaUrl } from '../../utils/image';
 
 interface StreamingMessageProps {
   content: string;
@@ -28,8 +29,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
 
   const resolvedAvatar = useMemo(() => {
     if (!avatarSrc || avatarError) return null;
-    if (avatarSrc.startsWith('http')) return avatarSrc;
-    return `${SERVER_BASE_URL}${avatarSrc.startsWith('/') ? avatarSrc : '/' + avatarSrc}`;
+    return toAbsoluteMediaUrl(avatarSrc, SERVER_BASE_URL);
   }, [avatarSrc, avatarError]);
 
   const renderedHtml = useMemo(() => {

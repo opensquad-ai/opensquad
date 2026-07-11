@@ -52,6 +52,9 @@ interface MessageBubbleProps {
 
 /** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
 function resolveAvatarUrl(avatar: string): string {
+  if (avatar.startsWith('data:') || avatar.startsWith('blob:')) {
+    return avatar;
+  }
   if (avatar.startsWith('http://') || avatar.startsWith('https://')) {
     try {
       const u = new URL(avatar);

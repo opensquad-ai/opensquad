@@ -185,6 +185,54 @@ class AgentSessionReader:
             except Exception:
                 return None, None
 
+        def _parse_iso_ms(value: str | None) -> float | None:
+            if not value or not isinstance(value, str):
+                return None
+            s = value.strip()
+            if not s:
+                return None
+            try:
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    # Storage convention: naive → UTC (matches time_utils.utc_from_iso)
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp() * 1000.0
+            except Exception:
+                return None
+
+        def _latest_activity_iso(data: dict | None, file_path: str | None = None) -> str | None:
+            """Best-effort last activity: max(last_updated, message/event ts, file mtime)."""
+            candidates: list[float] = []
+            if isinstance(data, dict):
+                for key in ("last_updated", "created_at"):
+                    raw = data.get(key)
+                    ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
+                    if ms is not None:
+                        candidates.append(ms)
+                for msg in data.get("messages") or []:
+                    if isinstance(msg, dict):
+                        raw = msg.get("timestamp")
+                        ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
+                        if ms is not None:
+                            candidates.append(ms)
+                for evt in data.get("events") or []:
+                    if isinstance(evt, dict):
+                        raw = evt.get("timestamp")
+                        ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
+                        if ms is not None:
+                            candidates.append(ms)
+            if file_path:
+                try:
+                    candidates.append(os.path.getmtime(file_path) * 1000.0)
+                except Exception:
+                    pass
+            if not candidates:
+                return None
+            best = max(candidates)
+            return datetime.fromtimestamp(best / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         def _pick_ts(data: dict | None, file_path: str | None = None) -> tuple[str | None, str | None]:
             created = (data or {}).get("created_at") if isinstance(data, dict) else None
             updated = (data or {}).get("last_updated") if isinstance(data, dict) else None
@@ -192,6 +240,11 @@ class AgentSessionReader:
                 f_created, f_updated = _file_ts(file_path)
                 created = created or f_created
                 updated = updated or f_updated
+            # Prefer freshest activity so sidebar age tracks recent chats even when
+            # the stored last_updated field lagged behind message timestamps.
+            activity = _latest_activity_iso(data, file_path)
+            if activity:
+                updated = activity
             # Never leave both empty — sidebar needs a displayable age.
             if not created and not updated:
                 now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

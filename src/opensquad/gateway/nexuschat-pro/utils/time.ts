@@ -24,6 +24,48 @@ export const formatTime = (timestamp: number, t: any): string => {
 };
 
 /**
+ * Parse session/API timestamps to epoch ms.
+ *
+ * Storage convention is UTC. Naive ISO strings (no `Z` / offset) are ambiguous:
+ * - new code / utcnow(): wall clock is UTC
+ * - legacy datetime.now(): wall clock is local
+ * Prefer UTC, but if that lands in the future, fall back to local parse.
+ */
+export function parseTimestampMs(
+  input: string | number | Date | null | undefined,
+  opts?: { now?: number },
+): number {
+  if (input == null || input === '') return NaN;
+  if (typeof input === 'number') {
+    // Heuristic: values below 1e12 are seconds.
+    return input > 0 && input < 1e12 ? input * 1000 : input;
+  }
+  if (input instanceof Date) return input.getTime();
+
+  const raw = String(input).trim();
+  if (!raw) return NaN;
+
+  // Already has timezone → trust Date.parse
+  if (/([zZ]|[+-]\d{2}:?\d{2})$/.test(raw)) {
+    return Date.parse(raw);
+  }
+
+  // Normalize "YYYY-MM-DD HH:mm:ss" → ISO-ish
+  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+  const asUtc = Date.parse(/[zZ]$/.test(normalized) ? normalized : `${normalized}Z`);
+  const asLocal = Date.parse(normalized);
+  const now = opts?.now ?? Date.now();
+
+  if (!Number.isFinite(asUtc) && !Number.isFinite(asLocal)) return NaN;
+  if (!Number.isFinite(asUtc)) return asLocal;
+  if (!Number.isFinite(asLocal)) return asUtc;
+
+  // UTC reading in the future ⇒ legacy local wall-clock without offset
+  if (asUtc > now + 60_000) return asLocal;
+  return asUtc;
+}
+
+/**
  * Cursor-style relative age for session list badges.
  * Units: 分钟 / 小时 / 天 / 个月 (or compact en: m / h / d / mo).
  */
@@ -32,15 +74,10 @@ export function formatRelativeAge(
   opts?: { locale?: 'zh' | 'en'; now?: number },
 ): string {
   if (input == null || input === '') return '';
-  const ts =
-    typeof input === 'number'
-      ? input
-      : input instanceof Date
-        ? input.getTime()
-        : Date.parse(String(input));
+  const now = opts?.now ?? Date.now();
+  const ts = parseTimestampMs(input, { now });
   if (!Number.isFinite(ts)) return '';
 
-  const now = opts?.now ?? Date.now();
   const locale = opts?.locale ?? 'zh';
   const diffMs = Math.max(0, now - ts);
   const mins = Math.floor(diffMs / 60000);

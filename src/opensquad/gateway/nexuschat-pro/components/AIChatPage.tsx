@@ -26,7 +26,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
 import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
-import { resolveChatAvatar } from '../utils/image';
+import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
@@ -102,9 +102,7 @@ const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; started
   }, [startedMs]);
 
   const avatarSrc = resolveChatAvatar(agentProfile?.chat_profile);
-  const resolvedAvatar = avatarSrc
-    ? (avatarSrc.startsWith('http') ? avatarSrc : `${SERVER_BASE_URL}${avatarSrc.startsWith('/') ? avatarSrc : '/' + avatarSrc}`)
-    : null;
+  const resolvedAvatar = toAbsoluteMediaUrl(avatarSrc, SERVER_BASE_URL);
 
   return (
     <div className="flex items-center gap-2 mb-4 pl-0.5">

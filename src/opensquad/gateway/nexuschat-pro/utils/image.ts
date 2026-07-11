@@ -106,6 +106,7 @@ export function resolveChatName(
 /**
  * 将头像字段解析为可加载的 URL。
  * - 空值 → 本地 SVG 占位（不再依赖 Dicebear CDN）
+ * - `data:` / `blob:` → 原样返回（切勿再拼 SERVER_BASE_URL，否则 Vite decodeURI 会炸）
  * - `/uploads/...` 等相对路径 → 保持同源相对路径
  * - 指向本机后端的绝对 `/uploads` URL → 改写为相对路径
  * - 其它 http(s) 外链 → 原样返回（加载失败由 UI onError 处理）
@@ -117,6 +118,10 @@ export const getAvatarUrl = (
 ): string => {
   if (!avatar) {
     return getLocalAvatarFallback(seed || 'default', label);
+  }
+
+  if (avatar.startsWith('data:') || avatar.startsWith('blob:')) {
+    return avatar;
   }
 
   if (avatar.startsWith('http://') || avatar.startsWith('https://')) {
@@ -144,6 +149,29 @@ export const getAvatarUrl = (
   // 相对路径：保持相对，走 Vite proxy / Gateway 同源 StaticFiles
   return avatar.startsWith('/') ? avatar : `/${avatar}`;
 };
+
+/**
+ * Prefix same-origin relative media with an absolute API base when needed.
+ * Never rewrite data:/blob:/http(s) URLs — classic-mode previously turned
+ * `data:image/svg+xml,...hsl(...%)` into `/data:image/...%...` and Vite's
+ * decodeURI threw "URI malformed".
+ */
+export function toAbsoluteMediaUrl(
+  url: string | null | undefined,
+  baseUrl: string,
+): string | null {
+  if (!url) return null;
+  if (
+    url.startsWith('data:') ||
+    url.startsWith('blob:') ||
+    url.startsWith('http://') ||
+    url.startsWith('https://')
+  ) {
+    return url;
+  }
+  const path = url.startsWith('/') ? url : `/${url}`;
+  return `${baseUrl}${path}`;
+}
 
 /**
  * 将附件 URL 转为可请求地址。

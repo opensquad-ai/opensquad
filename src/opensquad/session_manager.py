@@ -274,6 +274,7 @@ class SessionManager:
             if round_id is not None:
                 event["round_id"] = round_id
             self.session_data["events"].append(event)
+            self.session_data["last_updated"] = utc_now_iso()
             # Limit event history length
             if len(self.session_data["events"]) > 2000:
                 self.session_data["events"] = self.session_data["events"][-2000:]

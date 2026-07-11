@@ -695,7 +695,23 @@
     "pendingExpand": "展开",
     "pendingClearAll": "全部清空",
     "pendingQueuePosition": "#{{index}}",
-    "pendingAttachments": "{{images}} 张图片 · {{files}} 个文件"
+    "pendingAttachments": "{{images}} 张图片 · {{files}} 个文件",
+    "sessionSidebar": {
+      "repositories": "会话仓库",
+      "pinned": "置顶",
+      "noPinnedSessions": "暂无置顶会话",
+      "seeMore": "查看更多",
+      "rename": "重命名",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "confirmDelete": "确认删除",
+      "deleteSession": "删除会话",
+      "newInFolder": "在此目录新建会话",
+      "loadSessionsFailed": "加载会话失败",
+      "deleteSessionFailed": "删除会话失败",
+      "renameSessionFailed": "重命名会话失败",
+      "defaultFolder": "默认"
+    }
   },
   "quickNote": {
     "title": "笔记管理",

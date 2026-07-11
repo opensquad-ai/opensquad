@@ -78,7 +78,7 @@ export const TokenProgressBar: React.FC<TokenProgressBarProps> = ({
         </span>
       </div>
 
-      {/* Breakdown — always show all categories so user can see distribution */}
+      {/* Breakdown — Total/Requests stay on the Other line (no extra row) */}
       <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-textMuted">
         <span>Sys: {formatTokenCount(breakdown?.system ?? 0)}</span>
         <span>User: {formatTokenCount(breakdown?.user ?? 0)}</span>
@@ -87,15 +87,13 @@ export const TokenProgressBar: React.FC<TokenProgressBarProps> = ({
         <span>ToolDefs: {formatTokenCount(breakdown?.tool_defs ?? 0)}</span>
         <span>Reply: {formatTokenCount(breakdown?.response ?? 0)}</span>
         <span>Other: {formatTokenCount(breakdown?.overhead ?? 0)}</span>
+        {session && (
+          <>
+            <span>Total: {formatTokenCount(session.total_tokens ?? 0)}</span>
+            <span>Requests: {session.total_requests ?? 0}</span>
+          </>
+        )}
       </div>
-
-      {/* Session stats (本会话，后端已 reset，直接显示) */}
-      {session && (
-        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-textMuted mt-0.5">
-          <span>Total: {formatTokenCount(session.total_tokens ?? 0)}</span>
-          <span>Requests: {session.total_requests ?? 0}</span>
-        </div>
-      )}
     </div>
   );
 };

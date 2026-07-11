@@ -192,7 +192,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   return (
     <div className="relative mt-1.5 w-full">
       {tokenOpen && max > 0 && (
-        <div className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-40 rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+        <div className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-40 rounded-xl border border-border bg-panel shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
           <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/70">
             <span className="text-[13px] font-semibold text-textMain">Context Usage</span>
             <div className="flex items-center gap-1">
@@ -247,15 +247,25 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                     style={{ backgroundColor: s.color }}
                   />
                   <span className="flex-1 min-w-0 truncate text-textMuted">{s.label}</span>
-                  <span className="font-mono text-textMain/80 tabular-nums">{fmtTokens(s.val)}</span>
+                  <span className="font-mono text-textMain/80 tabular-nums shrink-0">{fmtTokens(s.val)}</span>
+                  {s.key === 'overhead' && tokenStats?.session && (
+                    <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
+                      · Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
+                      {tokenStats.session.total_requests != null
+                        ? ` · ${tokenStats.session.total_requests} req`
+                        : ''}
+                    </span>
+                  )}
                 </div>
               ))
             )}
-            {tokenStats?.session && (
-              <div className="pt-1.5 mt-1 border-t border-border/50 flex items-center justify-between text-[11px] text-textMuted">
-                <span>Session total</span>
-                <span className="font-mono">
-                  {fmtTokens(tokenStats.session.total_tokens ?? 0)}
+            {/* Session stats when Other segment is hidden (0 tokens) */}
+            {tokenStats?.session && !segments.some((s) => s.key === 'overhead') && (
+              <div className="flex items-center gap-2 text-[12px]">
+                <span className="w-2 h-2 rounded-[3px] shrink-0 bg-slate-500" />
+                <span className="flex-1 min-w-0 truncate text-textMuted">Other</span>
+                <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
+                  Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
                   {tokenStats.session.total_requests != null
                     ? ` · ${tokenStats.session.total_requests} req`
                     : ''}

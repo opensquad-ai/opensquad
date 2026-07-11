@@ -695,7 +695,23 @@
     "pendingExpand": "Expand",
     "pendingClearAll": "Clear all",
     "pendingQueuePosition": "#{{index}}",
-    "pendingAttachments": "{{images}} image(s) · {{files}} file(s)"
+    "pendingAttachments": "{{images}} image(s) · {{files}} file(s)",
+    "sessionSidebar": {
+      "repositories": "Repositories",
+      "pinned": "Pinned",
+      "noPinnedSessions": "No pinned sessions",
+      "seeMore": "See more",
+      "rename": "Rename",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "confirmDelete": "Confirm delete",
+      "deleteSession": "Delete session",
+      "newInFolder": "New session in this folder",
+      "loadSessionsFailed": "Failed to load sessions",
+      "deleteSessionFailed": "Failed to delete session",
+      "renameSessionFailed": "Failed to rename session",
+      "defaultFolder": "Default"
+    }
   },
   "quickNote": {
     "title": "Note Manager",
