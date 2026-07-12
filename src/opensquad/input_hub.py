@@ -499,6 +499,15 @@ class InputHub:
         except Exception:
             logger.debug("[InputHub] sub-agent cancel_all on stop skipped", exc_info=True)
 
+        # Kill hung shell/jobs/child processes so Stop unblocks immediately
+        # (otherwise runner waits until tool timeout while UI looks stuck).
+        try:
+            from opensquad.tools.system import abort_all_tool_processes
+
+            abort_all_tool_processes("stop_task")
+        except Exception:
+            logger.debug("[InputHub] abort_all_tool_processes on stop skipped", exc_info=True)
+
     def clear_stop_request(self):
         """Clear the stop request."""
         self._stop_requested = False

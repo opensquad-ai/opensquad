@@ -517,7 +517,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         </div>
         {isUser ? (
           <div
-            className="w-full rounded-2xl bg-white dark:bg-[#2a2a2c] border border-black/[0.08] dark:border-white/[0.1] shadow-[0_1px_3px_rgba(0,0,0,0.06),0_0_0_1px_rgba(0,0,0,0.02)] px-4 py-3 text-sm leading-relaxed text-textMain"
+            className="w-full rounded-2xl bg-chatBubbleSelf border border-border/60 shadow-[0_1px_2px_rgba(0,0,0,0.04)] px-4 py-3 text-sm leading-relaxed text-textMain"
           >
             {mediaAndBody}
           </div>
@@ -565,7 +565,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
 
         <div className={`rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5 text-sm leading-relaxed overflow-hidden ${
           isUser
-            ? 'bg-white text-gray-800 rounded-tr-sm shadow-sm'
+            ? 'bg-chatBubbleSelf text-textMain rounded-tr-sm border border-border/60 shadow-sm'
             : 'bg-chatBubbleOther text-textMain rounded-tl-sm border border-border'
         } ${isStreaming ? 'ai-streaming' : ''}`}>
           {mediaAndBody}

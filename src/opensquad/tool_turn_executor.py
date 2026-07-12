@@ -41,6 +41,30 @@ class ToolTurnExecutor:
         control_flow_return: tuple[bool, str, bool] | None = None
 
         for call_index, (tool_name, tool_args_dict) in enumerate(tool_calls):
+            # Stop between tools so a partial batch can finish quickly after abort.
+            try:
+                from opensquad.input_hub import input_hub
+
+                if input_hub.is_stop_requested():
+                    for rest_index in range(call_index, len(tool_calls)):
+                        rest_name, _ = tool_calls[rest_index]
+                        rid = f"call_stop_{rest_index}"
+                        await self.runner._emit(
+                            "tool_call",
+                            {"id": rid, "name": rest_name, "args": "{}"},
+                        )
+                        await self.runner._emit(
+                            "tool_result",
+                            {
+                                "id": rid,
+                                "name": rest_name,
+                                "result": "Cancelled: stopped by user",
+                            },
+                        )
+                    break
+            except Exception:
+                pass
+
             entry = await self._execute_single_tool(call_index, tool_name, tool_args_dict, tc_log)
             if entry.get("control_flow_return") is not None:
                 control_flow_return = entry["control_flow_return"]

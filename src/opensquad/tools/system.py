@@ -261,6 +261,28 @@ class ShellSession:
 
         start_time = time.time()
         while time.time() - start_time < timeout:
+            if self._stop_event.is_set() or (self.process and self.process.poll() is not None):
+                with self._lock:
+                    partial = "".join(self.output_buffer[start_index:])
+                return {
+                    "status": "error",
+                    "session_id": self.session_id,
+                    "message": "Command aborted (shell closed or process exited)",
+                    "partial_data": partial,
+                    "working_directory": self.working_directory,
+                    "aborted": True,
+                }
+            if _user_stop_requested():
+                with self._lock:
+                    partial = "".join(self.output_buffer[start_index:])
+                return {
+                    "status": "error",
+                    "session_id": self.session_id,
+                    "message": "Command aborted by user stop",
+                    "partial_data": partial,
+                    "working_directory": self.working_directory,
+                    "aborted": True,
+                }
             with self._lock:
                 combined = "".join(self.output_buffer[start_index:])
                 if marker in combined:
@@ -435,6 +457,76 @@ def list_shell_sessions() -> dict[str, Any]:
     return {"status": "success", "count": len(items), "sessions": items}
 
 
+def _user_stop_requested() -> bool:
+    try:
+        from opensquad.input_hub import input_hub
+
+        return bool(input_hub.is_stop_requested())
+    except Exception:
+        return False
+
+
+def abort_all_tool_processes(reason: str = "user stop") -> dict[str, Any]:
+    """Force-stop Jobs, ShellSessions, and any child OS processes.
+
+    Called from ``input_hub.request_stop()`` so UI Stop actually unblocks hung
+    tools (git/cmd/shell) instead of waiting for their natural timeout.
+    """
+    stopped_jobs = 0
+    closed_sessions = 0
+    killed_children = 0
+
+    for job in list(_JOBS.values()):
+        try:
+            if job.is_running():
+                job.stop()
+                stopped_jobs += 1
+        except Exception:
+            logger.debug("[system] abort job failed", exc_info=True)
+
+    for sid in list(_SESSIONS.keys()):
+        try:
+            sess = _SESSIONS.pop(sid, None)
+            if sess is not None:
+                sess.close()
+                closed_sessions += 1
+        except Exception:
+            logger.debug("[system] abort shell session failed sid=%s", sid, exc_info=True)
+
+    try:
+        me = psutil.Process()
+        children = me.children(recursive=True)
+        for child in children:
+            try:
+                child.kill()
+                killed_children += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            except Exception:
+                logger.debug("[system] kill child pid failed", exc_info=True)
+        _, alive = psutil.wait_procs(children, timeout=1.0)
+        for child in alive:
+            with contextlib.suppress(Exception):
+                child.kill()
+    except Exception:
+        logger.debug("[system] abort child processes failed", exc_info=True)
+
+    logger.info(
+        "[system] abort_all_tool_processes(%s): jobs=%d sessions=%d children=%d",
+        reason,
+        stopped_jobs,
+        closed_sessions,
+        killed_children,
+    )
+    return {
+        "status": "success",
+        "reason": reason,
+        "stopped_jobs": stopped_jobs,
+        "closed_sessions": closed_sessions,
+        "killed_children": killed_children,
+    }
+
+
 # --- Tool functions exposed to the agent ---
 
 
@@ -495,6 +587,20 @@ def start_job(
             # NOTE: start_job() is called via ToolRegistry.call() which wraps
             # sync tools in run_in_executor, so we're always in a thread and
             # time.sleep() does not block the event loop.
+            if _user_stop_requested():
+                with contextlib.suppress(Exception):
+                    job.stop()
+                return {
+                    "status": "error",
+                    "completed": False,
+                    "blocking": True,
+                    "aborted": True,
+                    "message": "Job aborted by user stop",
+                    "job_id": job_id,
+                    "command": command,
+                    "working_directory": resolved_cwd,
+                    "output": job.get_new_output(max_lines=200),
+                }
             time.sleep(0.1)
             if max_wait_seconds is not None and max_wait_seconds >= 0:
                 if (time.time() - started_at) >= max_wait_seconds:
@@ -528,6 +634,20 @@ def start_job(
     if wait_seconds > 0:
         deadline = time.time() + wait_seconds
         while time.time() < deadline:
+            if _user_stop_requested():
+                with contextlib.suppress(Exception):
+                    job.stop()
+                return {
+                    "status": "error",
+                    "completed": False,
+                    "blocking": False,
+                    "aborted": True,
+                    "message": "Job aborted by user stop",
+                    "job_id": job_id,
+                    "command": command,
+                    "working_directory": resolved_cwd,
+                    "output": job.get_new_output(max_lines=200),
+                }
             time.sleep(0.1)
             if not job.is_running():
                 # Task completed within the wait window; collect all output and return directly

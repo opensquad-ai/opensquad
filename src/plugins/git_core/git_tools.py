@@ -24,11 +24,14 @@ def _run_git(repo_path: str, args: list[str], env: dict[str, str] | None = None)
             encoding="utf-8",
             errors="replace",
             env={**os.environ, **(env or {})},
+            timeout=120,
         )
 
         if result.returncode != 0:
             return f"Error (code {result.returncode}): {result.stderr.strip()}"
         return result.stdout.strip() or "Success"
+    except subprocess.TimeoutExpired:
+        return f"Error: git command timed out after 120s: {' '.join(args)}"
     except Exception as e:
         logger.error(f"Git command failed: {e}")
         return f"Error: {e!s}"

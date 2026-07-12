@@ -74,6 +74,22 @@ interface SessionSidebarProps {
 }
 
 const SEE_MORE_LIMIT = 5;
+const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
+const SIDEBAR_WIDTH_DEFAULT = 256;
+const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_MAX = 480;
+
+function loadSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (!raw) return SIDEBAR_WIDTH_DEFAULT;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return SIDEBAR_WIDTH_DEFAULT;
+    return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(n)));
+  } catch {
+    return SIDEBAR_WIDTH_DEFAULT;
+  }
+}
 
 export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   agentId,
@@ -98,9 +114,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [renaming, setRenaming] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const editInputRef = useRef<HTMLInputElement>(null);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const reloadMeta = useCallback(() => {
     setMetaMap(loadSessionProjectMeta(agentId));
@@ -142,6 +160,52 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       editInputRef.current.select();
     }
   }, [editingId]);
+
+  const onResizePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [sidebarWidth]);
+
+  const onResizePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    const next = Math.min(
+      SIDEBAR_WIDTH_MAX,
+      Math.max(SIDEBAR_WIDTH_MIN, Math.round(dragRef.current.startWidth + (e.clientX - dragRef.current.startX))),
+    );
+    setSidebarWidth(next);
+  }, []);
+
+  const onResizePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    setSidebarWidth((w) => {
+      try {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+      } catch {
+        /* ignore quota / private mode */
+      }
+      return w;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, []);
 
   // New / switched session id — always re-fetch so the list stays in sync
   // without requiring a manual Refresh click.
@@ -478,7 +542,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   };
 
   return (
-    <div className="w-64 h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0">
+    <div
+      className="relative h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0"
+      style={{ width: sidebarWidth }}
+    >
       <div className="h-14 px-3 border-b border-border flex items-center justify-between flex-shrink-0">
         <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
         <div className="flex items-center gap-1">
@@ -508,6 +575,21 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             <ChevronLeft size={14} className="text-textMuted" />
           </button>
         </div>
+      </div>
+
+      {/* Drag handle — resize session list vs chat */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize session sidebar"
+        title="Drag to resize"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+        onPointerCancel={onResizePointerUp}
+        className="absolute top-0 right-0 z-20 h-full w-2 cursor-col-resize touch-none group"
+      >
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-px bg-transparent group-hover:bg-primary/45 group-active:bg-primary/70 transition-colors" />
       </div>
 
       {error && (

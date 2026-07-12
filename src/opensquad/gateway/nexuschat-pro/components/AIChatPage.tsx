@@ -3217,16 +3217,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const handleStop = () => {
     wsServiceRef.current?.stopTask();
-    // Finalize any streaming text
     const currentText = streamingTextRef.current;
-    if (currentText) {
-      const stoppedMsg: ChatMessage = {
-        role: 'assistant',
-        content: currentText + '\n\n[Stopped]',
-        timestamp: new Date().toISOString(),
-      };
-      setTimeline(prev => finalizeWorkflowAndAddMessage(prev, stoppedMsg));
-    }
+    const stoppedMsg: ChatMessage = {
+      role: 'assistant',
+      content: (currentText ? `${currentText}\n\n` : '') + '[Stopped]',
+      timestamp: new Date().toISOString(),
+    };
+    // Always seal open workflow / Running tools — even when there is no streaming text
+    // (e.g. hung tool_call with no result yet).
+    setTimeline((prev) => {
+      const updated = [...prev];
+      for (let i = updated.length - 1; i >= 0; i--) {
+        const entry = updated[i];
+        if (entry.kind !== 'workflow' || entry.data.completed) continue;
+        const events = entry.data.events.map((evt: WorkflowEvent) => {
+          if (evt.type === 'tool_call' && !evt.result) {
+            return {
+              ...evt,
+              result: 'Cancelled: stopped by user',
+              resultStatus: 'error' as const,
+            };
+          }
+          return evt;
+        });
+        updated[i] = {
+          ...entry,
+          data: { ...entry.data, events, status: null, completed: true },
+        } as TimelineEntry;
+        break;
+      }
+      return finalizeWorkflowAndAddMessage(updated, stoppedMsg);
+    });
     streamingTextRef.current = '';
     setStreamingText('');
     setIsStreaming(false);
