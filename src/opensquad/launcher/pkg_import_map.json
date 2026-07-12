@@ -7,5 +7,6 @@
   "scikit-learn": "sklearn",
   "flask-cors": "flask_cors",
   "lark-oapi": "lark_oapi",
-  "playwright-stealth": "playwright_stealth"
+  "playwright-stealth": "playwright_stealth",
+  "openai-whisper": "whisper"
 }

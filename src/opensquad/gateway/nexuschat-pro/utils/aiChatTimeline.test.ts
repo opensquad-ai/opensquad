@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
+  foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
+  genTimelineUID,
   isToolResultFailure,
   mergeOrphanedToolResultsAcrossWorkflows,
   shouldTreatWorkflowComplete,
@@ -34,6 +36,44 @@ describe('isToolResultFailure', () => {
     expect(isToolResultFailure('Cancelled: stopped by user')).toBe(true);
     expect(isToolResultFailure({ status: 'error', message: 'x' })).toBe(true);
     expect(isToolResultFailure('ok wrote file')).toBe(false);
+  });
+
+  it('does not treat successful payload bodies as failures', () => {
+    // Successful read_file content that happens to mention failure keywords.
+    const fileBody = [
+      'function handle() {',
+      '  if (failed) return;',
+      '  return { "status": "error", "message": "demo" };',
+      '}',
+    ].join('\n');
+    expect(isToolResultFailure(fileBody)).toBe(false);
+    expect(
+      isToolResultFailure({
+        id: 'c1',
+        name: 'filesystem__read_file',
+        result: fileBody,
+      }),
+    ).toBe(false);
+    expect(
+      isToolResultFailure({
+        status: 'ok',
+        content: fileBody,
+      }),
+    ).toBe(false);
+    expect(
+      isToolResultFailure(
+        JSON.stringify({ status: 'ok', content: 'has failed and "status": "error" inside' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('still detects structured / prefixed failure envelopes', () => {
+    expect(isToolResultFailure('Failed to open path')).toBe(true);
+    expect(isToolResultFailure('Security Denied: Path outside project.')).toBe(true);
+    expect(isToolResultFailure('{"status":"error","message":"Security Denied"}')).toBe(true);
+    expect(isToolResultFailure({ status: 'failed', message: 'nope' })).toBe(true);
+    expect(isToolResultFailure({ error: 'boom' })).toBe(true);
+    expect(isToolResultFailure({ aborted: true })).toBe(true);
   });
 });
 
@@ -505,5 +545,89 @@ describe('appendWorkflowEvent routes async sub-agent events across sealed workfl
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe('task_fold / to_user_end_task', () => {
+  it('folds agent process between last user message and end_task report', () => {
+    const messages = [
+      { role: 'user', content: 'do the big task', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: 'mid notice',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+      {
+        role: 'assistant',
+        content: 'final summary',
+        end_task: true,
+        timestamp: '2026-01-01T00:00:05.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'thought',
+        data: { text: 'planning…' },
+        timestamp: '2026-01-01T00:00:01.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 'c1', name: 'system.run_session_job', args: '{}' },
+        timestamp: '2026-01-01T00:00:01.500Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'c1', name: 'system.run_session_job', result: 'ok' },
+        timestamp: '2026-01-01T00:00:01.800Z',
+      },
+      {
+        type: 'thought',
+        data: { text: 'sub thinking', sub_agent: true, sub_task_label: 'worker' },
+        timestamp: '2026-01-01T00:00:03.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'task_fold', 'message']);
+    expect(tl[0].kind === 'message' && tl[0].data.role).toBe('user');
+    expect(tl[2].kind === 'message' && tl[2].data.content).toBe('final summary');
+    expect(tl[2].kind === 'message' && tl[2].data.end_task).toBe(true);
+    if (tl[1].kind === 'task_fold') {
+      expect(tl[1].data.collapsed).toBe(true);
+      expect(tl[1].data.entries.some((e) => e.kind === 'workflow')).toBe(true);
+      expect(tl[1].data.entries.some((e) => e.kind === 'message' && e.data.content === 'mid notice')).toBe(
+        true,
+      );
+      // Sub-agent thoughts are included in the same fold
+      const wf = tl[1].data.entries.find((e) => e.kind === 'workflow');
+      expect(
+        wf &&
+          wf.kind === 'workflow' &&
+          wf.data.events.some((ev) => ev.subAgent && String(ev.content).includes('sub thinking')),
+      ).toBe(true);
+    }
+  });
+
+  it('foldTaskProcessSinceLastUser leaves user message outside the fold', () => {
+    const uid = () => genTimelineUID();
+    const timeline: TimelineEntry[] = [
+      { kind: 'message', data: { role: 'user', content: 'go' }, _uid: uid() },
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'thought', content: 'x', timestamp: 1 }],
+          status: null,
+          completed: true,
+        },
+        _uid: uid(),
+      },
+      {
+        kind: 'message',
+        data: { role: 'assistant', content: 'done', end_task: true },
+        _uid: uid(),
+      },
+    ];
+    const folded = foldTaskProcessSinceLastUser(timeline);
+    expect(folded.map((e) => e.kind)).toEqual(['message', 'task_fold', 'message']);
+    expect(folded[0].kind === 'message' && folded[0].data.role).toBe('user');
   });
 });

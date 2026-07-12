@@ -352,6 +352,7 @@ class AgentRunner:
         self._current_input_source = "unknown"
         self._current_channel = ""  # Specific message channel (feishu/telegram/web/api)
         self._current_source_chat_id = ""  # Source chat_id (feishu/telegram)
+        self._current_group_id = ""  # ChatPro group id for the current turn (if any)
         self._current_user_id = ""  # User ID for the current turn (set by GatewayAdapter)
         self._last_user_input = ""
         self.delegation_depth = 0  # Current delegation depth (used by SubAgentRunner); always 0 for parent agents
@@ -860,6 +861,8 @@ class AgentRunner:
                             msg_parts.append(
                                 f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}"
                             )
+                            if getattr(msg, "source_id", None):
+                                self._current_group_id = str(msg.source_id)
                         elif msg.type == "dm":
                             msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
                         if msg.images:
@@ -927,6 +930,8 @@ class AgentRunner:
                                 msg_parts.append(
                                     f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}"
                                 )
+                                if getattr(msg, "source_id", None):
+                                    self._current_group_id = str(msg.source_id)
                             elif msg.type == "dm":
                                 msg_parts.append(f"[DM] {msg.sender_name}: {msg.content}")
                             if msg.images:
@@ -2196,6 +2201,9 @@ class AgentRunner:
                             for msg in pending_msgs:
                                 if msg.type == "group":
                                     msg_text = f"[{msg.source_name} | group_id={msg.source_id}] {msg.sender_name}: {msg.content}"
+                                    if getattr(msg, "source_id", None):
+                                        self._current_group_id = str(msg.source_id)
+                                        self._current_channel = "chatpro_group"
                                 elif msg.type == "dm":
                                     msg_text = f"[DM] {msg.sender_name}: {msg.content}"
                                 else:
@@ -2536,6 +2544,13 @@ class AgentRunner:
         if streamed.strip():
             user_msg = streamed.strip()
             user_msg_from_tag = getattr(self, "_streamed_user_tag", None) or "to_user"
+            # Prefer explicit end_task tag in the raw response over stream-tag race.
+            end_only = self._extract_tag(full_response, "to_user_end_task")
+            if end_only is not None:
+                user_msg_from_tag = "to_user_end_task"
+                cleaned_end = self._remove_all_tags(end_only).strip()
+                if cleaned_end:
+                    user_msg = cleaned_end
             self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
             # Fallback: extract from full_response (non-streaming API or
@@ -2556,16 +2571,21 @@ class AgentRunner:
             ]
             clean_context = self._remove_tags(full_response, interfering_tags)
 
-            user_msg = self._extract_tag(clean_context, "to_user_reply")
+            # Priority: to_user_end_task > to_user_reply > to_user
+            user_msg = self._extract_tag(clean_context, "to_user_end_task")
             if user_msg:
-                user_msg_from_tag = "to_user_reply"
+                user_msg_from_tag = "to_user_end_task"
             else:
-                user_msg = self._extract_tag(clean_context, "to_user")
+                user_msg = self._extract_tag(clean_context, "to_user_reply")
                 if user_msg:
-                    user_msg_from_tag = "to_user"
-                    self._last_user_msg_from_to_user = True
+                    user_msg_from_tag = "to_user_reply"
+                else:
+                    user_msg = self._extract_tag(clean_context, "to_user")
+                    if user_msg:
+                        user_msg_from_tag = "to_user"
+                        self._last_user_msg_from_to_user = True
             if not user_msg:
-                # If there is no explicit to_user/to_user_reply, treat the remainder as the reply
+                # If there is no explicit to_user*, treat the remainder as the reply
                 user_msg = self._remove_all_tags(clean_context)
             else:
                 user_msg = self._remove_all_tags(user_msg)
@@ -2666,6 +2686,7 @@ class AgentRunner:
             (task_start or sys_cmd in ["task_complete", "task_failed"])
             and "<to_user>" not in full_response
             and "<to_user_reply>" not in full_response
+            and "<to_user_end_task>" not in full_response
         ):
             logger.info("[Runner] Auto-filtering bare conversational text during task start/complete")
             user_msg = ""
@@ -2692,12 +2713,19 @@ class AgentRunner:
                 # but defer session persistence until after tool execution
                 # so events (thought, tool_call, tool_result) appear before
                 # the assistant message in current_session.json
-                event_type = "to_user_reply" if user_msg_from_tag == "to_user_reply" else "to_user_final"
+                if user_msg_from_tag == "to_user_end_task":
+                    event_type = "to_user_end_task"
+                elif user_msg_from_tag == "to_user_reply":
+                    event_type = "to_user_reply"
+                else:
+                    event_type = "to_user_final"
                 await self._emit(event_type, _send_msg)
                 if output_media:
                     await self._emit("output_media", output_media)
                 _saved_msg = _send_msg
                 _saved_output_media = output_media
+                if user_msg_from_tag == "to_user_end_task":
+                    _get_session_manager().mark_last_assistant_end_task()
                 # --- Plugin Hook: on_after_send ---
                 if self._plugin_manager:
                     await self._plugin_manager.run_hook(
@@ -2780,7 +2808,18 @@ class AgentRunner:
                     tc_log.info("[runner] [skip] Tool execution skipped by plugin hook")
                 else:
                     tc_log.info("[runner] [run] Executing tool: %s", t_name)
-                    result = await self.tool_registry.call(t_name, t_args_dict)
+                    # Bind call_id/sid so background Jobs can stream stdout to the CMD panel
+                    from opensquad.tools.system import reset_tool_call_context, set_tool_call_context
+
+                    _ctx_token = set_tool_call_context(
+                        sid=getattr(self, "_turn_sid", "") or "",
+                        call_id=call_id,
+                        tool_name=t_name,
+                    )
+                    try:
+                        result = await self.tool_registry.call(t_name, t_args_dict)
+                    finally:
+                        reset_tool_call_context(_ctx_token)
                     task_supervisor.report_activity()
 
                 # Collaboration board auto-sync
@@ -3201,6 +3240,7 @@ class AgentRunner:
             "plan",
             "to_user",
             "to_user_reply",
+            "to_user_end_task",
             "to_system",
             "tool_call",
             "tool_result",
@@ -3496,6 +3536,10 @@ class AgentRunner:
             self._streamed_user_tag = "to_user_reply"
             emit_user_stream(text)
 
+        def emit_to_user_end_task(text):
+            self._streamed_user_tag = "to_user_end_task"
+            emit_user_stream(text)
+
         self.chat_api.stream_parser._default_handler = emit_user_stream
 
         # Strict separation of streaming vs non-streaming tags.
@@ -3507,6 +3551,7 @@ class AgentRunner:
                 "think": lambda x: emit_with_sid("thought", x),
                 "to_user": emit_to_user,
                 "to_user_reply": emit_to_user_reply,
+                "to_user_end_task": emit_to_user_end_task,
                 # Intercept the following tags to prevent them from appearing in the content stream
                 "title": lambda x: None,  # Intercept title tag (subject handled elsewhere)
                 "plan": lambda x: None,

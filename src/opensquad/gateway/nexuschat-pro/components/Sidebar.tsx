@@ -176,7 +176,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
 
     const navBtn = (view: string | string[]) => {
         const isActive = Array.isArray(view) ? view.includes(currentView || '') : currentView === view;
-        return `flex items-center md:justify-center justify-start gap-3 w-full px-4 md:px-2 py-3 md:py-2 rounded-xl transition-all duration-200 ${
+        return `flex items-center md:justify-center justify-start gap-3 w-full px-4 md:px-1 py-2.5 md:py-1.5 rounded-lg transition-all duration-200 ${
             isActive
                 ? 'text-primary bg-primary/10'
                 : 'text-textMuted hover:bg-primary/10 hover:text-primary'
@@ -211,8 +211,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
     const filterId = `os-node-glow-${Math.random().toString(36).substr(2, 9)}`;
 
     return (
-        <div className="w-full md:w-[68px] bg-bgLight h-full flex flex-col md:items-center items-start py-6 z-30 shadow-lg border-r border-border shrink-0">
-            <div className="w-10 h-10 mb-6 flex-shrink-0 transition-transform hover:scale-105 cursor-pointer ml-4 md:ml-0">
+        <div className="w-full md:w-[52px] bg-bgLight h-full flex flex-col md:items-center items-start py-3 z-30 shadow-lg border-r border-border shrink-0">
+            <div className="w-8 h-8 mb-3 flex-shrink-0 transition-transform hover:scale-105 cursor-pointer ml-4 md:ml-0">
                 <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
                     <defs>
                         <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
@@ -244,7 +244,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
 
 
             <nav
-                className="flex flex-col gap-2 w-full px-2 flex-1 min-h-0 overflow-y-auto [&::-webkit-scrollbar]:hidden"
+                className="flex flex-col gap-0.5 w-full px-1 flex-1 min-h-0 overflow-y-auto [&::-webkit-scrollbar]:hidden"
                 style={{ scrollbarWidth: 'none' }}
             >
 
@@ -259,7 +259,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                         className={`${navBtn('ai-chat')} ${checkingAgentId === agent.agent_id ? 'opacity-60 cursor-wait' : ''}`}
                         title={agent.label}
                       >
-                        <div className="w-8 h-8 rounded-full overflow-hidden border border-border/60 bg-bgPage shrink-0">
+                        <div className="w-7 h-7 rounded-full overflow-hidden border border-border/60 bg-bgPage shrink-0">
                           {agent.avatar ? (
                             <img src={agent.avatar} alt={agent.label} className="w-full h-full object-cover" loading="lazy" />
                           ) : (
@@ -280,7 +280,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'chat' }))}
                     className={navBtn('chat')}
                 >
-                    <MessageCircle size={24} className="shrink-0" />
+                    <MessageCircle size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.chats')}</span>
                 </button>
 
@@ -289,7 +289,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'admin' }))}
                     className={navBtn(['admin', 'ai-chat'])}
                 >
-                    <LayoutGrid size={24} className="shrink-0" />
+                    <LayoutGrid size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.agents')}</span>
                 </button>
 
@@ -298,7 +298,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'collab-board' }))}
                     className={navBtn('collab-board')}
                 >
-                    <KanbanSquare size={24} className="shrink-0" />
+                    <KanbanSquare size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.collabBoard')}</span>
                 </button>
 
@@ -307,7 +307,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'plugins' }))}
                     className={navBtn('plugins')}
                 >
-                    <Puzzle size={24} className="shrink-0" />
+                    <Puzzle size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.plugins')}</span>
                 </button>
 
@@ -316,7 +316,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'services' }))}
                     className={navBtn('services')}
                 >
-                    <Radio size={24} className="shrink-0" />
+                    <Radio size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.services')}</span>
                 </button>
 
@@ -325,7 +325,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'mcp' }))}
                     className={navBtn('mcp')}
                 >
-                    <Server size={24} className="shrink-0" />
+                    <Server size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.mcp')}</span>
                 </button>
 
@@ -334,7 +334,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'skills' }))}
                     className={navBtn('skills')}
                 >
-                    <BookOpen size={24} className="shrink-0" />
+                    <BookOpen size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.skills')}</span>
                 </button>
 
@@ -343,7 +343,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'roles' }))}
                     className={navBtn('roles')}
                 >
-                    <UserCircle size={24} className="shrink-0" />
+                    <UserCircle size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.roles')}</span>
                 </button>
 
@@ -352,7 +352,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }))}
                     className={navBtn('models')}
                 >
-                    <Cpu size={24} className="shrink-0" />
+                    <Cpu size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.models')}</span>
                 </button>
 
@@ -361,7 +361,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'logs' }))}
                     className={navBtn('logs')}
                 >
-                    <ScrollText size={24} className="shrink-0" />
+                    <ScrollText size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.logs')}</span>
                 </button>
 
@@ -371,7 +371,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                     onClick={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'market' }))}
                     className={navBtn('market')}
                 >
-                    <Store size={24} className="shrink-0" />
+                    <Store size={20} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.market')}</span>
                 </button>
                 */}
@@ -393,14 +393,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                                 <img
                                     src={item.iconUrl}
                                     alt={item.label}
-                                    className="w-10 h-10 rounded-md object-cover shrink-0"
+                                    className="w-8 h-8 rounded-md object-cover shrink-0"
                                     loading="lazy"
                                 />
                             ) : LucideIcon ? (
-                                <LucideIcon size={24} className="shrink-0" />
+                                <LucideIcon size={20} className="shrink-0" />
                             ) : (
                                 // 首字符自动图标（插件未配置图标时系统自动生成）
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white text-sm font-bold shrink-0 ${avatarColor(item.name)}`}>
+                                <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold shrink-0 ${avatarColor(item.name)}`}>
                                     {item.label.charAt(0).toUpperCase()}
                                 </div>
                             )}
@@ -411,13 +411,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
             </nav>
 
             {/* Bottom Actions */}
-            <div className="flex flex-col gap-2 w-full px-3 mt-4 pt-4 border-t border-border shrink-0">
+            <div className="flex flex-col gap-1 w-full px-1 mt-2 pt-2 border-t border-border shrink-0">
                 {/* Language Toggle */}
                 <button
                     onClick={() => setLanguage(isZh ? 'en' : 'zh')}
-                    className="flex items-center md:justify-center justify-start w-full py-2 px-2 rounded-xl text-textMuted hover:bg-primary/10 hover:text-primary transition-all border border-border/30"
+                    className="flex items-center md:justify-center justify-start w-full py-1.5 px-1 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-all border border-border/30"
                 >
-                    <div className="w-7 h-7 flex items-center justify-center rounded-lg bg-primary/10 text-xs font-bold shrink-0">
+                    <div className="w-6 h-6 flex items-center justify-center rounded-md bg-primary/10 text-[10px] font-bold shrink-0">
                         {isZh ? 'EN' : '中'}
                     </div>
                     <span className="font-medium md:hidden ml-3">{t('lang.switchLang')}</span>
@@ -425,9 +425,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
 
                 <button
                     onClick={onOpenProfile}
-                    className="flex items-center md:justify-center justify-start w-full p-2 rounded-xl text-textMuted hover:bg-primary/10 hover:text-primary transition-all"
+                    className="flex items-center md:justify-center justify-start w-full p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-all"
                 >
-                    <div className="w-8 h-8 rounded-full overflow-hidden border border-border shrink-0">
+                    <div className="w-7 h-7 rounded-full overflow-hidden border border-border shrink-0">
                         <img
                             src={getAvatarUrl(currentUser?.avatar, currentUser?.id, currentUser?.name)}
                             alt=""
@@ -449,10 +449,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
 
                 <button
                     onClick={onOpenSettings}
-                    className="flex items-center md:justify-center justify-start gap-2 w-full px-4 md:px-2 py-3 rounded-xl text-textMuted hover:bg-primary/10 hover:text-primary transition-all"
+                    className="flex items-center md:justify-center justify-start gap-2 w-full px-4 md:px-1 py-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-all"
                 >
 
-                    <Settings size={20} className="shrink-0" />
+                    <Settings size={18} className="shrink-0" />
                     <span className="font-medium md:hidden">{t('nav.settings')}</span>
                 </button>
 

@@ -2,7 +2,7 @@ import re
 from collections.abc import Callable
 
 # Streaming tags: content dispatched character-by-character in real time; no nested tag recognition inside
-_STREAMING_TAGS = frozenset({"to_user", "to_user_reply", "thought", "think"})
+_STREAMING_TAGS = frozenset({"to_user", "to_user_reply", "to_user_end_task", "thought", "think"})
 
 
 class StreamingTagParser:

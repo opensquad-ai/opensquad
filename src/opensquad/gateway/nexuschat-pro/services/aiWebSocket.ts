@@ -87,6 +87,7 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'stream',
   'to_user_final',
   'to_user_reply',
+  'to_user_end_task',
   // thought / tool_* / info are session-scoped: when they carry `sid` for an
   // old session (e.g. orphaned sub-agent after new_session), drop them.
   'plan',

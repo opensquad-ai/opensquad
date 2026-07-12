@@ -22,7 +22,7 @@ logger = logging.getLogger("plugins.whisper")
     version="1.0.0",
     plugin_type="tool",
     display_name="Whisper Transcription",
-    dependencies={"pip": ["requests", "whisper", "flask", "flask-cors"]},
+    dependencies={"pip": ["requests", "openai-whisper", "flask", "flask-cors"]},
     tags=["audio"],
     config_schema={
         "port": {
@@ -37,7 +37,7 @@ logger = logging.getLogger("plugins.whisper")
         },
         "auto_start": {
             "type": "boolean",
-            "default": True,
+            "default": False,
             "description": "Automatically start the Whisper service when the launcher boots",
         },
     },

@@ -11,6 +11,7 @@ class DummySessionManager:
         self.elapsed_ms = None
         self.title = None
         self.current_session_id = "sess-1"
+        self.end_task_marked = False
 
     def add_event(self, event_type, payload, turn_id=None, round_id=None):
         self.events.append((event_type, payload, turn_id, round_id))
@@ -20,6 +21,9 @@ class DummySessionManager:
 
     def update_last_message_elapsed_ms(self, elapsed_ms):
         self.elapsed_ms = elapsed_ms
+
+    def mark_last_assistant_end_task(self):
+        self.end_task_marked = True
 
     def set_title(self, title):
         self.title = title
@@ -145,6 +149,35 @@ def test_extract_user_facing_message_prefers_streamed_content():
     assert result.user_msg == "hello world"
     assert result.user_msg_from_tag == "to_user_reply"
     assert runner._awaiting_user_reply is True
+
+
+def test_extract_user_facing_message_prefers_end_task_tag():
+    runner = DummyRunner()
+    handler = TurnResultHandler(runner)
+
+    result = handler.extract_user_facing_message(
+        "<to_user>mid</to_user><to_user_end_task>final report</to_user_end_task>"
+    )
+
+    assert result.user_msg == "final report"
+    assert result.user_msg_from_tag == "to_user_end_task"
+
+
+def test_emit_user_facing_message_end_task_event():
+    runner = DummyRunner()
+    handler = TurnResultHandler(runner)
+    user_message = SimpleNamespace(
+        user_msg="final report",
+        user_msg_from_tag="to_user_end_task",
+        saved_msg=None,
+        saved_output_media=None,
+    )
+
+    result = asyncio.run(handler.emit_user_facing_message(user_message, None))
+
+    assert ("to_user_end_task", "final report") in runner.emitted
+    assert runner._session_manager.end_task_marked is True
+    assert result.saved_msg == "final report"
 
 
 def test_finalize_without_tools_persists_message_and_waits():

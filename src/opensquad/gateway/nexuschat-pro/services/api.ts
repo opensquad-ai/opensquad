@@ -444,6 +444,30 @@ export const messageAPI = {
     });
   },
 
+  /** Resolve a collaboration step approval card posted in group chat (确定/拒绝). */
+  resolveCollabApproval: async (
+    groupId: string,
+    approvalId: string,
+    action: 'approve' | 'reject',
+    opts?: { messageId?: string; note?: string }
+  ) => {
+    return apiRequest<{
+      ok: boolean;
+      approval_id: string;
+      status: string;
+      collab_id?: string;
+      step?: string;
+      agent_notified?: boolean;
+    }>(`/groups/${groupId}/collab-approvals/${approvalId}/resolve?token=${authToken}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action,
+        message_id: opts?.messageId,
+        note: opts?.note || '',
+      }),
+    });
+  },
+
   permanentDeleteMessage: async (messageId: string) => {
     return apiRequest<{ message: string }>(`/messages/${messageId}/permanent?token=${authToken}`, {
       method: 'DELETE',

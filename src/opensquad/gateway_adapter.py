@@ -39,6 +39,7 @@ class GatewayAdapter(BaseAgent):
         # Listen to Runner output events
         _sub("to_user_final", self.on_runner_output)
         _sub("to_user_reply", self.on_runner_output)
+        _sub("to_user_end_task", self.on_runner_end_task)
         _sub("thought", self.on_runner_thought)
         _sub("to_user_stream", self.on_runner_stream)
         _sub("tool_call", self.on_tool_call)
@@ -68,6 +69,10 @@ class GatewayAdapter(BaseAgent):
         _sub("summary_stream", self.on_generic_event("summary_stream"))
         _sub("group_member_update", self.on_generic_event("group_member_update"))
         _sub("user_status_update", self.on_generic_event("user_status_update"))
+        # Shell / background job live output for CMD-style web panel
+        _sub("job_stdout", self.on_generic_event("job_stdout"))
+        _sub("job_status", self.on_generic_event("job_status"))
+        _sub("compression_progress", self.on_generic_event("compression_progress"))
 
     def dispose(self):
         """Unsubscribe all event bus handlers.
@@ -343,6 +348,19 @@ class GatewayAdapter(BaseAgent):
                 logger.warning("[GatewayAdapter] on_runner_output called but content is empty")
         else:
             logger.warning("[GatewayAdapter] on_runner_output called but not connected, discarding response")
+
+    async def on_runner_end_task(self, data):
+        """Complex-task final report — distinct WS type so the UI can fold the process."""
+        logger.info(f"[GatewayAdapter] on_runner_end_task called, connected={self.connected}, data={str(data)[:200]}")
+        if not self.connected:
+            logger.warning("[GatewayAdapter] on_runner_end_task called but not connected, discarding response")
+            return
+        sid = self._extract_sid(data)
+        content = self._unwrap(data)
+        if not content:
+            logger.warning("[GatewayAdapter] on_runner_end_task called but content is empty")
+            return
+        await self._send_event(content, "to_user_end_task", sid=sid)
 
     async def on_runner_thought(self, data):
         """When Runner is thinking (content may be a {"text":...,"final":...} object)."""

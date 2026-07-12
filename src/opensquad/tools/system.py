@@ -5,6 +5,7 @@ Allows agents to execute time-consuming commands in a "non-blocking" manner and 
 """
 
 import asyncio
+import contextvars
 import os
 import platform
 import queue
@@ -52,6 +53,94 @@ def _resolve_working_directory(working_directory: str | None) -> str:
 
 # _is_path_safe is imported from opensquad.utils.path_utils above
 
+# --- Tool-call UI context (set by runner / tool_turn_executor around registry.call) ---
+
+_tool_call_ctx: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "opensquad_tool_call_ctx", default=None
+)
+# Cross-thread fallback: ContextVar copy_context can miss in some executor paths;
+# a process-wide stack works because tool turns execute one call at a time.
+_ACTIVE_TOOL_CTX_STACK: list[dict[str, str]] = []
+_ACTIVE_TOOL_LOCK = threading.Lock()
+
+# job_id -> {call_id, sid, command} for abort / late status emits / check_job UI relay
+_JOB_UI_META: dict[str, dict[str, str]] = {}
+_JOB_UI_META_LOCK = threading.Lock()
+
+
+def set_tool_call_context(*, sid: str = "", call_id: str = "", tool_name: str = "") -> contextvars.Token:
+    """Bind current tool invocation so Jobs/ShellSessions can stream to the web UI."""
+    payload = {"sid": sid or "", "call_id": call_id or "", "tool_name": tool_name or ""}
+    with _ACTIVE_TOOL_LOCK:
+        _ACTIVE_TOOL_CTX_STACK.append(payload)
+    return _tool_call_ctx.set(payload)
+
+
+def reset_tool_call_context(token: contextvars.Token) -> None:
+    with _ACTIVE_TOOL_LOCK:
+        if _ACTIVE_TOOL_CTX_STACK:
+            _ACTIVE_TOOL_CTX_STACK.pop()
+    _tool_call_ctx.reset(token)
+
+
+def get_tool_call_context() -> dict[str, str]:
+    ctx = _tool_call_ctx.get()
+    if ctx and ctx.get("call_id"):
+        return dict(ctx)
+    with _ACTIVE_TOOL_LOCK:
+        if _ACTIVE_TOOL_CTX_STACK:
+            return dict(_ACTIVE_TOOL_CTX_STACK[-1])
+    return dict(ctx or {})
+
+
+def emit_job_event(etype: str, payload: dict[str, Any]) -> None:
+    """Thread-safe EventBus emit for job_stdout / job_status (GatewayAdapter forwards)."""
+    try:
+        from opensquad import bus
+
+        sid = str(payload.get("sid") or "")
+        bus.emit(etype, {"sid": sid, "data": payload})
+    except Exception:
+        logger.debug("[system] emit_job_event(%s) failed", etype, exc_info=True)
+
+
+def _register_job_ui_meta(job_id: str, *, call_id: str, sid: str, command: str) -> None:
+    with _JOB_UI_META_LOCK:
+        _JOB_UI_META[job_id] = {"call_id": call_id, "sid": sid, "command": command}
+
+
+def _pop_job_ui_meta(job_id: str) -> dict[str, str]:
+    with _JOB_UI_META_LOCK:
+        return dict(_JOB_UI_META.pop(job_id, {}) or {})
+
+
+def _peek_job_ui_meta(job_id: str) -> dict[str, str]:
+    with _JOB_UI_META_LOCK:
+        return dict(_JOB_UI_META.get(job_id) or {})
+
+
+def _emit_job_stdout_chunk(
+    *,
+    call_id: str,
+    sid: str,
+    job_id: str,
+    command: str,
+    chunk: str,
+) -> None:
+    if not call_id or not chunk:
+        return
+    emit_job_event(
+        "job_stdout",
+        {
+            "sid": sid,
+            "call_id": call_id,
+            "job_id": job_id,
+            "command": command,
+            "chunk": chunk,
+        },
+    )
+
+
 # --- Background job management core ---
 
 
@@ -61,17 +150,24 @@ class Job:
         self.command = command
         self.process: subprocess.Popen | None = None
         self.stdout_queue = queue.Queue()
+        self.output_log: list[str] = []
+        self._log_lock = threading.Lock()
         self.start_time = None
         self.end_time = None
         self.return_code = None
         self.shell = shell
         self.working_directory = _resolve_working_directory(working_directory)
+        ctx = get_tool_call_context()
+        self.ui_call_id = ctx.get("call_id", "")
+        self.ui_sid = ctx.get("sid", "")
 
     def start(self):
         self.start_time = datetime.now()
         try:
             # Subprocess environment: force Python subprocesses to output UTF-8
             env = os.environ.copy()
+            # Critical for live CMD panel: avoid block-buffering when stdout is a pipe
+            env["PYTHONUNBUFFERED"] = "1"
             if platform.system() == "Windows":
                 env.setdefault("PYTHONUTF8", "1")
                 env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -113,27 +209,112 @@ class Job:
             self.end_time = datetime.now()
             return False, str(e)
 
+    def _ui_ids(self) -> tuple[str, str]:
+        """Resolve call_id/sid — prefer instance fields, fall back to job meta table."""
+        if self.ui_call_id:
+            return self.ui_call_id, self.ui_sid
+        meta = _peek_job_ui_meta(self.id)
+        call_id = meta.get("call_id", "") or self.ui_call_id
+        sid = meta.get("sid", "") or self.ui_sid
+        if call_id and not self.ui_call_id:
+            self.ui_call_id = call_id
+            self.ui_sid = sid
+        return call_id, sid
+
+    def _emit_line(self, decoded: str) -> None:
+        self.stdout_queue.put(decoded)
+        with self._log_lock:
+            self.output_log.append(decoded)
+            line_count = len(self.output_log)
+        call_id, sid = self._ui_ids()
+        if call_id:
+            _emit_job_stdout_chunk(
+                call_id=call_id,
+                sid=sid,
+                job_id=self.id,
+                command=self.command,
+                chunk=decoded + "\n",
+            )
+            self._ui_emitted_lines = max(getattr(self, "_ui_emitted_lines", 0), line_count)
+        else:
+            logger.debug("[system] job %s stdout dropped (no call_id): %r", self.id, decoded[:80])
+
+    def emit_ui_catchup(self) -> None:
+        """Emit any log lines not yet pushed to the web UI (safe to call from check_job / wait loops)."""
+        call_id, sid = self._ui_ids()
+        if not call_id:
+            return
+        with self._log_lock:
+            lines = list(self.output_log)
+        already = getattr(self, "_ui_emitted_lines", 0)
+        if len(lines) <= already:
+            return
+        new_lines = lines[already:]
+        self._ui_emitted_lines = len(lines)
+        chunk = "\n".join(new_lines) + "\n"
+        _emit_job_stdout_chunk(
+            call_id=call_id,
+            sid=sid,
+            job_id=self.id,
+            command=self.command,
+            chunk=chunk,
+        )
+
     def _read_output(self):
         """Background thread: read output stream in real-time."""
-        if not self.process:
+        if not self.process or not self.process.stdout:
             return
 
+        # Use read()+split rather than readline-only so partially flushed chunks
+        # still surface promptly on Windows pipes.
+        pending = b""
         while True:
-            # Blocking read one byte (or one line) until stream closes
-            line = self.process.stdout.readline()
-            if not line:
-                break
             try:
-                # Prefer UTF-8 (Python scripts, npm, git, and other UTF-8 programs)
-                decoded = line.decode("utf-8").rstrip()
+                chunk = self.process.stdout.read(4096)
+            except Exception:
+                break
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending or b"\r" in pending:
+                # Prefer \n; also handle \r\n / bare \r
+                if b"\r\n" in pending:
+                    line, pending = pending.split(b"\r\n", 1)
+                elif b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                else:
+                    line, pending = pending.split(b"\r", 1)
+                try:
+                    decoded = line.decode("utf-8").rstrip("\r")
+                except UnicodeDecodeError:
+                    decoded = line.decode("gbk", errors="replace").rstrip("\r")
+                self._emit_line(decoded)
+
+        if pending:
+            try:
+                decoded = pending.decode("utf-8").rstrip("\r\n")
             except UnicodeDecodeError:
-                # Fall back to GBK (Windows system commands like dir/type with native GBK output)
-                decoded = line.decode("gbk", errors="replace").rstrip()
-            self.stdout_queue.put(decoded)
+                decoded = pending.decode("gbk", errors="replace").rstrip("\r\n")
+            if decoded:
+                self._emit_line(decoded)
 
         # Wait for process to fully exit
         self.return_code = self.process.wait()
         self.end_time = datetime.now()
+        call_id, sid = self._ui_ids()
+        if call_id:
+            state = "done" if (self.return_code or 0) == 0 else "error"
+            emit_job_event(
+                "job_status",
+                {
+                    "sid": sid,
+                    "call_id": call_id,
+                    "job_id": self.id,
+                    "command": self.command,
+                    "state": state,
+                    "return_code": self.return_code,
+                },
+            )
 
     def get_new_output(self, max_lines=50) -> str:
         """Get new output since the last check."""
@@ -143,6 +324,14 @@ class Job:
                 lines.append(self.stdout_queue.get_nowait())
         except queue.Empty:
             pass
+        return "\n".join(lines)
+
+    def get_full_output(self, max_lines: int = 5000) -> str:
+        """Cumulative output for UI / final tool_result (does not consume the queue)."""
+        with self._log_lock:
+            lines = list(self.output_log)
+        if max_lines > 0 and len(lines) > max_lines:
+            lines = lines[-max_lines:]
         return "\n".join(lines)
 
     def is_running(self) -> bool:
@@ -173,6 +362,18 @@ class Job:
             except Exception:
                 with contextlib.suppress(Exception):
                     self.process.kill()
+            if self.ui_call_id:
+                emit_job_event(
+                    "job_status",
+                    {
+                        "sid": self.ui_sid,
+                        "call_id": self.ui_call_id,
+                        "job_id": self.id,
+                        "command": self.command,
+                        "state": "aborted",
+                        "return_code": self.return_code,
+                    },
+                )
 
 
 # Global job store
@@ -249,6 +450,10 @@ class ShellSession:
         if not self.process or self.process.poll() is not None:
             return {"status": "error", "message": "Session shell is not running."}
 
+        ctx = get_tool_call_context()
+        ui_call_id = ctx.get("call_id", "")
+        ui_sid = ctx.get("sid", "")
+
         marker = f"END_OF_COMMAND_{uuid.uuid4().hex[:8]}"
         full_command = f"{command}\n"
         echo_cmd = f"Write-Host '{marker}'\n" if "powershell" in self.shell_type.lower() else f"echo {marker}\n"
@@ -256,14 +461,70 @@ class ShellSession:
         with self._lock:
             start_index = len(self.output_buffer)
 
+        if ui_call_id:
+            emit_job_event(
+                "job_status",
+                {
+                    "sid": ui_sid,
+                    "call_id": ui_call_id,
+                    "session_id": self.session_id,
+                    "command": command,
+                    "shell_type": self.shell_type,
+                    "state": "running",
+                },
+            )
+
         self._send_raw(full_command)
         self._send_raw(echo_cmd)
 
         start_time = time.time()
+        last_emit_len = 0
+
+        def _emit_new_chunks(combined: str, *, include_marker: bool = False) -> None:
+            nonlocal last_emit_len
+            if not ui_call_id:
+                return
+            visible = combined if include_marker else combined
+            if marker in visible and not include_marker:
+                visible = visible.split(marker)[0]
+            if len(visible) <= last_emit_len:
+                return
+            chunk = visible[last_emit_len:]
+            last_emit_len = len(visible)
+            if chunk:
+                emit_job_event(
+                    "job_stdout",
+                    {
+                        "sid": ui_sid,
+                        "call_id": ui_call_id,
+                        "session_id": self.session_id,
+                        "command": command,
+                        "shell_type": self.shell_type,
+                        "chunk": chunk,
+                    },
+                )
+
+        def _finish_status(state: str, return_code: int | None = None) -> None:
+            if not ui_call_id:
+                return
+            payload: dict[str, Any] = {
+                "sid": ui_sid,
+                "call_id": ui_call_id,
+                "session_id": self.session_id,
+                "command": command,
+                "shell_type": self.shell_type,
+                "state": state,
+            }
+            if return_code is not None:
+                payload["return_code"] = return_code
+            emit_job_event("job_status", payload)
+
         while time.time() - start_time < timeout:
             if self._stop_event.is_set() or (self.process and self.process.poll() is not None):
                 with self._lock:
                     partial = "".join(self.output_buffer[start_index:])
+                _emit_new_chunks(partial)
+                _finish_status("aborted")
                 return {
                     "status": "error",
                     "session_id": self.session_id,
@@ -275,6 +536,8 @@ class ShellSession:
             if _user_stop_requested():
                 with self._lock:
                     partial = "".join(self.output_buffer[start_index:])
+                _emit_new_chunks(partial)
+                _finish_status("aborted")
                 return {
                     "status": "error",
                     "session_id": self.session_id,
@@ -285,19 +548,23 @@ class ShellSession:
                 }
             with self._lock:
                 combined = "".join(self.output_buffer[start_index:])
-                if marker in combined:
-                    captured = combined.split(marker)[0].strip()
-                    return {
-                        "status": "success",
-                        "session_id": self.session_id,
-                        "shell_type": self.shell_type,
-                        "working_directory": self.working_directory,
-                        "data": captured,
-                    }
+            _emit_new_chunks(combined)
+            if marker in combined:
+                captured = combined.split(marker)[0].strip()
+                _finish_status("done", 0)
+                return {
+                    "status": "success",
+                    "session_id": self.session_id,
+                    "shell_type": self.shell_type,
+                    "working_directory": self.working_directory,
+                    "data": captured,
+                }
             time.sleep(0.1)
 
         with self._lock:
             partial = "".join(self.output_buffer[start_index:])
+        _emit_new_chunks(partial)
+        _finish_status("error")
         return {
             "status": "error",
             "session_id": self.session_id,
@@ -481,6 +748,18 @@ def abort_all_tool_processes(reason: str = "user stop") -> dict[str, Any]:
             if job.is_running():
                 job.stop()
                 stopped_jobs += 1
+            elif job.ui_call_id:
+                emit_job_event(
+                    "job_status",
+                    {
+                        "sid": job.ui_sid,
+                        "call_id": job.ui_call_id,
+                        "job_id": job.id,
+                        "command": job.command,
+                        "state": "aborted",
+                        "return_code": job.return_code,
+                    },
+                )
         except Exception:
             logger.debug("[system] abort job failed", exc_info=True)
 
@@ -492,6 +771,25 @@ def abort_all_tool_processes(reason: str = "user stop") -> dict[str, Any]:
                 closed_sessions += 1
         except Exception:
             logger.debug("[system] abort shell session failed sid=%s", sid, exc_info=True)
+
+    # Emit aborted for any remaining registered UI metas (e.g. race with reader thread)
+    with _JOB_UI_META_LOCK:
+        pending_meta = list(_JOB_UI_META.items())
+        _JOB_UI_META.clear()
+    for jid, meta in pending_meta:
+        call_id = meta.get("call_id") or ""
+        if not call_id:
+            continue
+        emit_job_event(
+            "job_status",
+            {
+                "sid": meta.get("sid", ""),
+                "call_id": call_id,
+                "job_id": jid,
+                "command": meta.get("command", ""),
+                "state": "aborted",
+            },
+        )
 
     try:
         me = psutil.Process()
@@ -572,13 +870,51 @@ def start_job(
         }
 
     job_id = str(uuid.uuid4())[:8]
+    ctx = get_tool_call_context()
     job = Job(job_id, command, working_directory=resolved_cwd)
+    # Prefer freshly-read context in case Job init raced an empty ContextVar
+    if not job.ui_call_id and ctx.get("call_id"):
+        job.ui_call_id = ctx.get("call_id", "")
+        job.ui_sid = ctx.get("sid", "")
+    if not job.ui_call_id:
+        logger.warning(
+            "[system] start_job %s has empty call_id — CMD panel will not receive live stdout",
+            job_id,
+        )
+
+    _JOBS[job_id] = job
+    _register_job_ui_meta(
+        job_id,
+        call_id=job.ui_call_id,
+        sid=job.ui_sid,
+        command=command,
+    )
+
     success, msg = job.start()
 
     if not success:
+        _pop_job_ui_meta(job_id)
+        _JOBS.pop(job_id, None)
         return {"status": "error", "message": f"Failed to start job: {msg}"}
 
-    _JOBS[job_id] = job
+    if job.ui_call_id:
+        emit_job_event(
+            "job_status",
+            {
+                "sid": job.ui_sid,
+                "call_id": job.ui_call_id,
+                "job_id": job_id,
+                "command": command,
+                "state": "running",
+            },
+        )
+
+    def _relay_full_output(last_len: int) -> int:
+        """Push any newly accumulated log lines to the web UI (wait-loop backup)."""
+        job.emit_ui_catchup()
+        return last_len
+
+    ui_out_len = 0
 
     # -- Blocking mode: wait until job exits (with optional safety timeout) --
     if blocking:
@@ -601,6 +937,7 @@ def start_job(
                     "working_directory": resolved_cwd,
                     "output": job.get_new_output(max_lines=200),
                 }
+            ui_out_len = _relay_full_output(ui_out_len)
             time.sleep(0.1)
             if max_wait_seconds is not None and max_wait_seconds >= 0:
                 if (time.time() - started_at) >= max_wait_seconds:
@@ -616,6 +953,7 @@ def start_job(
                         "command": command,
                         "working_directory": resolved_cwd,
                     }
+        ui_out_len = _relay_full_output(ui_out_len)
         output = job.get_new_output(max_lines=2000)
         elapsed = round((job.end_time - job.start_time).total_seconds(), 2) if job.end_time and job.start_time else None
         return {
@@ -649,8 +987,10 @@ def start_job(
                     "output": job.get_new_output(max_lines=200),
                 }
             time.sleep(0.1)
+            ui_out_len = _relay_full_output(ui_out_len)
             if not job.is_running():
                 # Task completed within the wait window; collect all output and return directly
+                ui_out_len = _relay_full_output(ui_out_len)
                 output = job.get_new_output(max_lines=500)
                 elapsed = (
                     round((job.end_time - job.start_time).total_seconds(), 2)
@@ -695,6 +1035,25 @@ def check_job(job_id: str) -> dict[str, Any]:
 
     is_running = job.is_running()
     new_output = job.get_new_output()
+
+    # Catch up any lines the reader thread couldn't emit (e.g. empty call_id at start).
+    job.emit_ui_catchup()
+    meta = _peek_job_ui_meta(job_id)
+    call_id = job.ui_call_id or meta.get("call_id", "")
+    sid = job.ui_sid or meta.get("sid", "")
+    if call_id and not is_running:
+        state = "done" if (job.return_code or 0) == 0 else "error"
+        emit_job_event(
+            "job_status",
+            {
+                "sid": sid,
+                "call_id": call_id,
+                "job_id": job_id,
+                "command": job.command,
+                "state": state,
+                "return_code": job.return_code,
+            },
+        )
 
     status_str = (
         "RUNNING"

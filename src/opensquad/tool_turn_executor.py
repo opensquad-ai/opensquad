@@ -137,7 +137,17 @@ class ToolTurnExecutor:
             tc_log.info("[runner] [skip] Tool execution skipped by plugin hook")
         else:
             tc_log.info("[runner] [run] Executing tool: %s", tool_name)
-            result = await self.runner.tool_registry.call(tool_name, tool_args_dict)
+            from opensquad.tools.system import reset_tool_call_context, set_tool_call_context
+
+            _ctx_token = set_tool_call_context(
+                sid=getattr(self.runner, "_turn_sid", "") or "",
+                call_id=call_id,
+                tool_name=tool_name,
+            )
+            try:
+                result = await self.runner.tool_registry.call(tool_name, tool_args_dict)
+            finally:
+                reset_tool_call_context(_ctx_token)
             task_supervisor.report_activity()
 
         perf_event(

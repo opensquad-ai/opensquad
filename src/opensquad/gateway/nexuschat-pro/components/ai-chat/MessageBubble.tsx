@@ -35,6 +35,8 @@ export interface ChatMessage {
   output_audio?: Array<{ url: string; mime: string }>;
   /** Model-generated image outputs */
   output_images?: string[];
+  /** Complex-task final report — UI folds prior agent process when set. */
+  end_task?: boolean;
 }
 
 interface MessageBubbleProps {

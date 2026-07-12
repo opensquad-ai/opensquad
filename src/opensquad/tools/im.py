@@ -339,3 +339,115 @@ def reconnect() -> dict[str, Any]:
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def request_approval(
+    title: str,
+    summary: str = "",
+    kind: str = "generic",
+    group_id: str = "",
+    to_mode: str = "",
+    from_mode: str = "",
+    approval_id: str = "",
+) -> dict[str, Any]:
+    """
+    Post an interactive Approve/Reject card to a group chat (works without collaboration).
+
+    Use this whenever you need the user to explicitly authorize something while talking
+    in a group — e.g. Plan→Build mode switch, risky actions, or any gated step.
+
+    Preferred over asking the user to type "确认" / "同意".
+
+    Args:
+        title: Short card title shown to the user.
+        summary: What they should review / why you need approval.
+        kind: ``generic`` (default), ``mode_switch`` (Plan/Build), or ``collab_step``.
+        group_id: Target group id/name. If empty, uses the group of the current turn.
+        to_mode: For ``kind=mode_switch``: ``plan`` or ``build``.
+        from_mode: Optional current mode label for the card.
+        approval_id: Optional fixed id (e.g. reuse the private-UI mode-switch request id).
+
+    Returns:
+        ``{status: "pending", approval_id, ...}`` — STOP and wait for the system
+        follow-up after the user clicks 确定/拒绝. Do NOT assume approved.
+    """
+    try:
+        from opensquad.agent_mode import get_current_mode, normalize_mode
+        from opensquad.collab_approval import (
+            KIND_MODE_SWITCH,
+            build_approval_payload,
+            new_approval_id,
+            normalize_kind,
+            post_group_approval_card,
+            resolve_agent_identity,
+            resolve_current_group_id,
+        )
+
+        kind_n = normalize_kind(kind)
+        target = resolve_current_group_id(group_id)
+        if not target:
+            return {
+                "status": "error",
+                "message": (
+                    "No group_id. Pass group_id=... or call this while handling a group message "
+                    "so the current group is known."
+                ),
+            }
+
+        agent_id, agent_name = resolve_agent_identity()
+        appr_id = (approval_id or "").strip() or new_approval_id()
+
+        fm = (from_mode or "").strip()
+        tm = (to_mode or "").strip()
+        card_title = (title or "").strip()
+        card_summary = (summary or "").strip()
+        if kind_n == KIND_MODE_SWITCH:
+            if not tm:
+                return {"status": "error", "message": "kind=mode_switch requires to_mode=plan|build"}
+            tm = normalize_mode(tm)
+            if not fm:
+                fm = get_current_mode()
+            else:
+                fm = normalize_mode(fm)
+            if not card_title:
+                card_title = f"切换模式：{fm} → {tm}"
+            if not card_summary:
+                card_summary = "切换到 Build 以编辑文件/运行命令" if tm == "build" else "切换到 Plan 进行只读探索与规划"
+
+        payload = build_approval_payload(
+            approval_id=appr_id,
+            title=card_title or "批准请求",
+            summary=card_summary,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            group_id=target,
+            status="pending",
+            kind=kind_n,
+            from_mode=fm,
+            to_mode=tm,
+        )
+
+        posted = post_group_approval_card(payload, target)
+        if not posted.get("ok"):
+            return {
+                "status": "error",
+                "message": posted.get("error") or "Failed to post approval card",
+                "approval_id": appr_id,
+            }
+
+        return {
+            "status": "pending",
+            "approval_id": appr_id,
+            "kind": kind_n,
+            "group_id": posted.get("group_id") or target,
+            "message_id": posted.get("message_id"),
+            "from_mode": fm or None,
+            "to_mode": tm or None,
+            "message": (
+                f"Approval card posted to the group (kind={kind_n}). "
+                "Waiting for the user to click 确定/拒绝. "
+                "Do NOT proceed until you receive a system message with the decision."
+            ),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

@@ -548,9 +548,19 @@ class SubAgentRunner:
                         },
                     )
 
-                    # Execute tool
+                    # Execute tool (bind call_id so shell Jobs can stream to the CMD panel)
                     try:
-                        tool_result = await sub_registry.call(t_name, t_args)
+                        from opensquad.tools.system import reset_tool_call_context, set_tool_call_context
+
+                        _ctx_token = set_tool_call_context(
+                            sid=getattr(self, "_sid", "") or "",
+                            call_id=call_id,
+                            tool_name=t_name,
+                        )
+                        try:
+                            tool_result = await sub_registry.call(t_name, t_args)
+                        finally:
+                            reset_tool_call_context(_ctx_token)
                     except Exception as e:
                         tool_result = f"Error: tool {t_name} execution failed -- {e}"
 

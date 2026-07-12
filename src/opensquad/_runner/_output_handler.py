@@ -78,6 +78,11 @@ class OutputHandler:
             streamed_user_tag = "to_user_reply"
             emit_user_stream(text)
 
+        def emit_to_user_end_task(text: str) -> None:
+            nonlocal streamed_user_tag
+            streamed_user_tag = "to_user_end_task"
+            emit_user_stream(text)
+
         if not stream_parser:
             return streamed_user_text
 
@@ -89,6 +94,7 @@ class OutputHandler:
                 "think": lambda x: emit_with_sid("thought", x),
                 "to_user": emit_to_user,
                 "to_user_reply": emit_to_user_reply,
+                "to_user_end_task": emit_to_user_end_task,
                 # Intercept these tags to prevent them from appearing as plain text
                 "title": lambda x: None,
                 "plan": lambda x: None,

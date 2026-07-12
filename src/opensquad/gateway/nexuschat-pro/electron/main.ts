@@ -505,9 +505,7 @@ async function createWindow(): Promise<void> {
     await waitForUrl(HEALTH_URL, readyLabel)
     if (!DEV_MODE) {
       await waitForBackendFullyReady()
-      if (!launcherProcess) {
-        startLauncher()
-      }
+      // Launcher was already spawned in parallel with Gateway; just wait for port.
       try {
         await waitForPort(LAUNCHER_PORT, 'Launcher')
       } catch {
@@ -582,9 +580,10 @@ app.whenReady().then(async () => {
   }
 
   if (!DEV_MODE) {
+    // Gateway + Launcher start in parallel. First-run workspace bootstrap is
+    // serialized by workspace_utils.workspace_bootstrap_lock (file lock).
     startBackend()
-    // Launcher starts after gateway is fully ready (see createWindow) to avoid
-    // parallel bootstrap_desktop_workspace() races on first launch.
+    startLauncher()
   } else {
     console.log(
       '[electron] DEV_MODE enabled — skipping backend spawn; loading Vite at',

@@ -857,6 +857,14 @@ class ChatProBridge:
 
                 r.raise_for_status()
                 logger.info("[Bridge] Message sent successfully")
+                try:
+                    data = r.json() if r.content else {}
+                    if isinstance(data, dict) and data.get("id"):
+                        self._last_sent_message_id = str(data["id"])
+                    else:
+                        self._last_sent_message_id = None
+                except Exception:
+                    self._last_sent_message_id = None
                 return True
 
             except Exception as e:
@@ -868,7 +876,12 @@ class ChatProBridge:
                     time.sleep(sleep_time)
 
         logger.error(f"[Bridge] Message sending failed after {retries} attempts. Last error: {last_error}")
+        self._last_sent_message_id = None
         return False
+
+    def last_sent_message_id(self) -> str | None:
+        """Message id from the most recent successful send_message (if API returned one)."""
+        return getattr(self, "_last_sent_message_id", None)
 
     def get_group_history(self, group_id: str, limit: int = 10) -> list[dict]:
         """Fetch group history."""

@@ -54,9 +54,18 @@ export const SoloUserNavRail: React.FC<SoloUserNavRailProps> = ({
     <nav
       className={`flex flex-col items-end gap-3 py-3 max-h-[70vh] overflow-y-auto transition-all duration-150 ${
         expanded
-          ? 'px-3 rounded-2xl bg-white/95 dark:bg-[#2a2a2c]/95 border border-black/[0.06] dark:border-white/10 shadow-[0_4px_20px_rgba(0,0,0,0.08)]'
+          ? 'px-3 rounded-2xl border shadow-[0_4px_20px_rgba(0,0,0,0.08)]'
           : 'px-1.5'
       }`}
+      style={
+        expanded
+          ? {
+              backgroundColor:
+                'color-mix(in srgb, var(--color-primary) 12%, var(--color-bg-light, #fff))',
+              borderColor: 'color-mix(in srgb, var(--color-primary) 28%, transparent)',
+            }
+          : undefined
+      }
       aria-label="User message navigation"
       onMouseLeave={() => setHoveredId(null)}
     >

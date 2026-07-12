@@ -34,7 +34,7 @@
       },
       "auto_start": {
         "type": "boolean",
-        "default": true,
+        "default": false,
         "description": "Automatically start the Whisper service when the launcher boots"
       }
     }
@@ -52,7 +52,7 @@
     },
     "auto_start": {
       "type": "boolean",
-      "default": true,
+      "default": false,
       "description": "Automatically start the Whisper service when the launcher boots"
     }
   },
@@ -62,7 +62,7 @@
     "default_port": 5001,
     "port_key": "whisper",
     "health_endpoint": "/health",
-    "auto_start": true,
+    "auto_start": false,
     "health_check_interval": 30,
     "restart_policy": {
       "max_retries": 5,
@@ -78,7 +78,7 @@
   "dependencies": {
     "pip": [
       "requests",
-      "whisper",
+      "openai-whisper",
       "flask",
       "flask-cors"
     ]

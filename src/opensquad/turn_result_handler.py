@@ -156,6 +156,12 @@ class TurnResultHandler:
         if streamed.strip():
             user_msg = streamed.strip()
             user_msg_from_tag = getattr(self.runner, "_streamed_user_tag", None) or "to_user"
+            end_only = self.runner._extract_tag(full_response, "to_user_end_task")
+            if end_only is not None:
+                user_msg_from_tag = "to_user_end_task"
+                cleaned_end = self.runner._remove_all_tags(end_only).strip()
+                if cleaned_end:
+                    user_msg = cleaned_end
             self.runner._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
             interfering_tags = [
@@ -173,14 +179,18 @@ class TurnResultHandler:
                 "func",
             ]
             clean_context = self.runner._remove_tags(full_response, interfering_tags)
-            user_msg = self.runner._extract_tag(clean_context, "to_user_reply")
+            user_msg = self.runner._extract_tag(clean_context, "to_user_end_task")
             if user_msg:
-                user_msg_from_tag = "to_user_reply"
+                user_msg_from_tag = "to_user_end_task"
             else:
-                user_msg = self.runner._extract_tag(clean_context, "to_user")
+                user_msg = self.runner._extract_tag(clean_context, "to_user_reply")
                 if user_msg:
-                    user_msg_from_tag = "to_user"
-                    self.runner._last_user_msg_from_to_user = True
+                    user_msg_from_tag = "to_user_reply"
+                else:
+                    user_msg = self.runner._extract_tag(clean_context, "to_user")
+                    if user_msg:
+                        user_msg_from_tag = "to_user"
+                        self.runner._last_user_msg_from_to_user = True
             if not user_msg:
                 user_msg = self.runner._remove_all_tags(clean_context)
             else:
@@ -216,7 +226,12 @@ class TurnResultHandler:
                 if hook_ctx.get("__stop__"):
                     send_msg = None
             if send_msg and send_msg.strip():
-                event_type = "to_user_reply" if user_message.user_msg_from_tag == "to_user_reply" else "to_user_final"
+                if user_message.user_msg_from_tag == "to_user_end_task":
+                    event_type = "to_user_end_task"
+                elif user_message.user_msg_from_tag == "to_user_reply":
+                    event_type = "to_user_reply"
+                else:
+                    event_type = "to_user_final"
                 print(f"[DIAG_EMIT] CALLING _emit(event_type={event_type}, send_msg={send_msg!r})", flush=True)
                 await self.runner._emit(event_type, send_msg)
                 print("[DIAG_EMIT] _emit DONE", flush=True)
@@ -224,6 +239,8 @@ class TurnResultHandler:
                     await self.runner._emit("output_media", output_media)
                 saved_msg = send_msg
                 saved_output_media = output_media
+                if user_message.user_msg_from_tag == "to_user_end_task":
+                    self.runner._session_manager.mark_last_assistant_end_task()
                 if self.runner._plugin_manager:
                     await self.runner._plugin_manager.run_hook(
                         "on_after_send",

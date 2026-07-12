@@ -43,6 +43,7 @@ def is_leaked_tool_params(text: str) -> bool:
         "plan",
         "to_user",
         "to_user_reply",
+        "to_user_end_task",
         "to_system",
         "tool_call",
         "tool_result",

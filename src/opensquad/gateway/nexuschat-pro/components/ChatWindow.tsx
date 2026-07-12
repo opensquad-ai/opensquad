@@ -7,6 +7,10 @@ import { MessageInput } from './MessageInput';
 import { uploadAPI, SERVER_BASE_URL, messageAPI } from '../services/api';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
+import {
+  CollabStepApprovalCard,
+  parseCollabApproval,
+} from './CollabStepApprovalCard';
 
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
@@ -2435,6 +2439,11 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                     <button onClick={saveEdit} className="p-1.5 text-green-500 hover:bg-green-50 rounded-full transition-colors"><Check size={16} /></button>
                                 </div>
                             </div>
+                        ) : msg.isDeleted ? (
+                            /* Recalled: subtle gray hint — no bubble chrome */
+                            <div className="px-1 py-0.5 text-xs text-gray-400 italic select-none">
+                                {t('chat.messageRecalled')}
+                            </div>
                         ) : (
                             <div className={`relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full
                                 ${isSelf
@@ -2510,34 +2519,36 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                  })()}
 
                                  {/* Content */}
-                                {msg.isDeleted ? (
-                                    <div className="flex flex-col items-center gap-2 py-2">
-                                        <div className="flex items-center gap-2 text-gray-400 italic text-sm">
-                                            <span>{t('chat.messageRecalled')}</span>
-                                        </div>
-                                         {/* 如果是自己的消息，显示恢复按钮 */}
-                                         {isSelf && (
-                                             <button
-                                                 onClick={(e) => {
-                                                     e.stopPropagation();
-                                                     console.log('[ChatWindow] Undo recall clicked for message:', msg.id);
-                                                     onUndoRecall(msg.id);
-                                                 }}
-                                                  className="p-1.5 hover:bg-primary/10 text-primary rounded-full transition-colors mt-1"
-                                                  title={t('chat.undoRecall')}
-                                              >
-                                                  <RotateCcw size={16} />
-                                              </button>
-                                          )}
-                                     </div>
-                                 ) : msg.type === MessageType.TEXT ? (
+                                {msg.type === MessageType.TEXT ? (
                                     <div className="flex flex-col">
-                                        <div
-                                            className="prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
-                                            style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
-                                            dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
-                                            onClick={(e) => handleMessageContentClick(e, msg.id)}
-                                        />
+                                        {(() => {
+                                            const approval = !msg.isDeleted ? parseCollabApproval(msg.content || '') : null;
+                                            if (approval) {
+                                                return (
+                                                    <CollabStepApprovalCard
+                                                        payload={approval}
+                                                        groupId={group.id}
+                                                        messageId={msg.id}
+                                                        onResolve={async (action) => {
+                                                            await messageAPI.resolveCollabApproval(
+                                                                group.id,
+                                                                approval.id,
+                                                                action,
+                                                                { messageId: msg.id }
+                                                            );
+                                                        }}
+                                                    />
+                                                );
+                                            }
+                                            return (
+                                                <div
+                                                    className="prose prose-sm max-w-full prose-p:my-0 prose-ul:my-1 break-all"
+                                                    style={{ wordBreak: 'break-all', overflowWrap: 'break-word' }}
+                                                    dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
+                                                    onClick={(e) => handleMessageContentClick(e, msg.id)}
+                                                />
+                                            );
+                                        })()}
                                         {msg.isEdited && <span className="text-[10px] text-gray-400 self-end mt-1 italic">{t('chat.edited')}</span>}
                                     </div>
                                 ) : null}

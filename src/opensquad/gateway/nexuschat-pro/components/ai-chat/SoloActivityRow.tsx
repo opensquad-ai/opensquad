@@ -14,7 +14,13 @@ import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
+import {
+  attachShellJobsToDisplayItems,
+  type ShellJobBundle,
+  type ShellStreamState,
+} from '../../utils/shellJobGrouping';
 import { DelegateFold } from './DelegateFold';
+import { ShellJobFold } from './ShellJobFold';
 import { parsePlanContent, type PlanStep } from './PlanBlock';
 
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
@@ -26,6 +32,8 @@ interface SoloActivityRowProps {
   /** When true, expand outer + thought folds only (Header lightbulb in Solo; tools stay collapsed). */
   expandDetails?: boolean;
   turnStartedMs?: number;
+  /** Live shell job stdout keyed by tool call_id */
+  shellStreams?: Record<string, ShellStreamState>;
 }
 
 function toolNameOf(evt: WorkflowEvent): string {
@@ -85,7 +93,7 @@ function thoughtLabel(text: string): { primary: string; secondary: string } {
   return { primary: 'Thought', secondary: 'for a bit' };
 }
 
-type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan';
+type LineKind = 'thought' | 'tool' | 'info' | 'summary' | 'progress' | 'delegation' | 'plan' | 'shell_job';
 
 interface ActivityLine {
   key: string;
@@ -105,7 +113,9 @@ interface ActivityLine {
   summaryPending?: boolean;
   /** Cursor-style delegate bundle (opens SubAgentPanel) */
   delegation?: DelegateBundle;
-  /** Parsed <plan> steps for Solo To-dos fold */
+  /** system.start_job / run_session_job live CMD panel */
+  shellJob?: ShellJobBundle;
+  /** Parsed <plan> steps for Solo plan fold */
   planSteps?: PlanStep[];
 }
 
@@ -281,9 +291,13 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
   return lines;
 }
 
-function buildLines(block: WorkflowBlock): ActivityLine[] {
+function buildLines(
+  block: WorkflowBlock,
+  shellStreams: Record<string, ShellStreamState> = {},
+): ActivityLine[] {
   const lines: ActivityLine[] = [];
-  const items = buildDisplayWorkflowItems(block.events);
+  const baseItems = buildDisplayWorkflowItems(block.events);
+  const items = attachShellJobsToDisplayItems(baseItems, shellStreams);
 
   for (const item of items) {
     if (item.kind === 'delegation') {
@@ -295,6 +309,18 @@ function buildLines(block: WorkflowBlock): ActivityLine[] {
         detail: '',
         running: item.bundle.running,
         delegation: item.bundle,
+      });
+      continue;
+    }
+    if (item.kind === 'shell_job') {
+      lines.push({
+        key: item.key,
+        kind: 'shell_job',
+        primary: item.bundle.running ? 'Running' : item.bundle.errored ? 'Shell failed' : 'Ran',
+        secondary: item.bundle.command,
+        detail: item.bundle.output,
+        running: item.bundle.running,
+        shellJob: item.bundle,
       });
       continue;
     }
@@ -319,7 +345,7 @@ function outerSummary(
   }
   const secs = elapsedMs != null ? Math.max(1, Math.round(elapsedMs / 1000)) : null;
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
-  const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation').length;
+  const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation' || l.kind === 'shell_job').length;
   const plans = lines.filter((l) => l.kind === 'plan');
   const summaries = lines.filter((l) => l.kind === 'summary');
   const liveSummary = summaries.some((l) => l.running);
@@ -596,7 +622,8 @@ const SoloPlanFold: React.FC<{
 const SoloEventLine: React.FC<{
   line: ActivityLine;
   defaultOpen?: boolean;
-}> = ({ line, defaultOpen = false }) => {
+  shellStreamFor?: (callId: string) => ShellStreamState | null | undefined;
+}> = ({ line, defaultOpen = false, shellStreamFor }) => {
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
@@ -621,6 +648,17 @@ const SoloEventLine: React.FC<{
   // Delegate: open Cursor-style sub-agent window (not an inline expand).
   if (line.kind === 'delegation' && line.delegation) {
     return <DelegateFold bundle={line.delegation} variant="solo" />;
+  }
+
+  // Shell job: CMD-style live panel
+  if (line.kind === 'shell_job' && line.shellJob) {
+    return (
+      <ShellJobFold
+        bundle={line.shellJob}
+        stream={shellStreamFor?.(line.shellJob.id)}
+        variant="solo"
+      />
+    );
   }
 
   // Plan / To-dos: Cursor-style bordered list fold.
@@ -777,6 +815,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   block,
   expandDetails = false,
   turnStartedMs,
+  shellStreams = {},
 }) => {
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
@@ -785,7 +824,8 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   // Async delegate_task_submit keeps the sub-agent window live after the parent
   // turn seals — treat it as still running so the outer fold / panel stay mounted.
   const hasAsyncDelegate = hasOpenAsyncDelegate(block.events);
-  const hasRunning = hasOpenTools || hasAsyncDelegate;
+  const hasLiveShell = Object.values(shellStreams).some((s) => s.state === 'running');
+  const hasRunning = hasOpenTools || hasAsyncDelegate || hasLiveShell;
   const hasLiveCompression = block.events.some((e) => {
     if (block.completed && !hasAsyncDelegate) return false;
     if (e.type === 'summary_stream') {
@@ -835,7 +875,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     return () => clearInterval(t);
   }, [isLiveTurn, hasRunning, hasLiveCompression]);
 
-  const lines = useMemo(() => buildLines(block), [block, tick]);
+  const lines = useMemo(() => buildLines(block, shellStreams), [block, tick, shellStreams]);
   const summary = useMemo(
     () => outerSummary(block, lines, turnStartedMs),
     [block, lines, turnStartedMs, tick],
@@ -907,6 +947,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
       l.kind === 'summary' ||
       l.kind === 'progress' ||
       l.kind === 'delegation' ||
+      l.kind === 'shell_job' ||
       l.kind === 'plan',
   );
   // Compression-only: one fold → summary body (avoid "Context compressed" + "Context summary done").
@@ -1095,6 +1136,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
           <SoloEventLine
             key={line.key}
             line={line}
+            shellStreamFor={(id) => shellStreams[id]}
             defaultOpen={
               (line.kind === 'thought' && expandDetails) ||
               !!(line.kind === 'summary' && line.running) ||

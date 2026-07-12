@@ -79,6 +79,12 @@ class MessageCreate(MessageBase):
     mentions: list[str] | None = []
 
 
+class CollabApprovalResolve(BaseModel):
+    action: str  # approve | reject
+    note: str = ""
+    message_id: str | None = None
+
+
 class MessageResponse(MessageBase):
     id: str
     sender_id: str

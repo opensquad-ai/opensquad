@@ -259,6 +259,7 @@ def create_task(
             "members": [created_by] if created_by else [],
             "status": "active",
             "progress": 0,
+            "board_rev": 0,
             "created_at": now,
             "started_at": now,
             "updated_at": now,
@@ -311,9 +312,23 @@ def update_task(
             current_extra.update(extra)
             rec["extra"] = current_extra
         rec["updated_at"] = _now_iso()
+        # Bump board_rev on meaningful task metadata changes
+        if any(x is not None for x in (progress, task_name, status, add_member, extra)):
+            rec["board_rev"] = int(rec.get("board_rev") or 0) + 1
         tasks[idx] = rec
         _write_tasks(tasks)
-        return rec
+        new_rev = int(rec.get("board_rev") or 0)
+
+    if any(x is not None for x in (progress, task_name, status, add_member, extra)):
+        _notify_board_changed(
+            task_id,
+            board_rev=new_rev,
+            reason="update_task",
+            item_type="task_meta",
+            item_key="",
+            actor_id=str(add_member or ""),
+        )
+    return rec
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -537,7 +552,41 @@ def upsert_item(
             items.append(base)
 
         _write_items(items)
-        return base
+
+        # Bump board_rev for meaningful item types (skip noisy auto status sync)
+        new_rev = 0
+        should_notify = item_type in (
+            "requirement",
+            "requirement_doc",
+            "plan",
+            "task",
+            "change_request",
+            "approval",
+            "discussion",
+        )
+        if should_notify:
+            tasks = _read_tasks()
+            tidx = next((i for i, t in enumerate(tasks) if str(t.get("task_id", "")) == str(collab_id)), -1)
+            if tidx >= 0:
+                trec = dict(tasks[tidx])
+                new_rev = int(trec.get("board_rev") or 0) + 1
+                trec["board_rev"] = new_rev
+                trec["updated_at"] = now
+                tasks[tidx] = trec
+                _write_tasks(tasks)
+
+    if should_notify and new_rev:
+        _notify_board_changed(
+            collab_id,
+            board_rev=new_rev,
+            reason="upsert_item",
+            item_type=item_type,
+            item_key=item_key or "",
+            actor_id=agent_id,
+        )
+        base = dict(base)
+        base["board_rev"] = new_rev
+    return base
 
 
 def list_items(*, collab_id: str, agent_id: str | None = None, visibility: str = "public") -> list[dict[str, Any]]:
@@ -908,6 +957,33 @@ def list_plan_snapshots(*, collab_id: str) -> list[dict[str, Any]]:
 
     snapshots.sort(key=lambda x: str(x.get("saved_at", "")), reverse=True)
     return snapshots
+
+
+def _notify_board_changed(
+    collab_id: str,
+    board_rev: int,
+    reason: str,
+    item_type: str,
+    item_key: str,
+    actor_id: str = "",
+) -> None:
+    """Publish a board_changed event via EventBus (lazy import to avoid circular deps)."""
+    try:
+        from opensquad.events import bus
+
+        bus.emit(
+            "board_changed",
+            {
+                "collab_id": collab_id,
+                "board_rev": board_rev,
+                "reason": reason,
+                "item_type": item_type,
+                "item_key": item_key,
+                "actor_id": actor_id,
+            },
+        )
+    except Exception:
+        logger.debug("EventBus not available; skipping board_changed notification", exc_info=True)
 
 
 # Run WAL replay on module import — recovers data from any uncommitted WAL entries

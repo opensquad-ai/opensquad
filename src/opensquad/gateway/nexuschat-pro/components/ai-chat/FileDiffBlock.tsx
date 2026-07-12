@@ -19,6 +19,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, CheckCircle, XCircle, Loader2, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
+import { marked } from 'marked';
 import hljs from 'highlight.js/lib/core';
 
 // Register commonly used languages (keep bundle size reasonable)
@@ -107,9 +108,50 @@ function escapeHtml(s: string): string {
 }
 
 /**
+ * Extract a quoted string field (JSON or Python-repr style) from a tool payload.
+ * Handles escapes so `'content': '1: {\\n2: …'` becomes real multiline text.
+ */
+function extractQuotedField(raw: string, field: string): string | null {
+  const keyRe = new RegExp(`['"]${field}['"]\\s*:\\s*`);
+  const km = keyRe.exec(raw);
+  if (!km) return null;
+  let i = km.index + km[0].length;
+  while (i < raw.length && /\s/.test(raw[i])) i++;
+  const quote = raw[i];
+  if (quote !== "'" && quote !== '"') return null;
+  i += 1;
+  let out = '';
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === '\\' && i + 1 < raw.length) {
+      const n = raw[i + 1];
+      if (n === 'n') { out += '\n'; i += 2; continue; }
+      if (n === 'r') { out += '\r'; i += 2; continue; }
+      if (n === 't') { out += '\t'; i += 2; continue; }
+      if (n === '\\' || n === "'" || n === '"') { out += n; i += 2; continue; }
+      if (n === 'u' && i + 5 < raw.length) {
+        const hex = raw.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+      }
+      out += n;
+      i += 2;
+      continue;
+    }
+    if (c === quote) break;
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
  * Unwrap filesystem.read_file tool payloads into plain file text.
- * Results often arrive as JSON `{"status":"success","content":"1: …"}` (one long
- * line); without unwrapping the viewer only shows a clipped JSON blob.
+ * Only the `content` field is shown — status / meta are discarded.
+ * Supports JSON and Python-repr style dict strings from the tool runtime.
  */
 export function normalizeReadFileDisplayContent(raw: string): {
   text: string;
@@ -122,6 +164,7 @@ export function normalizeReadFileDisplayContent(raw: string): {
   for (let i = 0; i < 3; i++) {
     const looksWrapped = text.startsWith('{') || text.startsWith('"');
     if (!looksWrapped) break;
+
     try {
       const parsed = JSON.parse(text);
       if (typeof parsed === 'string') {
@@ -144,7 +187,18 @@ export function normalizeReadFileDisplayContent(raw: string): {
         }
       }
     } catch {
+      // Python-repr / single-quoted payloads fail JSON.parse — fall through.
+    }
+
+    const fromContent = extractQuotedField(text, 'content');
+    if (fromContent != null) {
+      text = fromContent;
       break;
+    }
+    const fromResult = extractQuotedField(text, 'result');
+    if (fromResult != null) {
+      text = fromResult.trim();
+      continue;
     }
     break;
   }
@@ -535,15 +589,39 @@ const HLJS_STYLE = `
 `;
 
 // ============================================================
-// ReadContentPane — syntax-highlighted code viewer (for read_file results)
+// ReadContentPane — show only file content (like edit/write), never status/meta
 // ============================================================
+
+function renderReadMarkdown(text: string): string {
+  try {
+    return marked.parse(text, { breaks: true, async: false }) as string;
+  } catch {
+    return escapeHtml(text);
+  }
+}
 
 const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content, lang }) => {
   const { text, startLine } = useMemo(
     () => normalizeReadFileDisplayContent(content),
     [content],
   );
-  const lines = useMemo(() => (text.length ? text.split('\n') : ['']), [text]);
+
+  // Markdown files → prose (same chrome as edit/write body, no toggle).
+  // Everything else → syntax-highlighted lines like write_file.
+  if (lang === 'markdown') {
+    const mdHtml = renderReadMarkdown(text);
+    return (
+      <div
+        className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown
+                   text-[12.5px] leading-relaxed
+                   max-h-[500px] overflow-y-auto
+                   bg-gray-950 px-3.5 py-3"
+        dangerouslySetInnerHTML={{ __html: mdHtml }}
+      />
+    );
+  }
+
+  const lines = text.length ? text.split('\n') : [''];
   return (
     <div className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950">
       <style>{HLJS_STYLE}</style>
@@ -554,13 +632,10 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
             key={i}
             className="flex items-start font-mono text-[11px] leading-5 min-w-0 hover:bg-white/[0.03]"
           >
-            {/* Line number */}
             <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-gray-600 border-r border-gray-700/30 bg-gray-900/30">
               {startLine + i}
             </span>
-            {/* Alignment spacer (matches diff +/- column) */}
             <span className="w-5 shrink-0" />
-            {/* Content — wrap instead of clipping so the full line is visible */}
             <span
               className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-0.5 text-gray-300"
               dangerouslySetInnerHTML={{ __html: html }}
@@ -581,7 +656,7 @@ interface FileDiffBlockProps {
   status: 'running' | 'success' | 'error';
   /** Short one-liner note from tool result (edit/write) */
   note?: string;
-  /** Full result string for read_file — rendered as syntax-highlighted code */
+  /** Full read_file result — only inner `content` is shown (status/meta discarded) */
   resultContent?: string;
   /**
    * Solo mode: parent owns the fold header. When true, always render the

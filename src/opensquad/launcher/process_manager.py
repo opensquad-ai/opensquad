@@ -166,6 +166,23 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
             if app_data:
                 child_env.setdefault("OPENSQUAD_APP_DATA", os.path.abspath(app_data))
     else:
+        # Dev / non-frozen: keep workspace env in sync with the parent launcher
+        # so agents resolve private model_cards from the same workspace as the UI.
+        ws = (
+            os.environ.get("OPENSQUAD_WORKSPACE", "").strip()
+            or os.environ.get("OPENSQUAD_USER_DATA", "").strip()
+            or os.environ.get("OPENSQUAD_APP_DATA", "").strip()
+        )
+        if not ws:
+            try:
+                ws = syscfg.get_workspace()
+            except Exception:
+                ws = ""
+        if ws:
+            ws_abs = os.path.abspath(ws)
+            child_env.setdefault("OPENSQUAD_WORKSPACE", ws_abs)
+            child_env.setdefault("OPENSQUAD_USER_DATA", ws_abs)
+
         existing_pp = child_env.get("PYTHONPATH", "")
         child_env["PYTHONPATH"] = (install_dir + os.pathsep + existing_pp) if existing_pp else install_dir
 
@@ -253,11 +270,26 @@ RUNTIME_REGISTRY_DIR = syscfg.workspace_metadata_dir("runtime")
 # Workspace migration background task status table (shared across requests)
 _workspace_migration_tasks: dict = {}
 
-# Event signaled when the background _install_builtin_plugin_deps thread finishes
-# (success or failure). PluginServiceProcess.start() waits on this so a service
-# is not spawned before its dependencies are ready — otherwise the service
-# crashes with ModuleNotFoundError on import while pip is still bootstrapping.
+# Event signaled when the background *light* plugin dependency batch finishes
+# (success or failure). Services whose deps are all heavy (whisper/torch/…)
+# skip this wait and install themselves in _install_dependencies().
 _plugin_deps_ready = threading.Event()
+
+# Serialize pip/uv installs across parallel PluginServiceProcess.start() calls.
+_pip_install_lock = threading.Lock()
+
+# Packages that pull huge transitive deps — excluded from the startup batch
+# and installed only when the owning service starts.
+_HEAVY_PACKAGES = frozenset(
+    {
+        "whisper",
+        "openai-whisper",
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "playwright",
+    }
+)
 
 
 def is_port_in_use(port: int) -> bool:
@@ -587,6 +619,9 @@ class AgentProcess:
                 "OPENSQUAD_AGENT_ID": self.agent_id,
                 "OPENSQUAD_AGENT_DIR": self.agent_dir,
                 "OPENSQUAD_LAUNCHER_PORT": str(MANAGEMENT_PORT),  # for task_watch heartbeat
+                # Private model cards / agents data live in the workspace — never src/.
+                "OPENSQUAD_WORKSPACE": syscfg.get_workspace(),
+                "OPENSQUAD_USER_DATA": syscfg.get_workspace(),
             }
         )
         creationflags = 0
@@ -971,7 +1006,7 @@ class PluginServiceProcess:
             """Return list of deps still missing (not importable in plugin Python)."""
             still_missing = []
             for dep in pip_deps:
-                pkg = dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].strip()
+                pkg = _normalize_pip_pkg(dep)
                 import_name = pkg_import_map.get(pkg, pkg.replace("-", "_"))
                 if not _plugin_python_has_module(import_name):
                     still_missing.append(dep)
@@ -991,19 +1026,10 @@ class PluginServiceProcess:
                     self._circuit_last_failure_reason = f"Dependencies not installed: {still_missing}"
                     return False
 
-            # ── Playwright browser download ───────────────────────────────
-            # `pip install playwright` only installs the Python binding; the
-            # Chromium browser binary must be downloaded separately via
-            # `playwright install chromium`. Without this, the websearch
-            # service starts but crashes on the first browser launch.
+            # Playwright Chromium is ~150MB — never block service start on download.
+            # Schedule a background install; first search may wait/fail until ready.
             if "playwright" in pip_deps and _plugin_python_has_module("playwright"):
-                if not _ensure_playwright_browser():
-                    _log.warning(
-                        f"[Launcher] {self.plugin_id}: playwright browser download failed; "
-                        "service may crash on browser launch"
-                    )
-                    # Don't return False — the service can still start and
-                    # report a meaningful error to the user via /health.
+                _schedule_playwright_browser_download()
 
             return True
         except Exception as e:
@@ -1070,20 +1096,28 @@ class PluginServiceProcess:
             self.state = "error"
             return False
 
-        # Wait for the background _install_builtin_plugin_deps thread to finish
-        # before doing per-service dep check. Without this, a user clicking
-        # "Start" in the Service Manager UI right after launcher boot would
-        # spawn the service while pip is still bootstrapping in the Agent
-        # Python embed (get-pip.py + ~13 deps = 2-3 min on cold cache), and
-        # the service crashes with ModuleNotFoundError on import.
-        if not _plugin_deps_ready.is_set():
-            _log.info(f"[Launcher] {self.plugin_id}: waiting for background plugin dependency install to finish...")
-            _plugin_deps_ready.wait(timeout=300)  # 5 min max
+        # Wait for the *light* dependency batch only when this service needs
+        # packages from that batch. Heavy-only services (whisper/torch) skip
+        # and install themselves below so they never block each other.
+        plugin_json_path = os.path.join(self.plugin_dir, "plugin.json")
+        _start_pip_deps: list = []
+        if os.path.isfile(plugin_json_path):
+            try:
+                with open(plugin_json_path, encoding="utf-8") as f:
+                    _start_pip_deps = json.load(f).get("dependencies", {}).get("pip", []) or []
+            except Exception:
+                _start_pip_deps = []
+        if not _start_pip_deps and isinstance(self.dependencies, dict):
+            _start_pip_deps = self.dependencies.get("pip", []) or []
+
+        if _pip_deps_need_light_batch(_start_pip_deps) and not _plugin_deps_ready.is_set():
+            _log.info(f"[Launcher] {self.plugin_id}: waiting for light plugin dependency batch...")
+            _plugin_deps_ready.wait(timeout=300)
             if not _plugin_deps_ready.is_set():
                 _log.error(
-                    f"[Launcher] {self.plugin_id}: background dependency install did not finish in 300s, aborting start"
+                    f"[Launcher] {self.plugin_id}: light dependency batch did not finish in 300s, aborting start"
                 )
-                self._circuit_last_failure_reason = "Background dep install timeout (300s)"
+                self._circuit_last_failure_reason = "Light dep install timeout (300s)"
                 self.state = "error"
                 return False
 
@@ -1524,6 +1558,36 @@ def _resolve_uv_executable() -> str | None:
     return shutil.which("uv")
 
 
+def _normalize_pip_pkg(dep: str) -> str:
+    """Strip extras/version pins from a requirements-style dep string."""
+    return dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].strip()
+
+
+def _pip_deps_need_light_batch(pip_deps: list) -> bool:
+    """True if any declared dep is a light package covered by the batch install."""
+    for dep in pip_deps or []:
+        pkg = _normalize_pip_pkg(str(dep))
+        if pkg and pkg not in _HEAVY_PACKAGES:
+            return True
+    return False
+
+
+def _schedule_playwright_browser_download() -> None:
+    """Kick off Chromium download in the background — never block service start."""
+    sentinel = os.path.join(syscfg.workspace_metadata_dir("runtime"), "playwright_chromium_installed")
+    if os.path.isfile(sentinel):
+        return
+    if getattr(_schedule_playwright_browser_download, "_started", False):
+        return
+    _schedule_playwright_browser_download._started = True  # type: ignore[attr-defined]
+    threading.Thread(
+        target=_ensure_playwright_browser,
+        daemon=True,
+        name="playwright-chromium-download",
+    ).start()
+    _log.info("[Launcher] Playwright Chromium download scheduled in background")
+
+
 def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     """Install pip packages, bootstrapping pip itself if needed. Returns True on success.
 
@@ -1533,10 +1597,19 @@ def _ensure_pip_and_install(packages: list, label: str = "") -> bool:
     (or silently no-op because importlib already sees the bundled copies).
     Plugin services are spawned with the Agent Python runtime, so dependencies
     must land in *that* interpreter's site-packages.
+
+    Concurrent callers (parallel plugin auto-start) are serialized via
+    ``_pip_install_lock`` so uv/pip do not race on the same environment.
     """
     if not packages:
         return True
 
+    with _pip_install_lock:
+        return _ensure_pip_and_install_unlocked(packages, label=label)
+
+
+def _ensure_pip_and_install_unlocked(packages: list, label: str = "") -> bool:
+    """Inner install implementation — caller must hold ``_pip_install_lock``."""
     label_prefix = f"[{label}] " if label else ""
     target_python = _plugin_python_executable()
 
@@ -1841,23 +1914,15 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
         # whisper, etc.). These are skipped in the batch install so they don't
         # block ALL service starts — the per-service _install_dependencies()
         # safety net handles them when the specific service is actually started.
-        # Without this, `pip install whisper` (which pulls torch) can take 10+
-        # minutes and every PluginServiceProcess.start() waits on
+        # Without this, `pip install openai-whisper` (which pulls torch) can take
+        # 10+ minutes and every PluginServiceProcess.start() waits on
         # _plugin_deps_ready, making websearch/external_api unstartable.
-        _HEAVY_PACKAGES = {"whisper", "torch", "torchvision", "torchaudio", "playwright"}
-
-        # NOTE: Dependency presence is checked via ``_plugin_python_has_module()``
-        # (subprocess against the Agent Python), NOT in-process ``importlib``.
-        # The launcher process (frozen ``run.exe``) bundles its own copies of
-        # fastapi/uvicorn/click/etc. in ``_internal/``; importing them in-process
-        # would always succeed and hide missing deps in the Agent Python runtime,
-        # causing ``ModuleNotFoundError`` when the service actually starts.
         pkg_import_map = _PKG_IMPORT_MAP
 
         missing = []
         skipped_heavy = []
         for dep in sorted(all_deps):
-            pkg = dep.split("[")[0].split("==")[0].split(">=")[0].split("<=")[0].strip()
+            pkg = _normalize_pip_pkg(dep)
             if pkg in _HEAVY_PACKAGES:
                 skipped_heavy.append(dep)
                 continue

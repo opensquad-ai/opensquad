@@ -171,6 +171,8 @@ class AgentWebSocketHandler:
                     "output_media",
                     "summary_stream",
                     "compression_progress",
+                    "job_stdout",
+                    "job_status",
                 ]:
                     # Agent's response message, forward to user
                     user_id = message.get("user_id")
@@ -244,7 +246,7 @@ class AgentWebSocketHandler:
                     # Persist final assistant replies in Gateway WS history so refresh
                     # still works when the disk-session HTTP API is slow or unavailable.
                     # Streaming chunks (stream/thought/tool_*) are NOT saved here.
-                    if user_id and msg_type in ("message", "response"):
+                    if user_id and msg_type in ("message", "response", "to_user_end_task"):
                         content = message.get("content", "")
                         if isinstance(content, str) and content.strip():
                             await gateway_session_cache.async_add_message(
@@ -253,6 +255,7 @@ class AgentWebSocketHandler:
                                 "assistant",
                                 content,
                                 message_id=message.get("message_id"),
+                                end_task=(msg_type == "to_user_end_task"),
                             )
 
                     if user_id:

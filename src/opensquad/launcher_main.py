@@ -3641,7 +3641,11 @@ def _start_node_registration_if_needed(mgmt_port):
 
 
 def _init_and_start_plugin_services():
-    """Phase 7: Discover plugin services, install deps in background, auto-start enabled ones."""
+    """Phase 7a: Discover/register plugin services; return auto-start id list.
+
+    Does NOT block on per-service pip. Callers should run agents next, then
+    ``_auto_start_plugin_services_parallel`` for background parallel starts.
+    """
     # Frozen-bundle safe mode: plugin service spawns use `sys.executable` to run
     # the plugin's entry script, but in a PyInstaller bundle sys.executable IS
     # the frozen launcher EXE — spawning it would re-enter the launcher and
@@ -3714,11 +3718,10 @@ def _init_and_start_plugin_services():
         psp.dependencies = info.get("dependencies", {})
         _plugin_services[pid] = psp
 
-    # ── Pass 2: Auto-start enabled services ──
-    # Each psp.start() may block waiting for _plugin_deps_ready (background
-    # dep install thread) and per-service _install_dependencies(). Doing this
-    # in a separate loop after full registration ensures the registry is
-    # complete before any blocking call.
+    # ── Pass 2: collect auto-start candidates (actual start is deferred) ──
+    # Agents must not wait for plugin pip / playwright / whisper. Parallel
+    # start runs after _auto_start_agents via _auto_start_plugin_services_parallel.
+    to_start: list[str] = []
     for info in plugin_svc_infos:
         pid = info["plugin_id"]
         psp = _plugin_services[pid]
@@ -3729,19 +3732,57 @@ def _init_and_start_plugin_services():
             _log.info(f"[Launcher] Plugin service {pid} discovered but not auto-started (--no-services).")
             continue
         if psp.auto_start:
-            _log.info(f"[Launcher] Auto-starting plugin service: {pid}")
-            psp.start()
+            to_start.append(pid)
+    return to_start
+
+
+def _auto_start_plugin_services_parallel(plugin_ids: list[str]) -> None:
+    """Phase 7b: Auto-start plugin services in a background thread pool."""
+    if not plugin_ids:
+        return
+
+    def _run():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        workers = min(4, len(plugin_ids))
+        _log.info(
+            "[Launcher] Auto-starting %d plugin service(s) in parallel (workers=%d): %s",
+            len(plugin_ids),
+            workers,
+            ", ".join(plugin_ids),
+        )
+
+        def _start_one(pid: str) -> tuple[str, bool]:
+            psp = _plugin_services.get(pid)
+            if not psp:
+                return pid, False
+            try:
+                _log.info(f"[Launcher] Auto-starting plugin service: {pid}")
+                return pid, bool(psp.start())
+            except Exception as e:
+                _log.error(f"[Launcher] Auto-start failed for {pid}: {e}")
+                return pid, False
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="psp-start") as pool:
+            futures = [pool.submit(_start_one, pid) for pid in plugin_ids]
+            for fut in as_completed(futures):
+                pid, ok = fut.result()
+                _log.info("[Launcher] Plugin auto-start %s: %s", pid, "ok" if ok else "failed/skipped")
+
+    threading.Thread(target=_run, daemon=True, name="plugin-autostart-pool").start()
 
 
 def _auto_start_agents(args, agents_info):
     """Phase 8: Auto-start agents with auto_start_on_boot=true (unless --no-auto-start)."""
     if not args.no_auto_start and agents_info:
+        used_ports = [p.actual_port for p in _processes.values() if p.is_alive()]
         for _name, ap in _processes.items():
             auto_flag = bool((ap.config or {}).get("ui", {}).get("auto_start_on_boot", False))
             if not auto_flag:
                 continue
-            used_ports = [p.actual_port for p in _processes.values() if p.is_alive()]
             ap.start(allocated_ports=used_ports)
+            if ap.actual_port:
+                used_ports.append(ap.actual_port)
 
 
 def _setup_signal_handler():
@@ -3829,9 +3870,12 @@ def main():
     _start_background_services(args.mgmt_port)
     _start_node_registration_if_needed(args.mgmt_port)
 
-    # Phase 7-8: Plugin services + agent auto-start
-    _init_and_start_plugin_services()
+    # Phase 7a: Register plugin services + kick light-dep batch (non-blocking)
+    # Phase 8:  Auto-start agents FIRST — must not wait on plugin pip/services
+    # Phase 7b: Parallel plugin auto-start in background thread pool
+    plugin_autostart_ids = _init_and_start_plugin_services()
     _auto_start_agents(args, agents_info)
+    _auto_start_plugin_services_parallel(plugin_autostart_ids)
 
     # Phase 9-10: Signal handler + monitor loop
     _setup_signal_handler()

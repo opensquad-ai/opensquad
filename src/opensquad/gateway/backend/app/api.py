@@ -1454,6 +1454,300 @@ async def undo_recall(
     return {"message": "Undone"}
 
 
+@router.post("/groups/{group_id}/collab-approvals/{approval_id}/resolve")
+async def resolve_collab_approval(
+    group_id: str,
+    approval_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """User approves/rejects a group approval card (collab gate / mode switch / generic)."""
+    from opensquad.collab_approval import (
+        KIND_COLLAB_STEP,
+        KIND_MODE_SWITCH,
+        normalize_kind,
+        parse_approval_payload,
+        patch_approval_status_in_content,
+    )
+    from opensquad.collab_board import list_items, upsert_item
+
+    action = str((body or {}).get("action") or "").strip().lower()
+    note = str((body or {}).get("note") or "").strip()
+    message_id = str((body or {}).get("message_id") or "").strip() or None
+
+    if action not in ("approve", "reject", "approved", "rejected", "deny", "denied"):
+        raise HTTPException(status_code=400, detail="action must be approve or reject")
+    approved = action in ("approve", "approved")
+    new_status = "approved" if approved else "rejected"
+
+    member_check = await db.execute(
+        select(group_members).where(
+            and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+        )
+    )
+    if not member_check.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+
+    message = None
+    if message_id:
+        result = await db.execute(select(Message).where(Message.id == message_id, Message.group_id == group_id))
+        message = result.scalar_one_or_none()
+    if message is None:
+        result = await db.execute(
+            select(Message).where(Message.group_id == group_id).order_by(desc(Message.timestamp)).limit(80)
+        )
+        for m in result.scalars().all():
+            payload = parse_approval_payload(m.content or "")
+            if payload and str(payload.get("id")) == approval_id:
+                message = m
+                break
+    if message is None:
+        raise HTTPException(status_code=404, detail="Approval message not found in this group")
+
+    payload = parse_approval_payload(message.content or "")
+    if not payload or str(payload.get("id")) != approval_id:
+        raise HTTPException(status_code=400, detail="Message is not a matching approval card")
+
+    prev_status = str(payload.get("status") or "pending")
+    if prev_status in ("approved", "rejected"):
+        raise HTTPException(status_code=409, detail=f"Approval already {prev_status}")
+
+    kind = normalize_kind(str(payload.get("kind") or ""))
+    collab_id = str(payload.get("collab_id") or "")
+    agent_id = str(payload.get("agent_id") or payload.get("pm_agent_id") or "")
+    agent_name = str(payload.get("agent_name") or payload.get("pm_agent_name") or agent_id)
+    step = str(payload.get("step") or "")
+    title = str(payload.get("title") or step or "批准请求")
+    to_mode = str(payload.get("to_mode") or "").strip().lower()
+    from_mode = str(payload.get("from_mode") or "").strip().lower()
+
+    message.content = patch_approval_status_in_content(message.content or "", new_status, note)
+    message.is_edited = True
+    await db.commit()
+    result = await db.execute(
+        select(Message).where(Message.id == message.id).options(selectinload(Message.attachments))
+    )
+    message = result.scalar_one()
+    formatted = format_message_response(message)
+    await notify_message_update(group_id, formatted.model_dump(mode="json"))
+
+    # Collab board bookkeeping (only for collaboration gates)
+    if kind == KIND_COLLAB_STEP and collab_id:
+        try:
+            items = list_items(collab_id=collab_id, visibility="public")
+            target = next(
+                (i for i in items if str(i.get("item_type")) == "approval" and str(i.get("item_key")) == approval_id),
+                None,
+            )
+            board_agent = str((target or {}).get("agent_id") or agent_id or "pm")
+            extra = dict((target or {}).get("extra") or {}) if isinstance((target or {}).get("extra"), dict) else {}
+            approval_meta = dict(extra.get("approval") or payload)
+            approval_meta["status"] = new_status
+            if note:
+                approval_meta["resolve_note"] = note
+            approval_meta["resolved_by"] = current_user.id
+            approval_meta["resolved_by_name"] = current_user.name
+            extra["approval"] = approval_meta
+            extra["kind"] = "collab_step_approval"
+            extra["message_id"] = message.id
+            upsert_item(
+                collab_id=collab_id,
+                agent_id=board_agent,
+                item_type="approval",
+                item_key=approval_id,
+                title=title,
+                content=str(payload.get("summary") or ""),
+                status=new_status,
+                visibility="public",
+                task_name=str((target or {}).get("task_name") or collab_id),
+                extra=extra,
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning("[API] Failed to update collab board approval: %s", e)
+
+    # Mode switch: apply / deny via agent command channel
+    mode_applied = False
+    if kind == KIND_MODE_SWITCH and agent_id:
+        try:
+            from app.ai_web.registry import registry as agent_registry
+
+            candidates = [agent_id]
+            if agent_name and agent_name not in candidates:
+                candidates.append(agent_name)
+            for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+                try:
+                    if aid in candidates:
+                        continue
+                    if str(getattr(info, "agent_name", "") or "") in (agent_id, agent_name):
+                        candidates.append(aid)
+                except Exception:
+                    pass
+
+            if approved and to_mode:
+                cmd = {
+                    "type": "command",
+                    "user_id": current_user.id,
+                    "command": "set_agent_mode",
+                    "data": {"mode": to_mode, "id": approval_id, "approved_request_id": approval_id},
+                }
+            else:
+                cmd = {
+                    "type": "command",
+                    "user_id": current_user.id,
+                    "command": "deny_mode_switch",
+                    "data": {"id": approval_id, "reason": note or "User denied in group chat"},
+                }
+            for cand in candidates:
+                if await agent_registry.send_to_agent(cand, cmd):
+                    mode_applied = True
+                    break
+        except Exception as e:
+            logging.getLogger(__name__).warning("[API] Failed to apply mode switch from group approval: %s", e)
+
+    decision_label = "APPROVED (确定)" if approved else "REJECTED (拒绝)"
+    if kind == KIND_MODE_SWITCH:
+        nudge = (
+            f"[System] Mode switch approval {decision_label}\n"
+            f"approval_id: {approval_id}\n"
+            f"from_mode: {from_mode}\n"
+            f"to_mode: {to_mode}\n"
+            f"resolved_by: {current_user.name}\n"
+        )
+        if note:
+            nudge += f"note: {note}\n"
+        if approved:
+            nudge += (
+                f"The user approved the mode switch. You are now in {to_mode or 'the requested'} mode. "
+                "Continue the task you were waiting on. Do not ask for approval again."
+            )
+        else:
+            nudge += (
+                "The user denied the mode switch. Stay in the current mode. "
+                "Revise your plan or ask again later if still needed."
+            )
+    elif kind == KIND_COLLAB_STEP:
+        nudge = (
+            f"[System] Collaboration step approval {decision_label}\n"
+            f"approval_id: {approval_id}\n"
+            f"collab_id: {collab_id}\n"
+            f"step: {step}\n"
+            f"title: {title}\n"
+            f"resolved_by: {current_user.name}\n"
+        )
+        if note:
+            nudge += f"note: {note}\n"
+        if approved:
+            nudge += (
+                "The user approved this gate. You may proceed to the next collaboration step "
+                "(update the board if needed, then continue)."
+            )
+        else:
+            nudge += (
+                "The user rejected this gate. Revise requirements/plan/tasks on the board, "
+                "discuss in the group, then call request_step_approval again when ready."
+            )
+    else:
+        nudge = (
+            f"[System] Group approval {decision_label}\n"
+            f"approval_id: {approval_id}\n"
+            f"kind: {kind}\n"
+            f"title: {title}\n"
+            f"resolved_by: {current_user.name}\n"
+        )
+        if note:
+            nudge += f"note: {note}\n"
+        if approved:
+            nudge += "The user approved your request. Proceed with the authorized action."
+        else:
+            nudge += "The user rejected your request. Do not proceed; revise and re-request if needed."
+
+    nudged = False
+    # For mode_switch, apply_agent_mode already nudges via input_hub; still send chat if deny
+    # or if command delivery failed. For other kinds always chat-nudge.
+    should_chat_nudge = kind != KIND_MODE_SWITCH or not mode_applied or not approved
+    if agent_id and should_chat_nudge:
+        try:
+            from app.ai_web.registry import registry as agent_registry
+
+            candidates = [agent_id]
+            if agent_name and agent_name not in candidates:
+                candidates.append(agent_name)
+            for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+                try:
+                    if aid in candidates:
+                        continue
+                    if str(getattr(info, "agent_name", "") or "") in (agent_id, agent_name):
+                        candidates.append(aid)
+                except Exception:
+                    pass
+
+            chat_payload = {
+                "type": "chat",
+                "user_id": current_user.id,
+                "content": nudge,
+                "channel": "gateway",
+                "sender_name": current_user.name or "User",
+            }
+            for cand in candidates:
+                if await agent_registry.send_to_agent(cand, chat_payload):
+                    nudged = True
+                    break
+        except Exception as e:
+            logging.getLogger(__name__).warning("[API] Failed to nudge agent after group approval: %s", e)
+
+    try:
+        sys_msg_id = f"m_{datetime.now().timestamp()}_appr"
+        if kind == KIND_MODE_SWITCH:
+            sys_content = (
+                f"✅ 已批准模式切换：{from_mode or '?'} → {to_mode or '?'}"
+                if approved
+                else f"❌ 已拒绝模式切换：{from_mode or '?'} → {to_mode or '?'}"
+            )
+        elif kind == KIND_COLLAB_STEP:
+            sys_content = f"✅ 协作环节已批准：{title}" if approved else f"❌ 协作环节已拒绝：{title}"
+        else:
+            sys_content = f"✅ 已批准：{title}" if approved else f"❌ 已拒绝：{title}"
+        if note:
+            sys_content += f"（{note}）"
+        mention_ids: list[str] = []
+        if agent_id:
+            mention_ids.append(str(agent_id))
+            if agent_name:
+                sys_content += f"\n@{agent_name}"
+        sys_msg = Message(
+            id=sys_msg_id,
+            sender_id=current_user.id,
+            group_id=group_id,
+            content=sys_content,
+            type=MessageType.SYSTEM,
+            mentions=json.dumps(mention_ids) if mention_ids else None,
+            timestamp=beijing_now(),
+        )
+        db.add(sys_msg)
+        await db.commit()
+        result = await db.execute(
+            select(Message).where(Message.id == sys_msg_id).options(selectinload(Message.attachments))
+        )
+        sys_msg = result.scalar_one()
+        await notify_new_message(group_id, format_message_response(sys_msg).model_dump(mode="json"), current_user.id)
+    except Exception as e:
+        logging.getLogger(__name__).warning("[API] Failed to post approval system note: %s", e)
+
+    return {
+        "ok": True,
+        "approval_id": approval_id,
+        "status": new_status,
+        "kind": kind,
+        "collab_id": collab_id or None,
+        "step": step or None,
+        "to_mode": to_mode or None,
+        "mode_applied": mode_applied,
+        "message": formatted.model_dump(mode="json"),
+        "agent_notified": nudged or mode_applied,
+    }
+
+
 @router.delete("/messages/{message_id}/permanent")
 async def permanent_delete_message(
     message_id: str, current_user: User = Depends(get_current_user_dep), db: AsyncSession = Depends(get_db)

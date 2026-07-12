@@ -100,6 +100,7 @@ class GatewaySessionCache:
         images: list | None = None,
         attachments: list | None = None,
         files: list | None = None,
+        end_task: bool = False,
     ):
         """Add a message to the in-memory cache.
 
@@ -158,6 +159,8 @@ class GatewaySessionCache:
             }
             if message_id:
                 message["message_id"] = message_id
+            if end_task:
+                message["end_task"] = True
 
             # Media fields
             msg_images = images if isinstance(images, list) else []
@@ -308,6 +311,7 @@ class GatewaySessionCache:
         images: list | None = None,
         attachments: list | None = None,
         files: list | None = None,
+        end_task: bool = False,
     ):
         return await asyncio.to_thread(
             self.add_message,
@@ -321,6 +325,7 @@ class GatewaySessionCache:
             images,
             attachments,
             files,
+            end_task,
         )
 
     async def async_get_history(self, user_id: str, agent_id: str, limit: int | None = None) -> list[dict]:

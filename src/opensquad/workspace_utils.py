@@ -208,6 +208,9 @@ def bootstrap_desktop_workspace() -> str:
     """
     Initialize or reuse the desktop workspace on frozen (packaged) startup.
     Called from both the gateway (main.py) and the launcher.
+
+    Uses a cross-process file lock so Gateway + Launcher can start in parallel
+    without racing on first-run ``init_workspace`` / resource copy.
     """
     import sys as _sys
 
@@ -218,18 +221,80 @@ def bootstrap_desktop_workspace() -> str:
 
     _app_data, workspace_path = resolve_desktop_workspace()
     os.makedirs(workspace_path, exist_ok=True)
-    syscfg.set_workspace(workspace_path)
 
-    meta = os.path.join(workspace_path, ".opensquad", "workspace.json")
-    if not os.path.exists(meta):
-        print(f"[Workspace] First run — initializing desktop workspace: {workspace_path}")
-        syscfg.init_workspace(workspace_path, copy_config=True)
-        _copy_default_resources(workspace_path, syscfg.get_builtin_root())
-    else:
-        print(f"[Workspace] Reusing desktop workspace: {workspace_path}")
+    with workspace_bootstrap_lock(workspace_path):
+        syscfg.set_workspace(workspace_path)
 
-    save_last_workspace(workspace_path)
+        meta = os.path.join(workspace_path, ".opensquad", "workspace.json")
+        if not os.path.exists(meta):
+            print(f"[Workspace] First run — initializing desktop workspace: {workspace_path}")
+            syscfg.init_workspace(workspace_path, copy_config=True)
+            _copy_default_resources(workspace_path, syscfg.get_builtin_root())
+        else:
+            print(f"[Workspace] Reusing desktop workspace: {workspace_path}")
+
+        save_last_workspace(workspace_path)
     return workspace_path
+
+
+class _BootstrapLock:
+    """Simple cross-process exclusive lock for workspace bootstrap."""
+
+    def __init__(self, lock_path: str, timeout_s: float = 120.0):
+        self.lock_path = lock_path
+        self.timeout_s = timeout_s
+        self._fh = None
+
+    def __enter__(self):
+        import time
+
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
+        deadline = time.time() + self.timeout_s
+        self._fh = open(self.lock_path, "a+", encoding="utf-8")
+        while True:
+            try:
+                if platform.system() == "Windows":
+                    import msvcrt
+
+                    self._fh.seek(0)
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    raise TimeoutError(f"workspace bootstrap lock timeout: {self.lock_path}")
+                time.sleep(0.1)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._fh is None:
+            return
+        try:
+            if platform.system() == "Windows":
+                import msvcrt
+
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+        self._fh = None
+
+
+def workspace_bootstrap_lock(workspace_path: str):
+    """Return a context manager locking ``{workspace}/.opensquad/bootstrap.lock``."""
+    lock_path = os.path.join(workspace_path, ".opensquad", "bootstrap.lock")
+    return _BootstrapLock(lock_path)
 
 
 def persist_desktop_workspace_switch(workspace_path: str) -> None:
@@ -300,9 +365,10 @@ def bootstrap_workspace() -> str:
     # 1. Try to load the last-used workspace
     last_workspace = load_last_workspace()
     if last_workspace:
-        syscfg.set_workspace(last_workspace)
-        print(f"[Workspace] Loaded: {last_workspace}")
-        save_last_workspace(last_workspace)  # update last-opened time
+        with workspace_bootstrap_lock(last_workspace):
+            syscfg.set_workspace(last_workspace)
+            print(f"[Workspace] Loaded: {last_workspace}")
+            save_last_workspace(last_workspace)  # update last-opened time
         return last_workspace
 
     # 2. Detect legacy data
@@ -315,13 +381,15 @@ def bootstrap_workspace() -> str:
         print("[Workspace] Using installation directory as workspace (legacy mode)")
         print("[Workspace] Please run migration wizard to move data to a dedicated workspace")
         workspace_path = install_dir
-        syscfg.set_workspace(workspace_path)
+        with workspace_bootstrap_lock(workspace_path):
+            syscfg.set_workspace(workspace_path)
     else:
         # Create default workspace with full initialization
         workspace_path = get_default_workspace_path()
         print(f"[Workspace] Creating default workspace at: {workspace_path}")
-        syscfg.init_workspace(workspace_path, copy_config=True)
-        _copy_default_resources(workspace_path, install_dir)
+        with workspace_bootstrap_lock(workspace_path):
+            syscfg.init_workspace(workspace_path, copy_config=True)
+            _copy_default_resources(workspace_path, install_dir)
 
     # 3. Save workspace path
     save_last_workspace(workspace_path)

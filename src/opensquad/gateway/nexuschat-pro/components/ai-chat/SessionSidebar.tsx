@@ -544,7 +544,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       className="relative h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0"
       style={{ width: sidebarWidth }}
     >
-      <div className="h-14 px-3 border-b border-border box-border flex items-center justify-between flex-shrink-0">
+      <div className="h-11 px-3 border-b border-border box-border flex items-center justify-between flex-shrink-0">
         <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
         <div className="flex items-center gap-1">
           <button

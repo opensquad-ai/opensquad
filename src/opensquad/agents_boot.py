@@ -60,12 +60,18 @@ try:
     from opensquad.system_config import syscfg as _syscfg_early
     from opensquad.workspace_utils import load_last_workspace as _load_last_ws
 
-    _last_ws = _load_last_ws()
-    if _last_ws and os.path.exists(_last_ws):
-        _syscfg_early.set_workspace(_last_ws)
-        print(f"[Boot] Workspace: {_last_ws}")
+    # Prefer explicit env from the launcher (authoritative for this process).
+    _ws_env = os.environ.get("OPENSQUAD_WORKSPACE", "").strip() or os.environ.get("OPENSQUAD_USER_DATA", "").strip()
+    if _ws_env and os.path.isdir(_ws_env):
+        _syscfg_early.set_workspace(_ws_env)
+        print(f"[Boot] Workspace (from env): {_ws_env}")
     else:
-        print(f"[Boot] Workspace: {_syscfg_early.get_workspace()} (default)")
+        _last_ws = _load_last_ws()
+        if _last_ws and os.path.exists(_last_ws):
+            _syscfg_early.set_workspace(_last_ws)
+            print(f"[Boot] Workspace: {_last_ws}")
+        else:
+            print(f"[Boot] Workspace: {_syscfg_early.get_workspace()} (default)")
 except Exception as _ws_err:
     print(f"[Boot] Warning: failed to load last workspace: {_ws_err}")
 
@@ -580,6 +586,7 @@ async def setup_response_router(logger: logging.Logger):
 
     bus.subscribe("to_user", on_ai_response)
     bus.subscribe("to_user_final", on_ai_response)
+    bus.subscribe("to_user_end_task", on_ai_response)
 
 
 # ===================================================================

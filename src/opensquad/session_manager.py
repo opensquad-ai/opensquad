@@ -884,6 +884,18 @@ class SessionManager:
 
         self._enqueue_mutation(_mutate)
 
+    def mark_last_assistant_end_task(self):
+        """Mark the latest assistant message as a complex-task end report (for UI fold)."""
+
+        def _mutate():
+            messages = self.session_data.get("messages", [])
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "assistant":
+                    messages[i]["end_task"] = True
+                    return
+
+        self._enqueue_mutation(_mutate)
+
     def get_messages(self, limit: int | None = None) -> list[dict]:
         messages = self.session_data["messages"]
         if limit:
@@ -904,6 +916,7 @@ class SessionManager:
                 "output_images",
                 "preview",
                 "msg_type",
+                "end_task",
             }
         )
         for m in messages:

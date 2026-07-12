@@ -114,7 +114,11 @@ FORBIDDEN (tools are blocked; do not attempt):
 
 If you need to edit files or run commands to implement the plan, call
 `agent_mode__request_switch` with `target_mode="build"` and a short reason.
-Wait for the user to approve in the UI before assuming Build is active.
+Wait for the user to approve before assuming Build is active.
+- In **private AI chat**: user clicks Approve on the card above the composer.
+- In a **group chat**: a 确定/拒绝 card is also posted in the group — prefer that
+  when the conversation is happening in the group. You may also call
+  `im__request_approval(kind="mode_switch", to_mode="build", ...)` explicitly.
 """.strip()
 
 _PROMPT_BUILD = """
@@ -123,7 +127,8 @@ _PROMPT_BUILD = """
 You are currently in **Build** mode. You may edit files and run shell/cmd/bash/powershell tools as needed to implement changes.
 
 If you only need to explore or draft a plan without making changes, call
-`agent_mode__request_switch` with `target_mode="plan"` and a short reason, then wait for user approval.
+`agent_mode__request_switch` with `target_mode="plan"` and a short reason, then wait for user approval
+(in private AI chat UI, or the group 确定/拒绝 card when talking in a group).
 """.strip()
 
 

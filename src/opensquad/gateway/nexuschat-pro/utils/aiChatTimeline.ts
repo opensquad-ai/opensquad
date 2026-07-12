@@ -325,7 +325,105 @@ export type TimelineEntry =
       entries: TimelineEntry[];
       startTs?: string;
       endTs?: string;
+    }; _uid: string }
+  | { kind: 'task_fold'; data: {
+      title?: string;
+      messageCount: number;
+      eventCount: number;
+      entries: TimelineEntry[];
+      collapsed: boolean;
     }; _uid: string };
+
+/** Fold agent-side process between the latest user message and an end-task report. */
+export function foldAroundEndTaskIndex(
+  timeline: TimelineEntry[],
+  endIdx: number,
+  title?: string,
+): TimelineEntry[] {
+  if (endIdx <= 0 || endIdx >= timeline.length) return timeline;
+  const endEntry = timeline[endIdx];
+  if (endEntry.kind !== 'message' || endEntry.data.role !== 'assistant') return timeline;
+
+  let userIdx = -1;
+  for (let i = endIdx - 1; i >= 0; i -= 1) {
+    const e = timeline[i];
+    if (e.kind === 'message' && e.data.role === 'user') {
+      userIdx = i;
+      break;
+    }
+  }
+  const foldStart = userIdx + 1;
+  const foldEnd = endIdx;
+  if (foldEnd <= foldStart) return timeline;
+
+  const folded = timeline.slice(foldStart, foldEnd);
+  if (folded.length === 0) return timeline;
+
+  let messageCount = 0;
+  let eventCount = 0;
+  for (const e of folded) {
+    if (e.kind === 'message') messageCount += 1;
+    else if (e.kind === 'workflow') eventCount += e.data.events.length;
+    else if (e.kind === 'task_fold') {
+      messageCount += e.data.messageCount;
+      eventCount += e.data.eventCount;
+    } else eventCount += 1;
+  }
+
+  const foldEntry: TimelineEntry = {
+    kind: 'task_fold',
+    data: {
+      title: title || undefined,
+      messageCount,
+      eventCount,
+      entries: folded,
+      collapsed: true,
+    },
+    _uid: genTimelineUID(),
+  };
+
+  return [...timeline.slice(0, foldStart), foldEntry, ...timeline.slice(endIdx)];
+}
+
+/** After an end-task assistant message is appended, fold the preceding agent process. */
+export function foldTaskProcessSinceLastUser(
+  timeline: TimelineEntry[],
+  opts?: { title?: string },
+): TimelineEntry[] {
+  for (let i = timeline.length - 1; i >= 0; i -= 1) {
+    const e = timeline[i];
+    if (e.kind !== 'message') continue;
+    if (e.data.role === 'user') return timeline;
+    if (e.data.role === 'assistant') {
+      return foldAroundEndTaskIndex(timeline, i, opts?.title);
+    }
+  }
+  return timeline;
+}
+
+/** Rebuild folds for every persisted end_task assistant message (oldest → newest). */
+export function applyEndTaskFolds(timeline: TimelineEntry[]): TimelineEntry[] {
+  const endIndexes: number[] = [];
+  for (let i = 0; i < timeline.length; i += 1) {
+    const e = timeline[i];
+    if (e.kind === 'message' && e.data.role === 'assistant' && e.data.end_task) {
+      endIndexes.push(i);
+    }
+  }
+  if (endIndexes.length === 0) return timeline;
+
+  // Apply from the end so earlier indices stay stable relative to remaining suffix.
+  let result = timeline;
+  for (let k = endIndexes.length - 1; k >= 0; k -= 1) {
+    // Re-find this end_task message in the current result (uids stable).
+    const targetUid = timeline[endIndexes[k]]._uid;
+    const idx = result.findIndex((e) => e._uid === targetUid);
+    if (idx >= 0) {
+      result = foldAroundEndTaskIndex(result, idx);
+    }
+  }
+  return result;
+}
 
 export function workflowToolEventKey(evt: WorkflowEvent): string | null {
   if (evt.type !== 'tool_call' && evt.type !== 'tool_result') return null;
@@ -342,6 +440,10 @@ export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowE
   if (!key) return false;
   for (const entry of timeline) {
     if (entry.kind === 'archived_section') {
+      if (timelineHasToolEvent(entry.data.entries, event)) return true;
+      continue;
+    }
+    if (entry.kind === 'task_fold') {
       if (timelineHasToolEvent(entry.data.entries, event)) return true;
       continue;
     }
@@ -397,34 +499,78 @@ export function extractToolResultText(resultData: unknown): string {
   return '';
 }
 
-/** Heuristic: tool outcome should render as failure in the UI. */
+/** Heuristic: tool outcome should render as failure in the UI.
+ *
+ * Prefer structured `status` / `error` / `aborted`. Free-text checks are
+ * prefix / short system envelopes only — never scan arbitrary payload bodies
+ * (e.g. successful read_file content that mentions "failed" or `"status":"error"`).
+ */
 export function isToolResultFailure(result: unknown): boolean {
   if (result == null) return false;
+
+  if (typeof result === 'string') {
+    const t = result.trim();
+    if (!t) return false;
+    // Tool often returns a JSON envelope as a string.
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(t);
+        if (parsed && typeof parsed === 'object') {
+          return isToolResultFailure(parsed);
+        }
+      } catch {
+        /* fall through to text heuristic */
+      }
+    }
+    return isToolFailureText(t);
+  }
+
   if (typeof result === 'object') {
     const o = result as Record<string, unknown>;
-    if (o.error) return true;
+    if (o.error != null && o.error !== false && o.error !== '') return true;
     if (o.aborted === true) return true;
-    const status = String(o.status ?? '').toLowerCase();
-    if (status === 'error' || status === 'failed' || status === 'failure') return true;
-    if (typeof o.result === 'string' && isToolFailureText(o.result)) return true;
-    if (typeof o.message === 'string' && isToolFailureText(o.message)) return true;
+
+    if ('status' in o) {
+      const status = String(o.status ?? '').toLowerCase();
+      if (status === 'error' || status === 'failed' || status === 'failure') return true;
+      // Explicit success — do not dig into content/text payloads.
+      if (
+        status === 'ok' ||
+        status === 'success' ||
+        status === 'done' ||
+        status === 'completed' ||
+        status === 'running' ||
+        status === 'pending'
+      ) {
+        return false;
+      }
+    }
+
+    // WS / session tool_result envelope: { id, name, result, ... }
+    if ('result' in o) {
+      return isToolResultFailure(o.result);
+    }
+    // Bare error objects: { message: "Error: ..." } without a success payload.
+    if (typeof o.message === 'string' && !('content' in o) && !('output' in o) && !('text' in o)) {
+      return isToolFailureText(o.message);
+    }
     return false;
   }
+
   return isToolFailureText(String(result));
 }
 
+/** Prefix / known system envelopes only — not mid-body keyword scans. */
 function isToolFailureText(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
-  if (/^error\b/i.test(t)) return true;
-  if (/\bBlocked in Plan mode\b/i.test(t)) return true;
-  if (/\b(Security Denied|Permission Denied)\b/i.test(t)) return true;
-  if (/\bCancelled:/i.test(t)) return true;
-  if (/\baborted by user\b/i.test(t)) return true;
-  if (/\bCommand aborted\b/i.test(t)) return true;
-  if (/\b(failed|failure)\b/i.test(t)) return true;
-  if (/"status"\s*:\s*"(error|failed|failure)"/i.test(t)) return true;
-  if (/"aborted"\s*:\s*true/i.test(t)) return true;
+  if (/^(Error|Failed|Failure)\b/i.test(t)) return true;
+  if (/^Blocked in Plan mode\b/i.test(t)) return true;
+  if (/^(Security Denied|Permission Denied)\b/i.test(t)) return true;
+  if (/^Cancelled:/i.test(t)) return true;
+  if (/^Command aborted\b/i.test(t)) return true;
+  // Short system lines only (avoid matching long file bodies).
+  if (t.length < 240 && /\baborted by user\b/i.test(t)) return true;
   return false;
 }
 
@@ -1134,6 +1280,7 @@ export function buildTimelineFromSession(
         attachments: rawAttachments.length > 0 ? rawAttachments : undefined,
         output_images: rawOutputImages.length > 0 ? rawOutputImages : undefined,
         output_audio: rawOutputAudio.length > 0 ? rawOutputAudio : undefined,
+        end_task: !!(m as any).end_task,
       },
       _uid: genTimelineUID(),
     });
@@ -1168,7 +1315,7 @@ export function buildTimelineFromSession(
   // tool_call card instead of a permanently "running" one.
   const mergedTimeline = mergeOrphanedToolResultsAcrossWorkflows(timeline);
 
-  return mergedTimeline;
+  return applyEndTaskFolds(mergedTimeline);
 }
 
 export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[] {

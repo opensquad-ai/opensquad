@@ -80,7 +80,12 @@ def init(runner, config_path: str = "") -> None:
 # Card resolution
 # ---------------------------------------------------------------------------
 def _resolve_card(card_name: str) -> dict:
-    """Load a model card JSON from the builtin resources directory.
+    """Load a model card JSON from the workspace ``model_cards/`` directory.
+
+    Model cards hold private credentials (api_key) and must live in the
+    workspace — never under ``src/`` / builtin install trees.  Web UI
+    create/list/save already use ``workspace_model_cards_dir``; runtime
+    switches must resolve the same path.
 
     Returns the card dict with ``_card`` stamped in (so it round-trips through
     config.json the same way the admin assign endpoint records it).  Raises
@@ -89,12 +94,13 @@ def _resolve_card(card_name: str) -> dict:
     """
     if not card_name or not isinstance(card_name, str):
         raise ValueError("card name is required")
-    # Defensive: card names map 1:1 to filenames; reject path separators to
-    # prevent traversal even though builtin_resources_dir is read-only.
+    # Defensive: card names map 1:1 to filenames; reject path separators.
     safe = os.path.basename(card_name)
     if safe != card_name:
         raise ValueError(f"invalid card name: {card_name!r}")
-    card_path = syscfg.builtin_resources_dir("model_cards", f"{safe}.json")
+
+    cards_dir = syscfg.workspace_model_cards_dir()
+    card_path = os.path.join(cards_dir, f"{safe}.json")
     if not os.path.isfile(card_path):
         raise FileNotFoundError(f"model card not found: {safe} ({card_path})")
     with open(card_path, encoding="utf-8") as f:
@@ -103,6 +109,22 @@ def _resolve_card(card_name: str) -> dict:
         raise ValueError(f"model card {safe!r} has no model_name")
     cfg["_card"] = safe
     return cfg
+
+
+async def _emit_switch_failed(card_name: str, error: str) -> None:
+    """Tell the web UI to clear the 'switching…' spinner on failure."""
+    try:
+        await bus.emit_async(
+            "info",
+            {
+                "event": "model_card_switch_failed",
+                "card": card_name,
+                "error": error,
+                "text": f"Model switch failed: {error}",
+            },
+        )
+    except Exception as e:
+        logger.warning("[model_switch] switch_failed emit failed: %s", e)
 
 
 # Content part types that only multimodal models accept. When switching to a
@@ -253,11 +275,14 @@ async def switch_to_card(card_name: str) -> dict:
     (e.g. for testing) or via the event-bus handler.
     """
     if _runner is None:
-        return {"ok": False, "error": "model_switch not initialised (no runner)"}
+        err = "model_switch not initialised (no runner)"
+        await _emit_switch_failed(card_name, err)
+        return {"ok": False, "error": err}
     try:
         new_cfg = _resolve_card(card_name)
     except (FileNotFoundError, ValueError) as e:
         logger.warning("[model_switch] %s", e)
+        await _emit_switch_failed(card_name, str(e))
         return {"ok": False, "error": str(e)}
 
     # Preserve session reasoning_effort across card switches when the card
@@ -284,7 +309,9 @@ async def switch_to_card(card_name: str) -> dict:
         await apply_model_reload(_runner, new_cfg)
     except Exception as e:
         logger.warning("[model_switch] Model reload failed: %s", e)
-        return {"ok": False, "error": f"reload failed: {e}"}
+        err = f"reload failed: {e}"
+        await _emit_switch_failed(card_name, err)
+        return {"ok": False, "error": err}
 
     # Sub-agent soft switch: new delegations pick up the new cfg; running
     # sub-agents keep their own instance and finish with the old model.

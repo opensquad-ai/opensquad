@@ -251,7 +251,8 @@ def start_collaboration(
             "6. MUST use collaboration.board_update to write Plan Zone (architecture/workflow/module boundaries/risks)\n"
             "7. ⚠️ MUST use collaboration.assign_task (NOT board_update) to assign tasks to each worker — call it once PER worker with a unique item_key\n"
             "8. Discuss assignment with team via @mention in group chat\n"
-            "9. Continuously monitor progress via board_list and worker updates"
+            "9. At each 四门闸 gate, call collaboration.request_step_approval(...) so the user can click 确定/拒绝 in the group — do NOT proceed until approved\n"
+            "10. Continuously monitor progress via board_list and worker updates"
         ),
         "task_assignment_guide": {
             "description": "Use this guide to write properly structured task assignments on the collaboration board.",
@@ -1698,3 +1699,245 @@ def check_worker_status(collab_id: str = "", worker_id: str = "") -> dict[str, A
         return {"workers": workers, "total": len(workers)}
     except Exception as e:
         return {"error": str(e)}
+
+
+def request_step_approval(
+    collab_id: str,
+    step: str,
+    summary: str = "",
+    title: str = "",
+    group_id: str = "",
+) -> dict[str, Any]:
+    """
+    [PM] Request user approval in the collaboration group chat before proceeding.
+
+    Posts an Approve/Deny card to the group (same idea as Plan↔Build mode switch).
+    The user clicks 确定/拒绝 in the group; you will then receive a system message
+    and may continue to the next collaboration gate.
+
+    Typical steps (四门闸):
+      - ``requirements`` / 确定需求
+      - ``plan`` / 讨论方案
+      - ``task_assign`` / 任务分配
+      - ``acceptance`` / 任务验收
+
+    Args:
+        collab_id: Collaboration task id from start_collaboration.
+        step: Gate name (see above) or any short label.
+        summary: What the user should review (requirements/plan excerpt, etc.).
+        title: Optional card title (defaults to normalized step label).
+        group_id: Optional group id/name; defaults to task.extra.group_id.
+
+    Returns:
+        ``{status: "pending", approval_id, message, ...}`` while waiting for the user.
+        Do NOT assume approved — stop and wait for the system follow-up.
+    """
+    try:
+        from opensquad.collab_approval import (
+            build_approval_payload,
+            encode_approval_message,
+            new_approval_id,
+            normalize_step,
+        )
+        from opensquad.collab_board import list_tasks, upsert_item
+        from opensquad.input_hub import input_hub
+
+        if not collab_id:
+            return {"status": "error", "message": "collab_id is required"}
+
+        agent_dir = input_hub.agent_dir or ""
+        pm_folder = os.path.basename(agent_dir) if agent_dir else ""
+        pm_agent_id = pm_folder
+        pm_agent_name = pm_folder
+        try:
+            from opensquad.json_cache import load_json_cached
+
+            cfg = load_json_cached(os.path.join(agent_dir, "config.json")) if agent_dir else None
+            if isinstance(cfg, dict):
+                pm_agent_id = str(cfg.get("agent_id") or pm_folder)
+                pm_agent_name = str(cfg.get("agent_name") or pm_folder)
+        except Exception:
+            pass
+
+        # Resolve group from arg or task metadata
+        target_group = (group_id or "").strip()
+        task_name = collab_id
+        if not target_group:
+            try:
+                tasks = list_tasks()
+                t = next((x for x in tasks if str(x.get("task_id", "")) == str(collab_id)), None)
+                if isinstance(t, dict):
+                    task_name = str(t.get("task_name") or collab_id)
+                    extra = t.get("extra") if isinstance(t.get("extra"), dict) else {}
+                    target_group = str(extra.get("group_id") or "")
+            except Exception as e:
+                logger.warning("[Collab] resolve group_id failed: %s", e)
+
+        if not target_group:
+            return {
+                "status": "error",
+                "message": (
+                    "No group_id found. Pass group_id=... or start_collaboration with a group "
+                    "so task.extra.group_id is set."
+                ),
+            }
+
+        approval_id = new_approval_id()
+        step_label = normalize_step(step)
+        payload = build_approval_payload(
+            approval_id=approval_id,
+            collab_id=str(collab_id),
+            step=step_label,
+            title=title or step_label,
+            summary=summary or "",
+            pm_agent_id=pm_agent_id,
+            pm_agent_name=pm_agent_name,
+            agent_id=pm_agent_id,
+            agent_name=pm_agent_name,
+            group_id=target_group,
+            status="pending",
+            kind="collab_step",
+        )
+
+        upsert_item(
+            collab_id=str(collab_id),
+            agent_id=pm_agent_id,
+            item_type="approval",
+            item_key=approval_id,
+            title=payload["title"],
+            content=payload.get("summary") or "",
+            status="pending",
+            progress=0,
+            visibility="public",
+            task_name=task_name,
+            extra={
+                "approval": payload,
+                "kind": "collab_step_approval",
+            },
+        )
+
+        # Resolve group name → id if needed, then post card
+        message_id = None
+        im_result = None
+        try:
+            from opensquad.bridge import bridge
+
+            if not bridge or not bridge.token:
+                return {
+                    "status": "error",
+                    "message": "Bridge not connected; cannot post approval card to group chat.",
+                    "approval_id": approval_id,
+                }
+
+            target = target_group
+            groups = bridge.list_groups_api() or []
+            if not any(isinstance(g, dict) and g.get("id") == target_group for g in groups):
+                for g in groups:
+                    if isinstance(g, dict) and g.get("name") == target_group:
+                        target = str(g.get("id") or target_group)
+                        break
+
+            msg = encode_approval_message(payload)
+            ok = bridge.send_message(msg, target_id=target, target_type="group")
+            if not ok:
+                return {
+                    "status": "error",
+                    "message": "Failed to send approval card to group chat.",
+                    "approval_id": approval_id,
+                }
+            message_id = bridge.last_sent_message_id()
+            if not message_id:
+                # Fallback: scan recent history for our marker
+                try:
+                    hist = bridge.get_group_history(target, limit=8) or []
+                    for m in hist:
+                        if isinstance(m, dict) and approval_id in str(m.get("content") or ""):
+                            message_id = str(m.get("id") or "")
+                            break
+                except Exception:
+                    pass
+
+            if message_id:
+                payload["message_id"] = message_id
+                upsert_item(
+                    collab_id=str(collab_id),
+                    agent_id=pm_agent_id,
+                    item_type="approval",
+                    item_key=approval_id,
+                    title=payload["title"],
+                    content=payload.get("summary") or "",
+                    status="pending",
+                    visibility="public",
+                    task_name=task_name,
+                    extra={"approval": payload, "kind": "collab_step_approval", "message_id": message_id},
+                )
+            im_result = f"Approval card posted to group {target}"
+        except Exception as e:
+            logger.warning("[Collab] request_step_approval IM failed: %s", e)
+            return {
+                "status": "error",
+                "message": f"Failed to post approval card: {e}",
+                "approval_id": approval_id,
+            }
+
+        return {
+            "status": "pending",
+            "approval_id": approval_id,
+            "step": step_label,
+            "collab_id": collab_id,
+            "group_id": target_group,
+            "message_id": message_id,
+            "invitation": im_result,
+            "message": (
+                f"Approval requested for step '{step_label}'. "
+                "Waiting for the user to click 确定/拒绝 in the group chat. "
+                "Do NOT proceed to the next gate until you receive a system message "
+                "that this approval was approved or rejected."
+            ),
+        }
+    except Exception as e:
+        logger.exception("[Collab] request_step_approval failed")
+        return {"status": "error", "message": str(e)}
+
+
+def get_approval_status(collab_id: str, approval_id: str = "") -> dict[str, Any]:
+    """
+    [PM] Check status of collaboration step approval(s).
+
+    Args:
+        collab_id: Collaboration task id.
+        approval_id: Optional specific approval id; if empty, returns all approval items.
+    """
+    try:
+        from opensquad.collab_board import list_items
+
+        items = list_items(collab_id=collab_id, visibility="public")
+        approvals = [i for i in items if str(i.get("item_type") or "") == "approval"]
+        if approval_id:
+            approvals = [i for i in approvals if str(i.get("item_key") or "") == approval_id]
+            if not approvals:
+                return {"status": "error", "message": f"Approval '{approval_id}' not found"}
+            item = approvals[0]
+            extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+            return {
+                "status": item.get("status") or "pending",
+                "approval_id": approval_id,
+                "item": item,
+                "approval": extra.get("approval") or {},
+            }
+        return {
+            "status": "ok",
+            "collab_id": collab_id,
+            "approvals": [
+                {
+                    "approval_id": i.get("item_key"),
+                    "status": i.get("status"),
+                    "title": i.get("title"),
+                    "approval": (i.get("extra") or {}).get("approval") if isinstance(i.get("extra"), dict) else {},
+                }
+                for i in approvals
+            ],
+            "count": len(approvals),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

@@ -30,6 +30,7 @@ import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
+  foldTaskProcessSinceLastUser,
   genTimelineUID,
   timelineHasToolEvent,
   workflowToolEventKey,
@@ -48,6 +49,7 @@ import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
+import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
@@ -58,12 +60,21 @@ import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
 import { ToolCallBlock } from './ai-chat/ToolCallBlock';
 import { DelegateFold } from './ai-chat/DelegateFold';
+import { ShellJobFold } from './ai-chat/ShellJobFold';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { TokenProgressBar } from './ai-chat/TokenProgressBar';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
 import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
+import {
+  applyJobStatus,
+  applyJobStdout,
+  attachShellJobsToDisplayItems,
+  seedShellStreamFromToolCall,
+  sealShellStreamFromResult,
+  type ShellStreamState,
+} from '../utils/shellJobGrouping';
 
 const genUID = (): string => genTimelineUID();
 
@@ -159,10 +170,15 @@ const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; started
 // ---- Workflow Block with event pagination ----
 const WORKFLOW_EVENTS_PAGE_SIZE = 10;
 
-const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turnStartedMs?: number }> = ({ block, blockKey, turnStartedMs }) => {
+const WorkflowBlockView: React.FC<{
+  block: WorkflowBlock;
+  blockKey: number;
+  turnStartedMs?: number;
+  shellStreams?: Record<string, ShellStreamState>;
+}> = ({ block, blockKey, turnStartedMs, shellStreams = {} }) => {
   const displayItems = useMemo(
-    () => buildDisplayWorkflowItems(block.events),
-    [block.events],
+    () => attachShellJobsToDisplayItems(buildDisplayWorkflowItems(block.events), shellStreams),
+    [block.events, shellStreams],
   );
   const totalEvents = displayItems.length;
   const effectivelyCompleted = shouldTreatWorkflowComplete(block);
@@ -205,7 +221,7 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
 
   // Skip empty / lifecycle-only blocks (e.g. "New session started" → bare Completed).
   const hasRenderableContent = visibleItems.some((item) => {
-    if (item.kind === 'delegation') return true;
+    if (item.kind === 'delegation' || item.kind === 'shell_job') return true;
     const evt = item.event;
     if (evt.subAgent) return false;
     if (evt.type === 'info') {
@@ -243,6 +259,16 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
             <DelegateFold
               key={item.key}
               bundle={item.bundle}
+              variant="classic"
+            />
+          );
+        }
+        if (item.kind === 'shell_job') {
+          return (
+            <ShellJobFold
+              key={item.key}
+              bundle={item.bundle}
+              stream={shellStreams[item.bundle.id]}
               variant="classic"
             />
           );
@@ -368,6 +394,7 @@ const WorkflowBlockView: React.FC<{ block: WorkflowBlock; blockKey: number; turn
             const evtName = infoObj.event;
             const evtText = infoObj.text;
             if (evtName === 'model_card_switched') return `Model switched to ${infoObj.card || infoObj.model || 'new model'}`;
+            if (evtName === 'model_card_switch_failed') return evtText || `Model switch failed: ${infoObj.card || ''}`;
             if (evtName === 'context_compressed') return evtText || 'Context compressed';
             if (evtName === 'context_compress_skipped') return evtText || 'Context compression skipped';
             if (evtName === 'incoming_messages') return `Received ${infoObj.count || ''} message(s) from ${infoObj.source || 'external'}`;
@@ -728,6 +755,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // Solo: expand-all is session-only and defaults OFF so refresh keeps folds collapsed.
   const [soloExpandDetails, setSoloExpandDetails] = useState(false);
+  /** Live stdout for system.start_job / run_session_job (keyed by tool call_id) */
+  const [shellStreams, setShellStreams] = useState<Record<string, ShellStreamState>>({});
 
   // UI render mode: classic (chat bubbles) | solo (document stream). Global preference.
   type AiChatUiMode = 'classic' | 'solo';
@@ -1258,6 +1287,88 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       handleFinal(msg);
     });
 
+    const unsubToUserEndTask = aiWsService.on('to_user_end_task', (msg: AIWSMessage) => {
+      // Same as final text, then fold agent process since the last user message.
+      if (finalizingRef.current) return;
+      finalizingRef.current = true;
+
+      const text = _extractContent(msg);
+      const finalText = text || streamingTextRef.current;
+
+      if (typeof finalText === 'string' && finalText.trim().length > 0) {
+        const raw = msg as any;
+        const messageId = raw.message_id || raw.id || undefined;
+        const chatMsg: ChatMessage = {
+          role: 'assistant',
+          content: finalText,
+          timestamp: new Date().toISOString(),
+          end_task: true,
+        };
+        if (messageId) {
+          chatMsg.message_id = messageId;
+        }
+
+        setTimeline(prev => {
+          for (let i = prev.length - 1; i >= 0; i -= 1) {
+            const entry = prev[i];
+            if (entry.kind !== 'message') continue;
+            const existing = entry.data as ChatMessage;
+            if (existing.role === 'user') break;
+            if (existing.role === 'assistant') {
+              if (existing.content === finalText && existing.end_task) {
+                return foldTaskProcessSinceLastUser(prev);
+              }
+              if (messageId && existing.message_id && existing.message_id === messageId) {
+                const patched = prev.map((e, idx) =>
+                  idx === i && e.kind === 'message'
+                    ? { ...e, data: { ...e.data, end_task: true } }
+                    : e,
+                );
+                return foldTaskProcessSinceLastUser(patched);
+              }
+            }
+          }
+          if (messageId) {
+            const exists = prev.some(e =>
+              e.kind === 'message' && (e.data as ChatMessage).message_id === messageId
+            );
+            if (exists) {
+              const patched = prev.map((e) =>
+                e.kind === 'message' && (e.data as ChatMessage).message_id === messageId
+                  ? { ...e, data: { ...(e.data as ChatMessage), end_task: true } }
+                  : e,
+              );
+              return foldTaskProcessSinceLastUser(patched);
+            }
+          }
+
+          let next = finalizeWorkflowAndAddMessage(prev, chatMsg);
+          if (pendingFilePushesRef.current.length > 0) {
+            const buffered = pendingFilePushesRef.current.map((m) => ({
+              kind: 'message' as const,
+              data: m,
+              _uid: genUID(),
+            }));
+            pendingFilePushesRef.current = [];
+            next = [...next, ...buffered];
+          }
+          return foldTaskProcessSinceLastUser(next);
+        });
+      }
+
+      streamingTextRef.current = '';
+      setStreamingText('');
+      setIsStreaming(false);
+      setAgentStatus('connected');
+
+      if (newSessionPendingRef.current) {
+        newSessionPendingRef.current = false;
+        setIsLoadingSession(false);
+      }
+
+      setTimeout(() => { finalizingRef.current = false; }, 300);
+    });
+
     // Thought — accumulate consecutive chunks into a single thought block
     const unsubThought = aiWsService.on('thought', (msg: AIWSMessage) => {
       const text = _extractContent(msg);
@@ -1306,6 +1417,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         pendingHydrationWorkflowEventsRef.current.push({ event, status: `Calling ${toolName}...` });
       } else {
         setTimeline(prev => appendWorkflowEvent(prev, event, `Calling ${toolName}...`));
+        setShellStreams((prev) => seedShellStreamFromToolCall(prev, event));
       }
       // 仅主 agent 工具调用时才清空流式文本缓冲区；子 agent 调用不应影响父 agent 的流式输出。
       // 正常情况下 to_user_final 已在 tool_call 之前到达并清空了缓冲区，此处无副作用。
@@ -1329,11 +1441,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         subTaskLabel: typeof data === 'object' ? (data.sub_task_label || '') : '',
         jobId: typeof data === 'object' && data?.job_id ? String(data.job_id) : undefined,
       };
+      const callId =
+        typeof data === 'object' && data
+          ? String(data.id || data.tool_use_id || '')
+          : '';
+      const resultText =
+        typeof data === 'object' && data
+          ? (typeof data.result === 'string'
+              ? data.result
+              : data.result != null
+                ? JSON.stringify(data.result)
+                : '')
+          : '';
+      if (callId && resultText) {
+        setShellStreams((prev) => sealShellStreamFromResult(prev, callId, resultText));
+      }
       if (isHydratingSessionRef.current) {
         pendingHydrationWorkflowEventsRef.current.push({ event, status: `${toolName} completed` });
         return;
       }
       setTimeline(prev => appendWorkflowEvent(prev, event, `${toolName} completed`));
+    });
+
+    // Live shell / background job stdout for CMD panel
+    // Live shell / background job stdout for CMD panel
+    const unsubJobStdout = aiWsService.on('job_stdout', (msg: AIWSMessage) => {
+      const data = (msg.content || msg.data || {}) as Record<string, unknown>;
+      setShellStreams((prev) => applyJobStdout(prev, data));
+    });
+    const unsubJobStatus = aiWsService.on('job_status', (msg: AIWSMessage) => {
+      const data = (msg.content || msg.data || {}) as Record<string, unknown>;
+      setShellStreams((prev) => applyJobStatus(prev, data));
     });
 
     // Plan — Runner sends {id, text} after parsing <plan> tag
@@ -1607,6 +1745,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (typeof switchedModel === 'string' && switchedModel) setModelName(switchedModel);
           if (typeof switchedCard === 'string' && switchedCard) setCurrentCardName(switchedCard);
           setSwitchingModel(false);
+        }
+
+        if (evt === 'model_card_switch_failed') {
+          setSwitchingModel(false);
+          // Fall through so the failure shows in the timeline / system info
         }
 
         if (evt === 'reasoning_effort_changed') {
@@ -2577,9 +2720,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubResponse();
       unsubToUserReply();
       unsubToUserFinal();
+      unsubToUserEndTask();
+      unsubSessionTitle();
       unsubThought();
       unsubToolCall();
       unsubToolResult();
+      unsubJobStdout();
+      unsubJobStatus();
       unsubPlan();
       unsubSummaryStream();
       unsubCompressionProgress();
@@ -3286,6 +3433,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     wsServiceRef.current?.newSession();
     requestSessionListRefresh(agentId, null);
     setTimeline([]);
+    setShellStreams({});
     streamingTextRef.current = '';
     setStreamingText('');
     finalizingRef.current = false;
@@ -3675,29 +3823,29 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full min-w-0">
-        {/* Header — same h-14+border-b box as SessionSidebar so the split-line aligns */}
+        {/* Header — same h-11+border-b box as SessionSidebar so the split-line aligns */}
         <div className="flex-shrink-0 bg-bgLight">
-          <div className="h-14 px-2 sm:px-3 border-b border-border box-border flex items-center">
+          <div className="h-11 px-2 sm:px-3 border-b border-border box-border flex items-center">
             <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
+              <div className="flex items-center gap-1 sm:gap-2 min-w-0">
                 <button
                   onClick={onBack}
-                  className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                  className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
                 >
-                  <ArrowLeft size={20} className="text-textMuted" />
+                  <ArrowLeft size={18} className="text-textMuted" />
                 </button>
                 <button
                   onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
-                  className="p-1.5 sm:p-2 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                  className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
                   title={sessionSidebarOpen ? 'Close sessions' : 'Open sessions'}
                 >
                   {sessionSidebarOpen
-                    ? <PanelLeftClose size={18} className="text-textMuted" />
-                    : <PanelLeftOpen size={18} className="text-textMuted" />
+                    ? <PanelLeftClose size={16} className="text-textMuted" />
+                    : <PanelLeftOpen size={16} className="text-textMuted" />
                   }
                 </button>
-                <div className="w-7 h-7 sm:w-8 sm:h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                  <Bot size={16} className="text-primary" />
+                <div className="w-6 h-6 sm:w-7 sm:h-7 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+                  <Bot size={14} className="text-primary" />
                 </div>
                 <div className="min-w-0">
                   <h2 className="font-bold text-textMain text-sm truncate leading-tight">
@@ -3711,32 +3859,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               </div>
 
             {/* Header actions (right side) */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-0.5 sm:gap-1">
               {/* Classic | Solo render mode */}
               <div
-                className="flex items-center rounded-lg border border-border overflow-hidden flex-shrink-0"
+                className="flex items-center rounded-md border border-border overflow-hidden flex-shrink-0"
                 title="Chat UI mode"
               >
                 <button
                   type="button"
                   onClick={() => setUiModePersisted('classic')}
-                  className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 ${
+                  className={`px-1.5 sm:px-2 py-1 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 ${
                     !isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
                   }`}
                   title={t('aiChat.uiModeClassicHint')}
                 >
-                  <MessageSquare size={14} />
+                  <MessageSquare size={13} />
                   <span className="hidden sm:inline">{t('aiChat.uiModeClassic')}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setUiModePersisted('solo')}
-                  className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 border-l border-border ${
+                  className={`px-1.5 sm:px-2 py-1 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 border-l border-border ${
                     isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
                   }`}
                   title={t('aiChat.uiModeSoloHint')}
                 >
-                  <AlignLeft size={14} />
+                  <AlignLeft size={13} />
                   <span className="hidden sm:inline">Solo</span>
                 </button>
               </div>
@@ -3748,21 +3896,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     return next;
                   });
                 }}
-                className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   showPlanViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
                 }`}
                 title={t('aiChat.planPanel')}
               >
-                <ClipboardList size={18} className={showPlanViewer ? 'text-primary' : 'text-textMuted'} />
+                <ClipboardList size={16} className={showPlanViewer ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
                 onClick={() => setShowContextViewer(v => !v)}
-                className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   showContextViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
                 }`}
                 title={t('aiChat.contextDetails')}
               >
-                <List size={18} className={showContextViewer ? 'text-primary' : 'text-textMuted'} />
+                <List size={16} className={showContextViewer ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
                 onClick={() => {
@@ -3772,19 +3920,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     return next;
                   });
                 }}
-                className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   showTokenStats ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
                 }`}
                 title={showTokenStats ? t('aiChat.hideTokenStats') : t('aiChat.showTokenStats')}
               >
-                <Gauge size={18} className={showTokenStats ? 'text-primary' : 'text-textMuted'} />
+                <Gauge size={16} className={showTokenStats ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
                 onClick={() => {
                   if (isSolo) setSoloExpandDetails((v) => !v);
                   else toggleWorkflow();
                 }}
-                className={`p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 ${
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   (isSolo ? soloExpandDetails : showWorkflow)
                     ? 'bg-primary/15 hover:bg-primary/20'
                     : 'hover:bg-primary/10'
@@ -3796,17 +3944,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
               >
                 {(isSolo ? soloExpandDetails : showWorkflow)
-                  ? <Lightbulb size={18} className="text-primary" />
-                  : <Lightbulb size={18} className="text-textMuted" />
+                  ? <Lightbulb size={16} className="text-primary" />
+                  : <Lightbulb size={16} className="text-textMuted" />
                 }
               </button>
               <button
                 onClick={handleCompressContext}
                 disabled={isLoadingSession || isCompressingContext}
-                className="p-1.5 sm:p-2 rounded-lg transition-colors flex-shrink-0 hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed"
                 title={isCompressingContext ? 'Summarizing session...' : 'Summarize/compress current session context'}
               >
-                <Scissors size={18} className={isCompressingContext ? 'text-primary' : 'text-textMuted'} />
+                <Scissors size={16} className={isCompressingContext ? 'text-primary' : 'text-textMuted'} />
               </button>
 
             </div>
@@ -3948,6 +4096,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     block={merged}
                     expandDetails={soloExpandDetails}
                     turnStartedMs={turnMs}
+                    shellStreams={shellStreams}
                   />
                 );
               }
@@ -3959,6 +4108,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   block={entry.data}
                   blockKey={i}
                   turnStartedMs={turnMs}
+                  shellStreams={shellStreams}
                 />
               );
             }
@@ -3983,6 +4133,86 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
                   <div className="flex-1 h-px bg-border/25" />
                 </div>
+              );
+            }
+            if (entry.kind === 'task_fold') {
+              const fold = entry.data;
+              return (
+                <TaskFoldBlock
+                  key={entryKey}
+                  title={fold.title}
+                  messageCount={fold.messageCount}
+                  eventCount={fold.eventCount}
+                  defaultCollapsed={fold.collapsed !== false}
+                  isSolo={isSolo}
+                >
+                  {fold.entries.map((nested, ni) => {
+                    const nestedKey = nested._uid || `${entryKey}-n${ni}`;
+                    if (nested.kind === 'message') {
+                      const msgProps = {
+                        message: nested.data,
+                        senderName:
+                          nested.data.role === 'user'
+                            ? (currentUser?.name || undefined)
+                            : (agentProfile?.agent_name || undefined),
+                        senderAvatar:
+                          nested.data.role === 'user'
+                            ? (currentUser?.avatar || null)
+                            : (resolveChatAvatar(agentProfile?.chat_profile) || null),
+                      };
+                      return isSolo
+                        ? <SoloMessage key={nestedKey} {...msgProps} anchorId={nestedKey} />
+                        : <MessageBubble key={nestedKey} {...msgProps} />;
+                    }
+                    if (nested.kind === 'workflow') {
+                      if (isSolo) {
+                        return (
+                          <SoloActivityRow
+                            key={nestedKey}
+                            block={nested.data}
+                            expandDetails={soloExpandDetails}
+                            turnStartedMs={undefined}
+                            shellStreams={shellStreams}
+                          />
+                        );
+                      }
+                      if (!showWorkflow) return null;
+                      return (
+                        <WorkflowBlockView
+                          key={nestedKey}
+                          block={nested.data}
+                          blockKey={ni}
+                          turnStartedMs={undefined}
+                          shellStreams={shellStreams}
+                        />
+                      );
+                    }
+                    if (nested.kind === 'status_hint') {
+                      const hint = nested.data;
+                      let icon: React.ReactNode;
+                      let label: string;
+                      if (hint.hintType === 'sleep') {
+                        icon = <Moon size={11} className="text-indigo-400/60 shrink-0" />;
+                        label = t('aiChat.sleepMode', { seconds: hint.content });
+                      } else if (hint.hintType === 'wake') {
+                        icon = <Bell size={11} className="text-emerald-400/60 shrink-0" />;
+                        label = t('aiChat.wakeMode', { content: hint.content });
+                      } else {
+                        icon = <Zap size={11} className="text-amber-400/60 shrink-0" />;
+                        label = t('aiChat.stateLabel', { content: hint.content });
+                      }
+                      return (
+                        <div key={nestedKey} className="flex items-center gap-1.5 py-0.5 my-0.5">
+                          <div className="flex-1 h-px bg-border/25" />
+                          {icon}
+                          <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
+                          <div className="flex-1 h-px bg-border/25" />
+                        </div>
+                      );
+                    }
+                    return null;
+                  })}
+                </TaskFoldBlock>
               );
             }
             if (entry.kind === 'archived_section') {
