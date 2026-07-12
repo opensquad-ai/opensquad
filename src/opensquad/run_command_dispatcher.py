@@ -111,6 +111,7 @@ class RunCommandDispatcher:
             await self.runner._bus.emit_async("history_sync", history_data)
             await self.runner._bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
             await self.runner._bus.emit_async("session_list", self.runner._session_manager.get_session_list())
+            await self.runner._broadcast_token_stats()
             await self.runner._emit("info", f"Session loaded: {sid}")
             now_ms = int(datetime.now().timestamp() * 1000)
             await self.runner._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})

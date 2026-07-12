@@ -3675,9 +3675,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full min-w-0">
-        {/* Header — match SessionSidebar title bar height + theme bg */}
-        <div className="flex-shrink-0 border-b border-border bg-bgLight">
-          <div className="h-14 px-2 sm:px-3 flex items-center">
+        {/* Header — same h-14+border-b box as SessionSidebar so the split-line aligns */}
+        <div className="flex-shrink-0 bg-bgLight">
+          <div className="h-14 px-2 sm:px-3 border-b border-border box-border flex items-center">
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
                 <button
@@ -3723,10 +3723,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 ${
                     !isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
                   }`}
-                  title="Classic chat bubbles"
+                  title={t('aiChat.uiModeClassicHint')}
                 >
                   <MessageSquare size={14} />
-                  <span className="hidden sm:inline">经典</span>
+                  <span className="hidden sm:inline">{t('aiChat.uiModeClassic')}</span>
                 </button>
                 <button
                   type="button"
@@ -3734,7 +3734,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   className={`px-1.5 sm:px-2 py-1.5 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 border-l border-border ${
                     isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
                   }`}
-                  title="Solo document stream (Codex / Cursor Agent style)"
+                  title={t('aiChat.uiModeSoloHint')}
                 >
                   <AlignLeft size={14} />
                   <span className="hidden sm:inline">Solo</span>
@@ -3791,7 +3791,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }`}
                 title={
                   isSolo
-                    ? (soloExpandDetails ? 'Collapse activity details' : 'Expand activity details')
+                    ? (soloExpandDetails ? 'Collapse all thinking' : 'Expand all thinking')
                     : (showWorkflow ? 'Hide workflow details' : 'Show workflow details')
                 }
               >

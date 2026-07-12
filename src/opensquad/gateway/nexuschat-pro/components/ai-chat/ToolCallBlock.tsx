@@ -193,13 +193,20 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
   const isWebFilePushTool = /send_file_to_web|web\.send_file/i.test(toolName);
   const hasDeliveryWarning = /sent_to\s*=\s*0|not delivered to any connected web client|Open AI Web chat/i.test(resultStr);
 
-  // Delegate to FileDiffBlock for file edit/write ops
+  // Delegate to FileDiffBlock for file edit/write/read ops
   if (fileEditInfo) {
     // Extract a short note from result (first non-empty line, max 120 chars)
     const noteText = resultStr
       ? resultStr.split('\n').map(l => l.trim()).find(l => l.length > 0)?.slice(0, 120)
       : undefined;
-    return <FileDiffBlock info={fileEditInfo} status={status} note={noteText} />;
+    return (
+      <FileDiffBlock
+        info={fileEditInfo}
+        status={status}
+        note={fileEditInfo.kind === 'read' ? undefined : noteText}
+        resultContent={fileEditInfo.kind === 'read' ? resultStr : undefined}
+      />
+    );
   }
 
   // ---- Generic tool call rendering ----

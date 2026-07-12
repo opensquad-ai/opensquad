@@ -641,6 +641,9 @@
   },
   "aiChat": {
     "newSession": "新建会话",
+    "uiModeClassic": "经典",
+    "uiModeClassicHint": "经典聊天气泡",
+    "uiModeSoloHint": "Solo 文档流（Codex / Cursor Agent 风格）",
     "sessions": "会话列表",
     "sendMessage": "发送消息",
     "stopGenerating": "停止生成",

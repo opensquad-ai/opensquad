@@ -3,6 +3,7 @@ import {
   appendWorkflowEvent,
   buildTimelineFromSession,
   formatUserSkillDisplayContent,
+  isToolResultFailure,
   mergeOrphanedToolResultsAcrossWorkflows,
   shouldTreatWorkflowComplete,
   timelineHasToolEvent,
@@ -25,6 +26,16 @@ function toolResult(id: string, result = 'ok'): WorkflowEvent {
     timestamp: Date.now(),
   };
 }
+
+describe('isToolResultFailure', () => {
+  it('detects Plan-mode blocks and Error prefixes', () => {
+    expect(isToolResultFailure('Blocked in Plan mode: filesystem__write_file')).toBe(true);
+    expect(isToolResultFailure('Error: boom')).toBe(true);
+    expect(isToolResultFailure('Cancelled: stopped by user')).toBe(true);
+    expect(isToolResultFailure({ status: 'error', message: 'x' })).toBe(true);
+    expect(isToolResultFailure('ok wrote file')).toBe(false);
+  });
+});
 
 describe('timelineHasToolEvent / appendWorkflowEvent dedup', () => {
   it('detects an existing tool id in the timeline', () => {

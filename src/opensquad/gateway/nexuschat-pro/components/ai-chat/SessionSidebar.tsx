@@ -406,10 +406,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       <div
         key={session.id}
         className={`${nested ? 'pl-7' : 'pl-2'} pr-2 py-1 cursor-pointer transition-colors group rounded-md mx-1 ${
-          isActive
-            ? 'bg-primary/10 hover:bg-primary/15'
-            : 'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]'
-        }`}
+          isActive ? 'bg-primary/10' : ''
+        } hover:bg-black/[0.06] dark:hover:bg-white/[0.08]`}
         onClick={() => !isConfirming && !isEditing && onViewSession(session.id)}
         onDoubleClick={() => !isConfirming && !isEditing && onSwitchAndReply(session.id)}
         title={session.created_at || session.last_updated || undefined}
@@ -546,7 +544,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       className="relative h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0"
       style={{ width: sidebarWidth }}
     >
-      <div className="h-14 px-3 border-b border-border flex items-center justify-between flex-shrink-0">
+      <div className="h-14 px-3 border-b border-border box-border flex items-center justify-between flex-shrink-0">
         <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
         <div className="flex items-center gap-1">
           <button

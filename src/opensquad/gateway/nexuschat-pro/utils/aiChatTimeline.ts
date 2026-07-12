@@ -249,7 +249,11 @@ function appendEventIntoWorkflowBlock(
             ...evt,
             result: extractToolResultText(resultData),
             resultStatus:
-              typeof resultData === 'object' && resultData && resultData.error ? 'error' : 'success',
+              (typeof resultData === 'object' && resultData && (resultData as any).error) ||
+              isToolResultFailure(extractToolResultText(resultData)) ||
+              isToolResultFailure(resultData)
+                ? 'error'
+                : 'success',
           };
           return newEvents;
         }
@@ -352,7 +356,22 @@ export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowE
 /** Extract display text from a tool_result payload (WS or session event). */
 export function extractToolResultText(resultData: unknown): string {
   if (resultData == null) return '';
-  if (typeof resultData === 'string') return resultData;
+  if (typeof resultData === 'string') {
+    // Compact JSON string of {status, content, …} — unwrap for display.
+    const trimmed = resultData.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object') {
+          const nested = extractToolResultText(parsed);
+          if (nested) return nested;
+        }
+      } catch {
+        /* keep raw string */
+      }
+    }
+    return resultData;
+  }
   if (typeof resultData !== 'object') return String(resultData);
   const data = resultData as Record<string, unknown>;
   const candidates = [data.result, data.output, data.content, data.text, data.message];
@@ -363,6 +382,11 @@ export function extractToolResultText(resultData: unknown): string {
     }
     if (c != null && typeof c !== 'object') return String(c);
     if (c != null && typeof c === 'object') {
+      const nested = c as Record<string, unknown>;
+      // filesystem.read_file etc.: {status, content, meta}
+      if (typeof nested.content === 'string' && nested.content.length > 0) {
+        return nested.content;
+      }
       try {
         return JSON.stringify(c, null, 2);
       } catch {
@@ -371,6 +395,37 @@ export function extractToolResultText(resultData: unknown): string {
     }
   }
   return '';
+}
+
+/** Heuristic: tool outcome should render as failure in the UI. */
+export function isToolResultFailure(result: unknown): boolean {
+  if (result == null) return false;
+  if (typeof result === 'object') {
+    const o = result as Record<string, unknown>;
+    if (o.error) return true;
+    if (o.aborted === true) return true;
+    const status = String(o.status ?? '').toLowerCase();
+    if (status === 'error' || status === 'failed' || status === 'failure') return true;
+    if (typeof o.result === 'string' && isToolFailureText(o.result)) return true;
+    if (typeof o.message === 'string' && isToolFailureText(o.message)) return true;
+    return false;
+  }
+  return isToolFailureText(String(result));
+}
+
+function isToolFailureText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/^error\b/i.test(t)) return true;
+  if (/\bBlocked in Plan mode\b/i.test(t)) return true;
+  if (/\b(Security Denied|Permission Denied)\b/i.test(t)) return true;
+  if (/\bCancelled:/i.test(t)) return true;
+  if (/\baborted by user\b/i.test(t)) return true;
+  if (/\bCommand aborted\b/i.test(t)) return true;
+  if (/\b(failed|failure)\b/i.test(t)) return true;
+  if (/"status"\s*:\s*"(error|failed|failure)"/i.test(t)) return true;
+  if (/"aborted"\s*:\s*true/i.test(t)) return true;
+  return false;
 }
 
 /**
@@ -390,7 +445,11 @@ export function mergeToolResultIntoTimeline(
       : null;
   const resStr = extractToolResultText(resultData);
   const resultStatus =
-    typeof resultData === 'object' && resultData && (resultData as any).error ? 'error' as const : 'success' as const;
+    (typeof resultData === 'object' && resultData && (resultData as any).error) ||
+    isToolResultFailure(resStr) ||
+    isToolResultFailure(resultData)
+      ? ('error' as const)
+      : ('success' as const);
 
   for (let wi = prev.length - 1; wi >= 0; wi--) {
     if (prev[wi].kind !== 'workflow') continue;
@@ -502,7 +561,12 @@ export function appendWorkflowEvent(
             wf.events[ei] = {
               ...evt,
               result: resStr,
-              resultStatus: (typeof resultData === 'object' && resultData && resultData.error) ? 'error' : 'success',
+              resultStatus:
+                (typeof resultData === 'object' && resultData && resultData.error) ||
+                isToolResultFailure(resStr) ||
+                isToolResultFailure(resultData)
+                  ? 'error'
+                  : 'success',
             };
             // Keep the workflow's completed flag unchanged. Setting completed=false
             // here would re-open a legitimately-finished workflow (e.g. system.wait
@@ -671,9 +735,11 @@ export function mergeOrphanedToolResultsAcrossWorkflows(timeline: TimelineEntry[
       const mergedEvent: WorkflowEvent = {
         ...(timeline[bestMatch.wfIdx] as Extract<TimelineEntry, { kind: 'workflow' }>).data.events[bestMatch.eventIdx],
         result: resStr,
-        resultStatus: (typeof orphanEvt.content === 'object' && orphanEvt.content && orphanEvt.content.error)
-          ? 'error'
-          : 'success',
+        resultStatus:
+          (typeof orphanEvt.content === 'object' && orphanEvt.content && orphanEvt.content.error) ||
+          isToolResultFailure(resStr)
+            ? 'error'
+            : 'success',
       };
 
       if (bestMatch.wfIdx !== orphan.wfIdx) {
@@ -1181,7 +1247,8 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           if (!resultId || !callId || resultId === callId) {
             const resStr = extractToolResultText(data);
             evt.result = resStr;
-            evt.resultStatus = data.error ? 'error' : 'success';
+            evt.resultStatus =
+              data.error || isToolResultFailure(resStr) || isToolResultFailure(data) ? 'error' : 'success';
             if (jobId && !evt.jobId) evt.jobId = jobId;
             merged = true;
             break;

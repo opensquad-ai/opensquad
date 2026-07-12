@@ -3592,13 +3592,44 @@ class AgentRunner:
         if hasattr(self.chat_api, "_last_prompt_token_count"):
             self.chat_api._last_prompt_token_count = 0
 
+    def _tools_for_token_stats(self):
+        """Resolve tools schema for context token counting (incl. after restart).
+
+        Before the first LLM turn, ``_last_tools`` is unset, so resumed sessions
+        would under-count (missing Tool definitions). Fall back to registry.
+        """
+        tools = getattr(self.chat_api, "_last_tools", None) or self._current_tools
+        if tools:
+            return tools
+        try:
+            from opensquad.agent_mode import filter_tools_for_mode, get_current_mode
+
+            raw = self.tool_registry.generate_openai_tools("all") if self.tool_registry else None
+            if not raw:
+                return None
+            return filter_tools_for_mode(raw, get_current_mode())
+        except Exception:
+            logger.debug("[Runner] _tools_for_token_stats fallback failed", exc_info=True)
+            return None
+
     def _broadcast_token_stats_sync(self):
         """Sync version for __init__ — only writes token_stats.json (no WS event yet)."""
         try:
-            total = self.chat_api._count_tokens(self.chat_api.req, getattr(self.chat_api, "_last_tools", None))
+            from opensquad.token_breakdown import compute_token_breakdown
+
+            tools = self._tools_for_token_stats()
+            total = self.chat_api._count_tokens(self.chat_api.req, tools)
+            encoding = getattr(self.chat_api, "encoding", None)
+            stats = compute_token_breakdown(
+                self.chat_api.req,
+                tools,
+                encoding=encoding,
+                total=total,
+            )
             token_data = {
                 "used": total,
                 "max": self.chat_api.token_max,
+                "breakdown": stats,
                 "model": getattr(self.chat_api, "model", ""),
             }
             import json
@@ -3618,7 +3649,7 @@ class AgentRunner:
 
             from opensquad.token_breakdown import compute_token_breakdown
 
-            tools = getattr(self.chat_api, "_last_tools", None)
+            tools = self._tools_for_token_stats()
             total = self.chat_api._count_tokens(self.chat_api.req, tools)
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.

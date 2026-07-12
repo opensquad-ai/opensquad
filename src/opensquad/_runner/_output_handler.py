@@ -125,7 +125,11 @@ class OutputHandler:
             from opensquad.token_breakdown import compute_token_breakdown
 
             chat_api = runner.chat_api
-            tools = getattr(chat_api, "_last_tools", None)
+            tools = None
+            if hasattr(runner, "_tools_for_token_stats"):
+                tools = runner._tools_for_token_stats()
+            else:
+                tools = getattr(chat_api, "_last_tools", None) or getattr(runner, "_current_tools", None)
             total = chat_api._count_tokens(chat_api.req, tools)
             encoding = getattr(chat_api, "encoding", None)
             stats = compute_token_breakdown(

@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
+import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { extractFileEditInfo } from './FileDiffBlock';
 
 export interface SubAgentPanelProps {
@@ -102,15 +103,21 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
       const argsObj = parseArgs(content.arguments ?? content.args ?? content.input);
       const fileEdit = extractFileEditInfo(name, argsObj || {});
       const running = !evt.result;
+      const resultText = formatResult(evt.result);
+      const failed =
+        !running &&
+        (evt.resultStatus === 'error' || isToolResultFailure(evt.result) || isToolResultFailure(resultText));
       let primary = name;
       let secondary = '';
       if (fileEdit?.kind === 'read') {
-        primary = `Read ${fileEdit.fileName}`;
+        primary = failed ? `Failed read ${fileEdit.fileName}` : `Read ${fileEdit.fileName}`;
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit?.kind === 'write') {
-        primary = `Wrote ${fileEdit.fileName}`;
+        primary = failed ? `Failed write ${fileEdit.fileName}` : `Wrote ${fileEdit.fileName}`;
       } else if (fileEdit) {
-        primary = `Edited ${fileEdit.fileName}`;
+        primary = failed ? `Failed edit ${fileEdit.fileName}` : `Edited ${fileEdit.fileName}`;
+      } else if (failed) {
+        secondary = 'fail';
       }
       lines.push({
         key,
@@ -118,9 +125,9 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
         primary,
         secondary,
         running,
-        status: running ? 'running' : evt.resultStatus === 'error' ? 'error' : 'success',
+        status: running ? 'running' : failed ? 'error' : 'success',
         args: argsObj ? JSON.stringify(argsObj, null, 2) : formatResult(content.arguments ?? content.args ?? ''),
-        result: formatResult(evt.result),
+        result: resultText,
       });
       continue;
     }
@@ -128,15 +135,17 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
     if (evt.type === 'tool_result') {
       const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
       const name = String(data.name || data.tool || 'Tool');
+      const resultText = formatResult(data.result ?? data.output ?? data);
+      const failed = !!(data.error || isToolResultFailure(resultText));
       lines.push({
         key,
         kind: 'tool',
         primary: name,
-        secondary: '',
+        secondary: failed ? 'fail' : '',
         running: false,
-        status: data.error ? 'error' : 'success',
+        status: failed ? 'error' : 'success',
         args: '',
-        result: formatResult(data.result ?? data.output ?? data),
+        result: resultText,
       });
       continue;
     }
@@ -204,10 +213,13 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
         className="inline-flex items-center gap-1.5 py-0.5 text-left bg-transparent border-0 p-0 cursor-pointer max-w-full"
       >
         {statusIcon}
-        <span className="text-[13px] text-textMain/85 truncate">
+        <span className={`text-[13px] truncate ${line.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-textMain/85'}`}>
           {line.primary}
           {line.secondary ? (
-            <span className="text-textMuted/70"> {line.secondary}</span>
+            <span className={line.status === 'error' ? 'text-red-600/80 dark:text-red-400/80' : 'text-textMuted/70'}>
+              {' '}
+              {line.secondary}
+            </span>
           ) : null}
           {line.running ? <span className="text-textMuted/70"> …</span> : null}
         </span>

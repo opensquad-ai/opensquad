@@ -106,6 +106,67 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#039;');
 }
 
+/**
+ * Unwrap filesystem.read_file tool payloads into plain file text.
+ * Results often arrive as JSON `{"status":"success","content":"1: …"}` (one long
+ * line); without unwrapping the viewer only shows a clipped JSON blob.
+ */
+export function normalizeReadFileDisplayContent(raw: string): {
+  text: string;
+  startLine: number;
+} {
+  if (!raw) return { text: '', startLine: 1 };
+  let text = raw.trim();
+  if (!text) return { text: '', startLine: 1 };
+
+  for (let i = 0; i < 3; i++) {
+    const looksWrapped = text.startsWith('{') || text.startsWith('"');
+    if (!looksWrapped) break;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === 'string') {
+        text = parsed.trim();
+        continue;
+      }
+      if (parsed && typeof parsed === 'object') {
+        const o = parsed as Record<string, unknown>;
+        if (typeof o.content === 'string') {
+          text = o.content;
+          break;
+        }
+        if (typeof o.result === 'string') {
+          text = o.result.trim();
+          continue;
+        }
+        if (typeof o.output === 'string') {
+          text = o.output.trim();
+          continue;
+        }
+      }
+    } catch {
+      break;
+    }
+    break;
+  }
+
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  text = text.replace(/^(\d+:\s*)\uFEFF/, '$1');
+
+  const lines = text.split('\n');
+  const numberedCount = lines.filter((l) => /^\d+: ?/.test(l)).length;
+  let startLine = 1;
+  if (lines.length > 0 && numberedCount >= Math.ceil(lines.length * 0.8)) {
+    const firstNum = lines.find((l) => /^\d+:/.test(l));
+    if (firstNum) {
+      const n = parseInt(firstNum, 10);
+      if (Number.isFinite(n) && n > 0) startLine = n;
+    }
+    text = lines.map((l) => l.replace(/^\d+: ?/, '')).join('\n');
+  }
+
+  return { text, startLine };
+}
+
 // ============================================================
 // Types
 // ============================================================
@@ -399,18 +460,11 @@ const DiffLineRow: React.FC<DiffLineRowProps> = ({ line, lang }) => {
       <span className={`w-5 shrink-0 text-center select-none leading-5 ${markerColor}`}>
         {marker}
       </span>
-      {/* Content with syntax highlighting */}
-      {isUnchanged ? (
-        <span
-          className={`flex-1 whitespace-pre pl-0.5 overflow-hidden ${contentColor}`}
-          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-        />
-      ) : (
-        <span
-          className={`flex-1 whitespace-pre pl-0.5 overflow-hidden ${contentColor}`}
-          dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-        />
-      )}
+      {/* Content with syntax highlighting — wrap so long lines stay readable */}
+      <span
+        className={`flex-1 min-w-0 whitespace-pre-wrap break-words pl-0.5 ${contentColor}`}
+        dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+      />
     </div>
   );
 };
@@ -485,9 +539,13 @@ const HLJS_STYLE = `
 // ============================================================
 
 const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content, lang }) => {
-  const lines = useMemo(() => content.split('\n'), [content]);
+  const { text, startLine } = useMemo(
+    () => normalizeReadFileDisplayContent(content),
+    [content],
+  );
+  const lines = useMemo(() => (text.length ? text.split('\n') : ['']), [text]);
   return (
-    <div className="overflow-x-auto max-h-[500px] overflow-y-auto bg-gray-950">
+    <div className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950">
       <style>{HLJS_STYLE}</style>
       {lines.map((lineContent, i) => {
         const html = highlightLine(lineContent, lang);
@@ -498,13 +556,13 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
           >
             {/* Line number */}
             <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-gray-600 border-r border-gray-700/30 bg-gray-900/30">
-              {i + 1}
+              {startLine + i}
             </span>
             {/* Alignment spacer (matches diff +/- column) */}
             <span className="w-5 shrink-0" />
-            {/* Content */}
+            {/* Content — wrap instead of clipping so the full line is visible */}
             <span
-              className="flex-1 whitespace-pre pl-0.5 overflow-hidden text-gray-300"
+              className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-0.5 text-gray-300"
               dangerouslySetInnerHTML={{ __html: html }}
             />
           </div>
@@ -683,7 +741,7 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
           </div>
 
           {/* Diff content */}
-          <div className="overflow-x-auto max-h-[500px] overflow-y-auto bg-gray-950">
+          <div className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950">
             <style>{HLJS_STYLE}</style>
 
             {hunkEntries.length === 0 ? (

@@ -641,6 +641,9 @@
   },
   "aiChat": {
     "newSession": "New Session",
+    "uiModeClassic": "Classic",
+    "uiModeClassicHint": "Classic chat bubbles",
+    "uiModeSoloHint": "Solo document stream (Codex / Cursor Agent style)",
     "sessions": "Sessions",
     "sendMessage": "Send Message",
     "stopGenerating": "Stop",

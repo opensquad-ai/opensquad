@@ -3,7 +3,7 @@
  * parent delegate_task + nested sub_agent children (hidden from main stream).
  */
 import type { WorkflowEvent } from './aiChatTimeline';
-import { extractToolResultText } from './aiChatTimeline';
+import { extractToolResultText, isToolResultFailure } from './aiChatTimeline';
 
 export interface DelegateBundle {
   id: string;
@@ -274,9 +274,11 @@ export function buildDisplayWorkflowItems(events: WorkflowEvent[]): DisplayWorkf
           parent = {
             ...parent,
             result: resStr || parent.result,
-            resultStatus: (typeof next.content === 'object' && next.content && (next.content as any).error)
-              ? 'error'
-              : 'success',
+            resultStatus:
+              (typeof next.content === 'object' && next.content && (next.content as any).error) ||
+              isToolResultFailure(resStr || parent.result)
+                ? 'error'
+                : 'success',
             jobId: parent.jobId || parseJobIdFromResult(resStr) || undefined,
           };
           j += 1;

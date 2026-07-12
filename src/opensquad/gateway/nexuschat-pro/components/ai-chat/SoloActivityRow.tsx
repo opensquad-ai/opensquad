@@ -10,6 +10,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { CircleDashed, CheckCircle2, XCircle, ListTodo, ArrowRightCircle } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
+import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
 import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
@@ -22,7 +23,7 @@ const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
-  /** When true, expand outer + inner details (Header lightbulb in Solo). */
+  /** When true, expand outer + thought folds only (Header lightbulb in Solo; tools stay collapsed). */
   expandDetails?: boolean;
   turnStartedMs?: number;
 }
@@ -166,9 +167,12 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     const argsObj = parseArgs(rawArgs);
     const resultStr = formatResult(evt.result);
     const fileEdit = extractFileEditInfo(name, argsObj || rawArgs || {});
+    const failed =
+      !running &&
+      (evt.resultStatus === 'error' || isToolResultFailure(evt.result) || isToolResultFailure(resultStr));
     const status: 'running' | 'success' | 'error' = running
       ? 'running'
-      : evt.resultStatus === 'error'
+      : failed
         ? 'error'
         : 'success';
 
@@ -176,16 +180,30 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     let secondary = '';
     if (fileEdit) {
       if (fileEdit.kind === 'read') {
-        primary = running ? `Reading ${fileEdit.fileName}` : `Read ${fileEdit.fileName}`;
+        primary = running
+          ? `Reading ${fileEdit.fileName}`
+          : failed
+            ? `Failed read ${fileEdit.fileName}`
+            : `Read ${fileEdit.fileName}`;
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit.kind === 'write') {
-        primary = running ? `Writing ${fileEdit.fileName}` : `Wrote ${fileEdit.fileName}`;
+        primary = running
+          ? `Writing ${fileEdit.fileName}`
+          : failed
+            ? `Failed write ${fileEdit.fileName}`
+            : `Wrote ${fileEdit.fileName}`;
       } else {
-        primary = running ? `Editing ${fileEdit.fileName}` : `Edited ${fileEdit.fileName}`;
+        primary = running
+          ? `Editing ${fileEdit.fileName}`
+          : failed
+            ? `Failed edit ${fileEdit.fileName}`
+            : `Edited ${fileEdit.fileName}`;
       }
     } else if (running) {
       primary = 'Running';
       secondary = name;
+    } else if (failed) {
+      secondary = 'fail';
     }
 
     lines.push({
@@ -198,7 +216,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
       toolName: name,
       toolArgs: argsObj,
       toolResult: resultStr,
-      fileEdit,
+      fileEdit: failed ? (fileEdit ? { ...fileEdit, addedLines: undefined, removedLines: undefined } : null) : fileEdit,
       toolStatus: status,
     });
     return lines;
@@ -208,17 +226,18 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     const data = typeof evt.content === 'object' ? evt.content : {};
     const name = String(data.name || data.tool || 'Tool');
     const result = formatResult(data.result ?? data.output ?? data);
+    const failed = !!(data.error || isToolResultFailure(result));
     lines.push({
       key,
       kind: 'tool',
       primary: name,
-      secondary: '',
+      secondary: failed ? 'fail' : '',
       detail: '',
       toolName: name,
       toolArgs: null,
       toolResult: result,
       fileEdit: null,
-      toolStatus: data.error ? 'error' : 'success',
+      toolStatus: failed ? 'error' : 'success',
     });
     return lines;
   }
@@ -251,7 +270,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     lines.push({
       key,
       kind: 'plan',
-      primary: 'To-dos',
+      primary: 'plan',
       secondary: String(steps.length),
       detail: done > 0 ? `${done}/${steps.length}` : '',
       running: running && !blockCompleted,
@@ -328,7 +347,7 @@ function outerSummary(
   if (tools > 0) return { primary: 'Worked', secondary: '' };
   if (plans.length > 0) {
     const n = plans.reduce((sum, l) => sum + (l.planSteps?.length || 0), 0);
-    if (n > 0) return { primary: 'To-dos', secondary: String(n) };
+    if (n > 0) return { primary: 'plan', secondary: String(n) };
     return { primary: 'Planned', secondary: '' };
   }
   if (thoughts > 0) {
@@ -380,18 +399,26 @@ const TextChevronToggle: React.FC<{
   depth?: 0 | 1;
   addedLines?: number;
   removedLines?: number;
-}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines }) => {
+  /** Failed tool outcome — red title + fail cue */
+  errored?: boolean;
+}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored }) => {
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
-  const faint =
-    depth === 0
+  const faint = errored
+    ? 'color-mix(in srgb, #dc2626 78%, transparent)'
+    : depth === 0
       ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
       : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
 
   const title = (
     <>
       <span className="font-normal">{primary}</span>
-      {secondary ? <span>{' '}{secondary}</span> : null}
+      {secondary ? (
+        <span className={errored && secondary === 'fail' ? 'font-medium' : undefined}>
+          {' '}
+          {secondary}
+        </span>
+      ) : null}
     </>
   );
 
@@ -406,16 +433,21 @@ const TextChevronToggle: React.FC<{
       {shimmer ? <ShimmerLabel color={faint}>{title}</ShimmerLabel> : title}
       {running && !shimmer ? <span style={{ color: faint, opacity: 0.85 }}> …</span> : null}
     </span>
-    {(addedLines != null && addedLines > 0) && (
+    {!errored && (addedLines != null && addedLines > 0) && (
       <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #059669 55%, transparent)' }}>
         +{addedLines}
       </span>
     )}
-    {(removedLines != null && removedLines > 0) && (
+    {!errored && (removedLines != null && removedLines > 0) && (
       <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #ef4444 55%, transparent)' }}>
         -{removedLines}
       </span>
     )}
+    {errored && secondary !== 'fail' ? (
+      <span className="text-[11px] font-medium shrink-0" style={{ color: faint }}>
+        fail
+      </span>
+    ) : null}
     <span className="text-[13px] font-normal leading-relaxed shrink-0" style={{ color: faint }}>
       {open ? '⌄' : '>'}
     </span>
@@ -519,7 +551,7 @@ const SoloPlanFold: React.FC<{
       >
         <ListTodo size={13} className="shrink-0 opacity-80" style={{ color: faint }} />
         <span className="text-[13px] leading-relaxed" style={{ color: faint }}>
-          <span className="font-medium">To-dos</span>
+          <span className="font-medium">plan</span>
           <span>{' '}{steps.length}</span>
           {running ? <span style={{ opacity: 0.85 }}> …</span> : null}
         </span>
@@ -574,8 +606,14 @@ const SoloEventLine: React.FC<{
   const isFileRead = line.fileEdit?.kind === 'read';
 
   useEffect(() => {
+    // Lightbulb / defaultOpen drives thoughts both ways; tools only auto-open when
+    // their own defaultOpen is true (never via the Solo lightbulb).
+    if (isThought) {
+      setOpen(!!defaultOpen);
+      return;
+    }
     if (defaultOpen || (isSummary && line.running)) setOpen(true);
-  }, [defaultOpen, isSummary, line.running]);
+  }, [defaultOpen, isSummary, isThought, line.running]);
 
   const added = line.fileEdit?.addedLines;
   const removed = line.fileEdit?.removedLines;
@@ -621,6 +659,7 @@ const SoloEventLine: React.FC<{
         depth={1}
         addedLines={isFileEdit ? added : undefined}
         removedLines={isFileEdit ? removed : undefined}
+        errored={line.kind === 'tool' && line.toolStatus === 'error'}
       />
 
       {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
@@ -985,8 +1024,8 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         {thoughtBodies.length > 0 && (
           <div className="mb-1">
             <TextChevronToggle
-              primary={summary.primary.startsWith('To-dos') ? 'Thought' : summary.primary}
-              secondary={summary.primary.startsWith('To-dos') ? 'for a bit' : summary.secondary}
+              primary={summary.primary.startsWith('plan') ? 'Thought' : summary.primary}
+              secondary={summary.primary.startsWith('plan') ? 'for a bit' : summary.secondary}
               open={outerOpen}
               onToggle={() => setOuterOpen((v) => !v)}
               running={thinkingActive}
@@ -1057,7 +1096,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             key={line.key}
             line={line}
             defaultOpen={
-              expandDetails ||
+              (line.kind === 'thought' && expandDetails) ||
               !!(line.kind === 'summary' && line.running) ||
               line.kind === 'plan'
             }
