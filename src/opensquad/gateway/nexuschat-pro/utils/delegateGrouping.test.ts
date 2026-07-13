@@ -185,6 +185,8 @@ describe('delegateGrouping', () => {
     expect(isDelegateToolName('delegate_task_submit')).toBe(true);
     expect(isDelegateToolName('delegate_task_result')).toBe(false);
     expect(isDelegateToolName('delegate_task_list')).toBe(false);
+    expect(isDelegateToolName('self_learn.start_learn')).toBe(true);
+    expect(isDelegateToolName('self_learn__start_learn')).toBe(true);
   });
 
   it('recognizes namespaced / Native FC delegate tool names', () => {

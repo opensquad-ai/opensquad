@@ -209,10 +209,15 @@ class SessionManager:
                 # newer than what we would write — skip to avoid stale overwrite.
                 if self._save_seq > seq_before:
                     logger.debug(
-                        "[SessionManager] Async writer skip save: seq %d > %d (concurrent sync save detected)",
+                        "[SessionManager] Async writer raced sync save (seq %d > %d); "
+                        "re-saving in-memory state so thought/info are not lost",
                         self._save_seq,
                         seq_before,
                     )
+                    # Mutations in this batch are already applied to session_data.
+                    # A concurrent sync save may have flushed a snapshot taken
+                    # before those mutations; persist the merged in-memory state.
+                    self._save_session()
                 else:
                     self._save_session()
                 # Mark idle after flush is complete

@@ -114,27 +114,58 @@ def _make_request(endpoint: str, params: dict) -> dict:
         return {"error": f"Invalid JSON response from API endpoint '{endpoint}'."}
 
 
-def search(queries: list[str], max_results: int = 30) -> list[dict[str, str]]:
+def search(
+    queries: list[str] | str | None = None,
+    max_results: int = 30,
+    query: str | list[str] | None = None,
+) -> list[dict[str, str]]:
     """
     Call the WebSearch service's /search endpoint to retrieve search results for multiple queries.
+
+    Each result typically includes: title, url, summary/snippet, relevance_score,
+    matched_keywords, matched_queries, and optionally result_type/card_kind
+    (``answer_card`` for Bing weather/knowledge/AI widgets; ``organic`` for blue links).
+
     Usage tips:
-    - **Concept expansion and synonym substitution**: When keywords fail to return useful results,
-      try synonyms. E.g., expand "artificial intelligence" to "machine learning", "deep learning",
-      "neural networks", "LLM", etc.
-    - **Multi-angle queries:** For complex questions, don't rely on a single keyword. Use multiple
-      related, different-angle queries (the `queries` list) to get more comprehensive information.
-    - **Cross-validation of results:** Overlapping results from different queries generally indicate
-      more reliable sources.
-    - **Summary-driven content retrieval:** Don't visit all returned links directly. First read the
-      `snippet` carefully (summaries include date/time info), then select only the most relevant and
-      authoritative links, and use the `fetch` tool to retrieve the full text.
-    - **High result volume:** When fetch results are insufficient, increase max_results, e.g., 30 => 100.
-    demo: How to research "the latest advances in artificial intelligence"**
-    1.  **Define multi-angle queries:** `search(queries=["Latest AI breakthroughs 2024", "Top AI conference papers 2024", "Gartner 2024 AI report"], max_results=30)`.
-    2.  **Analyze summaries:** Review the returned results' `title` and `snippet`, identifying specific
-        technologies (e.g., "multimodal large models", "AI Agent") or authoritative sources (e.g., MIT, Google AI).
-    3.  **Precise content retrieval:** Pass the 2-3 most relevant `url` values to the `fetch` tool for in-depth reading.
+    - **Prefer snippets / answer cards before fetch:** For many questions (weather, facts,
+      short news, definitions), the returned ``summary``/``snippet`` or an ``answer_card``
+      already contains enough information to answer. Do **not** automatically call
+      ``fetch``/``fetch_html`` on every URL. Only fetch when you still need deeper detail
+      that the snippet clearly lacks.
+    - **Answer cards first:** If any result has ``result_type="answer_card"`` (especially
+      ``card_kind="weather"`` / entity / ai_answer), read that summary first — it mirrors
+      what a human sees at the top of the Bing page.
+    - **Concept expansion and synonym substitution**: When keywords fail to return useful
+      results, try synonyms. E.g., expand "artificial intelligence" to "machine learning",
+      "deep learning", "neural networks", "LLM", etc.
+    - **Multi-angle queries:** For complex questions, don't rely on a single keyword. Use
+      multiple related, different-angle queries (the ``queries`` list).
+    - **Language-aware search:** Chinese queries automatically use cn.bing.com; English
+      queries use www.bing.com. Mixed queries pick the region based on the dominant script.
+    - **Multi-keyword queries:** You can pass comma-separated related keywords in one query
+      string, e.g. ``queries=["福州天气, 福州气温, 福州降雨"]``. Results include
+      ``matched_keywords`` showing which keyword phrases actually hit the page.
+    - **Cross-validation:** Higher ``match_count``, ``relevance_score``, or more
+      ``matched_keywords`` usually means better intent match.
+    - **When to fetch:** After reading summaries, fetch at most 1–3 high-value URLs that
+      still need full text (long reports, docs, paywalled-looking snippets that are thin).
+      Prefer alternative open sources if a site is known to block scrapers.
+    - **High result volume:** If coverage is thin, increase max_results (e.g. 30 → 100)
+      and re-rank by summary — still avoid mass-fetching.
+
+    Demo: research "the latest advances in artificial intelligence"
+    1. Multi-angle search: ``search(queries=["Latest AI breakthroughs 2024", ...], max_results=30)``
+    2. Read ``title`` / ``summary`` / ``relevance_score`` / ``result_type``; answer from
+       snippets/answer cards when sufficient.
+    3. Only then ``fetch`` the 1–3 URLs that still need full-page detail.
     """
+    if not queries:
+        if query is None:
+            return {"error": "Missing required parameter 'queries'."}
+        queries = [query] if isinstance(query, str) else list(query)
+    elif isinstance(queries, str):
+        queries = [queries]
+
     logger.info(f"Executing 'search' tool for queries: {queries}")
     max_results = int(max_results)
     params = {
@@ -147,13 +178,21 @@ def search(queries: list[str], max_results: int = 30) -> list[dict[str, str]]:
 def fetch(urls: list[str], max_token=100000) -> dict[str, str]:
     """
     Call the WebSearch service's /fetch endpoint to retrieve the body content of one or more URLs.
+
+    **When to use:** Only after ``search``, and only for links whose ``summary``/``snippet``
+    (or answer card) is insufficient. Do not fetch every search hit.
+
     **Best Practices:**
-    - **Batch processing:** If multiple URLs need to be fetched simultaneously, pass them in a single list
-                 rather than making multiple calls. E.g., fetch(urls=["url_to_article_A", "url_to_article_B"]).
-    - **Use after search:** This tool is typically used after the `search` tool to deeply investigate
-                 high-value links identified from search results.
-    - **Token limit:** Total output is capped at max_token (default 100k tokens). If exceeded, content
-                 is split into 3 parts (beginning, middle, end) to preserve context diversity.
+    - **Snippet-first:** If search already answers the user (weather card, short fact, clear
+      snippet), skip fetch entirely.
+    - **Batch processing:** Pass multiple URLs in one list instead of repeated calls.
+    - **Anti-bot / Forbid pages:** Many sites (e.g. weather.com.cn) return block pages such as
+      ``Forbid_code: 120000``. That is a site WAF rejection, not a tool bug. Do **not** retry
+      the same URL with ``fetch`` or ``fetch_html``. Instead: rely on search snippets/answer
+      cards, pick another source URL, or use an interactive browser/MCP scrape channel if
+      available.
+    - **Token limit:** Total output is capped at max_token (default 100k tokens). If exceeded,
+      content is split into beginning/middle/end segments.
     """
     max_token = int(max_token)
     logger.info(f"Executing 'fetch' tool for {len(urls)} URLs.")
@@ -188,16 +227,15 @@ def fetch(urls: list[str], max_token=100000) -> dict[str, str]:
 
 def fetch_html(url: str | None = None) -> dict:
     """
-    Call the WebSearch service's /fetch_html endpoint to retrieve the raw HTML content of a URL.
+    Call the WebSearch service's /fetch_html endpoint to retrieve the raw HTML of a URL.
+
+    **When to use:** Deep-link discovery or structure inspection — not as the default way to
+    read page text. Prefer ``search`` summaries/answer cards, then ``fetch`` for cleaned text.
 
     **Best Practices:**
-    - **For deep search:** This tool is generally used in deep search tasks. A webpage often contains
-    a large amount of text and link addresses. Deep searches often require identifying new search
-    directions from the page's HTML links, making this a key step in determining critical links
-    for the search task.
-    - **Use after search:** This tool is typically used after the `search` tool to deeply investigate
-    high-value filtered links.
-
+    - Use after search when you need page links/structure beyond the snippet.
+    - Same anti-bot rule as ``fetch``: ``Forbid_code`` / soft-block HTML means switch source
+      or use snippets; do not loop fetch_html on the blocked URL.
     """
     logger.info(f"Executing 'fetch_html' tool for {url} URL.")
     params = {"url": url}

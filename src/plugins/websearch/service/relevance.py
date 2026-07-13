@@ -1,0 +1,464 @@
+"""Keyword–URL relevance scoring for web search results."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from urllib.parse import quote, unquote, urlparse
+
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+_EN_WORD_RE = re.compile(r"[a-z0-9]{2,}", re.I)
+_PHRASE_SPLIT_RE = re.compile(r"[,;|、，；]+")
+_TOKEN_SPLIT_RE = re.compile(r'[\s/\\"\'()\[\]{}:：。！？、\-–—]+')
+_QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'')
+_DATE_RE = re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b")
+_YEAR_RE = re.compile(r"\b(20\d{2})\b")
+
+# Intent terms: if the query expresses an intent (weather, etc.) but a result
+# only matches a place/entity name, cap its score so encyclopedias/tourism
+# pages do not outrank on-topic hits.
+_INTENT_TERMS = frozenset(
+    {
+        "天气",
+        "气温",
+        "温度",
+        "降雨",
+        "降水",
+        "预报",
+        "气象",
+        "湿度",
+        "风力",
+        "weather",
+        "forecast",
+        "temperature",
+        "rainfall",
+        "precipitation",
+        "humidity",
+        "气温预报",
+        "天气预报",
+        "tianqi",
+    }
+)
+
+# Minimal stop words that add noise to matching but rarely appear in titles.
+_STOP_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "is",
+        "are",
+        "with",
+        "by",
+        "from",
+        "how",
+        "what",
+        "why",
+        "when",
+        "where",
+        "的",
+        "了",
+        "是",
+        "在",
+        "和",
+        "与",
+        "及",
+        "等",
+        "如何",
+        "什么",
+        "怎么",
+        "哪些",
+        "介绍",
+        "概述",
+        "关于",
+    }
+)
+
+
+@dataclass
+class QueryTerms:
+    """Structured terms extracted from one search query string."""
+
+    phrases: list[str] = field(default_factory=list)
+    tokens: list[str] = field(default_factory=list)
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _add_unique(items: list[str], seen: set[str], value: str) -> None:
+    value = _normalize_text(value)
+    if len(value) < 2 or value in _STOP_WORDS or value in seen:
+        return
+    seen.add(value)
+    items.append(value)
+
+
+def _extract_date_entities(segment: str, tokens: list[str], seen: set[str]) -> str:
+    """Keep YYYY-MM-DD as one token; strip date pieces so they don't dilute scoring."""
+
+    def _repl(match: re.Match[str]) -> str:
+        y, m, d = match.group(1), match.group(2).zfill(2), match.group(3).zfill(2)
+        _add_unique(tokens, seen, f"{y}-{m}-{d}")
+        return " "
+
+    return _DATE_RE.sub(_repl, segment)
+
+
+def _extract_tokens_from_segment(segment: str, tokens: list[str], seen: set[str]) -> None:
+    segment = _extract_date_entities(segment, tokens, seen)
+
+    for word in _EN_WORD_RE.findall(segment):
+        # Bare years from dates are weak match signals for weather/news queries.
+        if _YEAR_RE.fullmatch(word):
+            continue
+        _add_unique(tokens, seen, word)
+
+    for run in _CJK_RUN_RE.findall(segment):
+        if len(run) >= 2:
+            _add_unique(tokens, seen, run)
+        # Prefer meaningful 2-grams; skip overlapping bigrams that straddle
+        # intent boundaries poorly (e.g. 州天 from 福州天气).
+        if len(run) >= 4:
+            for i in range(len(run) - 1):
+                bigram = run[i : i + 2]
+                if bigram in _INTENT_TERMS or any(
+                    intent in run and bigram in intent for intent in _INTENT_TERMS if len(intent) >= 2
+                ):
+                    _add_unique(tokens, seen, bigram)
+                elif i == 0 or i + 2 == len(run):
+                    # Keep edge bigrams of long runs (city/topic anchors).
+                    _add_unique(tokens, seen, bigram)
+        elif len(run) == 3:
+            _add_unique(tokens, seen, run[:2])
+            _add_unique(tokens, seen, run[1:])
+
+    for part in _TOKEN_SPLIT_RE.split(segment):
+        part = part.strip()
+        if len(part) >= 2 and not _CJK_RUN_RE.fullmatch(part) and not _DATE_RE.fullmatch(part):
+            _add_unique(tokens, seen, part)
+
+
+def _query_intent_terms(query: str) -> list[str]:
+    normalized = _normalize_text(query)
+    return [term for term in _INTENT_TERMS if term in normalized]
+
+
+def _result_has_intent(intent_terms: list[str], title: str, summary: str, url_text: str) -> bool:
+    if not intent_terms:
+        return True
+    blob = _normalize_text(f"{title} {summary} {url_text}")
+    return any(term in blob for term in intent_terms)
+
+
+def _extract_space_phrases(segment: str, phrases: list[str], seen: set[str]) -> None:
+    """Build contiguous English / mixed word phrases inside one segment."""
+    words = [w for w in _TOKEN_SPLIT_RE.split(segment) if w.strip()]
+    if len(words) < 2:
+        return
+
+    normalized_words = [_normalize_text(w) for w in words if _normalize_text(w)]
+    if len(normalized_words) >= 2:
+        _add_unique(phrases, seen, " ".join(normalized_words))
+
+    for size in (3, 2):
+        if len(normalized_words) < size:
+            continue
+        for i in range(len(normalized_words) - size + 1):
+            _add_unique(phrases, seen, " ".join(normalized_words[i : i + size]))
+
+
+def parse_query_terms(text: str) -> QueryTerms:
+    """
+    Parse a query into keyword phrases and fallback tokens.
+
+    Supports:
+    - Comma/semicolon separated keywords: ``深度学习, 神经网络, Transformer``
+    - Space-separated multi-word phrases: ``Python asyncio tutorial``
+    - Quoted phrases: ``"large language model" 最新进展``
+    - Mixed Chinese / English queries
+    """
+    if not text:
+        return QueryTerms()
+
+    phrases: list[str] = []
+    tokens: list[str] = []
+    phrase_seen: set[str] = set()
+    token_seen: set[str] = set()
+
+    quoted_segments: list[str] = []
+    remaining = text
+    for match in _QUOTED_PHRASE_RE.finditer(text):
+        quoted = match.group(1) or match.group(2) or ""
+        if quoted.strip():
+            quoted_segments.append(quoted.strip())
+        remaining = remaining.replace(match.group(0), " ")
+
+    segments = [s.strip() for s in _PHRASE_SPLIT_RE.split(remaining) if s.strip()]
+    segments.extend(quoted_segments)
+
+    if not segments:
+        segments = [text.strip()]
+
+    for segment in segments:
+        # Pull dates out first so hyphenated YYYY-MM-DD does not explode into
+        # noisy space phrases like "福州天气 2026 07 13".
+        segment_for_phrases = _extract_date_entities(segment, tokens, token_seen)
+        normalized_segment = _normalize_text(segment_for_phrases)
+        if len(normalized_segment) >= 2:
+            _add_unique(phrases, phrase_seen, normalized_segment)
+
+        _extract_space_phrases(segment_for_phrases, phrases, phrase_seen)
+        _extract_tokens_from_segment(segment, tokens, token_seen)
+
+    # Tokens that duplicate whole phrases add little value for partial matching.
+    phrase_set = set(phrases)
+    tokens = [token for token in tokens if token not in phrase_set]
+
+    return QueryTerms(phrases=phrases, tokens=tokens)
+
+
+def tokenize_query(text: str) -> list[str]:
+    """Backward-compatible flat token list."""
+    terms = parse_query_terms(text)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in terms.phrases + terms.tokens:
+        if item not in seen:
+            seen.add(item)
+            merged.append(item)
+    return merged
+
+
+def _field_hits(items: list[str], haystack: str) -> tuple[int, list[str]]:
+    if not items or not haystack:
+        return 0, []
+    normalized = _normalize_text(haystack)
+    matched: list[str] = []
+    for item in items:
+        if item in normalized:
+            matched.append(item)
+    return len(matched), matched
+
+
+def score_single_result(
+    query: str,
+    title: str,
+    summary: str,
+    url: str,
+    *,
+    rank: int = 0,
+) -> float:
+    """Score how well a search result matches one query (0.0–1.0)."""
+    terms = parse_query_terms(query)
+    if not terms.phrases and not terms.tokens:
+        return 0.0
+
+    parsed = urlparse(url)
+    url_text = unquote(f"{parsed.netloc}{parsed.path}".replace("-", " ").replace("_", " "))
+
+    title_phrase_hits, title_phrase_matched = _field_hits(terms.phrases, title)
+    summary_phrase_hits, summary_phrase_matched = _field_hits(terms.phrases, summary)
+    url_phrase_hits, _ = _field_hits(terms.phrases, url_text)
+
+    title_token_hits, title_token_matched = _field_hits(terms.tokens, title)
+    summary_token_hits, summary_token_matched = _field_hits(terms.tokens, summary)
+    url_token_hits, _ = _field_hits(terms.tokens, url_text)
+
+    matched_phrases = set(title_phrase_matched + summary_phrase_matched)
+    matched_tokens = set(title_token_matched + summary_token_matched)
+
+    phrase_count = max(len(terms.phrases), 1)
+    token_count = max(len(terms.tokens), 1)
+
+    phrase_coverage = len(matched_phrases) / phrase_count
+    token_coverage = len(matched_tokens) / token_count if terms.tokens else 0.0
+
+    weighted_hits = (
+        title_phrase_hits * 5.0
+        + summary_phrase_hits * 3.0
+        + url_phrase_hits * 1.5
+        + title_token_hits * 2.0
+        + summary_token_hits * 1.2
+        + url_token_hits * 0.6
+    )
+    max_weight = phrase_count * 5.0 + token_count * 2.0
+    density = weighted_hits / max_weight if max_weight else 0.0
+
+    # Prefer results that cover most comma/space-separated keywords, not just one token.
+    base = 0.50 * phrase_coverage + 0.25 * token_coverage + 0.25 * density
+
+    if terms.phrases and len(matched_phrases) == len(terms.phrases):
+        base += 0.12
+    elif terms.phrases and len(matched_phrases) >= max(2, len(terms.phrases) // 2):
+        base += 0.05
+
+    if not matched_phrases and not matched_tokens:
+        return 0.0
+
+    intent_terms = _query_intent_terms(query)
+    has_intent = _result_has_intent(intent_terms, title, summary, url_text)
+    if intent_terms:
+        if has_intent:
+            # Title/URL intent hits are strong relevance signals.
+            title_blob = _normalize_text(f"{title} {url_text}")
+            if any(term in title_blob for term in intent_terms):
+                base += 0.18
+            else:
+                base += 0.08
+        else:
+            # City-only encyclopedia / tourism pages: keep weakly, never top.
+            base = min(base, 0.12)
+
+    # Preserve a small Bing-rank prior only among keyword-matched results.
+    # Skip rank inflation for intent-missing pages so Baike can't ride Bing order.
+    rank_bonus = 0.0 if (intent_terms and not has_intent) else max(0.0, (10 - rank) * 0.012)
+    return min(1.0, base + rank_bonus)
+
+
+def _collect_matched_keywords(query: str, title: str, summary: str, url: str) -> list[str]:
+    terms = parse_query_terms(query)
+    parsed = urlparse(url)
+    url_text = unquote(f"{parsed.netloc}{parsed.path}".replace("-", " ").replace("_", " "))
+    combined = " ".join([title, summary, url_text])
+
+    matched: list[str] = []
+    seen: set[str] = set()
+    for item in terms.phrases + terms.tokens:
+        if item in _normalize_text(combined) and item not in seen:
+            seen.add(item)
+            matched.append(item)
+    return matched
+
+
+def merge_and_rank_results(
+    queries: list[str],
+    search_results_list: list[list[dict[str, str]]],
+    *,
+    min_score: float = 0.08,
+    ad_str_list: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """
+    Merge multi-query results, attach query provenance, score, filter, and sort.
+
+    Returns results with fields: title, url, summary, snippet, relevance_score,
+    matched_queries, matched_keywords, match_count.
+    """
+    ad_str_list = ad_str_list or []
+    aggregated: dict[str, dict] = {}
+
+    for query, result_list in zip(queries, search_results_list, strict=False):
+        for rank, result in enumerate(result_list):
+            url = (result.get("url") or "").strip()
+            # Drop Bing SERP chrome links; keep synthetic answer-card URLs and externals.
+            if not url or (url.startswith("https://cn.bing.com/") and result.get("result_type") != "answer_card"):
+                continue
+            if url.startswith("https://cn.bing.com/") and result.get("result_type") == "answer_card":
+                # Prefer synthetic scheme so answer cards are not discarded as chrome links.
+                kind = result.get("card_kind") or "generic"
+                url = f"bing-answer://{kind}/{quote(query.strip() or 'query')}"
+
+            title = result.get("title") or ""
+            summary = result.get("summary") or result.get("snippet") or ""
+            if any(ad in summary for ad in ad_str_list):
+                continue
+
+            result_type = result.get("result_type") or "organic"
+            card_kind = result.get("card_kind")
+            score = score_single_result(query, title, summary, url, rank=rank)
+            if result_type == "answer_card":
+                # Visible SERP widgets are what users see first — prefer them.
+                score = min(1.0, score + (0.22 if card_kind == "weather" else 0.16))
+            matched_keywords = _collect_matched_keywords(query, title, summary, url)
+
+            if url not in aggregated:
+                aggregated[url] = {
+                    "title": title,
+                    "summary": summary,
+                    "bing_region": result.get("bing_region"),
+                    "result_type": result_type,
+                    "card_kind": card_kind,
+                    "query_scores": {},
+                    "matched_queries": [],
+                    "matched_keywords": [],
+                    "best_rank": rank,
+                }
+
+            entry = aggregated[url]
+            entry["query_scores"][query] = max(entry["query_scores"].get(query, 0.0), score)
+            entry["matched_queries"].append(query)
+            entry["best_rank"] = min(entry["best_rank"], rank)
+            if result_type == "answer_card":
+                entry["result_type"] = "answer_card"
+                if card_kind:
+                    entry["card_kind"] = card_kind
+
+            for keyword in matched_keywords:
+                if keyword not in entry["matched_keywords"]:
+                    entry["matched_keywords"].append(keyword)
+
+            if score >= entry.get("_best_single_score", 0.0):
+                entry["_best_single_score"] = score
+                entry["title"] = title
+                entry["summary"] = summary
+                if result.get("bing_region"):
+                    entry["bing_region"] = result["bing_region"]
+
+    ranked: list[dict[str, str]] = []
+    for url, entry in aggregated.items():
+        match_count = len(set(entry["matched_queries"]))
+        best_single = max(entry["query_scores"].values()) if entry["query_scores"] else 0.0
+        cross_bonus = (match_count - 1) * 0.12 if best_single > 0 else 0.0
+        # Do not double-count Bing rank: score_single_result already applied a prior.
+        # Only a tiny merge-time nudge remains for multi-query consensus pages.
+        keyword_bonus = min(0.08, max(0, len(entry["matched_keywords"]) - 1) * 0.02)
+        final_score = min(1.0, best_single + cross_bonus + keyword_bonus)
+
+        matched = list(dict.fromkeys(entry["matched_queries"]))
+        summary = entry["summary"]
+        item: dict[str, str] = {
+            "title": entry["title"],
+            "url": url,
+            "summary": summary,
+            "snippet": summary,
+            "relevance_score": round(final_score, 3),
+            "matched_queries": matched,
+            "matched_keywords": entry["matched_keywords"],
+            "match_count": match_count,
+            "result_type": entry.get("result_type") or "organic",
+        }
+        if entry.get("card_kind"):
+            item["card_kind"] = entry["card_kind"]
+        if entry.get("bing_region"):
+            item["bing_region"] = entry["bing_region"]
+        ranked.append(item)
+
+    ranked.sort(
+        key=lambda item: (
+            -item["relevance_score"],
+            0 if item.get("result_type") == "answer_card" else 1,
+            -len(item["matched_keywords"]),
+            -item["match_count"],
+            item["url"],
+        )
+    )
+
+    filtered = [
+        item
+        for item in ranked
+        if (item["relevance_score"] >= min_score and item["matched_keywords"]) or item["match_count"] >= 2
+    ]
+    if not filtered and ranked:
+        keep = max(3, len(queries))
+        filtered = ranked[:keep]
+
+    return filtered

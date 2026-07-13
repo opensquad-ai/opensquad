@@ -1,0 +1,113 @@
+{
+  "name": "self_learn",
+  "display_name": "Self Learn",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Continuous self-learning: archive compression summaries, background sub-agent learning, idle/interval triggers, import/export.",
+  "author": "OpenSquad",
+  "tags": [
+    "memory",
+    "learning"
+  ],
+  "tools": [
+    {
+      "name": "self_learn",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "idle_auto_enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically start a learn run after the user is idle long enough."
+      },
+      "idle_minutes": {
+        "type": "integer",
+        "default": 30,
+        "description": "Minutes without user interaction before idle auto-learn may start."
+      },
+      "cooldown_hours": {
+        "type": "integer",
+        "default": 24,
+        "description": "Minimum hours between successful auto learn runs."
+      },
+      "interval_hours": {
+        "type": "integer",
+        "default": 0,
+        "description": "Optional wall-clock interval in hours (0 = disabled)."
+      },
+      "allow_agent_md_auto": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow auto learn runs to patch agent.md (still requires evidence gate)."
+      },
+      "allow_reminder_auto": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow auto learn runs to create reminders."
+      },
+      "scheduler_tick_seconds": {
+        "type": "integer",
+        "default": 60,
+        "description": "How often the idle/interval scheduler checks conditions."
+      }
+    }
+  },
+  "config_schema": {
+    "idle_auto_enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Automatically start a learn run after the user is idle long enough."
+    },
+    "idle_minutes": {
+      "type": "integer",
+      "default": 30,
+      "description": "Minutes without user interaction before idle auto-learn may start."
+    },
+    "cooldown_hours": {
+      "type": "integer",
+      "default": 24,
+      "description": "Minimum hours between successful auto learn runs."
+    },
+    "interval_hours": {
+      "type": "integer",
+      "default": 0,
+      "description": "Optional wall-clock interval in hours (0 = disabled)."
+    },
+    "allow_agent_md_auto": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow auto learn runs to patch agent.md (still requires evidence gate)."
+    },
+    "allow_reminder_auto": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow auto learn runs to create reminders."
+    },
+    "scheduler_tick_seconds": {
+      "type": "integer",
+      "default": 60,
+      "description": "How often the idle/interval scheduler checks conditions."
+    }
+  },
+  "contributes": {
+    "views": [
+      {
+        "name": "panel",
+        "title": "Self Learn",
+        "icon": "GraduationCap",
+        "data_endpoint": "/api/plugins/self_learn/data"
+      }
+    ]
+  },
+  "dependencies": {
+    "pip": []
+  }
+}

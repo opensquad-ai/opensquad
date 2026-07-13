@@ -73,6 +73,7 @@ import {
   attachShellJobsToDisplayItems,
   seedShellStreamFromToolCall,
   sealShellStreamFromResult,
+  rebuildShellStreamsFromTimeline,
   type ShellStreamState,
 } from '../utils/shellJobGrouping';
 
@@ -182,6 +183,12 @@ const WorkflowBlockView: React.FC<{
   );
   const totalEvents = displayItems.length;
   const effectivelyCompleted = shouldTreatWorkflowComplete(block);
+  // After restart/hydrate, completed blocks used to paginate to the last 10 items
+  // and hide earlier DelegateFold / ShellJobFold. Keep folds always expanded.
+  const hasFolds = useMemo(
+    () => displayItems.some((i) => i.kind === 'delegation' || i.kind === 'shell_job'),
+    [displayItems],
+  );
   const [visibleCount, setVisibleCount] = useState(() =>
     totalEvents <= WORKFLOW_EVENTS_PAGE_SIZE ? totalEvents : WORKFLOW_EVENTS_PAGE_SIZE
   );
@@ -189,23 +196,18 @@ const WorkflowBlockView: React.FC<{
   // While the workflow is active, auto-grow visibleCount to always show all events.
   // This prevents the sliding-window effect where new events push user-expanded
   // tool calls out of the visible range.
-  // For completed workflows, the count is frozen so the user can use "Show more".
+  // For completed workflows, the count is frozen so the user can use "Show more"
+  // — unless the block contains sub-agent / CMD folds (always show full nest).
   useEffect(() => {
-    if (!effectivelyCompleted) {
-      // Active: show everything — no events ever get hidden during live work
+    if (!effectivelyCompleted || hasFolds) {
       setVisibleCount(totalEvents);
     } else if (visibleCount > totalEvents) {
-      // Completed and somehow over total (shouldn't happen, but guard it)
       setVisibleCount(totalEvents);
     }
-    // Completed + visibleCount <= totalEvents: leave as-is (user controls via "Show more")
-  }, [totalEvents, effectivelyCompleted]);
+  }, [totalEvents, effectivelyCompleted, hasFolds]);
 
-  // For active (non-completed) workflows, always show ALL events during render.
-  // This prevents a one-frame flash where useEffect hasn't yet updated visibleCount,
-  // causing expanded tool calls to be sliced out of the DOM and losing the
-  // data-tool-expanded attribute that freezes auto-scroll.
-  const effectiveCount = effectivelyCompleted ? visibleCount : totalEvents;
+  // For active workflows (or completed ones with folds), always show ALL events.
+  const effectiveCount = (!effectivelyCompleted || hasFolds) ? totalEvents : visibleCount;
   const hiddenCount = Math.max(0, totalEvents - effectiveCount);
   const visibleItems = hiddenCount <= 0
     ? displayItems
@@ -676,10 +678,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [pendingCollapsed, setPendingCollapsed] = useState(false);
   const pendingMessagesRef = useRef<PendingMessage[]>([]);
   const isFlushingPendingRef = useRef(false);
-  /** After releasing a message, block further auto-drain until agent becomes busy once. */
-  const waitForBusyAfterPendingSendRef = useRef(false);
+  /** Blocks rapid double-send until the backend acknowledges the outbound turn. */
+  const outboundTurnPendingRef = useRef(false);
+  const outboundTurnPendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingQueueHydratedKeyRef = useRef<string | null>(null);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
+
+  const clearOutboundTurnPending = useCallback(() => {
+    outboundTurnPendingRef.current = false;
+    if (outboundTurnPendingTimerRef.current) {
+      clearTimeout(outboundTurnPendingTimerRef.current);
+      outboundTurnPendingTimerRef.current = null;
+    }
+  }, []);
+
+  const armOutboundTurnPending = useCallback(() => {
+    outboundTurnPendingRef.current = true;
+    if (outboundTurnPendingTimerRef.current) {
+      clearTimeout(outboundTurnPendingTimerRef.current);
+    }
+    // Safety valve: never leave the send gate latched if status events were missed.
+    outboundTurnPendingTimerRef.current = setTimeout(() => {
+      outboundTurnPendingRef.current = false;
+      outboundTurnPendingTimerRef.current = null;
+    }, 8000);
+  }, []);
 
   const pendingQueueStorageKey = useCallback((sid?: string | null) => {
     const sessionPart = (sid || currentSessionId || 'nosession').trim() || 'nosession';
@@ -1396,7 +1419,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           return;
         }
         setTimeline(prev => appendWorkflowEvent(prev, event, 'Thinking...'));
-        setAgentStatus('thinking');
+        // Background sub-agents (self-learn / delegate) must not flip the parent
+        // chat into "thinking" — otherwise the Stop button stays on and the
+        // idle message queue never drains after the sub-agent finishes.
+        if (!isSubAgent) {
+          setAgentStatus('thinking');
+        }
       }
     });
 
@@ -1836,6 +1864,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             : undefined,
       };
       setTimeline(prev => appendWorkflowEvent(prev, event, summary));
+      // Self-Learn runs outside a parent turn; nested thoughts used to leave the
+      // chat stuck on "thinking". Only release for Self-Learn completions.
+      const subEvt =
+        typeof detailed === 'object' && detailed !== null
+          ? String((detailed as any).event || '')
+          : '';
+      const subLabel =
+        typeof detailed === 'object' && detailed !== null
+          ? String((detailed as any).sub_task_label || (detailed as any).message || '')
+          : '';
+      if (
+        isSubAgent &&
+        subEvt === 'sub_agent_result' &&
+        /self-learn|self_learn/i.test(subLabel)
+      ) {
+        setAgentStatus((prev) => (prev === 'thinking' ? 'idle' : prev));
+        setIsStreaming(false);
+      }
     });
 
     // Turn start — reset streaming state and record workflow start timestamp (first turn only)
@@ -1878,6 +1924,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             : 0;
       if (isRealWorkflow || numericTurn >= 1) {
         setAgentStatus('thinking');
+        clearOutboundTurnPending();
       }
       if (isRealWorkflow && isFirstTurn) {
         const startedMs = (data as any).started_ms as number;
@@ -2222,6 +2269,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 return merged;
               });
+              // Restore CMD panels from disk; keep any live streams preferred.
+              setShellStreams((live) => ({
+                ...rebuildShellStreamsFromTimeline(nextEntries),
+                ...live,
+              }));
             } else {
               // Full replace path (connect / session switch / refresh).
               const bufferedWf = pendingHydrationWorkflowEventsRef.current;
@@ -2231,6 +2283,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 withBuffered = appendWorkflowEvent(withBuffered, event, status);
               }
               setTimeline(withBuffered);
+              setShellStreams(rebuildShellStreamsFromTimeline(withBuffered));
             }
             sessionBootstrapDoneRef.current = true;
             currentSessionIdRef.current = currentSid;
@@ -3220,12 +3273,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const skillDir = pendingSkill?.dir || '';
     if (!text && images.length === 0 && attachments.length === 0 && !skillDir) return;
 
-    // Park when agent is busy, OR a turn was just released and we are waiting
-    // for busy status, OR there are already queued messages (keep FIFO order).
-    // This prevents rapid idle sends from all racing to the backend at once.
+    // Park when agent is busy, OR an outbound turn is still being acknowledged, OR
+    // there are already queued messages (keep FIFO order).
     const shouldQueue =
       isAgentBusy ||
-      waitForBusyAfterPendingSendRef.current ||
+      outboundTurnPendingRef.current ||
       isFlushingPendingRef.current ||
       pendingMessagesRef.current.length > 0;
 
@@ -3259,7 +3311,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return;
     }
 
-    waitForBusyAfterPendingSendRef.current = true;
+    armOutboundTurnPending();
     deliverMessage(
       {
         text,
@@ -3282,7 +3334,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Remove from the pending queue first so it doesn't get double-sent by the
     // idle auto-flush.
     setPendingMessages(prev => prev.filter(m => m.id !== id));
-    waitForBusyAfterPendingSendRef.current = true;
+    armOutboundTurnPending();
     deliverMessage(
       {
         text: target.text,
@@ -3306,7 +3358,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (queue.length === 0) return;
     const next = queue[0];
     setPendingMessages(prev => prev.filter(m => m.id !== next.id));
-    waitForBusyAfterPendingSendRef.current = true;
+    armOutboundTurnPending();
     deliverMessage(
       {
         text: next.text,
@@ -3322,25 +3374,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // Clear the entire queue without sending anything.
   const handleCancelAllPending = useCallback(() => {
     setPendingMessages([]);
-    waitForBusyAfterPendingSendRef.current = false;
-  }, []);
+    clearOutboundTurnPending();
+  }, [clearOutboundTurnPending]);
 
   // Auto-drain: when idle, release exactly ONE pending message, then wait until
-  // the agent becomes busy (and later idle again) before releasing the next.
+  // the agent picks up the turn before releasing the next.
   useEffect(() => {
-    if (isAgentBusy) {
-      // Agent picked up the released turn — allow another drain on the next idle.
-      waitForBusyAfterPendingSendRef.current = false;
+    if (isAgentBusy || isStreaming) {
+      clearOutboundTurnPending();
       return;
     }
     if (isFlushingPendingRef.current) return;
-    if (waitForBusyAfterPendingSendRef.current) return;
+    if (outboundTurnPendingRef.current) return;
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
 
     const next = queue[0];
     isFlushingPendingRef.current = true;
-    waitForBusyAfterPendingSendRef.current = true;
+    armOutboundTurnPending();
     setPendingMessages((prev) => prev.filter((m) => m.id !== next.id));
     deliverMessage(
       {
@@ -3353,7 +3404,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       { clearInputState: false, salvageStream: false },
     );
     setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
-  }, [isAgentBusy, deliverMessage]);
+  }, [isAgentBusy, isStreaming, pendingMessages.length, deliverMessage, armOutboundTurnPending, clearOutboundTurnPending]);
+
+  useEffect(() => () => {
+    if (outboundTurnPendingTimerRef.current) {
+      clearTimeout(outboundTurnPendingTimerRef.current);
+    }
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -3455,7 +3512,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       localStorage.removeItem(pendingQueueStorageKey(null));
     } catch { /* ignore */ }
     setPendingMessages([]);
-    waitForBusyAfterPendingSendRef.current = false;
+    clearOutboundTurnPending();
     pendingQueueHydratedKeyRef.current = null;
     pendingSessionTitleRef.current = null;
     // Folder-scoped new session: bind cwd to that project path immediately.
@@ -3506,6 +3563,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (sidChanged || msgCount === 0) {
           const entries = buildTimelineFromSession(session?.messages || [], session?.events || []);
           setTimeline(entries);
+          setShellStreams(rebuildShellStreamsFromTimeline(entries));
           if (currentSid) {
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
@@ -3553,6 +3611,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           session.events || [],
         );
         setTimeline(entries);
+        setShellStreams(rebuildShellStreamsFromTimeline(entries));
         setCurrentSessionId(sessionId);
         currentSessionIdRef.current = sessionId;
         viewingHistorySessionRef.current = true;
@@ -3593,6 +3652,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           session.events || [],
         );
         setTimeline(entries);
+        setShellStreams(rebuildShellStreamsFromTimeline(entries));
         historyOffsetRef.current = session.messages?.length || 0;
         setHasMoreHistory(session.has_more ?? false);
       }
@@ -3988,21 +4048,46 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Messages Area */}
         <div className="flex-1 relative min-h-0" style={{ minHeight: 0 }}>
-        <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
-          {isSolo && soloUserNavNodes.length > 0 && (
-            <div
-              className="pointer-events-none sticky top-0 z-30 float-right w-0 h-0"
-              aria-hidden={false}
-            >
-              <div className="pointer-events-auto absolute right-0 top-[42vh] -translate-y-1/2 translate-x-[-4px]">
-                <SoloUserNavRail
-                  nodes={soloUserNavNodes}
-                  activeId={soloUserNavNodes[soloUserNavNodes.length - 1]?.id}
-                  onJump={jumpToSoloUserMessage}
-                />
-              </div>
+        {/* Solo: pin jump rail + top/bottom scroll to panel far-right (outside padded scroll / max-w column) */}
+        {isSolo && soloUserNavNodes.length > 0 && (
+          <div className="pointer-events-none absolute inset-y-0 right-0 z-30 w-0">
+            <div className="pointer-events-auto absolute right-1 top-[42vh] -translate-y-1/2">
+              <SoloUserNavRail
+                nodes={soloUserNavNodes}
+                activeId={soloUserNavNodes[soloUserNavNodes.length - 1]?.id}
+                onJump={jumpToSoloUserMessage}
+              />
             </div>
-          )}
+          </div>
+        )}
+        {isSolo && (showScrollTop || showScrollBottom) && (
+          <div
+            className="pointer-events-none absolute right-1 bottom-4 z-20 transition-opacity duration-300"
+            style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
+          >
+            <div className="pointer-events-auto flex flex-col gap-2">
+              {showScrollTop && (
+                <button
+                  onClick={scrollToTop}
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  title="Scroll to top"
+                >
+                  <ChevronUp size={18} className="text-gray-500" />
+                </button>
+              )}
+              {showScrollBottom && (
+                <button
+                  onClick={scrollToBottom}
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  title="Scroll to bottom"
+                >
+                  <ChevronDown size={18} className="text-gray-500" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
           <div className={soloColumnClass}>
           {!hasContent && !isLoadingSession && (
             <div className="flex flex-col items-center justify-center h-full text-textMuted">
@@ -4244,9 +4329,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           )}
 
           <div ref={chatEndRef} />
+          </div>
 
-          {/* Scroll-to-top / scroll-to-bottom floating buttons */}
-          {(showScrollTop || showScrollBottom) && (
+          {/* Classic: scroll-to-top / scroll-to-bottom (solo buttons are on the outer panel edge) */}
+          {!isSolo && (showScrollTop || showScrollBottom) && (
             <div
               className="sticky bottom-4 z-10 pointer-events-none flex justify-end pr-1 transition-opacity duration-300"
               style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
@@ -4273,7 +4359,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               </div>
             </div>
           )}
-          </div>
         </div>
         </div>
 

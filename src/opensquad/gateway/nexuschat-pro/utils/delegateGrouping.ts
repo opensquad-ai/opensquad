@@ -27,7 +27,7 @@ export type DisplayWorkflowItem =
 
 /** True parent delegate entrypoints — short, dotted, or Native FC `__` names. */
 const DELEGATE_ENTRY_RE =
-  /(?:^|[.__])delegate_task(_submit)?$/i;
+  /(?:^|[.__])(?:delegate_task(_submit)?|self_learn(?:[._]|__)+start_learn)$/i;
 const DELEGATE_RESULT_RE =
   /(?:^|[.__])delegate_task(_result)?$/i;
 
@@ -114,6 +114,15 @@ export function extractDelegatePrompt(evt: WorkflowEvent): string {
 }
 
 export function extractDelegateLabel(evt: WorkflowEvent, prompt: string): string {
+  const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  const toolName = String(data.name || data.tool || '');
+  if (/self_learn/i.test(toolName)) {
+    if (evt.subTaskLabel && evt.subTaskLabel.trim()) {
+      const t = evt.subTaskLabel.trim();
+      return t.length > 72 ? `${t.slice(0, 72)}…` : t;
+    }
+    return 'Self-Learn';
+  }
   if (evt.subTaskLabel && evt.subTaskLabel.trim()) {
     const t = evt.subTaskLabel.trim();
     return t.length > 72 ? `${t.slice(0, 72)}…` : t;

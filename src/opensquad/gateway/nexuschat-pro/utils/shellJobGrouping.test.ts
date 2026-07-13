@@ -8,6 +8,7 @@ import {
   isShellJobStillRunningAck,
   isShellJobToolName,
   isShellPollToolName,
+  rebuildShellStreamsFromEvents,
   sealShellStreamFromResult,
   type ShellStreamState,
 } from './shellJobGrouping';
@@ -84,5 +85,24 @@ describe('shellJobGrouping', () => {
     };
     streams = applyJobStdout(streams, { job_id: 'job9', chunk: 'hi\n' });
     expect(streams.c1.output).toBe('hi\n');
+  });
+
+  it('rebuilds shell streams from persisted tool_call+result after refresh', () => {
+    const events: WorkflowEvent[] = [
+      {
+        type: 'tool_call',
+        content: {
+          id: 'c1',
+          name: 'system__start_job',
+          args: JSON.stringify({ command: 'echo hi' }),
+        },
+        result: JSON.stringify({ status: 'success', completed: true, output: 'hi\n', job_id: 'j1' }),
+        timestamp: 1,
+      },
+    ];
+    const streams = rebuildShellStreamsFromEvents(events);
+    expect(streams.c1?.state).toBe('done');
+    expect(streams.c1?.output).toContain('hi');
+    expect(streams.c1?.command).toContain('echo');
   });
 });

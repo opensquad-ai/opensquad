@@ -347,6 +347,57 @@ export function sealShellStreamFromResult(
   };
 }
 
+/** Rebuild CMD panel state from persisted workflow events after refresh/restart. */
+export function rebuildShellStreamsFromEvents(
+  events: WorkflowEvent[],
+): Record<string, ShellStreamState> {
+  let streams: Record<string, ShellStreamState> = {};
+  for (const evt of events) {
+    if (evt.type === 'tool_call' && isShellJobToolCall(evt)) {
+      streams = seedShellStreamFromToolCall(streams, evt);
+      if (evt.result != null && evt.result !== '') {
+        const callId = parentCallId(evt);
+        if (callId) streams = sealShellStreamFromResult(streams, callId, evt.result);
+      }
+      continue;
+    }
+    if (evt.type === 'tool_result' && !evt.subAgent && isShellJobToolName(toolNameOfEvent(evt))) {
+      const callId = parentCallId(evt);
+      if (!callId) continue;
+      if (!streams[callId]) {
+        streams = {
+          ...streams,
+          [callId]: {
+            callId,
+            output: '',
+            state: 'running',
+            command: extractShellCommand({ ...evt, type: 'tool_call' } as WorkflowEvent),
+          },
+        };
+      }
+      const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+      const result = (data as any).result ?? evt.content;
+      streams = sealShellStreamFromResult(streams, callId, result);
+    }
+  }
+  return streams;
+}
+
+/** Merge shell streams from every workflow block on a timeline. */
+export function rebuildShellStreamsFromTimeline(
+  timeline: Array<{ kind: string; data?: { events?: WorkflowEvent[] } }>,
+): Record<string, ShellStreamState> {
+  let streams: Record<string, ShellStreamState> = {};
+  for (const entry of timeline) {
+    if (entry.kind !== 'workflow') continue;
+    const events = entry.data?.events || [];
+    const part = rebuildShellStreamsFromEvents(events);
+    if (Object.keys(part).length === 0) continue;
+    streams = { ...streams, ...part };
+  }
+  return streams;
+}
+
 /** After start_job returns job_id, attach it onto the running stream for job_id-based matching. */
 export function attachJobIdToStream(
   prev: Record<string, ShellStreamState>,

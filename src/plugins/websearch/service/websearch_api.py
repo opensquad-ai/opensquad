@@ -6,10 +6,12 @@ from playwright.async_api import Browser, BrowserContext, async_playwright
 
 try:
     from .fetch_content import fetch_page_content_async
+    from .relevance import merge_and_rank_results
     from .wash_content import wash_content
     from .web_crawler import search_with_bing_playwright
 except ImportError:
     from fetch_content import fetch_page_content_async
+    from relevance import merge_and_rank_results
     from wash_content import wash_content
     from web_crawler import search_with_bing_playwright
 
@@ -139,23 +141,39 @@ async def search_links_async(
     search_tasks = [search_with_bing_playwright(browser, query, max_results=max_results_per_query) for query in queries]
     search_results_list = await asyncio.gather(*search_tasks)
 
-    unique_results = {}
-    for result_list in search_results_list:
-        for result in result_list:
-            if result["url"] not in unique_results:
-                skip = False
-                for ad_str in ad_str_list:
-                    if ad_str in result["summary"]:
-                        skip = True
-                        break
-                if not skip:
-                    unique_results[result["url"]] = result
-
-    results = list(unique_results.values())
+    results = merge_and_rank_results(
+        queries,
+        search_results_list,
+        ad_str_list=ad_str_list,
+    )
     elapsed = time.time() - start_time
     print(f"--- API 1: Finished. Found {len(results)} unique links in {elapsed:.2f}s ---")
     _cache_set(_search_cache, cache_key, results)
     return results
+
+
+_BLOCK_MARKERS = (
+    "Forbid_code",
+    "Forbid_code:",
+    "您当前请求存在异常，暂时限制本次访问",  # noqa: RUF001
+    "访问频率过高",
+    "当前访问行为存在异常",
+)
+
+
+def _is_blocked_page(text: str | None) -> bool:
+    if not text:
+        return False
+    sample = text[:4000]
+    return any(marker in sample for marker in _BLOCK_MARKERS)
+
+
+def _blocked_page_message(url: str) -> str:
+    return (
+        f"[blocked] Site rejected automated fetch for {url} "
+        f"(e.g. Forbid_code / WAF). Do not retry fetch/fetch_html on this URL. "
+        f"Use websearch.search snippets or answer_card summaries, or try another source."
+    )
 
 
 # ── API 2: Fetch + wash ───────────────────────────────────────────────
@@ -186,12 +204,23 @@ async def fetch_and_wash_urls_async(url_infos: list[str], headless: bool = True)
     async def _process_single(url):
         async with sem:
             content = await fetch_page_content_async(ctx, url)
-            if content:
-                loop = asyncio.get_running_loop()
-                washed = await loop.run_in_executor(None, wash_content, content, url)
-                if washed and "您当前请求存在异常，暂时限制本次访问" not in washed:  # noqa: RUF001
-                    result[url] = washed
-                    _cache_set(_fetch_cache, url, washed)
+            if not content:
+                return
+            if _is_blocked_page(content):
+                msg = _blocked_page_message(url)
+                result[url] = msg
+                _cache_set(_fetch_cache, url, msg)
+                print(f"--- [BLOCKED] {url} ---")
+                return
+            loop = asyncio.get_running_loop()
+            washed = await loop.run_in_executor(None, wash_content, content, url)
+            if washed and not _is_blocked_page(washed):
+                result[url] = washed
+                _cache_set(_fetch_cache, url, washed)
+            elif washed and _is_blocked_page(washed):
+                msg = _blocked_page_message(url)
+                result[url] = msg
+                _cache_set(_fetch_cache, url, msg)
 
     await asyncio.gather(*[_process_single(url) for url in uncached_urls])
 
@@ -212,11 +241,13 @@ async def fetch_html_content_async(url: str | None = None, headless: bool = True
     start_time = time.time()
     ctx = await _get_context(headless)
     content = await fetch_page_content_async(ctx, url)
+    if content and _is_blocked_page(content):
+        content = _blocked_page_message(url)
     if content:
         _cache_set(_fetch_cache, url, content)
     elapsed = time.time() - start_time
     print(f"--- API 3: Finished in {elapsed:.2f}s ---")
-    return content
+    return content or ""
 
 
 # --- Demo: how to use the new API in two steps ---

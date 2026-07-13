@@ -8,6 +8,32 @@ from typing import Any, Union
 from .log_setup import get_tool_call_debug_logger
 from .tool import logger
 
+# When the model omits the namespace (e.g. calls bare ``memory_write``), resolve
+# against registered tools. Prefer these namespaces on name collisions.
+_BARE_NAME_NS_PRIORITY: tuple[str, ...] = (
+    "memory",  # legacy registration name used by some runners
+    "long_memory",  # agents_boot registration name
+    "filesystem",
+    "system",
+    "im",
+    "help",
+    "agent_mode",
+    "collaboration",
+    "agent_setup",
+    "workspace",
+    "task_watch",
+    "delegate_task",
+)
+
+# Hard preferences for well-known prompt shorthand → try these namespaces first
+# for that function name (still must exist on the registered module).
+_BARE_TOOL_PREFERRED_NS: dict[str, tuple[str, ...]] = {
+    "memory_write": ("memory", "long_memory"),
+    "memory_query": ("memory", "long_memory"),
+    "memory_log": ("memory", "long_memory"),
+    "memory_find_chain": ("memory", "long_memory"),
+}
+
 
 class ToolRegistry:
     """Tool discovery and dispatch center"""
@@ -18,6 +44,7 @@ class ToolRegistry:
         self._mcp_adapter = None
         self._desc_cache: str | None = None  # cache for generate_tool_descriptions()
         self._openai_tools_cache: dict[str, list[dict]] = {}  # tool_filter -> cached tools
+        self._bare_name_index: dict[str, list[tuple[str, str]]] | None = None  # fn -> [(ns, level)]
         # Register help tool by default
         self.register(self, "help", level="core")
 
@@ -34,6 +61,7 @@ class ToolRegistry:
             self._tools[namespace] = {"module": tool_set, "level": level}
         self._desc_cache = None  # invalidate cache
         self._openai_tools_cache.clear()
+        self._bare_name_index = None
         logger.info(f"Tool set '{namespace}' registered as [{level}].")
 
     def unregister(self, namespace: str):
@@ -43,6 +71,7 @@ class ToolRegistry:
                 del self._tools[namespace]
                 self._desc_cache = None  # invalidate cache
                 self._openai_tools_cache.clear()
+                self._bare_name_index = None
                 logger.info(f"Tool set '{namespace}' unregistered.")
                 return True
             return False
@@ -143,7 +172,7 @@ class ToolRegistry:
             return list(self._openai_tools_cache[cache_key])
 
         # Define high-frequency and medium-frequency tool namespaces
-        HIGH_FREQ_NAMESPACES = {"filesystem", "system", "websearch", "long_memory", "help"}
+        HIGH_FREQ_NAMESPACES = {"filesystem", "system", "websearch", "long_memory", "memory", "help"}
         MEDIUM_FREQ_NAMESPACES = {"git", "api_process", "vision", "mcp_query", "im", "media", "translate_tool"}
 
         # Determine which namespaces to include
@@ -494,6 +523,78 @@ class ToolRegistry:
             )
         return "\n".join(lines)
 
+    def _build_bare_name_index(self) -> dict[str, list[tuple[str, str]]]:
+        """Map bare function name -> [(namespace, level), ...] across registered tools."""
+        index: dict[str, list[tuple[str, str]]] = {}
+        with self._lock:
+            items = list(self._tools.items())
+        for namespace, info in items:
+            module = info["module"]
+            level = info.get("level") or "extended"
+            members = list(inspect.getmembers(module, inspect.isfunction)) + list(
+                inspect.getmembers(module, inspect.ismethod)
+            )
+            seen: set[int] = set()
+            for name, func in members:
+                if name.startswith("_") or id(func) in seen:
+                    continue
+                seen.add(id(func))
+                index.setdefault(name, []).append((namespace, level))
+        return index
+
+    def _bare_name_index_cached(self) -> dict[str, list[tuple[str, str]]]:
+        if self._bare_name_index is None:
+            self._bare_name_index = self._build_bare_name_index()
+        return self._bare_name_index
+
+    def resolve_bare_tool_name(self, bare_name: str) -> str | None:
+        """
+        Resolve a bare tool name (e.g. ``memory_write``) to ``namespace.function``.
+
+        Rules:
+        1. Preferred namespaces from ``_BARE_TOOL_PREFERRED_NS`` if that ns has the fn
+        2. Unique match across the registry
+        3. On collisions: prefer ``_BARE_NAME_NS_PRIORITY``, then ``core`` level
+        """
+        bare = (bare_name or "").strip()
+        if not bare or "." in bare or "__" in bare:
+            return None
+
+        index = self._bare_name_index_cached()
+        candidates = list(index.get(bare) or [])
+        if not candidates:
+            return None
+
+        preferred = _BARE_TOOL_PREFERRED_NS.get(bare)
+        if preferred:
+            cand_ns = {ns for ns, _ in candidates}
+            for ns in preferred:
+                if ns in cand_ns:
+                    return f"{ns}.{bare}"
+
+        if len(candidates) == 1:
+            return f"{candidates[0][0]}.{bare}"
+
+        # Collision: priority list, then core level, then alphabetical ns for stability.
+        priority = {ns: i for i, ns in enumerate(_BARE_NAME_NS_PRIORITY)}
+
+        def _sort_key(item: tuple[str, str]) -> tuple[int, int, str]:
+            ns, level = item
+            return (
+                priority.get(ns, 10_000),
+                0 if level == "core" else 1,
+                ns,
+            )
+
+        candidates.sort(key=_sort_key)
+        best_ns, _ = candidates[0]
+        # If top-two share the same priority tier and level, treat as ambiguous.
+        if len(candidates) > 1:
+            a, b = candidates[0], candidates[1]
+            if _sort_key(a)[:2] == _sort_key(b)[:2] and a[0] not in priority and b[0] not in priority:
+                return None
+        return f"{best_ns}.{bare}"
+
     async def call(self, tool_name: str, args: str | dict[str, Any]) -> Any:
         """
         Dispatch a tool call
@@ -519,6 +620,25 @@ class ToolRegistry:
             tc_log.info("[registry.call] tool_name=%r, args_dict=%r", tool_name, args)
 
         args = args or {}
+
+        # Translate bare names (memory_write) before plan-gate / dispatch.
+        if (
+            tool_name
+            and "." not in tool_name
+            and "__" not in tool_name
+            and not tool_name.startswith("mcp__")
+            and tool_name not in ("event_pipeline", "help.get_tool_help")
+        ):
+            resolved_early = self.resolve_bare_tool_name(tool_name)
+            if resolved_early:
+                ns0, fn0 = resolved_early.split(".", 1)
+                tc_log.info(
+                    "[registry.call] Bare tool name resolved: %r -> %s__%s",
+                    tool_name,
+                    ns0,
+                    fn0,
+                )
+                tool_name = f"{ns0}__{fn0}"
 
         # Plan-mode gate (defense-in-depth; schema is also filtered)
         try:
@@ -556,7 +676,7 @@ class ToolRegistry:
                 adapter = self._mcp_adapter
             return await adapter.call_tool_async(tool_name, args)
 
-        # Support both formats: namespace.function (XML) and namespace__function (Native FC)
+        # Support both formats: namespace.function (XML) and namespace__function (Native FC).
         if "." in tool_name:
             ns, fn = tool_name.split(".", 1)
         elif "__" in tool_name:
@@ -564,6 +684,16 @@ class ToolRegistry:
             ns, fn = tool_name.split("__", 1)
             tc_log.debug("[registry.call] Converted Native FC format: %s -> %s.%s", tool_name, ns, fn)
         else:
+            # Bare name was not resolvable in the early pass (unknown / ambiguous).
+            candidates = self._bare_name_index_cached().get(tool_name) or []
+            if len(candidates) > 1:
+                opts = ", ".join(f"{ns}__{tool_name}" for ns, _ in candidates)
+                tc_log.warning(
+                    "[registry.call] Ambiguous bare tool name %r. Candidates: %s",
+                    tool_name,
+                    opts,
+                )
+                return f"Error: Ambiguous tool name {tool_name}. Use one of: {opts}"
             tc_log.warning(
                 "[registry.call] INVALID FORMAT: tool_name=%r has neither '.' nor '__'. Registered namespaces: %s",
                 tool_name,

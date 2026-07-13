@@ -1108,6 +1108,26 @@ class AgentRunner:
                         # when realtime WS events are dropped during reconnect.
                         _get_session_manager().add_message("system", summary_text, msg_type="context_summary")
                         await self._emit("info", _summary_evt)
+                        # Archive into self_learn corpus (append-only learning material)
+                        try:
+                            from plugins.self_learn.archive import archive_compression_summary
+
+                            _sm = _get_session_manager()
+                            _title = ""
+                            try:
+                                _title = str((_sm.session_data or {}).get("title") or "")
+                            except Exception:
+                                pass
+                            archive_compression_summary(
+                                summary_text,
+                                session_id=_sm.get_current_session_id() or "",
+                                session_title=_title,
+                                source="manual_compress",
+                                agent_dir=getattr(self, "_agent_dir", None) or None,
+                                agent_id=getattr(self, "_agent_id", "") or "",
+                            )
+                        except Exception:
+                            logger.debug("[Runner] self_learn archive skipped", exc_info=True)
                     self._load_history()
                     self.chat_api.req = self.chat_api._prepare_messages()
                     sid = _get_session_manager().get_current_session_id()
@@ -1823,6 +1843,26 @@ class AgentRunner:
                         # Persist summary to session_data so _load_history() can restore it
                         _get_session_manager().session_data["latest_summary"] = _summary
                         await self._emit("info", _summary_evt)
+                        # Archive into self_learn corpus (append-only learning material)
+                        try:
+                            from plugins.self_learn.archive import archive_compression_summary
+
+                            _sm = _get_session_manager()
+                            _title = ""
+                            try:
+                                _title = str((_sm.session_data or {}).get("title") or "")
+                            except Exception:
+                                pass
+                            archive_compression_summary(
+                                _summary,
+                                session_id=_sm.get_current_session_id() or "",
+                                session_title=_title,
+                                source="auto_compress",
+                                agent_dir=getattr(self, "_agent_dir", None) or None,
+                                agent_id=getattr(self, "_agent_id", "") or "",
+                            )
+                        except Exception:
+                            logger.debug("[Runner] self_learn archive skipped", exc_info=True)
                         # FIX 2: Also emit summary_stream so the frontend can display the summary in the workflow panel.
                         # Auto-compression has no per-chunk streaming, so emit the full summary in one delta with done=true.
                         _ss_id = f"auto_compress_{_get_session_manager().get_current_session_id()}"

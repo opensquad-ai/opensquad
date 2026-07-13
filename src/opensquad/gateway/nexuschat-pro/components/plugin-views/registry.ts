@@ -80,7 +80,11 @@ const PLUGIN_VIEW_LOADERS: Record<string, () => Promise<PluginViewAdapter>> = {
   "long_memory:panel": async () => {
     const { mount, unmount } = await import("./long-memory/LongMemoryPanel");
     return { mount, unmount };
-  }
+  },
+  "self_learn:panel": async () => {
+    const { mount, unmount } = await import("./self-learn/SelfLearnPanel");
+    return { mount, unmount };
+  },
 };
 
 // Adapter cache — avoids re-importing on every mount

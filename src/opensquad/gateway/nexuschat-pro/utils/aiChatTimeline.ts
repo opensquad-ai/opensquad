@@ -99,7 +99,7 @@ function isParentDelegateToolCall(evt: WorkflowEvent): boolean {
   const n = String(data.name || data.tool || '').trim();
   if (!n) return false;
   if (/(?:^|[.__])delegate_task_(result|list)$/i.test(n)) return false;
-  return /(?:^|[.__])delegate_task(_submit)?$/i.test(n);
+  return /(?:^|[.__])(?:delegate_task(_submit)?|self_learn(?:[._]|__)+start_learn)$/i.test(n);
 }
 
 function parseJobIdFromToolResult(result: unknown): string {
