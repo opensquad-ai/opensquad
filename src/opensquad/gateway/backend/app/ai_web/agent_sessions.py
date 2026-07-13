@@ -578,9 +578,21 @@ class AgentSessionReader:
 
                     f = _parse_ts(first_ts)
                     l = _parse_ts(last_ts)
-                    # Primary window: ±30s around message range
+                    # Primary window: ±30s around message range.
+                    # Latest page (offset=0): also keep trailing in-progress events
+                    # after the last message (tool_call_delta / thoughts mid-turn).
                     t_min = f - timedelta(seconds=30)
-                    t_max = l + timedelta(seconds=30)
+                    if offset == 0:
+                        from datetime import timezone as _tz
+
+                        now_utc = datetime.now(_tz.utc)
+                        # Prefer timezone-aware comparison when message ts has tzinfo
+                        if l.tzinfo is not None:
+                            t_max = max(l + timedelta(seconds=30), now_utc)
+                        else:
+                            t_max = max(l + timedelta(seconds=30), datetime.utcnow())
+                    else:
+                        t_max = l + timedelta(seconds=30)
                     paged_events = []
                     for evt in all_events:
                         evt_ts = evt.get("timestamp")

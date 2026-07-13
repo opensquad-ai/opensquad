@@ -1725,6 +1725,43 @@ class ChatAPI:
         stream_ok = False
         _images_stripped = False  # Track if images were stripped due to unsupported error
 
+        # Live tool-arg streaming for Agent Web (write/edit file code blocks).
+        # Also persist throttled snapshots so a page refresh mid-stream can
+        # reconstruct the Writing fold (tool_call only lands when execution starts).
+        if tool_call_strategy and hasattr(tool_call_strategy, "set_delta_callback"):
+            _delta_persist_at: dict[int, float] = {}
+            _delta_persist_interval_s = 0.4
+
+            def _on_tool_call_delta(payload):
+                self._emit_with_sid("tool_call_delta", payload)
+                try:
+                    import time as _time
+
+                    idx = int(payload.get("index", 0) or 0)
+                    now = _time.monotonic()
+                    last = _delta_persist_at.get(idx, 0.0)
+                    force = bool(payload.get("force"))
+                    if not force and (now - last) < _delta_persist_interval_s:
+                        return
+                    _delta_persist_at[idx] = now
+                    call_id = payload.get("id") or f"partial_tc_{idx}"
+                    args = payload.get("arguments") or payload.get("args") or ""
+                    _session_module.get_session_manager().add_event(
+                        "tool_call_delta",
+                        {
+                            "id": call_id,
+                            "index": idx,
+                            "name": payload.get("name") or payload.get("tool") or "Tool",
+                            "arguments": args,
+                            "args": args,
+                            "partial": True,
+                        },
+                    )
+                except Exception:
+                    logger.debug("[ChatAPI] tool_call_delta persist skipped", exc_info=True)
+
+            tool_call_strategy.set_delta_callback(_on_tool_call_delta)
+
         for attempt in range(max_stream_retries + 1):
             got_any_chunk = False
             try:
@@ -1926,6 +1963,9 @@ class ChatAPI:
             full_response.append("\n[Error: Stream interrupted - unknown streaming failure]")
 
         res_text = "".join(full_response)
+        if tool_call_strategy and hasattr(tool_call_strategy, "set_delta_callback"):
+            tool_call_strategy.set_delta_callback(None)
+
         if self.stream_parser:
             self.stream_parser.finish()
 

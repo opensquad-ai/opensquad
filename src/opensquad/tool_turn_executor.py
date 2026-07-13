@@ -163,8 +163,23 @@ class ToolTurnExecutor:
 
         raw_events = get_event_pipeline().drain_sync()
         pipeline_events = await self._drain_pipeline_events(raw_events)
+
+        ui_extras: dict[str, Any] = {}
+        if isinstance(result, dict):
+            for key in ("diff_old", "diff_new", "diff_start_line"):
+                if key in result and result[key] is not None:
+                    ui_extras[key] = result[key]
+            # Prefer human message for LLM / note text (avoid dumping full dict).
+            display = result.get("message")
+            if isinstance(display, str) and display.strip():
+                result_for_text = display
+            else:
+                result_for_text = result
+        else:
+            result_for_text = result
+
         tool_result_text = self.runner._truncate_result_text(
-            str(result) if result else "(empty result)",
+            str(result_for_text) if result_for_text else "(empty result)",
             self._resolve_tool_result_limit(limit_token),
         )
 
@@ -198,6 +213,7 @@ class ToolTurnExecutor:
             "result_text": tool_result_text,
             "call_id": call_id,
             "pipeline_events": pipeline_events,
+            "ui_extras": ui_extras,
         }
 
     async def _run_before_tool_hook(
@@ -430,6 +446,7 @@ class ToolTurnExecutor:
                     "name": entry["name"],
                     "args": entry["args_json"],
                     "result": entry["result_text"],
+                    **(entry.get("ui_extras") or {}),
                 },
                 turn_id=self.runner._current_turn,
                 round_id=self.runner._current_round,
@@ -441,6 +458,7 @@ class ToolTurnExecutor:
                     "name": entry["name"],
                     "args": entry["args_json"],
                     "result": entry["result_text"],
+                    **(entry.get("ui_extras") or {}),
                 },
             )
 

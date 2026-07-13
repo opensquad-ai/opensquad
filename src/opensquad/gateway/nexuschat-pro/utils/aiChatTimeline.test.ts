@@ -7,6 +7,7 @@ import {
   genTimelineUID,
   isToolResultFailure,
   mergeOrphanedToolResultsAcrossWorkflows,
+  sealIncompleteWorkflows,
   shouldTreatWorkflowComplete,
   timelineHasToolEvent,
   type TimelineEntry,
@@ -629,5 +630,122 @@ describe('task_fold / to_user_end_task', () => {
     const folded = foldTaskProcessSinceLastUser(timeline);
     expect(folded.map((e) => e.kind)).toEqual(['message', 'task_fold', 'message']);
     expect(folded[0].kind === 'message' && folded[0].data.role).toBe('user');
+  });
+});
+
+describe('sealIncompleteWorkflows (mid-send)', () => {
+  it('marks incomplete workflows completed and stamps elapsed_ms', () => {
+    const uid = () => genTimelineUID();
+    const started = 1_700_000_000_000;
+    const now = started + 5500;
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'thought', content: 'thinking', timestamp: started }],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+    ];
+    const sealed = sealIncompleteWorkflows(prev, { nowMs: now });
+    expect(sealed[0].kind).toBe('workflow');
+    if (sealed[0].kind !== 'workflow') return;
+    expect(sealed[0].data.completed).toBe(true);
+    expect(sealed[0].data.status).toBeNull();
+    expect(sealed[0].data.elapsed_ms).toBe(5500);
+    expect(sealed[0].data.started_ms).toBe(started);
+  });
+});
+
+describe('buildTimelineFromSession in-progress refresh', () => {
+  it('keeps trailing incomplete workflow with started_ms and partial tool_call_delta', () => {
+    const started = 1_700_000_000_000;
+    const messages = [
+      {
+        role: 'user',
+        content: 'write a file',
+        timestamp: new Date(started - 1000).toISOString(),
+      },
+    ];
+    const events = [
+      {
+        type: 'info',
+        data: { text: 'Workflow started', started_ms: started },
+        timestamp: new Date(started).toISOString(),
+      },
+      {
+        type: 'thought',
+        data: { text: 'planning edit' },
+        timestamp: new Date(started + 200).toISOString(),
+      },
+      {
+        type: 'tool_call_delta',
+        data: {
+          id: 'partial_tc_0',
+          index: 0,
+          name: 'filesystem__write_file',
+          arguments: '{"path":"a.ts","content":"hello',
+          partial: true,
+        },
+        timestamp: new Date(started + 400).toISOString(),
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    expect(tl.map((e) => e.kind)).toEqual(['message', 'workflow']);
+    expect(tl[1].kind === 'workflow' && tl[1].data.completed).toBe(false);
+    expect(tl[1].kind === 'workflow' && tl[1].data.started_ms).toBe(started);
+    if (tl[1].kind !== 'workflow') return;
+    const tools = tl[1].data.events.filter((e) => e.type === 'tool_call');
+    expect(tools).toHaveLength(1);
+    expect(tools[0].content?.partial).toBe(true);
+    expect(String(tools[0].content?.args || tools[0].content?.arguments || '')).toContain('hello');
+  });
+
+  it('promotes partial tool_call_delta into final tool_call with different id', () => {
+    const started = 1_700_000_000_000;
+    const messages = [
+      {
+        role: 'user',
+        content: 'write',
+        timestamp: new Date(started - 1000).toISOString(),
+      },
+    ];
+    const events = [
+      {
+        type: 'info',
+        data: { text: 'Workflow started', started_ms: started },
+        timestamp: new Date(started).toISOString(),
+      },
+      {
+        type: 'tool_call_delta',
+        data: {
+          id: 'stream-id',
+          index: 0,
+          name: 'filesystem__write_file',
+          arguments: '{"path":"a.ts","content":"x"}',
+          partial: true,
+        },
+        timestamp: new Date(started + 100).toISOString(),
+      },
+      {
+        type: 'tool_call',
+        data: {
+          id: 'call_runner_write_0',
+          name: 'filesystem__write_file',
+          args: '{\n  "path": "a.ts",\n  "content": "x"\n}',
+        },
+        timestamp: new Date(started + 200).toISOString(),
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    expect(tl[1].kind).toBe('workflow');
+    if (tl[1].kind !== 'workflow') return;
+    const tools = tl[1].data.events.filter((e) => e.type === 'tool_call');
+    expect(tools).toHaveLength(1);
+    expect(tools[0].content?.id).toBe('call_runner_write_0');
+    expect(tools[0].content?.partial).toBeUndefined();
   });
 });

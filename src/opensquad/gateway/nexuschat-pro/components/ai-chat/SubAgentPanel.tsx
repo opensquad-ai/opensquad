@@ -7,7 +7,7 @@ import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
-import { extractFileEditInfo } from './FileDiffBlock';
+import { extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
 
 export interface SubAgentPanelProps {
@@ -101,8 +101,16 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
     if (evt.type === 'tool_call') {
       const name = toolNameOf(evt);
       const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
-      const argsObj = parseArgs(content.arguments ?? content.args ?? content.input);
-      const fileEdit = extractFileEditInfo(name, argsObj || {});
+      const rawArgs = content.arguments ?? content.args ?? content.input;
+      const argsObj =
+        parseArgs(rawArgs) ||
+        (typeof rawArgs === 'string' ? parsePartialFileToolArgs(rawArgs) : null) ||
+        (typeof rawArgs === 'object' && rawArgs ? rawArgs : null);
+      const fileEdit = applyEditDiffContext(extractFileEditInfo(name, argsObj || {}), {
+        diffOld: evt.diffOld,
+        diffNew: evt.diffNew,
+        diffStartLine: evt.diffStartLine,
+      });
       const running = !evt.result;
       const resultText = formatResult(evt.result);
       const failed =
@@ -111,12 +119,24 @@ function buildNestedLines(events: WorkflowEvent[]): NestedLine[] {
       let primary = name;
       let secondary = '';
       if (fileEdit?.kind === 'read') {
-        primary = failed ? `Failed read ${fileEdit.fileName}` : `Read ${fileEdit.fileName}`;
+        primary = running
+          ? `Reading ${fileEdit.fileName}`
+          : failed
+            ? `Failed read ${fileEdit.fileName}`
+            : `Read ${fileEdit.fileName}`;
         secondary = fileEdit.lineRange || '';
       } else if (fileEdit?.kind === 'write') {
-        primary = failed ? `Failed write ${fileEdit.fileName}` : `Wrote ${fileEdit.fileName}`;
+        primary = running
+          ? `Writing ${fileEdit.fileName}`
+          : failed
+            ? `Failed write ${fileEdit.fileName}`
+            : `Wrote ${fileEdit.fileName}`;
       } else if (fileEdit) {
-        primary = failed ? `Failed edit ${fileEdit.fileName}` : `Edited ${fileEdit.fileName}`;
+        primary = running
+          ? `Editing ${fileEdit.fileName}`
+          : failed
+            ? `Failed edit ${fileEdit.fileName}`
+            : `Edited ${fileEdit.fileName}`;
       } else if (failed) {
         secondary = 'fail';
       }

@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
-import { FileDiffBlock, extractFileEditInfo } from './FileDiffBlock';
+import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
 
 // ---- Markdown renderer (reuses the app-wide prose styles) ----
 
@@ -136,6 +136,10 @@ interface ToolCallBlockProps {
   subTaskLabel?: string;
   /** Global persistence key for open/close state. */
   persistKey?: string;
+  /** Expanded edit snippets from replace_in_file (±context lines). */
+  diffOld?: string;
+  diffNew?: string;
+  diffStartLine?: number;
 }
 
 export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
@@ -146,6 +150,9 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
   subAgent = false,
   subTaskLabel,
   persistKey,
+  diffOld,
+  diffNew,
+  diffStartLine,
 }) => {
   const { t } = useTranslation();
   const storageKey = persistKey ? `tool_call_open_${persistKey}` : null;
@@ -176,13 +183,26 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
   const parsedArgs = useMemo(() => {
     if (!args) return null;
     if (typeof args === 'object') return args;
-    try { return JSON.parse(args); } catch { return null; }
+    try { return JSON.parse(args); } catch {
+      return parsePartialFileToolArgs(String(args));
+    }
   }, [args]);
 
   const fileEditInfo = useMemo(() => {
     if (!parsedArgs) return null;
-    return extractFileEditInfo(toolName, parsedArgs);
-  }, [toolName, parsedArgs]);
+    return applyEditDiffContext(extractFileEditInfo(toolName, parsedArgs), {
+      diffOld,
+      diffNew,
+      diffStartLine,
+    });
+  }, [toolName, parsedArgs, diffOld, diffNew, diffStartLine]);
+
+  // Auto-expand while a file write/edit is still streaming/running.
+  React.useEffect(() => {
+    if (status === 'running' && fileEditInfo && (fileEditInfo.kind === 'write' || fileEditInfo.kind === 'edit')) {
+      setIsOpen(true);
+    }
+  }, [status, fileEditInfo]);
 
   // ---- Derived strings (needed before early return) ----
   const argsStr = args

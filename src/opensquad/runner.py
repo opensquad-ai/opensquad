@@ -1356,8 +1356,12 @@ class AgentRunner:
             # Record the workflow start time (before all turns, set only once)
             self._workflow_started_ms = datetime.now().timestamp() * 1000
             # Persist a workflow start marker so refresh can reconstruct in-progress blocks
+            # (including Working elapsed seconds via started_ms).
             _get_session_manager().add_event(
-                "info", {"text": "Workflow started"}, turn_id=0, round_id=self._current_round
+                "info",
+                {"text": "Workflow started", "started_ms": int(self._workflow_started_ms)},
+                turn_id=0,
+                round_id=self._current_round,
             )
 
             for turn in range(max_turns):

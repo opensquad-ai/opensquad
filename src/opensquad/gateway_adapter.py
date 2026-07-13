@@ -90,6 +90,7 @@ class GatewayAdapter(BaseAgent):
         _sub("thought", self.on_runner_thought)
         _sub("to_user_stream", self.on_runner_stream)
         _sub("tool_call", self.on_tool_call)
+        _sub("tool_call_delta", self.on_tool_call_delta)
         _sub("tool_result", self.on_tool_result)
         # Subscribe to state and system notification events
         _sub("state", self.on_runner_state)
@@ -499,6 +500,13 @@ class GatewayAdapter(BaseAgent):
             sid = self._extract_sid(data)
             content = self._unwrap(data)
             await self._send_event(content, "tool_call", sid=sid)
+
+    async def on_tool_call_delta(self, data):
+        """Incremental native-FC tool arguments (file write/edit streaming preview)."""
+        if self.connected:
+            sid = self._extract_sid(data)
+            content = self._unwrap(data)
+            await self._send_event(content, "tool_call_delta", sid=sid)
 
     async def on_tool_result(self, data):
         """When a tool result is returned (content is a {"id":...,"name":...,"result":...} object)."""

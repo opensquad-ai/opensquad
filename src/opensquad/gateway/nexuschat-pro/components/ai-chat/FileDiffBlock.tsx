@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, CheckCircle, XCircle, Loader2, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
 import { marked } from 'marked';
 import hljs from 'highlight.js/lib/core';
+import { FollowScrollBox } from './FollowScrollBox';
 
 // Register commonly used languages (keep bundle size reasonable)
 import javascript from 'highlight.js/lib/languages/javascript';
@@ -110,8 +111,9 @@ function escapeHtml(s: string): string {
 /**
  * Extract a quoted string field (JSON or Python-repr style) from a tool payload.
  * Handles escapes so `'content': '1: {\\n2: …'` becomes real multiline text.
+ * Also works on incomplete streaming JSON (unterminated string → returns so-far).
  */
-function extractQuotedField(raw: string, field: string): string | null {
+export function extractQuotedField(raw: string, field: string): string | null {
   const keyRe = new RegExp(`['"]${field}['"]\\s*:\\s*`);
   const km = keyRe.exec(raw);
   if (!km) return null;
@@ -144,6 +146,57 @@ function extractQuotedField(raw: string, field: string): string | null {
     if (c === quote) break;
     out += c;
     i += 1;
+  }
+  return out;
+}
+
+/**
+ * Parse complete or partial Native-FC tool arguments JSON for file write/edit preview.
+ */
+export function parsePartialFileToolArgs(raw: string | null | undefined): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>;
+  } catch {
+    // Incomplete streaming JSON — fall through to field extraction.
+  }
+
+  const path =
+    extractQuotedField(trimmed, 'path') ??
+    extractQuotedField(trimmed, 'file_path') ??
+    extractQuotedField(trimmed, 'filepath') ??
+    extractQuotedField(trimmed, 'filename') ??
+    extractQuotedField(trimmed, 'file');
+  const content = extractQuotedField(trimmed, 'content');
+  const newStr =
+    extractQuotedField(trimmed, 'new_str') ??
+    extractQuotedField(trimmed, 'new_string') ??
+    extractQuotedField(trimmed, 'newString') ??
+    extractQuotedField(trimmed, 'newStr');
+  const oldStr =
+    extractQuotedField(trimmed, 'old_str') ??
+    extractQuotedField(trimmed, 'old_string') ??
+    extractQuotedField(trimmed, 'oldString') ??
+    extractQuotedField(trimmed, 'oldStr');
+
+  if (path == null && content == null && newStr == null && oldStr == null) return null;
+
+  const out: Record<string, unknown> = {};
+  if (path != null) out.path = path;
+  if (content != null) out.content = content;
+  if (newStr != null) {
+    out.new_str = newStr;
+    out.new_string = newStr;
+    out.newString = newStr;
+  }
+  if (oldStr != null) {
+    out.old_str = oldStr;
+    out.old_string = oldStr;
+    out.oldString = oldStr;
   }
   return out;
 }
@@ -236,6 +289,8 @@ export interface FileEditInfo {
   addedLines: number;
   removedLines: number;
   lineRange?: string;
+  /** 1-based line number of the first line in oldStr/newStr (for contextual snippets). */
+  startLine?: number;
 }
 
 // ============================================================
@@ -315,10 +370,13 @@ export function extractFileEditInfo(toolName: string, args: any): FileEditInfo |
 
   const isWriteTool =
     nameLower.includes('write_file') ||
+    nameLower.includes('create_file') ||
+    nameLower.includes('write_to_file') ||
     (nameLower.includes('write') && args.content !== undefined);
 
-  if (isWriteTool && args.content !== undefined) {
-    const content = String(args.content);
+  // Allow streaming preview: write_file with path only (content still arriving).
+  if (isWriteTool && (args.content !== undefined || nameLower.includes('write_file') || nameLower.includes('create_file'))) {
+    const content = args.content !== undefined ? String(args.content) : '';
     const lines = content.split('\n');
     return {
       kind: 'write',
@@ -326,12 +384,47 @@ export function extractFileEditInfo(toolName: string, args: any): FileEditInfo |
       fileName,
       oldStr: null,
       newStr: content,
-      addedLines: lines.length,
+      addedLines: content ? lines.length : 0,
       removedLines: 0,
     };
   }
 
   return null;
+}
+
+/**
+ * Prefer server-expanded snippets (±unchanged context) from replace_in_file
+ * over the raw tool args when available.
+ */
+export function applyEditDiffContext(
+  info: FileEditInfo | null,
+  ctx?: { diffOld?: string; diffNew?: string; diffStartLine?: number } | null,
+): FileEditInfo | null {
+  if (!info || info.kind !== 'edit' || !ctx) return info;
+  if (ctx.diffOld == null || ctx.diffNew == null) return info;
+  const oldLines = ctx.diffOld.split('\n');
+  const newLines = ctx.diffNew.split('\n');
+  // Count real +/- so Solo "+N -M" stays about the edit, not the whole context window.
+  const dp: number[][] = Array.from({ length: oldLines.length + 1 }, () =>
+    new Array(newLines.length + 1).fill(0),
+  );
+  for (let i = 1; i <= oldLines.length; i++) {
+    for (let j = 1; j <= newLines.length; j++) {
+      dp[i][j] =
+        oldLines[i - 1] === newLines[j - 1]
+          ? dp[i - 1][j - 1] + 1
+          : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  const lcs = dp[oldLines.length][newLines.length];
+  return {
+    ...info,
+    oldStr: ctx.diffOld,
+    newStr: ctx.diffNew,
+    addedLines: Math.max(0, newLines.length - lcs),
+    removedLines: Math.max(0, oldLines.length - lcs),
+    startLine: typeof ctx.diffStartLine === 'number' ? ctx.diffStartLine : info.startLine,
+  };
 }
 
 // ============================================================
@@ -684,18 +777,28 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
 
   // Build raw diff lines — always call hooks unconditionally (Rules of Hooks)
   const rawDiffLines = useMemo<RawDiffLine[]>(() => {
+    let lines: RawDiffLine[];
     if (info.kind === 'write') {
-      return info.newStr.split('\n').map((content, i): RawDiffLine => ({
+      lines = info.newStr.split('\n').map((content, i): RawDiffLine => ({
         kind: 'added',
         oldNo: null,
         newNo: i + 1,
         content,
       }));
+    } else if (!info.oldStr) {
+      lines = [];
+    } else {
+      const oldLines = info.oldStr.split('\n');
+      const newLines = info.newStr.split('\n');
+      lines = buildDiff(oldLines, newLines);
     }
-    if (!info.oldStr) return [];
-    const oldLines = info.oldStr.split('\n');
-    const newLines = info.newStr.split('\n');
-    return buildDiff(oldLines, newLines);
+    const offset = typeof info.startLine === 'number' && info.startLine > 1 ? info.startLine - 1 : 0;
+    if (!offset) return lines;
+    return lines.map((l) => ({
+      ...l,
+      oldNo: l.oldNo != null ? l.oldNo + offset : null,
+      newNo: l.newNo != null ? l.newNo + offset : null,
+    }));
   }, [info]);
 
   // Build hunk entries
@@ -816,11 +919,17 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
           </div>
 
           {/* Diff content */}
-          <div className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950">
+          <FollowScrollBox
+            contentKey={`${info.filePath}:${info.newStr.length}:${info.oldStr?.length ?? 0}`}
+            follow={status === 'running'}
+            className="max-h-[500px] overflow-y-auto overflow-x-hidden bg-gray-950"
+          >
             <style>{HLJS_STYLE}</style>
 
             {hunkEntries.length === 0 ? (
-              <div className="p-3 text-[11px] text-gray-500 font-mono">No diff content</div>
+              <div className="p-3 text-[11px] text-gray-500 font-mono">
+                {status === 'running' ? 'Streaming…' : 'No diff content'}
+              </div>
             ) : (
               hunkEntries.map((entry, entryIdx) => {
                 if (entry.type === 'fold') {
@@ -864,7 +973,7 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
                 );
               })
             )}
-          </div>
+          </FollowScrollBox>
         </div>
       )}
     </div>

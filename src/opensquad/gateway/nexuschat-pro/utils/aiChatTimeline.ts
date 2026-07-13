@@ -73,6 +73,10 @@ export interface WorkflowEvent {
   timestamp: number;
   result?: any;
   resultStatus?: 'success' | 'error';
+  /** Expanded file-edit snippets (±context) from replace_in_file for UI diffs. */
+  diffOld?: string;
+  diffNew?: string;
+  diffStartLine?: number;
   subAgent?: boolean;
   subTaskLabel?: string;
   /** Async delegate_task_submit job id (nests parallel sub-agents). */
@@ -245,6 +249,7 @@ function appendEventIntoWorkflowBlock(
         const callData = typeof evt.content === 'object' ? evt.content : {};
         const callId = callData.id || callData.tool_use_id;
         if (!resultId || !callId || resultId === callId) {
+          const ctx = extractDiffContext(resultData);
           newEvents[i] = {
             ...evt,
             result: extractToolResultText(resultData),
@@ -254,6 +259,9 @@ function appendEventIntoWorkflowBlock(
               isToolResultFailure(resultData)
                 ? 'error'
                 : 'success',
+            ...(ctx.diffOld != null ? { diffOld: ctx.diffOld } : {}),
+            ...(ctx.diffNew != null ? { diffNew: ctx.diffNew } : {}),
+            ...(ctx.diffStartLine != null ? { diffStartLine: ctx.diffStartLine } : {}),
           };
           return newEvents;
         }
@@ -285,6 +293,44 @@ export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
 }
 
 /**
+ * Seal all incomplete workflow blocks (e.g. user inserts a new message mid-turn).
+ * Stamps elapsed_ms so Solo shows "Worked for Xs" instead of stuck "Working".
+ */
+export function sealIncompleteWorkflows(
+  prev: TimelineEntry[],
+  opts?: { nowMs?: number; fallbackStartedMs?: number },
+): TimelineEntry[] {
+  const now = opts?.nowMs ?? Date.now();
+  const fallbackStarted = opts?.fallbackStartedMs;
+  return prev.map((entry) => {
+    if (entry.kind !== 'workflow' || entry.data.completed) return entry;
+    const wf = entry.data;
+    const started =
+      typeof wf.started_ms === 'number'
+        ? wf.started_ms
+        : typeof fallbackStarted === 'number'
+          ? fallbackStarted
+          : wf.events[0]?.timestamp;
+    const elapsed =
+      typeof wf.elapsed_ms === 'number'
+        ? wf.elapsed_ms
+        : typeof started === 'number'
+          ? Math.max(0, now - started)
+          : undefined;
+    return {
+      ...entry,
+      data: {
+        ...wf,
+        completed: true,
+        status: null,
+        started_ms: typeof started === 'number' ? started : wf.started_ms,
+        elapsed_ms: elapsed,
+      },
+    };
+  });
+}
+
+/**
  * Whether a trailing / orphan workflow should render as finished even if
  * `completed` was never flipped by a following chat message.
  * Avoids thought-only live blocks (still streaming) being marked done.
@@ -312,6 +358,16 @@ export function shouldTreatWorkflowComplete(block: WorkflowBlock): boolean {
   if (hasDoneSummary || hasFinalProgress) return true;
   if (toolCalls > 0 && toolsWithResult === toolCalls) return true;
   return false;
+}
+
+/** Extract workflow start epoch-ms from a persisted "Workflow started" info event. */
+export function workflowStartedMsFromRaw(raw: any): number | undefined {
+  if (!raw || raw.type !== 'info') return undefined;
+  const data = raw.data || {};
+  const text = typeof data === 'string' ? data : (data.text || '');
+  if (!/Workflow started/i.test(String(text))) return undefined;
+  const ms = typeof data === 'object' && data !== null ? Number((data as any).started_ms) : NaN;
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 export type TimelineEntry =
@@ -453,6 +509,170 @@ export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowE
     }
   }
   return false;
+}
+
+function toolCallNameOf(evt: WorkflowEvent): string {
+  const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  return String(data.name || data.tool || '').trim();
+}
+
+function isPartialToolCall(evt: WorkflowEvent): boolean {
+  if (evt.type !== 'tool_call') return false;
+  const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  return !!data.partial;
+}
+
+function findLastIncompleteWorkflowIdx(timeline: TimelineEntry[]): number {
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    if (timeline[i].kind === 'prompt' || timeline[i].kind === 'status_hint') continue;
+    if (
+      timeline[i].kind === 'workflow' &&
+      !(timeline[i] as Extract<TimelineEntry, { kind: 'workflow' }>).data.completed
+    ) {
+      return i;
+    }
+    break;
+  }
+  return -1;
+}
+
+/**
+ * Upsert a streaming partial tool_call (Native FC arguments still arriving).
+ * Matches by id / stream index within the active incomplete workflow.
+ */
+export function upsertPartialToolCall(
+  prev: TimelineEntry[],
+  event: WorkflowEvent,
+  status: string | null,
+): TimelineEntry[] {
+  const data = typeof event.content === 'object' && event.content ? event.content : {};
+  const callId = data.id != null ? String(data.id) : '';
+  const streamIndex = data.index != null ? Number(data.index) : NaN;
+  const toolName = String(data.name || data.tool || '').trim();
+
+  const updated = [...prev];
+  let targetIdx = findLastIncompleteWorkflowIdx(updated);
+  if (targetIdx < 0) {
+    updated.push({
+      kind: 'workflow',
+      data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
+      _uid: genTimelineUID(),
+    });
+    return updated;
+  }
+
+  const entry = updated[targetIdx] as Extract<TimelineEntry, { kind: 'workflow' }>;
+  const wf = entry.data;
+  const events = [...wf.events];
+  let matchIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const evt = events[i];
+    if (evt.type !== 'tool_call' || evt.result) continue;
+    const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    if (callId && String(c.id || '') === callId) {
+      matchIdx = i;
+      break;
+    }
+    if (
+      Number.isFinite(streamIndex) &&
+      c.partial &&
+      Number(c.index) === streamIndex &&
+      (!toolName || String(c.name || '') === toolName)
+    ) {
+      matchIdx = i;
+      break;
+    }
+  }
+
+  if (matchIdx >= 0) {
+    const prevEvt = events[matchIdx];
+    events[matchIdx] = {
+      ...prevEvt,
+      content: { ...(typeof prevEvt.content === 'object' ? prevEvt.content : {}), ...data, partial: true },
+      timestamp: event.timestamp || prevEvt.timestamp,
+    };
+  } else {
+    events.push({ ...event, _uid: genTimelineUID() });
+  }
+
+  updated[targetIdx] = {
+    ...entry,
+    data: { ...wf, events, status: status ?? wf.status, completed: false },
+  };
+  return updated;
+}
+
+/**
+ * When the final tool_call arrives, replace a matching partial streaming card
+ * (same tool name, still open) so we do not show a duplicate Writing row.
+ */
+export function promotePartialToolCall(
+  prev: TimelineEntry[],
+  event: WorkflowEvent,
+  status: string | null,
+): TimelineEntry[] | null {
+  if (event.type !== 'tool_call') return null;
+  const finalName = toolCallNameOf(event);
+  if (!finalName) return null;
+
+  const updated = [...prev];
+  const targetIdx = findLastIncompleteWorkflowIdx(updated);
+  if (targetIdx < 0) return null;
+
+  const entry = updated[targetIdx] as Extract<TimelineEntry, { kind: 'workflow' }>;
+  const wf = entry.data;
+  const events = [...wf.events];
+  let matchIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const evt = events[i];
+    if (!isPartialToolCall(evt) || evt.result) continue;
+    if (toolCallNameOf(evt) === finalName) {
+      matchIdx = i;
+      break;
+    }
+  }
+  if (matchIdx < 0) return null;
+
+  const prevEvt = events[matchIdx];
+  events[matchIdx] = {
+    ...prevEvt,
+    ...event,
+    content: {
+      ...(typeof event.content === 'object' ? event.content : {}),
+      partial: false,
+    },
+    _uid: prevEvt._uid || event._uid || genTimelineUID(),
+    timestamp: event.timestamp || prevEvt.timestamp,
+  };
+  updated[targetIdx] = {
+    ...entry,
+    data: { ...wf, events, status: status ?? wf.status, completed: false },
+  };
+  return updated;
+}
+
+/** Pull replace_in_file UI context fields off a tool_result payload. */
+export function extractDiffContext(resultData: unknown): {
+  diffOld?: string;
+  diffNew?: string;
+  diffStartLine?: number;
+} {
+  if (!resultData || typeof resultData !== 'object') return {};
+  const data = resultData as Record<string, unknown>;
+  const diffOld = typeof data.diff_old === 'string' ? data.diff_old : undefined;
+  const diffNew = typeof data.diff_new === 'string' ? data.diff_new : undefined;
+  const rawStart = data.diff_start_line;
+  const diffStartLine =
+    typeof rawStart === 'number'
+      ? rawStart
+      : typeof rawStart === 'string' && rawStart.trim()
+        ? Number(rawStart)
+        : undefined;
+  return {
+    diffOld,
+    diffNew,
+    diffStartLine: Number.isFinite(diffStartLine as number) ? (diffStartLine as number) : undefined,
+  };
 }
 
 /** Extract display text from a tool_result payload (WS or session event). */
@@ -609,11 +829,15 @@ export function mergeToolResultIntoTimeline(
       const callData = typeof evt.content === 'object' && evt.content ? evt.content : {};
       const callId = callData.id || callData.tool_use_id;
       if (!resultId || !callId || resultId === callId) {
+        const ctx = extractDiffContext(resultData);
         const newEvents = [...wf.events];
         newEvents[ei] = {
           ...evt,
           result: resStr || evt.result,
           resultStatus,
+          ...(ctx.diffOld != null ? { diffOld: ctx.diffOld } : {}),
+          ...(ctx.diffNew != null ? { diffNew: ctx.diffNew } : {}),
+          ...(ctx.diffStartLine != null ? { diffStartLine: ctx.diffStartLine } : {}),
         };
         return prev.map((entry, idx) =>
           idx === wi
@@ -635,6 +859,22 @@ export function appendWorkflowEvent(
   event: WorkflowEvent,
   status: string | null,
 ): TimelineEntry[] {
+  // Live Native-FC argument stream → upsert partial tool_call card.
+  if (
+    event.type === 'tool_call' &&
+    typeof event.content === 'object' &&
+    event.content &&
+    event.content.partial
+  ) {
+    return upsertPartialToolCall(prev, event, status);
+  }
+
+  // Final tool_call: promote matching partial card instead of appending a duplicate.
+  if (event.type === 'tool_call') {
+    const promoted = promotePartialToolCall(prev, event, status);
+    if (promoted) return promoted;
+  }
+
   // Dedup tool_call replays (e.g. after compression hydration).
   // IMPORTANT: tool_result shares the same id namespace as tool_call
   // (`tool:${id}`). Treating tool_result as a duplicate here used to DROP
@@ -980,6 +1220,7 @@ export function buildTimelineFromSession(
     if (pendingRaw.length === 0) return;
 
     const workflowEvents: any[] = [];
+    let startedMs: number | undefined;
     for (const rawEvt of pendingRaw) {
       if (rawEvt.type === 'prompt_update') {
         const p = rawEvt.data || {};
@@ -998,6 +1239,8 @@ export function buildTimelineFromSession(
           });
         }
       } else {
+        const markerMs = workflowStartedMsFromRaw(rawEvt);
+        if (typeof markerMs === 'number') startedMs = markerMs;
         workflowEvents.push(rawEvt);
       }
     }
@@ -1006,7 +1249,27 @@ export function buildTimelineFromSession(
 
     if (workflowEvents.length === 0) return;
     const wfEvents = convertSessionEventsToWorkflow(workflowEvents);
-    if (wfEvents.length === 0) return;
+    // In-progress turn may only have a "Workflow started" marker (filtered from
+    // display) — still emit an incomplete block so refresh shows Working.
+    if (wfEvents.length === 0) {
+      if (opts?.completed === false && typeof startedMs === 'number') {
+        timeline.push({
+          kind: 'workflow',
+          data: {
+            events: [],
+            status: 'working',
+            completed: false,
+            started_ms: startedMs,
+          },
+          _uid: genTimelineUID(),
+        });
+      }
+      return;
+    }
+    if (startedMs == null) {
+      const firstTs = wfEvents[0]?.timestamp;
+      if (typeof firstTs === 'number') startedMs = firstTs;
+    }
     timeline.push({
       kind: 'workflow',
       data: {
@@ -1014,6 +1277,7 @@ export function buildTimelineFromSession(
         status: opts?.completed === false ? 'working' : null,
         completed: opts?.completed !== false,
         elapsed_ms: opts?.elapsedMs,
+        started_ms: startedMs,
       },
       _uid: genTimelineUID(),
     });
@@ -1365,22 +1629,112 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
       } else {
         result.push(incoming);
       }
-    } else if (type === 'tool_call') {
+    } else if (type === 'tool_call' || type === 'tool_call_delta') {
       const isSub = !!data.sub_agent;
       const jobId = data.job_id ? String(data.job_id) : undefined;
-      result.push({
-        _uid: genTimelineUID(),
-        type: 'tool_call',
-        content: {
-          id: data.id,
-          name: data.name || data.tool || 'Tool',
-          args: data.args || data.arguments || data.input,
-        },
-        timestamp: eventTimestamp,
-        subAgent: isSub || undefined,
-        subTaskLabel: data.sub_task_label || undefined,
-        jobId,
-      });
+      const callId = data.id != null ? String(data.id) : '';
+      const streamIndex = data.index != null ? Number(data.index) : NaN;
+      const isPartial = type === 'tool_call_delta' || !!data.partial;
+      const args = data.args || data.arguments || data.input;
+      const toolName = data.name || data.tool || 'Tool';
+
+      // Upsert streaming partials / final tool_call by id or stream index so
+      // refresh does not show duplicate Writing rows for the same call.
+      let matchIdx = -1;
+      for (let i = result.length - 1; i >= 0; i--) {
+        const evt = result[i];
+        if (evt.type !== 'tool_call' || evt.result) continue;
+        const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+        if (callId && String(c.id || '') === callId) {
+          matchIdx = i;
+          break;
+        }
+        if (
+          Number.isFinite(streamIndex) &&
+          c.partial &&
+          Number(c.index) === streamIndex &&
+          String(c.name || '') === String(toolName)
+        ) {
+          matchIdx = i;
+          break;
+        }
+      }
+
+      const nextContent: Record<string, unknown> = {
+        id: callId || undefined,
+        name: toolName,
+        args,
+        arguments: args,
+      };
+      if (isPartial) {
+        nextContent.partial = true;
+        if (Number.isFinite(streamIndex)) nextContent.index = streamIndex;
+      }
+
+      if (matchIdx >= 0) {
+        const prevEvt = result[matchIdx];
+        const prevC = typeof prevEvt.content === 'object' && prevEvt.content ? prevEvt.content : {};
+        result[matchIdx] = {
+          ...prevEvt,
+          content: isPartial
+            ? { ...prevC, ...nextContent, partial: true }
+            : { ...prevC, ...nextContent },
+          timestamp: eventTimestamp,
+        };
+        if (!isPartial && result[matchIdx].content && typeof result[matchIdx].content === 'object') {
+          delete (result[matchIdx].content as Record<string, unknown>).partial;
+          delete (result[matchIdx].content as Record<string, unknown>).index;
+        }
+      } else if (!isPartial) {
+        // Final tool_call often uses a runner-generated id different from the
+        // streaming Native-FC id — promote the latest open partial with same name.
+        let promoteIdx = -1;
+        for (let i = result.length - 1; i >= 0; i--) {
+          const evt = result[i];
+          if (evt.type !== 'tool_call' || evt.result) continue;
+          const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+          if (!c.partial) continue;
+          if (String(c.name || '') === String(toolName)) {
+            promoteIdx = i;
+            break;
+          }
+        }
+        if (promoteIdx >= 0) {
+          const prevEvt = result[promoteIdx];
+          const prevC = typeof prevEvt.content === 'object' && prevEvt.content ? prevEvt.content : {};
+          const merged = { ...prevC, ...nextContent };
+          delete merged.partial;
+          delete merged.index;
+          result[promoteIdx] = {
+            ...prevEvt,
+            content: merged,
+            timestamp: eventTimestamp,
+            subAgent: isSub || prevEvt.subAgent || undefined,
+            subTaskLabel: data.sub_task_label || prevEvt.subTaskLabel,
+            jobId: jobId || prevEvt.jobId,
+          };
+        } else {
+          result.push({
+            _uid: genTimelineUID(),
+            type: 'tool_call',
+            content: nextContent,
+            timestamp: eventTimestamp,
+            subAgent: isSub || undefined,
+            subTaskLabel: data.sub_task_label || undefined,
+            jobId,
+          });
+        }
+      } else {
+        result.push({
+          _uid: genTimelineUID(),
+          type: 'tool_call',
+          content: nextContent,
+          timestamp: eventTimestamp,
+          subAgent: isSub || undefined,
+          subTaskLabel: data.sub_task_label || undefined,
+          jobId,
+        });
+      }
     } else if (type === 'tool_result') {
       // Merge into matching tool_call
       const resultId = data.id || data.tool_use_id;
@@ -1393,10 +1747,14 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           const callId = evt.content?.id;
           if (!resultId || !callId || resultId === callId) {
             const resStr = extractToolResultText(data);
+            const ctx = extractDiffContext(data);
             evt.result = resStr;
             evt.resultStatus =
               data.error || isToolResultFailure(resStr) || isToolResultFailure(data) ? 'error' : 'success';
             if (jobId && !evt.jobId) evt.jobId = jobId;
+            if (ctx.diffOld != null) evt.diffOld = ctx.diffOld;
+            if (ctx.diffNew != null) evt.diffNew = ctx.diffNew;
+            if (ctx.diffStartLine != null) evt.diffStartLine = ctx.diffStartLine;
             merged = true;
             break;
           }

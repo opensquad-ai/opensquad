@@ -34,6 +34,7 @@ import {
   genTimelineUID,
   timelineHasToolEvent,
   workflowToolEventKey,
+  sealIncompleteWorkflows,
   shouldTreatWorkflowComplete,
   toWebMediaUrl,
   type TimelineEntry,
@@ -41,6 +42,7 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
+import { formatElapsed } from '../utils/formatElapsed';
 import { setSessionProjectPath, getSessionMeta, requestSessionListRefresh } from '../utils/sessionProjectMeta';
 
 // AI Chat sub-components
@@ -155,7 +157,7 @@ const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; started
           <circle cx="10" cy="22" r="2.5" fill="#a78bfa" style={{ animation: 'osqPulse 1.6s ease-in-out 1.2s infinite' }} />
         </svg>
         {startedMs !== undefined && (
-          <span className="text-[10px] text-textMuted font-mono leading-none">{(liveElapsed / 1000).toFixed(1)}s</span>
+          <span className="text-[10px] text-textMuted font-mono leading-none">{formatElapsed(liveElapsed)}</span>
         )}
       </div>
       <style>{`
@@ -310,6 +312,9 @@ const WorkflowBlockView: React.FC<{
               status={status}
               subAgent={evt.subAgent}
               subTaskLabel={evt.subTaskLabel}
+              diffOld={evt.diffOld}
+              diffNew={evt.diffNew}
+              diffStartLine={evt.diffStartLine}
             />
           );
         }
@@ -586,6 +591,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // Backend start timestamp for the current workflow turn (epoch ms from turn_start)
   const [turnStartedMs, setTurnStartedMs] = useState<number | undefined>(undefined);
+  const turnStartedMsRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    turnStartedMsRef.current = turnStartedMs;
+  }, [turnStartedMs]);
 
   // Refs
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -1482,6 +1491,38 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     });
 
+    // Live Native-FC tool arguments (file write/edit code streaming into tool fold)
+    const unsubToolCallDelta = aiWsService.on('tool_call_delta', (msg: AIWSMessage) => {
+      const data = msg.content || msg.data;
+      if (!data || typeof data !== 'object') return;
+      const toolName = data.name || data.tool || 'Tool';
+      const event: WorkflowEvent = {
+        type: 'tool_call',
+        content: {
+          id: data.id,
+          index: data.index,
+          name: toolName,
+          arguments: data.arguments ?? data.args ?? '',
+          args: data.arguments ?? data.args ?? '',
+          partial: true,
+        },
+        timestamp: Date.now(),
+        subAgent: !!data.sub_agent,
+        subTaskLabel: data.sub_task_label || '',
+      };
+      if (isHydratingSessionRef.current) {
+        pendingHydrationWorkflowEventsRef.current.push({
+          event,
+          status: `Writing ${toolName}...`,
+        });
+        return;
+      }
+      setTimeline((prev) => appendWorkflowEvent(prev, event, `Writing ${toolName}...`));
+      if (!data.sub_agent) {
+        setAgentStatus('thinking');
+      }
+    });
+
     // Tool result — merge into matching tool_call
     const unsubToolResult = aiWsService.on('tool_result', (msg: AIWSMessage) => {
       const data = msg.content || msg.data;
@@ -2021,6 +2062,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         // Reset timer on each new workflow (turn=1). Subsequent turns (2+ after tool calls)
         // must NOT overwrite it so the timer reflects the full workflow duration.
         setTurnStartedMs(startedMs);
+        // Stamp started_ms onto the active incomplete workflow (or create one) so
+        // refresh can restore Working-for-Xs without relying on live turnStartedMs.
+        setTimeline((prev) => {
+          const updated = [...prev];
+          for (let i = updated.length - 1; i >= 0; i--) {
+            const entry = updated[i];
+            if (entry.kind !== 'workflow') continue;
+            if (entry.data.completed) break;
+            updated[i] = {
+              ...entry,
+              data: { ...entry.data, started_ms: entry.data.started_ms ?? startedMs, completed: false },
+            };
+            return updated;
+          }
+          updated.push({
+            kind: 'workflow',
+            data: {
+              events: [],
+              status: 'working',
+              completed: false,
+              started_ms: startedMs,
+            },
+            _uid: genUID(),
+          });
+          return updated;
+        });
       }
     });
 
@@ -2397,6 +2464,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 return merged;
               });
               setShellStreams(rebuildShellStreamsFromTimeline(withBuffered));
+              nextEntries = withBuffered;
             }
             // Restore pending propose_options cards after refresh / session switch.
             const allEvents = [
@@ -2404,6 +2472,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               ...(session.events || []),
             ];
             setOptionsProposals(hydrateOptionsProposalsFromEvents(allEvents));
+            // Restore live Working timer from disk started_ms after refresh.
+            {
+              let restoredStart: number | undefined;
+              for (let i = nextEntries.length - 1; i >= 0; i--) {
+                const e = nextEntries[i];
+                if (e.kind !== 'workflow' || e.data.completed) continue;
+                if (typeof e.data.started_ms === 'number') {
+                  restoredStart = e.data.started_ms;
+                } else {
+                  const firstTs = e.data.events[0]?.timestamp;
+                  if (typeof firstTs === 'number') restoredStart = firstTs;
+                }
+                break;
+              }
+              setTurnStartedMs(restoredStart);
+            }
             sessionBootstrapDoneRef.current = true;
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
@@ -2897,6 +2981,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubSessionTitle();
       unsubThought();
       unsubToolCall();
+      unsubToolCallDelta();
       unsubToolResult();
       unsubJobStdout();
       unsubJobStatus();
@@ -3266,11 +3351,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       images: allImages.length > 0 ? allImages : undefined,
       attachments: fileAtts.length > 0 ? fileAtts : undefined,
     };
-    setTimeline(prev => [...prev, {
-      kind: 'message',
-      data: userMsg,
-      _uid: genUID(),
-    }]);
+    // Mid-turn insert: seal previous Working → Worked above the new user bubble.
+    // Do NOT cancel open tools (unlike Stop) — the runner will continue / interrupt
+    // via the new message; UI just closes the old fold's live timer.
+    setTimeline((prev) => {
+      const sealed = sealIncompleteWorkflows(prev, {
+        fallbackStartedMs: turnStartedMsRef.current,
+      });
+      return [
+        ...sealed,
+        {
+          kind: 'message',
+          data: userMsg,
+          _uid: genUID(),
+        },
+      ];
+    });
+    setTurnStartedMs(undefined);
 
     // Lock project path for this session on first user message (Solo archive grouping).
     {
@@ -4240,16 +4337,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           )}
 
           {/* Render timeline entries (messages + workflow blocks interleaved) */}
-          {/* Lazy loading indicators at top */}
+          {/* Lazy loading indicator at top */}
           {isLoadingMore && (
             <div className="flex items-center justify-center py-3">
               <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin mr-2" />
               <span className="text-xs text-textMuted">Loading earlier messages...</span>
-            </div>
-          )}
-          {!hasMoreHistory && !isLoadingMore && timeline.length > 0 && historyOffsetRef.current > 0 && (
-            <div className="flex items-center justify-center py-2">
-              <span className="text-xs text-textMuted opacity-50">All messages loaded</span>
             </div>
           )}
 

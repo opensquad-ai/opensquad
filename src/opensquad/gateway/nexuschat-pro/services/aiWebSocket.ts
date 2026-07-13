@@ -9,6 +9,7 @@
  *   - message/response : final reply
  *   - thought          : AI thought process
  *   - tool_call        : tool invocation
+ *   - tool_call_delta  : incremental native-FC tool arguments (file write/edit preview)
  *   - tool_result      : tool execution result
  *   - plan             : task plan
  *   - token_stats      : token usage

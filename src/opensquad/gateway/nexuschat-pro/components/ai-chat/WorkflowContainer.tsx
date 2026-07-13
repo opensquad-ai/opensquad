@@ -17,6 +17,7 @@
  */
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { Cpu, ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { formatElapsed } from '../../utils/formatElapsed';
 
 interface WorkflowContainerProps {
   status?: string;
@@ -84,13 +85,13 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
     };
   }, [isRunning, startedMs]);
 
-  // Displayed seconds:
+  // Displayed duration:
   //   completed → finalElapsedMs (exact, from backend)
   //   running   → live calculation from startedMs
   //   fallback  → 0
-  const displaySeconds = finalElapsedMs !== undefined
-    ? (finalElapsedMs / 1000).toFixed(1)
-    : (liveElapsed / 1000).toFixed(1);
+  const displayElapsed = formatElapsed(
+    finalElapsedMs !== undefined ? finalElapsedMs : liveElapsed,
+  );
 
   const displayStatus = status || 'Completed';
   const icon = isRunning ? (
@@ -138,7 +139,7 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
       >
         {icon}
         <span className="text-xs text-textMuted flex-1 truncate">{displayStatus}</span>
-        <span className="text-[10px] text-textMuted font-mono">{displaySeconds}s</span>
+        <span className="text-[10px] text-textMuted font-mono">{displayElapsed}</span>
         {isOpen
           ? <ChevronDown size={14} className="text-textMuted" />
           : <ChevronRight size={14} className="text-textMuted" />

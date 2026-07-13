@@ -122,6 +122,15 @@ class NativeToolCallStrategy(ToolCallStrategy):
     the API's `tools` parameter. The API returns structured tool calls.
     """
 
+    # Emit live args for these tools so the UI can stream file content.
+    _STREAM_ARG_HINTS = (
+        "write_file",
+        "edit_file",
+        "replace_in_file",
+        "create_file",
+        "write_to_file",
+    )
+
     def __init__(self, tool_registry, tool_filter: str = "all"):
         """
         Initialize Native FC strategy
@@ -137,6 +146,53 @@ class NativeToolCallStrategy(ToolCallStrategy):
         super().__init__(tool_registry)
         self._tool_calls_buffer = []  # Buffer for streaming mode
         self._tool_filter = tool_filter  # tool filter strategy
+        self._delta_callback = None  # optional: callable(dict) for live UI
+        self._last_delta_emit_at: dict[int, float] = {}
+        self._delta_min_interval_s = 0.05  # ~20 Hz throttle
+
+    def set_delta_callback(self, callback) -> None:
+        """Register/clear a callback for incremental tool_call argument updates."""
+        self._delta_callback = callback
+        if callback is None:
+            self._last_delta_emit_at.clear()
+
+    @classmethod
+    def _should_stream_args(cls, tool_name: str) -> bool:
+        n = (tool_name or "").lower().replace(".", "__")
+        return any(h in n for h in cls._STREAM_ARG_HINTS)
+
+    def _emit_args_delta(self, index: int, *, force: bool = False) -> None:
+        """Push throttled partial tool args to the gateway (file write/edit only)."""
+        if not self._delta_callback:
+            return
+        if index < 0 or index >= len(self._tool_calls_buffer):
+            return
+        tc = self._tool_calls_buffer[index]
+        name = tc.get("function", {}).get("name") or ""
+        if not name or not self._should_stream_args(name):
+            return
+        import time
+
+        now = time.monotonic()
+        last = self._last_delta_emit_at.get(index, 0.0)
+        if not force and (now - last) < self._delta_min_interval_s:
+            return
+        self._last_delta_emit_at[index] = now
+        args_so_far = tc.get("function", {}).get("arguments") or ""
+        call_id = tc.get("id") or f"partial_tc_{index}"
+        try:
+            self._delta_callback(
+                {
+                    "id": call_id,
+                    "index": index,
+                    "name": name,
+                    "arguments": args_so_far,
+                    "partial": True,
+                    "force": bool(force),
+                }
+            )
+        except Exception as e:
+            logger.debug("[NativeFC] delta callback failed: %s", e)
 
     def prepare_llm_call(self, system_prompt: str) -> dict[str, Any]:
         """
@@ -180,20 +236,36 @@ class NativeToolCallStrategy(ToolCallStrategy):
                             }
                         )
 
+                    buf = self._tool_calls_buffer[tc.index]
+                    # Keep first non-empty id from the stream
+                    if getattr(tc, "id", None) and not buf.get("id"):
+                        buf["id"] = tc.id
+
+                    name_just_set = False
+                    args_grew = False
                     # Accumulate function name
                     if hasattr(tc, "function") and tc.function:
                         if hasattr(tc.function, "name") and tc.function.name:
-                            self._tool_calls_buffer[tc.index]["function"]["name"] = tc.function.name
+                            if not buf["function"]["name"]:
+                                name_just_set = True
+                            buf["function"]["name"] = tc.function.name
 
                         # Accumulate arguments (streamed incrementally)
                         if hasattr(tc.function, "arguments") and tc.function.arguments:
-                            self._tool_calls_buffer[tc.index]["function"]["arguments"] += tc.function.arguments
+                            buf["function"]["arguments"] += tc.function.arguments
+                            args_grew = True
+
+                    if name_just_set or args_grew:
+                        self._emit_args_delta(tc.index, force=name_just_set)
 
             # Check if stream finished (finish_reason present)
             finish_reason = getattr(api_response.choices[0], "finish_reason", None)
             if finish_reason == "tool_calls" or finish_reason == "stop":
                 # Stream finished, parse ALL buffered tool calls
                 if self._tool_calls_buffer:
+                    # Final flush so UI has the complete args before runner tool_call
+                    for i in range(len(self._tool_calls_buffer)):
+                        self._emit_args_delta(i, force=True)
                     results = []
                     for tc in self._tool_calls_buffer:
                         tool_name = tc["function"]["name"]
@@ -207,6 +279,7 @@ class NativeToolCallStrategy(ToolCallStrategy):
                         logger.info(f"Native FC parsed tool call: {tool_name}")
                         results.append((tool_name, args_dict))
                     self._tool_calls_buffer = []  # Clear buffer
+                    self._last_delta_emit_at.clear()
                     return results if results else None
         else:
             # Empty or missing choices -- some proxy APIs return chunks with
@@ -214,6 +287,8 @@ class NativeToolCallStrategy(ToolCallStrategy):
             # Check if stream is finished and parse buffered tool calls.
             finish_reason = getattr(api_response, "finish_reason", None)
             if (finish_reason == "tool_calls" or finish_reason == "stop") and self._tool_calls_buffer:
+                for i in range(len(self._tool_calls_buffer)):
+                    self._emit_args_delta(i, force=True)
                 results = []
                 for tc in self._tool_calls_buffer:
                     tool_name = tc["function"]["name"]
@@ -227,12 +302,15 @@ class NativeToolCallStrategy(ToolCallStrategy):
                     logger.info(f"Native FC parsed tool call (from empty-choices chunk): {tool_name}")
                     results.append((tool_name, args_dict))
                 self._tool_calls_buffer = []  # Clear buffer
+                self._last_delta_emit_at.clear()
                 return results if results else None
             # Also try to extract from choices[0] if it exists (even if list appears falsy)
             if hasattr(api_response, "choices") and api_response.choices is not None and len(api_response.choices) > 0:
                 finish_reason = getattr(api_response.choices[0], "finish_reason", None)
                 if finish_reason == "tool_calls" or finish_reason == "stop":
                     if self._tool_calls_buffer:
+                        for i in range(len(self._tool_calls_buffer)):
+                            self._emit_args_delta(i, force=True)
                         results = []
                         for tc in self._tool_calls_buffer:
                             tool_name = tc["function"]["name"]
@@ -246,6 +324,7 @@ class NativeToolCallStrategy(ToolCallStrategy):
                             logger.info(f"Native FC parsed tool call (from choices[0]): {tool_name}")
                             results.append((tool_name, args_dict))
                         self._tool_calls_buffer = []
+                        self._last_delta_emit_at.clear()
                         return results if results else None
 
         return None

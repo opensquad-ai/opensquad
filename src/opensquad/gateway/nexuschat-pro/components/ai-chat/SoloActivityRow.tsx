@@ -12,7 +12,8 @@ import { CircleDashed, CheckCircle2, XCircle, ListTodo, ArrowRightCircle } from 
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
-import { FileDiffBlock, extractFileEditInfo, type FileEditInfo } from './FileDiffBlock';
+import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext, type FileEditInfo } from './FileDiffBlock';
+import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
 import { buildDisplayWorkflowItems, type DelegateBundle } from '../../utils/delegateGrouping';
 import {
   attachShellJobsToDisplayItems,
@@ -176,9 +177,19 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     const name = toolNameOf(evt);
     const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
     const rawArgs = content.arguments ?? content.args ?? content.input;
-    const argsObj = parseArgs(rawArgs);
+    const argsObj =
+      parseArgs(rawArgs) ||
+      (typeof rawArgs === 'string' ? parsePartialFileToolArgs(rawArgs) : null) ||
+      (typeof rawArgs === 'object' && rawArgs ? rawArgs : null);
     const resultStr = formatResult(evt.result);
-    const fileEdit = extractFileEditInfo(name, argsObj || rawArgs || {});
+    const fileEdit = applyEditDiffContext(
+      extractFileEditInfo(name, argsObj || rawArgs || {}),
+      {
+        diffOld: evt.diffOld,
+        diffNew: evt.diffNew,
+        diffStartLine: evt.diffStartLine,
+      },
+    );
     const failed =
       !running &&
       (evt.resultStatus === 'error' || isToolResultFailure(evt.result) || isToolResultFailure(resultStr));
@@ -345,7 +356,11 @@ function outerSummary(
   if (elapsedMs == null && turnStartedMs != null) {
     elapsedMs = Math.max(0, Date.now() - turnStartedMs);
   }
-  const secs = elapsedMs != null ? Math.max(1, Math.round(elapsedMs / 1000)) : null;
+  if (elapsedMs == null && typeof block.started_ms === 'number') {
+    elapsedMs = Math.max(0, Date.now() - block.started_ms);
+  }
+  const elapsedLabel =
+    elapsedMs != null ? formatElapsedAtLeastOneSecond(elapsedMs) : null;
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
   const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation' || l.kind === 'shell_job').length;
   const plans = lines.filter((l) => l.kind === 'plan');
@@ -356,7 +371,7 @@ function outerSummary(
   const hasLiveLine = lines.some((l) => l.running);
 
   if (liveSummary) {
-    if (secs != null) return { primary: `Compressing for ${secs}s`, secondary: '' };
+    if (elapsedLabel != null) return { primary: `Compressing for ${elapsedLabel}`, secondary: '' };
     return { primary: 'Compressing context', secondary: '' };
   }
   // Summary finished (even if workflow block not yet marked completed).
@@ -364,15 +379,15 @@ function outerSummary(
     return { primary: 'Context compressed', secondary: '' };
   }
   if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
-    if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
+    if (elapsedLabel != null) return { primary: `Working for ${elapsedLabel}`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
   // Incomplete block = still working (even between tool rounds / without turnStartedMs).
   if (!block.completed) {
-    if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
+    if (elapsedLabel != null) return { primary: `Working for ${elapsedLabel}`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
-  if (tools > 0 && secs != null) return { primary: `Worked for ${secs}s`, secondary: '' };
+  if (tools > 0 && elapsedLabel != null) return { primary: `Worked for ${elapsedLabel}`, secondary: '' };
   if (tools > 0) return { primary: 'Worked', secondary: '' };
   if (plans.length > 0) {
     const n = plans.reduce((sum, l) => sum + (l.planSteps?.length || 0), 0);
@@ -380,7 +395,9 @@ function outerSummary(
     return { primary: 'Planned', secondary: '' };
   }
   if (thoughts > 0) {
-    if (secs != null && secs >= 2) return { primary: 'Thought', secondary: `for ${secs}s` };
+    if (elapsedMs != null && elapsedMs >= 2000 && elapsedLabel != null) {
+      return { primary: 'Thought', secondary: `for ${elapsedLabel}` };
+    }
     return { primary: 'Thought', secondary: 'for a bit' };
   }
   return { primary: 'Activity', secondary: '' };
@@ -642,8 +659,8 @@ const SoloEventLine: React.FC<{
       setOpen(!!defaultOpen);
       return;
     }
-    if (defaultOpen || (isSummary && line.running)) setOpen(true);
-  }, [defaultOpen, isSummary, isThought, line.running]);
+    if (defaultOpen || (isSummary && line.running) || (isFileEdit && line.running)) setOpen(true);
+  }, [defaultOpen, isSummary, isThought, isFileEdit, line.running]);
 
   const added = line.fileEdit?.addedLines;
   const removed = line.fileEdit?.removedLines;
@@ -1170,6 +1187,8 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             defaultOpen={
               (line.kind === 'thought' && expandDetails) ||
               !!(line.kind === 'summary' && line.running) ||
+              !!(line.kind === 'tool' && line.running && line.fileEdit &&
+                (line.fileEdit.kind === 'write' || line.fileEdit.kind === 'edit')) ||
               line.kind === 'plan'
             }
           />

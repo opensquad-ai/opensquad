@@ -598,6 +598,65 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+def _expand_replace_context(
+    content: str,
+    old_str: str,
+    new_str: str,
+    context_lines: int = 3,
+) -> tuple[str, str, int] | None:
+    """Build old/new snippets with surrounding unchanged context for UI diffs.
+
+    Returns (old_snippet, new_snippet, start_line_1based) or None if old_str
+    is not found. Context is taken from the real file so the web UI can show
+    nearby unchanged lines even when the model only sent a tiny old_str/new_str.
+    """
+    if not old_str or old_str not in content:
+        return None
+
+    idx = content.find(old_str)
+    end = idx + len(old_str)
+
+    # Line starts (0-based character offsets)
+    line_starts = [0]
+    for i, ch in enumerate(content):
+        if ch == "\n":
+            line_starts.append(i + 1)
+
+    def char_to_line(pos: int) -> int:
+        """0-based line index for character position."""
+        lo, hi = 0, len(line_starts) - 1
+        ans = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if line_starts[mid] <= pos:
+                ans = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return ans
+
+    first = char_to_line(idx)
+    last = char_to_line(max(end - 1, idx))
+    ctx_start = max(0, first - context_lines)
+    ctx_end = min(len(line_starts), last + 1 + context_lines)
+
+    start_char = line_starts[ctx_start]
+    end_char = line_starts[ctx_end] if ctx_end < len(line_starts) else len(content)
+
+    old_snippet = content[start_char:end_char]
+    new_full = content[:idx] + new_str + content[end:]
+    new_end_char = end_char + (len(new_str) - len(old_str))
+    new_snippet = new_full[start_char:new_end_char]
+
+    # Normalize trailing newline so split('\n') line counts stay stable in UI
+    if old_snippet.endswith("\n"):
+        old_snippet = old_snippet[:-1]
+    if new_snippet.endswith("\n"):
+        new_snippet = new_snippet[:-1]
+
+    return old_snippet, new_snippet, ctx_start + 1
+
+
 def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> dict[str, Any]:
     """
     Replace a string in a file. By default, only replaces the first match.
@@ -623,6 +682,9 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
 
         count = content.count(old_str)
 
+        # Capture UI context from the first match before mutating the file.
+        context = _expand_replace_context(content, old_str, new_str, context_lines=3)
+
         if replace_all or count == 1:
             new_content = content.replace(old_str, new_str)
             replaced = count
@@ -641,7 +703,18 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
         if count > 1 and not replace_all:
             msg += f" WARNING: {count - 1} more occurrences remain. Set replace_all=True to replace all."
 
-        return {"status": "success", "message": msg, "total_matches": count, "replaced": replaced}
+        out: dict[str, Any] = {
+            "status": "success",
+            "message": msg,
+            "total_matches": count,
+            "replaced": replaced,
+        }
+        if context is not None:
+            diff_old, diff_new, start_line = context
+            out["diff_old"] = diff_old
+            out["diff_new"] = diff_new
+            out["diff_start_line"] = start_line
+        return out
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

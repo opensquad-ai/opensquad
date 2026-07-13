@@ -153,6 +153,7 @@ class AgentWebSocketHandler:
                     "thought",
                     "stream",
                     "tool_call",
+                    "tool_call_delta",
                     "tool_result",
                     "state",
                     "wake",
