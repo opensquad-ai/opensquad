@@ -468,6 +468,30 @@ export const messageAPI = {
     });
   },
 
+  /** Resolve an N-way propose-options card posted in group chat (choose / custom / ignore). */
+  resolveProposeOptions: async (
+    groupId: string,
+    proposalId: string,
+    action: 'choose' | 'custom' | 'ignore',
+    value: string,
+    opts?: { messageId?: string; note?: string }
+  ) => {
+    return apiRequest<{
+      ok: boolean;
+      proposal_id: string;
+      status: string;
+      agent_notified?: boolean;
+    }>(`/groups/${groupId}/propose-options/${proposalId}/resolve?token=${authToken}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        action,
+        value,
+        message_id: opts?.messageId,
+        note: opts?.note || '',
+      }),
+    });
+  },
+
   permanentDeleteMessage: async (messageId: string) => {
     return apiRequest<{ message: string }>(`/messages/${messageId}/permanent?token=${authToken}`, {
       method: 'DELETE',

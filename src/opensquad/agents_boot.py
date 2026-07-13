@@ -265,6 +265,7 @@ TOOL_MODULES = {
     "workspace": "opensquad.tools.workspace",
     "task_watch": "opensquad.tools.task_watch",
     "agent_mode": "opensquad.tools.agent_mode_tools",
+    "choice_tools": "opensquad.tools.choice_tools",
     # --- Plugin-owned tools: resolved via PluginManager, not direct import here ---
     # websearch        -> plugins/websearch/
     # vision           -> plugins/vision/
@@ -277,7 +278,7 @@ TOOL_MODULES = {
 }
 
 # Core-level tools get detailed docs in prompts; extended-level get summary only
-CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration", "agent_mode"}
+CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration", "agent_mode", "choice_tools"}
 
 # Mandatory tools: automatically injected into every agent regardless of config.json tools list.
 # These are the built-in core tools shown in the UI as "系统内置".
@@ -291,6 +292,7 @@ MANDATORY_TOOLS = {
     "workspace",
     "task_watch",
     "agent_mode",
+    "choice_tools",
 }
 
 BOOT_PHASES = AgentBootPhases(

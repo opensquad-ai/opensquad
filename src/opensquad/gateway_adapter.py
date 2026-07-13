@@ -271,6 +271,30 @@ class GatewayAdapter(BaseAgent):
             logger.info(f"[Adapter] deny_mode_switch: id={req_id}")
             return
 
+        if command == "resolve_proposed_options":
+            req_id = cmd_data.get("id", "") or cmd_data.get("request_id", "")
+            chosen = cmd_data.get("chosen_option_id", "") or cmd_data.get("option_id", "")
+            custom = cmd_data.get("custom_answer", "") or cmd_data.get("custom", "")
+            ignored = bool(cmd_data.get("ignored", False))
+            if req_id:
+                try:
+                    from opensquad.model_switch import resolve_proposed_options
+
+                    await resolve_proposed_options(
+                        str(req_id),
+                        chosen_option_id=str(chosen),
+                        custom_answer=str(custom),
+                        ignored=ignored,
+                    )
+                    logger.info(
+                        f"[Adapter] resolve_proposed_options: id={req_id} chosen={chosen or custom or ('ignored' if ignored else '?')}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[Adapter] resolve_proposed_options failed: {e}")
+            else:
+                logger.warning("[Adapter] resolve_proposed_options command missing 'id' field")
+            return
+
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")
         await super()._handle_command(data)
 

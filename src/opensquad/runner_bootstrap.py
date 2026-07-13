@@ -108,6 +108,14 @@ def create_tool_registry(config: dict[str, Any]) -> ToolRegistry:
     if "long_memory" in tools_list and long_memory_tool is not None:
         registry.register(long_memory_tool, "memory")
 
+    # Choice tools (propose_options) — always available for plan decision UI
+    try:
+        from opensquad.tools import choice_tools
+
+        registry.register(choice_tools, "choice_tools", level="core")
+    except ImportError as exc:
+        logger.warning("Failed to import choice_tools: %s", exc)
+
     if "agent_setup" in tools_list:
         try:
             from opensquad.tools import agent_setup

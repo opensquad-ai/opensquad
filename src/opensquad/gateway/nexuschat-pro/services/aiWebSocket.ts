@@ -223,6 +223,29 @@ class AIWebSocketService {
     this._sendCommand('deny_mode_switch', { id: requestId, reason: reason || '' });
   }
 
+  /** User picked one of the agent-proposed options (propose_options card). */
+  resolveProposedOptions(requestId: string, optionId: string) {
+    this._sendCommand('resolve_proposed_options', {
+      id: requestId,
+      chosen_option_id: optionId,
+      ignored: false,
+    });
+  }
+
+  /** User typed a custom answer instead of picking a listed option. */
+  resolveProposedOptionsCustom(requestId: string, customAnswer: string) {
+    this._sendCommand('resolve_proposed_options', {
+      id: requestId,
+      custom_answer: customAnswer,
+      ignored: false,
+    });
+  }
+
+  /** User ignored the propose_options card. */
+  ignoreProposedOptions(requestId: string) {
+    this._sendCommand('resolve_proposed_options', { id: requestId, ignored: true });
+  }
+
   /**
    * Switch to a session and send a message.
    * If content is empty, just switches to the session without sending a message.

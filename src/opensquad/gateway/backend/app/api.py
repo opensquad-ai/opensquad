@@ -1748,6 +1748,193 @@ async def resolve_collab_approval(
     }
 
 
+@router.post("/groups/{group_id}/propose-options/{proposal_id}/resolve")
+async def resolve_propose_options(
+    group_id: str,
+    proposal_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(get_current_user_dep),
+    db: AsyncSession = Depends(get_db),
+):
+    """User resolves an N-way propose-options card posted in group chat.
+
+    action: ``choose`` (value=option_id), ``custom`` (value=free text), or ``ignore``.
+    """
+    from opensquad.collab_approval import (
+        parse_propose_options_payload,
+        patch_propose_options_status_in_content,
+    )
+
+    action = str((body or {}).get("action") or "").strip().lower()
+    value = str((body or {}).get("value") or "").strip()
+    note = str((body or {}).get("note") or "").strip()
+    message_id = str((body or {}).get("message_id") or "").strip() or None
+
+    if action not in ("choose", "custom", "ignore"):
+        raise HTTPException(status_code=400, detail="action must be choose, custom, or ignore")
+
+    member_check = await db.execute(
+        select(group_members).where(
+            and_(group_members.c.user_id == current_user.id, group_members.c.group_id == group_id)
+        )
+    )
+    if not member_check.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not a member of this group")
+
+    message = None
+    if message_id:
+        result = await db.execute(select(Message).where(Message.id == message_id, Message.group_id == group_id))
+        message = result.scalar_one_or_none()
+    if message is None:
+        result = await db.execute(
+            select(Message).where(Message.group_id == group_id).order_by(desc(Message.timestamp)).limit(80)
+        )
+        for m in result.scalars().all():
+            payload = parse_propose_options_payload(m.content or "")
+            if payload and str(payload.get("id")) == proposal_id:
+                message = m
+                break
+    if message is None:
+        raise HTTPException(status_code=404, detail="Propose-options message not found in this group")
+
+    payload = parse_propose_options_payload(message.content or "")
+    if not payload or str(payload.get("id")) != proposal_id:
+        raise HTTPException(status_code=400, detail="Message is not a matching propose-options card")
+
+    prev_status = str(payload.get("status") or "pending")
+    if prev_status in ("chosen", "ignored", "custom"):
+        raise HTTPException(status_code=409, detail=f"Proposal already {prev_status}")
+
+    if action == "choose":
+        if not value:
+            raise HTTPException(status_code=400, detail="value (option_id) required for choose")
+        new_status = "chosen"
+        chosen_id = value
+        custom_answer = ""
+    elif action == "custom":
+        if not value:
+            raise HTTPException(status_code=400, detail="value (custom answer) required for custom")
+        new_status = "custom"
+        chosen_id = ""
+        custom_answer = value
+    else:  # ignore
+        new_status = "ignored"
+        chosen_id = ""
+        custom_answer = ""
+
+    message.content = patch_propose_options_status_in_content(
+        message.content or "", new_status, chosen=chosen_id, custom=custom_answer, note=note
+    )
+    message.is_edited = True
+    await db.commit()
+    result = await db.execute(
+        select(Message).where(Message.id == message.id).options(selectinload(Message.attachments))
+    )
+    message = result.scalar_one()
+    formatted = format_message_response(message)
+    await notify_message_update(group_id, formatted.model_dump(mode="json"))
+
+    # Build nudge message and deliver to the agent
+    prompt = str(payload.get("prompt") or "")
+    options = payload.get("options") or []
+    chosen_title = ""
+    for opt in options:
+        if isinstance(opt, dict) and str(opt.get("id")) == chosen_id:
+            chosen_title = str(opt.get("title") or "")
+            break
+
+    if action == "ignore":
+        nudge = (
+            f"[System] Group propose-options ignored\n"
+            f"proposal_id: {proposal_id}\n"
+            f"prompt: {prompt}\n"
+            f"resolved_by: {current_user.name}\n"
+            "The user ignored the proposed options. Ask whether they want a different approach, "
+            "or proceed with the most sensible default if they prefer you to decide."
+        )
+        sys_content = f"⏭ 已忽略选项：{prompt}"
+    elif action == "custom":
+        nudge = (
+            f"[System] Group propose-options custom answer\n"
+            f"proposal_id: {proposal_id}\n"
+            f"prompt: {prompt}\n"
+            f"custom_answer: {custom_answer[:500]}\n"
+            f"resolved_by: {current_user.name}\n"
+            f'The user typed their own answer instead of picking a listed option: "{custom_answer[:500]}". '
+            "Follow their answer as the chosen plan."
+        )
+        sys_content = f"✏️ 自定义答案：{custom_answer[:40]}"
+    else:
+        nudge = (
+            f"[System] Group propose-options chosen\n"
+            f"proposal_id: {proposal_id}\n"
+            f"prompt: {prompt}\n"
+            f"chosen_option_id: {chosen_id}\n"
+            f"chosen_option_title: {chosen_title}\n"
+            f"resolved_by: {current_user.name}\n"
+            f"The user chose option '{chosen_id}' ({chosen_title}). "
+            "Continue with that plan now. Do not ask for the choice again."
+        )
+        sys_content = f"✅ 已选择：{chosen_title or chosen_id}"
+    if note:
+        nudge += f"\nnote: {note}"
+
+    nudged = False
+    agent_id = str(payload.get("agent_id") or "")
+    try:
+        from app.ai_web.registry import registry as agent_registry
+
+        candidates = [agent_id] if agent_id else []
+        # Fall back to the first running agent if no agent_id was embedded
+        if not candidates:
+            for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+                candidates.append(aid)
+                break
+        chat_payload = {
+            "type": "chat",
+            "user_id": current_user.id,
+            "content": nudge,
+            "channel": "gateway",
+            "sender_name": current_user.name or "User",
+        }
+        for cand in candidates:
+            if await agent_registry.send_to_agent(cand, chat_payload):
+                nudged = True
+                break
+    except Exception as e:
+        logging.getLogger(__name__).warning("[API] Failed to nudge agent after propose-options: %s", e)
+
+    try:
+        sys_msg_id = f"m_{datetime.now().timestamp()}_propopt"
+        sys_msg = Message(
+            id=sys_msg_id,
+            sender_id=current_user.id,
+            group_id=group_id,
+            content=sys_content,
+            type=MessageType.SYSTEM,
+            timestamp=beijing_now(),
+        )
+        db.add(sys_msg)
+        await db.commit()
+        result = await db.execute(
+            select(Message).where(Message.id == sys_msg_id).options(selectinload(Message.attachments))
+        )
+        sys_msg = result.scalar_one()
+        await notify_new_message(group_id, format_message_response(sys_msg).model_dump(mode="json"), current_user.id)
+    except Exception as e:
+        logging.getLogger(__name__).warning("[API] Failed to post propose-options system note: %s", e)
+
+    return {
+        "ok": True,
+        "proposal_id": proposal_id,
+        "status": new_status,
+        "chosen_option_id": chosen_id or None,
+        "custom_answer": custom_answer or None,
+        "message": formatted.model_dump(mode="json"),
+        "agent_notified": nudged,
+    }
+
+
 @router.delete("/messages/{message_id}/permanent")
 async def permanent_delete_message(
     message_id: str, current_user: User = Depends(get_current_user_dep), db: AsyncSession = Depends(get_db)

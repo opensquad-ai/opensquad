@@ -24,12 +24,21 @@ GROUP_APPROVAL_END = "[[/GROUP_APPROVAL]]"
 COLLAB_APPROVAL_START = "[[COLLAB_APPROVAL]]"
 COLLAB_APPROVAL_END = "[[/COLLAB_APPROVAL]]"
 
+# Propose-options marker (N-way single choice, distinct from approve/reject cards)
+PROPOSE_OPTIONS_START = "[[PROPOSE_OPTIONS]]"
+PROPOSE_OPTIONS_END = "[[/PROPOSE_OPTIONS]]"
+
 # Back-compat aliases used by older imports
 APPROVAL_START = COLLAB_APPROVAL_START
 APPROVAL_END = COLLAB_APPROVAL_END
 
 _MARKER_RE = re.compile(
     r"\[\[(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]\s*(\{.*?\})\s*\[\[/(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]",
+    re.DOTALL,
+)
+
+_PROPOSE_OPTIONS_RE = re.compile(
+    r"\[\[PROPOSE_OPTIONS\]\]\s*(\{.*?\})\s*\[\[/PROPOSE_OPTIONS\]\]",
     re.DOTALL,
 )
 
@@ -189,6 +198,89 @@ def parse_approval_payload(content: str) -> dict[str, Any] | None:
     if not data.get("agent_name") and data.get("pm_agent_name"):
         data["agent_name"] = data["pm_agent_name"]
     return data
+
+
+def encode_propose_options_message(payload: dict[str, Any]) -> str:
+    """Build group TEXT content for an N-way propose-options card."""
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    prompt = payload.get("prompt") or "请选择一个选项"
+    options = payload.get("options") or []
+    lines = [f"{PROPOSE_OPTIONS_START}{body}{PROPOSE_OPTIONS_END}", f"❓ 选择一个选项：{prompt}"]
+    for i, opt in enumerate(options):
+        if isinstance(opt, dict):
+            title = opt.get("title") or ""
+            desc = opt.get("description") or ""
+            line = f"{i + 1}. {title}"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+    lines.append("请在下方卡片中选择一个选项。")
+    return "\n".join(lines)
+
+
+def parse_propose_options_payload(content: str) -> dict[str, Any] | None:
+    if not content or PROPOSE_OPTIONS_START not in content:
+        return None
+    m = _PROPOSE_OPTIONS_RE.search(content)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("id"):
+        return None
+    if not data.get("options") or not isinstance(data["options"], list):
+        return None
+    return data
+
+
+def patch_propose_options_status_in_content(
+    content: str,
+    status: str,
+    chosen: str = "",
+    custom: str = "",
+    note: str = "",
+) -> str:
+    """Rewrite PROPOSE_OPTIONS marker JSON status inside an existing message body."""
+    payload = parse_propose_options_payload(content)
+    if not payload:
+        return content
+    payload["status"] = status
+    if chosen:
+        payload["chosen_option_id"] = chosen
+    if custom:
+        payload["custom_answer"] = custom
+    if note:
+        payload["resolve_note"] = note
+    new_marker = (
+        f"{PROPOSE_OPTIONS_START}{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}{PROPOSE_OPTIONS_END}"
+    )
+    return _PROPOSE_OPTIONS_RE.sub(new_marker, content, count=1)
+
+
+def post_group_propose_options_card(payload: dict[str, Any], group_id: str) -> dict[str, Any]:
+    """Send an N-way propose-options card to a group via bridge. Returns status dict."""
+    from opensquad.bridge import bridge
+
+    if not bridge or not bridge.token:
+        return {"ok": False, "error": "Bridge not connected"}
+
+    target = group_id
+    groups = bridge.list_groups_api() or []
+    if not any(isinstance(g, dict) and g.get("id") == group_id for g in groups):
+        for g in groups:
+            if isinstance(g, dict) and g.get("name") == group_id:
+                target = str(g.get("id") or group_id)
+                break
+
+    msg = encode_propose_options_message(payload)
+    ok = bridge.send_message(msg, target_id=target, target_type="group")
+    if not ok:
+        return {"ok": False, "error": "Failed to send propose-options card", "group_id": target}
+
+    message_id = bridge.last_sent_message_id()
+    return {"ok": True, "group_id": target, "message_id": message_id}
 
 
 def patch_approval_status_in_content(content: str, status: str, note: str = "") -> str:

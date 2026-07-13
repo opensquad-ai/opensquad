@@ -557,6 +557,52 @@ async def deny_mode_switch(request_id: str, reason: str = "") -> dict:
     return {"ok": True}
 
 
+async def resolve_proposed_options(
+    request_id: str,
+    *,
+    chosen_option_id: str = "",
+    custom_answer: str = "",
+    ignored: bool = False,
+) -> dict:
+    """Resolve a pending propose_options card and nudge the agent to continue."""
+    status = "ignored" if ignored else ("custom" if custom_answer else "chosen")
+    try:
+        await bus.emit_async(
+            "info",
+            {
+                "event": "propose_options_resolved",
+                "id": request_id,
+                "status": status,
+                "chosen_option_id": chosen_option_id,
+                "custom_answer": custom_answer,
+                "text": f"Propose options {status}",
+            },
+        )
+    except Exception as e:
+        logger.warning("[model_switch] propose_options resolve emit failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+    if ignored:
+        cue = (
+            "[System] The user ignored the proposed options. Ask whether they want a different "
+            "approach, or proceed with the most sensible default if they prefer you to decide."
+        )
+    elif custom_answer.strip():
+        cue = (
+            f"[System] The user typed their own answer instead of picking a listed option: "
+            f'"{custom_answer.strip()[:500]}". Follow their answer as the chosen plan.'
+        )
+    elif chosen_option_id:
+        cue = (
+            f"[System] The user chose option '{chosen_option_id}'. "
+            "Continue with that plan now. Do not ask for the choice again."
+        )
+    else:
+        cue = "[System] The user resolved the proposed options without a clear selection. Ask which option they prefer."
+    await _nudge_agent_after_mode_decision(cue)
+    return {"ok": True, "status": status}
+
+
 async def _on_agent_mode_requested(data: dict) -> None:
     if not isinstance(data, dict):
         return

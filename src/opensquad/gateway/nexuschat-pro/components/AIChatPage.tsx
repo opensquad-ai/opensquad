@@ -54,6 +54,7 @@ import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
 import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
+import { OptionsApprovalCard, type OptionsProposal } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
@@ -354,6 +355,24 @@ const WorkflowBlockView: React.FC<{
               </div>
             );
           }
+          if (infoObj?.event === 'propose_options') {
+            const prompt = String(infoObj.prompt || '请选择一个选项');
+            const opts = (infoObj.options || []) as { id: string; title: string; description?: string }[];
+            const count = Array.isArray(opts) ? opts.length : 0;
+            return (
+              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
+                选项请求：{prompt}{count ? `（${count} 个选项）` : ''}
+              </div>
+            );
+          }
+          if (infoObj?.event === 'propose_options_resolved') {
+            const st = infoObj.status === 'ignored' ? '已忽略' : infoObj.status === 'custom' ? '自定义答案' : '已选择';
+            return (
+              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
+                选项已处理：{st}
+              </div>
+            );
+          }
 
           // --- Task Supervisor check-in: special badge rendering ---
           if (infoObj?.event === 'task_supervisor_checkin') {
@@ -607,6 +626,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
   const [agentMode, setAgentMode] = useState<AgentMode>('build');
   const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
+  const [optionsProposals, setOptionsProposals] = useState<OptionsProposal[]>([]);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
   /** Default workspace root from agent (used when user never picks a folder). */
   const [defaultCwd, setDefaultCwd] = useState<string | null>(null);
@@ -1827,6 +1847,57 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             setAgentMode(toMode);
           }
           // Fall through to update timeline card status via re-render of pending→resolved
+        }
+
+        if (evt === 'propose_options') {
+          const id = String((detailed as any).id || '');
+          const prompt = String((detailed as any).prompt || '请选择一个选项：');
+          const rawOpts = (detailed as any).options || [];
+          const options = Array.isArray(rawOpts)
+            ? rawOpts
+                .map((o: any) => ({
+                  id: String((o && o.id) || ''),
+                  title: String((o && (o.title || o.name)) || ''),
+                  description: String((o && (o.description || o.summary)) || '') || undefined,
+                }))
+                .filter((o: { id: string; title: string }) => o.id && o.title)
+            : [];
+          const allowCustom = (detailed as any).allow_custom !== false;
+          if (id && options.length >= 2) {
+            const proposal: OptionsProposal = {
+              id,
+              prompt,
+              options,
+              allow_custom: allowCustom,
+              status: 'pending',
+            };
+            setOptionsProposals((prev) => {
+              if (prev.some((p) => p.id === id)) {
+                return prev.map((p) => (p.id === id ? { ...p, ...proposal } : p));
+              }
+              return [...prev, proposal];
+            });
+          }
+          // Fall through so the timeline also shows a compact status line
+        }
+
+        if (evt === 'propose_options_resolved') {
+          const id = String((detailed as any).id || '');
+          const statusRaw = String((detailed as any).status || 'chosen');
+          const status: OptionsProposal['status'] =
+            statusRaw === 'ignored' ? 'ignored' : statusRaw === 'custom' ? 'custom' : 'chosen';
+          const chosenOptionId = String((detailed as any).chosen_option_id || '');
+          const customAnswer = String((detailed as any).custom_answer || '');
+          if (id) {
+            setOptionsProposals((prev) =>
+              prev.map((p) =>
+                p.id === id
+                  ? { ...p, status, chosen_option_id: chosenOptionId, custom_answer: customAnswer }
+                  : p,
+              ),
+            );
+          }
+          // Fall through to update timeline compact status
         }
 
         // Task supervisor check-in: pass full payload but use a short status label
@@ -4596,6 +4667,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       prev.map((a) => (a.id === reqId ? { ...a, status: 'denied' } : a)),
                     );
                     wsServiceRef.current?.denyModeSwitch(reqId);
+                  }}
+                />
+              ))}
+              {optionsProposals.filter((p) => p.status === 'pending').map((proposal) => (
+                <OptionsApprovalCard
+                  key={proposal.id}
+                  proposal={proposal}
+                  onSubmit={(reqId, optionId) => {
+                    setOptionsProposals((prev) =>
+                      prev.map((p) =>
+                        p.id === reqId ? { ...p, status: 'chosen', chosen_option_id: optionId } : p,
+                      ),
+                    );
+                    wsServiceRef.current?.resolveProposedOptions(reqId, optionId);
+                  }}
+                  onCustom={(reqId, answer) => {
+                    setOptionsProposals((prev) =>
+                      prev.map((p) =>
+                        p.id === reqId ? { ...p, status: 'custom', custom_answer: answer } : p,
+                      ),
+                    );
+                    wsServiceRef.current?.resolveProposedOptionsCustom(reqId, answer);
+                  }}
+                  onIgnore={(reqId) => {
+                    setOptionsProposals((prev) =>
+                      prev.map((p) => (p.id === reqId ? { ...p, status: 'ignored' } : p)),
+                    );
+                    wsServiceRef.current?.ignoreProposedOptions(reqId);
                   }}
                 />
               ))}

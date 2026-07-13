@@ -3887,6 +3887,14 @@ if __name__ == "__main__":
     if "long_memory" in tools_list:
         registry.register(memory, "memory")
 
+    # Choice tools (propose_options) — always available for plan decision UI
+    try:
+        from opensquad.tools import choice_tools
+
+        registry.register(choice_tools, "choice_tools", level="core")
+    except ImportError as e:
+        logger.warning(f"Failed to import choice_tools: {e}")
+
     # agent_setup tool for project management skill
     if "agent_setup" in tools_list:
         try:

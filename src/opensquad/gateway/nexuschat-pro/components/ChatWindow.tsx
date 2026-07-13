@@ -11,6 +11,10 @@ import {
   CollabStepApprovalCard,
   parseCollabApproval,
 } from './CollabStepApprovalCard';
+import {
+  ProposeOptionsCard,
+  parseProposeOptions,
+} from './ProposeOptionsCard';
 
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
@@ -2534,6 +2538,25 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                                 group.id,
                                                                 approval.id,
                                                                 action,
+                                                                { messageId: msg.id }
+                                                            );
+                                                        }}
+                                                    />
+                                                );
+                                            }
+                                            const proposal = !msg.isDeleted ? parseProposeOptions(msg.content || '') : null;
+                                            if (proposal) {
+                                                return (
+                                                    <ProposeOptionsCard
+                                                        payload={proposal}
+                                                        groupId={group.id}
+                                                        messageId={msg.id}
+                                                        onResolve={async (action, value) => {
+                                                            await messageAPI.resolveProposeOptions(
+                                                                group.id,
+                                                                proposal.id,
+                                                                action,
+                                                                value,
                                                                 { messageId: msg.id }
                                                             );
                                                         }}
