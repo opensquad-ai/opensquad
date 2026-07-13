@@ -8,6 +8,7 @@ import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle } from 'lucide-r
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { extractFileEditInfo } from './FileDiffBlock';
+import { MarkdownScrollBody } from './MarkdownScrollBody';
 
 export interface SubAgentPanelProps {
   open: boolean;
@@ -179,9 +180,7 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
         </button>
         {open && (
           <div className="mt-0.5 pl-3 pr-1 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05]">
-            <pre className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 text-textMuted max-h-[280px] overflow-y-auto">
-              {line.text}
-            </pre>
+            <MarkdownScrollBody text={line.text} follow muted maxHeightClass="max-h-[280px]" />
           </div>
         )}
       </div>

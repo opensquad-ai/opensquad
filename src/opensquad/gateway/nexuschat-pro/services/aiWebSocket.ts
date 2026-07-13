@@ -223,11 +223,18 @@ class AIWebSocketService {
     this._sendCommand('deny_mode_switch', { id: requestId, reason: reason || '' });
   }
 
-  /** User picked one of the agent-proposed options (propose_options card). */
-  resolveProposedOptions(requestId: string, optionId: string) {
+  /** User picked one or more agent-proposed options (propose_options card). */
+  resolveProposedOptions(requestId: string, optionIdOrIds: string | string[]) {
+    const ids = Array.isArray(optionIdOrIds)
+      ? optionIdOrIds.filter(Boolean)
+      : String(optionIdOrIds || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
     this._sendCommand('resolve_proposed_options', {
       id: requestId,
-      chosen_option_id: optionId,
+      chosen_option_id: ids[0] || '',
+      chosen_option_ids: ids,
       ignored: false,
     });
   }

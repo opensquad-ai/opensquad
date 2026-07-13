@@ -714,6 +714,15 @@
       "deleteSessionFailed": "删除会话失败",
       "renameSessionFailed": "重命名会话失败",
       "defaultFolder": "默认"
+    },
+    "workingDirModal": {
+      "title": "设置工作目录",
+      "description": "出于安全限制，浏览器无法读取文件夹的绝对路径。请输入本机完整路径，以便 Agent 将其用作会话工作目录。",
+      "folderSelected": "已选择文件夹名称：{{name}} — 请确认或修改下方完整路径。",
+      "pathLabel": "绝对路径",
+      "pathPlaceholder": "例如 C:\\ai_test\\ds 或 /home/user/project",
+      "browse": "浏览",
+      "saving": "保存中…"
     }
   },
   "quickNote": {

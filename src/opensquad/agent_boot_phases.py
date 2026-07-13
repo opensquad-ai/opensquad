@@ -223,12 +223,24 @@ class AgentBootPhases:
             provider = "google"
             agent_logger.info(f"[Boot] Auto-detected Gemini model: {model_name}, switching provider to 'google'")
 
-        from opensquad.model_config import ModelConfig
+        from opensquad.model_config import LONG_REASONING_TIMEOUT, ModelConfig
 
         model_config = ModelConfig.from_dict(model_cfg, prompt=system_prompt, provider=provider)
-        if provider in ["claude", "anthropic"]:
-            model_config.timeout = 1200.0
-        elif provider in ["google", "gemini"]:
+        # Many cards still ship timeout=120 from schema defaults. That budget is a
+        # stuck-connection guard, not a limit on thinking length — 5+ minute
+        # reasoning turns are normal. Raise when still on the short default.
+        # Note: default reasoning_effort is already "high"; only treat max/xhigh
+        # (or native is_think / Claude) as needing the long budget.
+        _effort = (model_config.reasoning_effort or "").strip().lower()
+        _needs_long = model_config.is_think or provider in ("claude", "anthropic") or _effort in ("max", "xhigh")
+        if _needs_long and model_config.timeout <= 120.0:
+            model_config.timeout = LONG_REASONING_TIMEOUT
+            agent_logger.info(
+                f"[Boot] Raised model timeout to {LONG_REASONING_TIMEOUT}s for long reasoning "
+                f"(is_think={model_config.is_think}, effort={_effort or 'n/a'}, provider={provider}); "
+                f"set model.timeout explicitly to override"
+            )
+        if provider in ["google", "gemini"]:
             model_config.token_max = 1_000_000
 
         if provider in ["claude", "anthropic"]:

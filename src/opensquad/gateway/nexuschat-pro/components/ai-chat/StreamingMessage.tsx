@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { Bot } from 'lucide-react';
-import { marked } from 'marked';
 import { SERVER_BASE_URL } from '../../services/api';
 import { toAbsoluteMediaUrl } from '../../utils/image';
+import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 
 interface StreamingMessageProps {
   content: string;
@@ -35,7 +35,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
   const renderedHtml = useMemo(() => {
     if (!visibleContent) return '';
     try {
-      return marked.parse(visibleContent, { breaks: true }) as string;
+      return renderFencedMarkdown(visibleContent);
     } catch {
       return visibleContent;
     }
@@ -51,7 +51,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
         </div>
         <div className="text-sm leading-relaxed text-textMain w-full min-w-0">
           <div
-            className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown"
+            className={AI_MARKDOWN_CLASS}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
           {!isComplete && (
@@ -74,7 +74,7 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
       <div className="flex flex-col gap-2 max-w-[85%] sm:max-w-[80%] min-w-0">
         <div className="bg-chatBubbleOther text-textMain rounded-xl rounded-tl-sm border border-border px-3 py-2 sm:px-3.5 sm:py-2.5 text-sm leading-relaxed overflow-hidden shadow-sm">
           <div
-            className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown"
+            className={AI_MARKDOWN_CLASS}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
           {!isComplete && (

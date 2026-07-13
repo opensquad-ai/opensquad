@@ -40,7 +40,7 @@ import {
   type WorkflowBlock,
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
-import { pickFolderPath, pushCwdRecent } from '../utils/cwdRecents';
+import { pushCwdRecent } from '../utils/cwdRecents';
 import { setSessionProjectPath, getSessionMeta, requestSessionListRefresh } from '../utils/sessionProjectMeta';
 
 // AI Chat sub-components
@@ -54,7 +54,7 @@ import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
 import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
-import { OptionsApprovalCard, type OptionsProposal } from './ai-chat/OptionsApprovalCard';
+import { OptionsApprovalCard, type OptionsProposal, hydrateOptionsProposalsFromEvents } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
@@ -183,7 +183,13 @@ const WorkflowBlockView: React.FC<{
     [block.events, shellStreams],
   );
   const totalEvents = displayItems.length;
-  const effectivelyCompleted = shouldTreatWorkflowComplete(block);
+  // Trailing compression/summary may never get a following chat message to flip
+  // `completed`. But do NOT treat "all tools have results" as complete while this
+  // turn is still live (turnStartedMs set) — that auto-collapsed the fold between
+  // tool rounds while the agent was still working.
+  const effectivelyCompleted =
+    block.completed ||
+    (turnStartedMs == null && shouldTreatWorkflowComplete(block));
   // After restart/hydrate, completed blocks used to paginate to the last 10 items
   // and hide earlier DelegateFold / ShellJobFold. Keep folds always expanded.
   const hasFolds = useMemo(
@@ -218,8 +224,6 @@ const WorkflowBlockView: React.FC<{
     setVisibleCount(prev => Math.min(prev + WORKFLOW_EVENTS_PAGE_SIZE, totalEvents));
   };
 
-  // Trailing compression/summary blocks may never get a following chat message
-  // to flip `completed`; treat settled terminal work as finished for display.
   const displayStatus = effectivelyCompleted ? undefined : (block.status || undefined);
 
   // Skip empty / lifecycle-only blocks (e.g. "New session started" → bare Completed).
@@ -780,11 +784,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     } catch { /* ignore quota */ }
   }, [pendingMessages, agentId, currentSessionId, pendingQueueStorageKey]);
 
-  // Workflow visibility toggle (persisted to localStorage, default: visible so users can see thought content)
+  // Workflow visibility toggle (persisted to localStorage, default: visible)
   const [showWorkflow, setShowWorkflow] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem('ai_chat_show_workflow');
-      return stored === 'true';
+      // Missing key → visible. Only hide when explicitly stored as "false".
+      return stored !== 'false';
     } catch { return true; }
   });
 
@@ -1857,18 +1862,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             ? rawOpts
                 .map((o: any) => ({
                   id: String((o && o.id) || ''),
-                  title: String((o && (o.title || o.name)) || ''),
+                  title: String((o && (o.title || o.name || o.label)) || ''),
                   description: String((o && (o.description || o.summary)) || '') || undefined,
                 }))
                 .filter((o: { id: string; title: string }) => o.id && o.title)
             : [];
           const allowCustom = (detailed as any).allow_custom !== false;
+          const allowMultiple = !!(detailed as any).allow_multiple;
           if (id && options.length >= 2) {
             const proposal: OptionsProposal = {
               id,
               prompt,
               options,
               allow_custom: allowCustom,
+              allow_multiple: allowMultiple,
               status: 'pending',
             };
             setOptionsProposals((prev) => {
@@ -1887,12 +1894,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const status: OptionsProposal['status'] =
             statusRaw === 'ignored' ? 'ignored' : statusRaw === 'custom' ? 'custom' : 'chosen';
           const chosenOptionId = String((detailed as any).chosen_option_id || '');
+          const rawIds = (detailed as any).chosen_option_ids;
+          const chosenOptionIds = Array.isArray(rawIds)
+            ? rawIds.map((x: any) => String(x)).filter(Boolean)
+            : chosenOptionId
+              ? [chosenOptionId]
+              : [];
           const customAnswer = String((detailed as any).custom_answer || '');
           if (id) {
             setOptionsProposals((prev) =>
               prev.map((p) =>
                 p.id === id
-                  ? { ...p, status, chosen_option_id: chosenOptionId, custom_answer: customAnswer }
+                  ? {
+                      ...p,
+                      status,
+                      chosen_option_id: chosenOptionIds[0] || chosenOptionId,
+                      chosen_option_ids: chosenOptionIds,
+                      custom_answer: customAnswer,
+                    }
                   : p,
               ),
             );
@@ -2353,9 +2372,38 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               for (const { event, status } of bufferedWf) {
                 withBuffered = appendWorkflowEvent(withBuffered, event, status);
               }
-              setTimeline(withBuffered);
+              // If disk snapshot lags (common right after new session / early tools),
+              // keep any already-rendered live workflow so the Worked/Working fold
+              // does not vanish mid-turn.
+              setTimeline((prev) => {
+                const liveWfs = prev.filter(
+                  (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+                );
+                if (liveWfs.length === 0) return withBuffered;
+                const diskHasLive = withBuffered.some(
+                  (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+                );
+                if (diskHasLive) return withBuffered;
+                let merged = withBuffered;
+                for (const wf of liveWfs) {
+                  for (const evt of (wf as { data: WorkflowBlock }).data.events) {
+                    merged = appendWorkflowEvent(
+                      merged,
+                      evt,
+                      (wf as { data: WorkflowBlock }).data.status || 'Working...',
+                    );
+                  }
+                }
+                return merged;
+              });
               setShellStreams(rebuildShellStreamsFromTimeline(withBuffered));
             }
+            // Restore pending propose_options cards after refresh / session switch.
+            const allEvents = [
+              ...(session.archived_events || []),
+              ...(session.events || []),
+            ];
+            setOptionsProposals(hydrateOptionsProposalsFromEvents(allEvents));
             sessionBootstrapDoneRef.current = true;
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
@@ -2368,6 +2416,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             diskSessionLoadedRef.current = true;
           } else {
             // Disk session unavailable — use buffered WS history as fallback
+            setOptionsProposals([]);
             const buffered = pendingHydrationMediaRef.current;
             pendingHydrationMediaRef.current = [];
             if (buffered.length > 0) {
@@ -3562,6 +3611,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     requestSessionListRefresh(agentId, null);
     setTimeline([]);
     setShellStreams({});
+    setOptionsProposals([]);
+    setModeApprovals([]);
     streamingTextRef.current = '';
     setStreamingText('');
     finalizingRef.current = false;
@@ -3633,7 +3684,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const sidChanged = !!currentSid && currentSid !== previousSid;
         if (sidChanged || msgCount === 0) {
           const entries = buildTimelineFromSession(session?.messages || [], session?.events || []);
-          setTimeline(entries);
+          // Disk can lag behind live WS tools right after creating a session —
+          // don't wipe an in-flight Worked/Working fold with an empty snapshot.
+          setTimeline((prev) => {
+            const liveWfs = prev.filter(
+              (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+            );
+            if (liveWfs.length === 0) return entries;
+            const diskHasLive = entries.some(
+              (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+            );
+            if (diskHasLive) return entries;
+            return [...entries, ...liveWfs];
+          });
           setShellStreams(rebuildShellStreamsFromTimeline(entries));
           if (currentSid) {
             currentSessionIdRef.current = currentSid;
@@ -4674,13 +4737,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <OptionsApprovalCard
                   key={proposal.id}
                   proposal={proposal}
-                  onSubmit={(reqId, optionId) => {
+                  onSubmit={(reqId, optionIds) => {
                     setOptionsProposals((prev) =>
                       prev.map((p) =>
-                        p.id === reqId ? { ...p, status: 'chosen', chosen_option_id: optionId } : p,
+                        p.id === reqId
+                          ? {
+                              ...p,
+                              status: 'chosen',
+                              chosen_option_id: optionIds[0],
+                              chosen_option_ids: optionIds,
+                            }
+                          : p,
                       ),
                     );
-                    wsServiceRef.current?.resolveProposedOptions(reqId, optionId);
+                    wsServiceRef.current?.resolveProposedOptions(reqId, optionIds);
                   }}
                   onCustom={(reqId, answer) => {
                     setOptionsProposals((prev) =>
@@ -4860,6 +4930,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   } catch (err: any) {
                     console.error('[AIChatPage] Failed to set working directory:', err);
                     alert(`Failed to set working directory: ${err.message || err}`);
+                    throw err;
                   }
                 }}
                 trailing={

@@ -835,6 +835,17 @@ export const adminAPI = {
     });
   },
 
+  /** 在 Launcher 本机弹出原生目录选择对话框，返回绝对路径（浏览器 Open Folder 用） */
+  pickDirectory: async (initialDir?: string | null) => {
+    return apiRequest<{ path: string | null; cancelled?: boolean; error?: string }>(
+      `/ai-web/admin/system/pick-directory`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ initial_dir: initialDir || undefined }),
+      },
+    );
+  },
+
   /** 获取 Agent 的 role.md */
   getRole: async (name: string) => {
     return apiRequest<{ content: string }>(`/ai-web/admin/agents/${name}/role`);

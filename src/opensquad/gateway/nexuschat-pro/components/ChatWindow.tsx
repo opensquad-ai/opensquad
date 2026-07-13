@@ -2395,20 +2395,34 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             const replyContextMsg = msg.replyToId ? messageMap.get(msg.replyToId) ?? null : null;
             const replyContextUser = replyContextMsg ? users[replyContextMsg.senderId] : null;
 
-            // SYSTEM messages render as a centered banner, not a chat bubble.
+            // SYSTEM messages: propose-options resolve tips stay plain text;
+            // other system notes keep the soft banner.
             if (msg.type === MessageType.SYSTEM) {
+                const plainTip = /^(✅\s*已选择|⏭\s*已忽略|✏️\s*自定义)/.test((msg.content || '').trim());
                 return (
-                    <div key={msg.id} id={msg.id} className="flex justify-center my-3">
-                        <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
-                            <div
-                                className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
-                                dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
-                                onClick={(e) => handleMessageContentClick(e, msg.id)}
-                            />
-                        </div>
+                    <div key={msg.id} id={msg.id} className="flex justify-center my-2">
+                        {plainTip ? (
+                            <div className="max-w-[90%] md:max-w-[75%] px-1 py-0.5 text-xs text-textMuted whitespace-pre-wrap break-words text-center">
+                                {msg.content}
+                            </div>
+                        ) : (
+                            <div className="max-w-[90%] md:max-w-[75%] px-4 py-3 bg-primary/5 border border-primary/20 rounded-xl text-sm text-textMain whitespace-pre-wrap break-words text-center">
+                                <div
+                                    className="prose prose-sm max-w-full prose-p:my-0 inline-block text-left"
+                                    dangerouslySetInnerHTML={{ __html: parseMessageContent(msg.content, msg.id) }}
+                                    onClick={(e) => handleMessageContentClick(e, msg.id)}
+                                />
+                            </div>
+                        )}
                     </div>
                 );
             }
+
+            const interactiveApproval =
+                !msg.isDeleted && msg.type === MessageType.TEXT ? parseCollabApproval(msg.content || '') : null;
+            const interactiveProposal =
+                !msg.isDeleted && msg.type === MessageType.TEXT ? parseProposeOptions(msg.content || '') : null;
+            const isInteractiveCard = !!(interactiveApproval || interactiveProposal);
 
             return (
                 <div key={msg.id} id={msg.id} className={`group flex gap-2 md:gap-3 mb-1 ${isSequence ? 'mt-1' : 'mt-4'} ${isSelf ? 'flex-row-reverse' : ''}`}>
@@ -2449,14 +2463,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 {t('chat.messageRecalled')}
                             </div>
                         ) : (
-                            <div className={`relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full
-                                ${isSelf
-                                    ? 'bg-chatBubbleSelf rounded-2xl rounded-tr-sm border border-border'
-                                    : isMentioned
-                                        ? 'bg-yellow-50 rounded-2xl rounded-tl-sm border border-yellow-300 ring-2 ring-yellow-100'
-                                        : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
-                                }
-                            `}>
+                            <div className={
+                                isInteractiveCard
+                                    ? 'relative text-sm leading-relaxed text-textMain break-all overflow-visible max-w-full'
+                                    : `relative px-3 md:px-4 py-2 md:py-2.5 shadow-sm text-sm leading-relaxed text-textMain break-all overflow-hidden max-w-full ${
+                                        isSelf
+                                            ? 'bg-chatBubbleSelf rounded-2xl rounded-tr-sm border border-border'
+                                            : isMentioned
+                                                ? 'bg-yellow-50 rounded-2xl rounded-tl-sm border border-yellow-300 ring-2 ring-yellow-100'
+                                                : 'bg-chatBubbleOther rounded-2xl rounded-tl-sm border border-border'
+                                    }`
+                            }>
                                  {/* Reply Context UI */}
                                  {msg.replyToId && (() => {
                                      const targetMsg = messageMap.get(msg.replyToId!);
@@ -2572,7 +2589,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                                 />
                                             );
                                         })()}
-                                        {msg.isEdited && <span className="text-[10px] text-gray-400 self-end mt-1 italic">{t('chat.edited')}</span>}
+                                        {msg.isEdited && !isInteractiveCard && (
+                                            <span className="text-[10px] text-gray-400 self-end mt-1 italic">{t('chat.edited')}</span>
+                                        )}
                                     </div>
                                 ) : null}
 

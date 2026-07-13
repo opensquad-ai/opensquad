@@ -22,6 +22,8 @@ import {
 import { DelegateFold } from './DelegateFold';
 import { ShellJobFold } from './ShellJobFold';
 import { parsePlanContent, type PlanStep } from './PlanBlock';
+import { FollowScrollBox } from './FollowScrollBox';
+import { MarkdownScrollBody } from './MarkdownScrollBody';
 
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
@@ -358,14 +360,15 @@ function outerSummary(
     return { primary: 'Compressing context', secondary: '' };
   }
   // Summary finished (even if workflow block not yet marked completed).
-  if (summaries.length > 0 && summaries.every((l) => !l.running)) {
+  if (summaries.length > 0 && summaries.every((l) => !l.running) && block.completed) {
     return { primary: 'Context compressed', secondary: '' };
   }
   if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
     if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
-  if (!block.completed && turnStartedMs != null) {
+  // Incomplete block = still working (even between tool rounds / without turnStartedMs).
+  if (!block.completed) {
     if (secs != null) return { primary: `Working for ${secs}s`, secondary: '' };
     return { primary: 'Working', secondary: '' };
   }
@@ -703,12 +706,12 @@ const SoloEventLine: React.FC<{
       {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
       {open && isThought && line.detail && (
         <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
-          <pre
-            className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
-            style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
-          >
-            {line.detail}
-          </pre>
+          <MarkdownScrollBody
+            text={line.detail}
+            follow={!!line.running}
+            muted
+            maxHeightClass="max-h-[320px]"
+          />
         </div>
       )}
 
@@ -729,7 +732,10 @@ const SoloEventLine: React.FC<{
               Waiting for context compression…
             </div>
           ) : (
-            <pre
+            <FollowScrollBox
+              as="pre"
+              contentKey={(line.detail || '').length}
+              follow={!!line.running}
               className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
               style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
             >
@@ -737,7 +743,7 @@ const SoloEventLine: React.FC<{
               {line.running && !line.summaryPending ? (
                 <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
               ) : null}
-            </pre>
+            </FollowScrollBox>
           )}
         </div>
       )}
@@ -839,34 +845,55 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     return false;
   });
   // Parent only passes turnStartedMs for the active incomplete group.
-  // Also keep open during context compression (no turn_start / turnStartedMs)
-  // and while async sub-agents are still streaming.
-  const isLiveTurn =
-    (!block.completed && turnStartedMs != null) ||
-    hasLiveCompression ||
-    hasRunning;
+  // Treat any incomplete block as live so gaps between tool rounds do not
+  // flip the header to "Worked" and auto-collapse while the agent is still going.
+  const isLiveTurn = !block.completed || hasLiveCompression || hasRunning;
 
   const [outerOpen, setOuterOpen] = useState(isLiveTurn || expandDetails);
   const prevExpandRef = useRef(expandDetails);
+  const wasLiveRef = useRef(isLiveTurn);
+  /** User pin: 'open' | 'closed' | null (follow auto open/collapse). */
+  const userOverrideRef = useRef<'open' | 'closed' | null>(null);
   const stepsScrollRef = useRef<HTMLDivElement>(null);
   const stepsAtBottomRef = useRef(true);
+
+  const toggleOuter = () => {
+    setOuterOpen((v) => {
+      const next = !v;
+      userOverrideRef.current = next ? 'open' : 'closed';
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (expandDetails) {
       setOuterOpen(true);
+      userOverrideRef.current = null;
       prevExpandRef.current = expandDetails;
+      wasLiveRef.current = isLiveTurn;
       return;
     }
     // User just turned expandDetails off → collapse
     if (prevExpandRef.current && !expandDetails) {
       setOuterOpen(false);
+      userOverrideRef.current = null;
       prevExpandRef.current = expandDetails;
+      wasLiveRef.current = isLiveTurn;
       return;
     }
     prevExpandRef.current = expandDetails;
 
-    if (isLiveTurn) setOuterOpen(true);
-    else setOuterOpen(false);
+    if (isLiveTurn && !wasLiveRef.current) {
+      // New live turn → reset pin and auto-open
+      userOverrideRef.current = null;
+      setOuterOpen(true);
+    } else if (isLiveTurn) {
+      if (userOverrideRef.current !== 'closed') setOuterOpen(true);
+    } else if (userOverrideRef.current !== 'open') {
+      // Turn finished → auto-collapse unless user pinned the fold open
+      setOuterOpen(false);
+    }
+    wasLiveRef.current = isLiveTurn;
   }, [isLiveTurn, expandDetails]);
 
   useEffect(() => {
@@ -976,7 +1003,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
           primary={summary.primary}
           secondary={summary.secondary}
           open={outerOpen}
-          onToggle={() => setOuterOpen((v) => !v)}
+          onToggle={toggleOuter}
           running={isLiveTurn}
           shimmer={thinkingActive}
           depth={0}
@@ -984,13 +1011,13 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         {outerOpen && thoughtBodies.length > 0 && (
           <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
             {thoughtBodies.map((text, i) => (
-              <pre
+              <MarkdownScrollBody
                 key={i}
-                className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
-                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
-              >
-                {text}
-              </pre>
+                text={text}
+                follow={thinkingActive && i === thoughtBodies.length - 1}
+                muted
+                maxHeightClass="max-h-[320px]"
+              />
             ))}
           </div>
         )}
@@ -1015,7 +1042,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
           primary={summary.primary}
           secondary={summary.secondary}
           open={outerOpen}
-          onToggle={() => setOuterOpen((v) => !v)}
+          onToggle={toggleOuter}
           running={live}
           shimmer={live}
           depth={0}
@@ -1036,7 +1063,10 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
                 Waiting for context compression…
               </div>
             ) : (
-              <pre
+              <FollowScrollBox
+                as="pre"
+                contentKey={(summaryLine.detail || '').length}
+                follow={!!summaryLine.running}
                 className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
                 style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
               >
@@ -1044,7 +1074,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
                 {summaryLine.running && !summaryLine.summaryPending ? (
                   <span className="inline-block w-1.5 h-3.5 bg-indigo-400/50 animate-pulse ml-0.5 align-middle" />
                 ) : null}
-              </pre>
+              </FollowScrollBox>
             )}
           </div>
         )}
@@ -1068,7 +1098,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
               primary={summary.primary.startsWith('plan') ? 'Thought' : summary.primary}
               secondary={summary.primary.startsWith('plan') ? 'for a bit' : summary.secondary}
               open={outerOpen}
-              onToggle={() => setOuterOpen((v) => !v)}
+              onToggle={toggleOuter}
               running={thinkingActive}
               shimmer={thinkingActive}
               depth={0}
@@ -1076,13 +1106,13 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             {outerOpen && (
               <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
                 {thoughtBodies.map((text, i) => (
-                  <pre
+                  <MarkdownScrollBody
                     key={i}
-                    className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[320px] overflow-y-auto"
-                    style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
-                  >
-                    {text}
-                  </pre>
+                    text={text}
+                    follow={thinkingActive && i === thoughtBodies.length - 1}
+                    muted
+                    maxHeightClass="max-h-[320px]"
+                  />
                 ))}
               </div>
             )}
@@ -1107,7 +1137,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         primary={summary.primary}
         secondary={summary.secondary}
         open={outerOpen}
-        onToggle={() => setOuterOpen((v) => !v)}
+        onToggle={toggleOuter}
         running={isLiveTurn || hasRunning || hasLiveCompression}
         shimmer={thinkingActive || hasRunning || hasLiveCompression}
         depth={0}

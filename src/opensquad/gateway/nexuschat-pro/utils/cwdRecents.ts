@@ -1,5 +1,7 @@
 /** Shared folder pick + recent cwd helpers for Solo composer. */
 
+import { adminAPI } from '../services/api';
+
 const RECENTS_KEY = 'solo_cwd_recents';
 const MAX_RECENTS = 8;
 
@@ -29,7 +31,7 @@ export function pushCwdRecent(path: string): string[] {
 }
 
 /** Extract absolute directory path from files selected via webkitdirectory. */
-function directoryPathFromFileList(files: FileList | null | undefined): string | null {
+export function directoryPathFromFileList(files: FileList | null | undefined): string | null {
   if (!files?.length) return null;
   const file = files[0];
   const fullPath = (file as File & { path?: string }).path;
@@ -58,66 +60,97 @@ function directoryPathFromFileList(files: FileList | null | undefined): string |
   return null;
 }
 
-/** Open OS folder picker via hidden webkitdirectory input. */
-function pickFolderPathViaInput(): Promise<string | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    (input as HTMLInputElement & { webkitdirectory: boolean }).webkitdirectory = true;
-    (input as any).directory = true;
-    input.style.display = 'none';
-    document.body.appendChild(input);
+/** Folder name hint when absolute path is unavailable (browser security). */
+export function folderNameHintFromFileList(files: FileList | null | undefined): string | null {
+  if (!files?.length) return null;
+  const rel = files[0].webkitRelativePath;
+  if (!rel) return null;
+  return rel.replace(/\\/g, '/').split('/')[0] || null;
+}
 
-    let settled = false;
-    const finish = (value: string | null) => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener('focus', onWindowFocus);
-      input.remove();
-      resolve(value);
-    };
+export type FolderPickResult = {
+  /** Absolute path when available (Electron / Launcher native dialog). */
+  path: string | null;
+  /** Folder basename hint (legacy webkitdirectory fallback). */
+  folderNameHint: string | null;
+  /** True when the user dismissed the picker without selecting. */
+  cancelled: boolean;
+  /** Error message when the native picker could not be opened. */
+  error?: string | null;
+};
 
-    input.onchange = () => {
-      const path = directoryPathFromFileList(input.files);
-      finish(path?.trim() || null);
-    };
+/**
+ * Suggest an absolute path when the browser only exposes a folder name.
+ * Prefer sibling of current cwd: C:/ai_test/t + "ds" → C:/ai_test/ds
+ */
+export function suggestPathFromFolderHint(
+  currentCwd: string | null | undefined,
+  folderName: string | null | undefined,
+): string {
+  const name = (folderName || '').trim();
+  const cwd = (currentCwd || '').trim().replace(/[/\\]+$/, '');
+  if (!name) return cwd;
+  if (!cwd) return name;
 
-    const onWindowFocus = () => {
-      window.setTimeout(() => {
-        if (!settled && (!input.files || input.files.length === 0)) {
-          finish(null);
-        }
-      }, 400);
+  const sep = cwd.includes('\\') ? '\\' : '/';
+  const lastSep = Math.max(cwd.lastIndexOf('/'), cwd.lastIndexOf('\\'));
+  if (lastSep <= 0) return name;
+  const parent = cwd.slice(0, lastSep);
+  return `${parent}${sep}${name}`;
+}
+
+async function pickFolderViaLauncher(initialDir?: string | null): Promise<FolderPickResult> {
+  try {
+    const res = await adminAPI.pickDirectory(initialDir);
+    if (res?.cancelled) {
+      return { path: null, folderNameHint: null, cancelled: true };
+    }
+    const path = typeof res?.path === 'string' ? res.path.trim() : '';
+    if (path) {
+      return { path, folderNameHint: folderLabel(path), cancelled: false };
+    }
+    if (res?.error) {
+      return { path: null, folderNameHint: null, cancelled: false, error: res.error };
+    }
+    return { path: null, folderNameHint: null, cancelled: true };
+  } catch (err: any) {
+    console.warn('[pickFolder] launcher native picker failed', err);
+    return {
+      path: null,
+      folderNameHint: null,
+      cancelled: false,
+      error: err?.message || String(err),
     };
-    window.addEventListener('focus', onWindowFocus);
-    input.click();
-  });
+  }
 }
 
 /**
- * Native folder picker only (no path prompt):
+ * Native folder picker that returns an absolute path:
  * 1) Electron dialog
- * 2) OS folder chooser via webkitdirectory input
+ * 2) Launcher-hosted OS dialog (Agent Web in browser)
  */
-export async function pickFolderPath(): Promise<string | null> {
+export async function pickFolder(initialDir?: string | null): Promise<FolderPickResult> {
   try {
     if (typeof window !== 'undefined' && window.electronEnv?.pickWorkspaceFolder) {
       const picked = await window.electronEnv.pickWorkspaceFolder();
-      return picked?.trim() || null;
+      const path = picked?.trim() || null;
+      if (!path) return { path: null, folderNameHint: null, cancelled: true };
+      return { path, folderNameHint: folderLabel(path), cancelled: false };
     }
   } catch (err: any) {
-    if (err?.name === 'AbortError') return null;
-    console.warn('[pickFolderPath] electron picker failed, trying input fallback', err);
+    if (err?.name === 'AbortError') {
+      return { path: null, folderNameHint: null, cancelled: true };
+    }
+    console.warn('[pickFolder] electron picker failed, trying launcher', err);
   }
 
-  try {
-    return await pickFolderPathViaInput();
-  } catch (err: any) {
-    if (err?.name === 'AbortError') return null;
-    console.error('[pickFolderPath]', err);
-    return null;
-  }
+  return pickFolderViaLauncher(initialDir);
+}
+
+/** @deprecated Prefer pickFolder(); kept for callers that only need an absolute path. */
+export async function pickFolderPath(initialDir?: string | null): Promise<string | null> {
+  const result = await pickFolder(initialDir);
+  return result.path;
 }
 
 export function folderLabel(path: string): string {

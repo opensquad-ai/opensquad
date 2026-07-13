@@ -36,7 +36,9 @@ class ModelConfigSchema(BaseModel):
     base_url: str = Field(default="")
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     token_max: int = Field(default=100000, gt=0)
-    timeout: float = Field(default=120.0, gt=0)
+    # Per-call wall-clock budget (seconds). Thinking models often need 600–1200+.
+    # Boot raises timeout to 1200 when is_think / high effort and this is still ≤120.
+    timeout: float = Field(default=120.0, gt=0, description="LLM call timeout in seconds")
     tool_call_mode: str = Field(default="auto", pattern=r"^(auto|native|xml)$")
     is_image: bool = Field(default=False)
     is_video: bool = Field(default=False)

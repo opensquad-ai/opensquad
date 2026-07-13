@@ -1807,23 +1807,47 @@ async def resolve_propose_options(
 
     if action == "choose":
         if not value:
+            raise HTTPException(status_code=400, detail="value (option_id or comma-separated ids) required for choose")
+        # Accept JSON array string or comma-separated ids for multi-select.
+        chosen_ids: list[str] = []
+        raw_val = value.strip()
+        if raw_val.startswith("["):
+            try:
+                parsed = json.loads(raw_val)
+                if isinstance(parsed, list):
+                    chosen_ids = [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                chosen_ids = []
+        if not chosen_ids:
+            chosen_ids = [p.strip() for p in raw_val.split(",") if p.strip()]
+        if not chosen_ids:
             raise HTTPException(status_code=400, detail="value (option_id) required for choose")
+        allow_multiple = bool(payload.get("allow_multiple"))
+        if not allow_multiple and len(chosen_ids) > 1:
+            chosen_ids = chosen_ids[:1]
         new_status = "chosen"
-        chosen_id = value
+        chosen_id = chosen_ids[0]
         custom_answer = ""
     elif action == "custom":
         if not value:
             raise HTTPException(status_code=400, detail="value (custom answer) required for custom")
         new_status = "custom"
         chosen_id = ""
+        chosen_ids = []
         custom_answer = value
     else:  # ignore
         new_status = "ignored"
         chosen_id = ""
+        chosen_ids = []
         custom_answer = ""
 
     message.content = patch_propose_options_status_in_content(
-        message.content or "", new_status, chosen=chosen_id, custom=custom_answer, note=note
+        message.content or "",
+        new_status,
+        chosen=chosen_id,
+        custom=custom_answer,
+        note=note,
+        chosen_ids=chosen_ids,
     )
     message.is_edited = True
     await db.commit()
@@ -1837,11 +1861,12 @@ async def resolve_propose_options(
     # Build nudge message and deliver to the agent
     prompt = str(payload.get("prompt") or "")
     options = payload.get("options") or []
-    chosen_title = ""
+    chosen_titles: list[str] = []
+    id_set = set(chosen_ids)
     for opt in options:
-        if isinstance(opt, dict) and str(opt.get("id")) == chosen_id:
-            chosen_title = str(opt.get("title") or "")
-            break
+        if isinstance(opt, dict) and str(opt.get("id")) in id_set:
+            chosen_titles.append(str(opt.get("title") or opt.get("id") or ""))
+    chosen_title = ", ".join(t for t in chosen_titles if t) or chosen_id
 
     if action == "ignore":
         nudge = (
@@ -1865,42 +1890,90 @@ async def resolve_propose_options(
         )
         sys_content = f"✏️ 自定义答案：{custom_answer[:40]}"
     else:
+        ids_joined = ", ".join(chosen_ids)
         nudge = (
             f"[System] Group propose-options chosen\n"
             f"proposal_id: {proposal_id}\n"
             f"prompt: {prompt}\n"
             f"chosen_option_id: {chosen_id}\n"
+            f"chosen_option_ids: [{ids_joined}]\n"
             f"chosen_option_title: {chosen_title}\n"
             f"resolved_by: {current_user.name}\n"
-            f"The user chose option '{chosen_id}' ({chosen_title}). "
-            "Continue with that plan now. Do not ask for the choice again."
         )
-        sys_content = f"✅ 已选择：{chosen_title or chosen_id}"
+        if len(chosen_ids) > 1:
+            nudge += (
+                f"The user chose multiple options: [{ids_joined}] ({chosen_title}). "
+                "Continue with those plans now (in a sensible order). Do not ask for the choice again."
+            )
+            sys_content = f"✅ 已选择：{chosen_title}"
+        else:
+            nudge += (
+                f"The user chose option '{chosen_id}' ({chosen_title}). "
+                "Continue with that plan now. Do not ask for the choice again."
+            )
+            sys_content = f"✅ 已选择：{chosen_title or chosen_id}"
     if note:
         nudge += f"\nnote: {note}"
 
     nudged = False
     agent_id = str(payload.get("agent_id") or "")
+    agent_name = str(payload.get("agent_name") or "")
     try:
         from app.ai_web.registry import registry as agent_registry
 
-        candidates = [agent_id] if agent_id else []
-        # Fall back to the first running agent if no agent_id was embedded
+        candidates: list[str] = []
+        if agent_id:
+            candidates.append(agent_id)
+        if agent_name and agent_name not in candidates:
+            candidates.append(agent_name)
+        for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+            try:
+                if aid in candidates:
+                    continue
+                if str(getattr(info, "agent_name", "") or "") in (agent_id, agent_name) and (agent_id or agent_name):
+                    candidates.append(aid)
+            except Exception:
+                pass
+        # Last resort: only if still empty, try the single running agent
         if not candidates:
-            for aid, info in list(getattr(agent_registry, "agents", {}).items()):
+            for aid, _info in list(getattr(agent_registry, "agents", {}).items()):
                 candidates.append(aid)
                 break
-        chat_payload = {
-            "type": "chat",
+
+        # Prefer the same resolve command Agent Web uses (input_hub nudge inside
+        # the agent process). Fields MUST live under ``data`` — gateway_adapter
+        # reads cmd_data = message["data"], not top-level keys.
+        cmd = {
+            "type": "command",
             "user_id": current_user.id,
-            "content": nudge,
-            "channel": "gateway",
-            "sender_name": current_user.name or "User",
+            "command": "resolve_proposed_options",
+            "data": {
+                "id": proposal_id,
+                "chosen_option_id": chosen_id,
+                "chosen_option_ids": chosen_ids,
+                "custom_answer": custom_answer,
+                "ignored": action == "ignore",
+            },
         }
         for cand in candidates:
-            if await agent_registry.send_to_agent(cand, chat_payload):
+            if await agent_registry.send_to_agent(cand, cmd):
                 nudged = True
                 break
+
+        # Chat fallback: always try if command delivery failed; also try when
+        # no agent_id was embedded (candidates may be wrong / empty).
+        if not nudged:
+            chat_payload = {
+                "type": "chat",
+                "user_id": current_user.id,
+                "content": nudge,
+                "channel": "gateway",
+                "sender_name": current_user.name or "User",
+            }
+            for cand in candidates:
+                if await agent_registry.send_to_agent(cand, chat_payload):
+                    nudged = True
+                    break
     except Exception as e:
         logging.getLogger(__name__).warning("[API] Failed to nudge agent after propose-options: %s", e)
 

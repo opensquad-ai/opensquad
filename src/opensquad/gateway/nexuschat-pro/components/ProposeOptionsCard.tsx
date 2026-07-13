@@ -1,10 +1,8 @@
 /**
- * ProposeOptionsCard — N-way single-choice card posted in group chat.
+ * ProposeOptionsCard — N-way choice card posted in group chat.
  * Marker: [[PROPOSE_OPTIONS]]{json}[[/PROPOSE_OPTIONS]]
  *
- * Distinct from CollabStepApprovalCard (which is Approve/Reject). This card
- * lets the user pick one of several agent-proposed options, or type a custom
- * answer, or ignore.
+ * Supports single or multi select (`allow_multiple`), custom answer, ignore.
  */
 import React, { useState } from 'react';
 import { Check, Minus, HelpCircle } from 'lucide-react';
@@ -21,8 +19,10 @@ export interface ProposeOptionsPayload {
   prompt: string;
   options: ProposedOptionPayload[];
   allow_custom?: boolean;
+  allow_multiple?: boolean;
   status: 'pending' | 'chosen' | 'ignored' | 'custom' | string;
   chosen_option_id?: string;
+  chosen_option_ids?: string[];
   custom_answer?: string;
   resolve_note?: string;
   group_id?: string;
@@ -71,15 +71,33 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
 }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string>(payload.options[0]?.id || '');
+  const multi = !!payload.allow_multiple;
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    multi ? [] : payload.options[0]?.id ? [payload.options[0].id] : [],
+  );
   const [customMode, setCustomMode] = useState(false);
   const [customText, setCustomText] = useState('');
 
   const pending = (payload.status || 'pending') === 'pending';
   const allowCustom = payload.allow_custom !== false;
   const resolved = !pending;
-  const chosenId = payload.chosen_option_id;
+  const resolvedIds =
+    payload.chosen_option_ids?.length
+      ? payload.chosen_option_ids
+      : payload.chosen_option_id
+        ? [payload.chosen_option_id]
+        : [];
   const resolvedCustom = payload.custom_answer;
+  const markClass = multi ? 'rounded-sm' : 'rounded-full';
+
+  const toggleId = (id: string) => {
+    setCustomMode(false);
+    if (multi) {
+      setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    } else {
+      setSelectedIds([id]);
+    }
+  };
 
   const handle = async (action: 'choose' | 'custom' | 'ignore', value: string) => {
     if (!pending || busy || disabled) return;
@@ -100,21 +118,21 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
         <HelpCircle size={14} className="text-primary shrink-0" />
         <span>{payload.prompt || '请选择一个选项'}</span>
       </div>
-      <div className="text-[11px] text-textMuted mb-2">{pending ? '选择一个答案' : '已处理'}</div>
+      <div className="text-[11px] text-textMuted mb-2">
+        {pending ? (multi ? '可多选，然后提交' : '选择一个答案') : '已处理'}
+        {multi && pending ? ' · 多选' : ''}
+      </div>
 
       <div className="flex flex-col gap-2 mb-3">
         {payload.options.map((opt) => {
-          const isSelected = pending && !customMode && opt.id === selectedId;
-          const isResolvedChoice = resolved && chosenId === opt.id;
+          const isSelected = pending && !customMode && selectedIds.includes(opt.id);
+          const isResolvedChoice = resolved && resolvedIds.includes(opt.id);
           return (
             <button
               key={opt.id}
               type="button"
               disabled={resolved || busy || disabled}
-              onClick={() => {
-                setCustomMode(false);
-                setSelectedId(opt.id);
-              }}
+              onClick={() => toggleId(opt.id)}
               className={`w-full text-left rounded-lg border px-2.5 py-2 transition-colors ${
                 isResolvedChoice
                   ? 'border-primary bg-primary/10'
@@ -125,13 +143,22 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
             >
               <div className="flex items-start gap-2">
                 <span
-                  className={`mt-0.5 shrink-0 w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${
+                  className={`mt-0.5 shrink-0 w-3.5 h-3.5 border-2 flex items-center justify-center ${markClass} ${
                     isResolvedChoice ? 'border-primary' : isSelected ? 'border-amber-400' : 'border-textMuted/50'
                   }`}
                 >
-                  {(isSelected || isResolvedChoice) && (
-                    <span className={`w-1.5 h-1.5 rounded-full ${isResolvedChoice ? 'bg-primary' : 'bg-amber-400'}`} />
-                  )}
+                  {(isSelected || isResolvedChoice) &&
+                    (multi ? (
+                      <Check
+                        size={9}
+                        className={isResolvedChoice ? 'text-primary' : 'text-amber-500'}
+                        strokeWidth={3}
+                      />
+                    ) : (
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${isResolvedChoice ? 'bg-primary' : 'bg-amber-400'}`}
+                      />
+                    ))}
                 </span>
                 <div className="flex-1 min-w-0">
                   <div className="text-[12px] font-medium text-textMain leading-snug">{opt.title}</div>
@@ -161,7 +188,7 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
               disabled={resolved || busy || disabled}
               onClick={() => {
                 setCustomMode(true);
-                setSelectedId('');
+                setSelectedIds([]);
               }}
               className="w-full text-left flex items-start gap-2"
             >
@@ -204,13 +231,17 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
           </button>
           <button
             type="button"
-            disabled={busy || disabled || (customMode && !customText.trim())}
+            disabled={
+              busy ||
+              disabled ||
+              (customMode ? !customText.trim() : selectedIds.length === 0)
+            }
             onClick={() => {
               if (customMode) {
                 const text = customText.trim();
                 if (text) handle('custom', text);
-              } else if (selectedId) {
-                handle('choose', selectedId);
+              } else if (selectedIds.length) {
+                handle('choose', selectedIds.join(','));
               }
             }}
             className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-black text-white hover:opacity-90 border-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed dark:bg-white dark:text-black"
@@ -231,6 +262,7 @@ export const ProposeOptionsCard: React.FC<ProposeOptionsCardProps> = ({
           ) : (
             <>
               <Check size={12} /> 已选择
+              {resolvedIds.length > 1 ? `（${resolvedIds.length}）` : ''}
             </>
           )}
           {payload.resolve_note ? ` — ${payload.resolve_note}` : ''}

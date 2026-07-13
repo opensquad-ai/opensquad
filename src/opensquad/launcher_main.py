@@ -679,6 +679,14 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 return self._send_json({"workers": result})
             elif path == "/api/ping":
                 return self._send_json({"status": "ok", "service": "launcher"})
+            elif path == "/api/system/pick-directory":
+                # GET kept for discovery; real pick is POST (blocks until dialog closes)
+                return self._send_json(
+                    {
+                        "status": "ok",
+                        "message": "POST /api/system/pick-directory to open a native folder dialog",
+                    }
+                )
             elif path == "/api/workspace":
                 return self._send_json(
                     {
@@ -796,6 +804,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path == "/api/workspace/migrate":
                 body = self._read_body()
                 return self._handle_workspace_migrate(body)
+            elif path == "/api/system/pick-directory":
+                body = self._read_body() or {}
+                return self._handle_pick_directory(body)
             elif path == "/api/runtime/cleanup":
                 body = self._read_body()
                 return self._handle_runtime_cleanup(body)
@@ -1152,6 +1163,32 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     "workspace_root": workspace_root,
                     "active_cwd": session_cwd if session_cwd else workspace_root,
                 }
+            )
+
+        def _handle_pick_directory(self, body: dict | None = None):
+            """POST /api/system/pick-directory — native OS folder dialog on this host.
+
+            Body (optional): ``{"initial_dir": "C:\\\\ai_test"}``
+            """
+            initial = ""
+            if isinstance(body, dict):
+                initial = str(body.get("initial_dir") or body.get("path") or "").strip()
+            try:
+                from opensquad.utils.pick_directory import pick_directory
+
+                result = pick_directory(initial or None)
+            except Exception as e:
+                return self._send_json({"path": None, "error": str(e)}, 500)
+
+            path = result.get("path")
+            if path:
+                _log.info(f"[Launcher] pick-directory selected: {path}")
+                return self._send_json({"path": path, "cancelled": False})
+            if result.get("cancelled"):
+                return self._send_json({"path": None, "cancelled": True})
+            return self._send_json(
+                {"path": None, "cancelled": False, "error": result.get("error") or "Folder pick failed"},
+                500,
             )
 
         def _handle_set_working_directory(self, name: str, body: dict):

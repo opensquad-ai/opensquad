@@ -101,6 +101,17 @@ class TestModelConfigDefaults:
     def test_default_timeout(self):
         assert ModelConfig().timeout == 120.0
 
+    def test_think_model_default_timeout_is_long(self):
+        """Native thinking models need multi-minute budgets by default."""
+        from opensquad.model_config import LONG_REASONING_TIMEOUT
+
+        cfg = ModelConfig.from_dict({"is_think": True})
+        assert cfg.timeout == LONG_REASONING_TIMEOUT
+
+    def test_explicit_timeout_wins_over_think_default(self):
+        cfg = ModelConfig.from_dict({"is_think": True, "timeout": 300})
+        assert cfg.timeout == 300.0
+
     def test_default_token_max(self):
         assert ModelConfig().token_max == 100_000
 

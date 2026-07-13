@@ -8,9 +8,9 @@
  */
 import React, { useMemo } from 'react';
 import { User, Bot, Copy, Check, FileText } from 'lucide-react';
-import { marked } from 'marked';
 import { SERVER_BASE_URL } from '../../services/api';
 import { useTranslation } from 'react-i18next';
+import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 
 /** Structured file attachment on a ChatMessage */
 export interface FileAttachment {
@@ -258,7 +258,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       // Strip <title>...</title> tags used for session naming
       let content = displayContent.replace(/<title>.*?<\/title>/gs, '').trim();
       if (!content) return '';
-      return marked.parse(content, { breaks: true }) as string;
+      return renderFencedMarkdown(content);
     } catch {
       return displayContent;
     }
@@ -355,7 +355,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     if (isContextSummary) {
       const summaryHtml = (() => {
         try {
-          return marked.parse(message.content, { breaks: true }) as string;
+          return renderFencedMarkdown(message.content);
         } catch {
           return message.content;
         }
@@ -423,7 +423,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       ) : (
         <>
           <div
-            className="prose prose-sm prose-invert max-w-none break-words overflow-x-auto ai-markdown"
+            className={AI_MARKDOWN_CLASS}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
           {fileAttachments.length > 0 && (

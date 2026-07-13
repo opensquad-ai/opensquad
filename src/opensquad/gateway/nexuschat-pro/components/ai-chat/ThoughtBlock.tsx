@@ -2,10 +2,12 @@
  * ThoughtBlock - displays AI thinking/reasoning process.
  *
  * Shows a collapsible block with thought content, typically inside
- * a WorkflowContainer.
+ * a WorkflowContainer. Fenced code (```html / ```python / …) renders
+ * as highlighted code blocks. While open, the body sticks to the latest line.
  */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Brain, ChevronDown, ChevronRight } from 'lucide-react';
+import { MarkdownScrollBody } from './MarkdownScrollBody';
 
 interface ThoughtBlockProps {
   content: string;
@@ -17,16 +19,23 @@ interface ThoughtBlockProps {
 export const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ content, defaultOpen = false, onInspectChange }) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
+  useEffect(() => {
+    if (defaultOpen) setIsOpen(true);
+  }, [defaultOpen]);
+
   if (!content) return null;
 
-  // Truncate preview
   const preview = content.length > 100 ? content.slice(0, 100) + '...' : content;
 
   return (
     <div className="rounded-md border border-gray-200 bg-white/80 overflow-hidden">
       <div
         className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-gray-50 transition-colors"
-        onClick={() => { const next = !isOpen; setIsOpen(next); onInspectChange?.(next); }}
+        onClick={() => {
+          const next = !isOpen;
+          setIsOpen(next);
+          onInspectChange?.(next);
+        }}
       >
         <Brain size={12} className="text-gray-600 flex-shrink-0" />
         <span className="text-[11px] text-gray-800 font-medium">Thinking</span>
@@ -39,8 +48,13 @@ export const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ content, defaultOpen
         }
       </div>
       {isOpen && (
-        <div className="px-2 py-1.5 border-t border-gray-200 text-[11px] text-textMuted whitespace-pre-wrap leading-relaxed max-h-[300px] overflow-y-auto">
-          {content}
+        <div className="px-2 py-1.5 border-t border-gray-200">
+          <MarkdownScrollBody
+            text={content}
+            follow
+            muted
+            maxHeightClass="max-h-[300px]"
+          />
         </div>
       )}
     </div>

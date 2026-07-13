@@ -714,6 +714,15 @@
       "deleteSessionFailed": "Failed to delete session",
       "renameSessionFailed": "Failed to rename session",
       "defaultFolder": "Default"
+    },
+    "workingDirModal": {
+      "title": "Set working directory",
+      "description": "Browsers cannot read absolute folder paths for security reasons. Enter the full path on this machine so the agent can use it as the session working directory.",
+      "folderSelected": "Selected folder name: {{name}} — confirm or edit the full path below.",
+      "pathLabel": "Absolute path",
+      "pathPlaceholder": "e.g. C:\\ai_test\\ds or /home/user/project",
+      "browse": "Browse",
+      "saving": "Saving…"
     }
   },
   "quickNote": {

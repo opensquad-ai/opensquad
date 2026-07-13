@@ -8,6 +8,53 @@ from opensquad.system_config import syscfg
 
 logger = logging.getLogger(__name__)
 
+_TOP_LEVEL_CMD_SKIP = frozenset({"type", "command", "user_id", "data", "seq", "timestamp"})
+_TOP_LEVEL_CMD_FALLBACK_KEYS = (
+    "id",
+    "request_id",
+    "chosen_option_id",
+    "chosen_option_ids",
+    "option_id",
+    "option_ids",
+    "custom_answer",
+    "custom",
+    "ignored",
+    "mode",
+    "agent_mode",
+    "approved_request_id",
+    "reason",
+    "card",
+    "card_name",
+    "effort",
+    "reasoning_effort",
+    "session_id",
+    "content",
+)
+
+
+def coerce_command_data(message: dict) -> dict:
+    """Return the command payload dict for gateway_adapter handlers.
+
+    Prefer ``message["data"]``. If callers put fields at the top level (a bug that
+    used to break group ``resolve_proposed_options``), merge those in so the
+    agent still wakes.
+    """
+    if not isinstance(message, dict):
+        return {}
+    raw = message.get("data", {})
+    cmd_data = dict(raw) if isinstance(raw, dict) else {}
+    if not cmd_data:
+        return {k: v for k, v in message.items() if k not in _TOP_LEVEL_CMD_SKIP}
+    if cmd_data.get("id") or cmd_data.get("request_id"):
+        return cmd_data
+    if not (message.get("id") or message.get("request_id")):
+        return cmd_data
+    merged = dict(cmd_data)
+    for key in _TOP_LEVEL_CMD_FALLBACK_KEYS:
+        if key in message and key not in merged:
+            merged[key] = message[key]
+    return merged
+
 
 class GatewayAdapter(BaseAgent):
     """
@@ -179,7 +226,7 @@ class GatewayAdapter(BaseAgent):
     async def _handle_command(self, data: dict):
         """Handle command messages from the Gateway (separate channel from chat)."""
         command = data.get("command", "")
-        cmd_data = data.get("data", {})
+        cmd_data = coerce_command_data(data)
         user_id = data.get("user_id", "")
 
         # Route session/control events back to the requesting web user (not broadcast).
@@ -274,6 +321,13 @@ class GatewayAdapter(BaseAgent):
         if command == "resolve_proposed_options":
             req_id = cmd_data.get("id", "") or cmd_data.get("request_id", "")
             chosen = cmd_data.get("chosen_option_id", "") or cmd_data.get("option_id", "")
+            chosen_ids_raw = cmd_data.get("chosen_option_ids") or cmd_data.get("option_ids") or []
+            if isinstance(chosen_ids_raw, str):
+                chosen_ids = [p.strip() for p in chosen_ids_raw.split(",") if p.strip()]
+            elif isinstance(chosen_ids_raw, list):
+                chosen_ids = [str(x).strip() for x in chosen_ids_raw if str(x).strip()]
+            else:
+                chosen_ids = []
             custom = cmd_data.get("custom_answer", "") or cmd_data.get("custom", "")
             ignored = bool(cmd_data.get("ignored", False))
             if req_id:
@@ -283,11 +337,13 @@ class GatewayAdapter(BaseAgent):
                     await resolve_proposed_options(
                         str(req_id),
                         chosen_option_id=str(chosen),
+                        chosen_option_ids=chosen_ids,
                         custom_answer=str(custom),
                         ignored=ignored,
                     )
                     logger.info(
-                        f"[Adapter] resolve_proposed_options: id={req_id} chosen={chosen or custom or ('ignored' if ignored else '?')}"
+                        f"[Adapter] resolve_proposed_options: id={req_id} "
+                        f"chosen={chosen_ids or chosen or custom or ('ignored' if ignored else '?')}"
                     )
                 except Exception as e:
                     logger.warning(f"[Adapter] resolve_proposed_options failed: {e}")

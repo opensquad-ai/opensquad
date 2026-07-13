@@ -1,3 +1,60 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Fenced code blocks in assistant dialogue + thought Markdown */
+.ai-markdown .ai-code-wrap {
+  margin: 0.5rem 0;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-border, #444) 80%, transparent);
+  background: color-mix(in srgb, #0b0f17 92%, transparent);
+  overflow: hidden;
+}
+.ai-markdown .ai-code-lang {
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  color: color-mix(in srgb, var(--color-text-muted, #9ca3af) 85%, transparent);
+  padding: 0.35rem 0.65rem 0;
+  user-select: none;
+}
+.ai-markdown .ai-code-block {
+  margin: 0 !important;
+  padding: 0.5rem 0.75rem 0.75rem !important;
+  overflow-x: auto;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  font-size: 11.5px !important;
+  line-height: 1.55 !important;
+}
+.ai-markdown .ai-code-block code {
+  background: transparent !important;
+  padding: 0 !important;
+  font-size: inherit !important;
+  color: #c8cdd8;
+}
+.ai-markdown .hljs-keyword { color: #c792ea; }
+.ai-markdown .hljs-built_in { color: #82aaff; }
+.ai-markdown .hljs-type { color: #ffcb6b; }
+.ai-markdown .hljs-literal { color: #ff5874; }
+.ai-markdown .hljs-number { color: #f78c6c; }
+.ai-markdown .hljs-string { color: #c3e88d; }
+.ai-markdown .hljs-comment { color: #676e95; font-style: italic; }
+.ai-markdown .hljs-title,
+.ai-markdown .hljs-title.function_ { color: #82aaff; }
+.ai-markdown .hljs-attr { color: #ffcb6b; }
+.ai-markdown .hljs-name { color: #f07178; }
+.ai-markdown .hljs-tag { color: #89ddff; }
+.ai-markdown .hljs-meta { color: #ffcb6b; }
+.ai-markdown .hljs-selector-class { color: #ffcb6b; }
+.ai-markdown .hljs-selector-id { color: #82aaff; }
+.ai-markdown .hljs-attribute { color: #c792ea; }
+.ai-markdown .hljs-variable { color: #f07178; }
+.ai-markdown .hljs-params { color: #a6accd; }
+.ai-markdown .hljs-punctuation { color: #89ddff; }
+.ai-markdown .hljs-operator { color: #89ddff; }
+.ai-markdown .hljs-property { color: #80cbc4; }
+.ai-markdown .hljs-regexp { color: #f07178; }
+.ai-markdown .hljs-subst { color: #a6accd; }

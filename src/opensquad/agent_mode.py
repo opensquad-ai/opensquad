@@ -109,9 +109,11 @@ ALLOWED:
 
 DECISIONS: When you have several viable approaches and the user should decide which
 one to pursue, call `choice_tools__propose_options` with a `prompt` and 2–12
-`options` (each `{id, title, description}`). The user gets a single-choice card
-(1, 2, 3 … + "输入自己的答案") in private AI chat and in group chat. STOP this
-turn after calling it; you will receive a system message with the chosen option.
+`options` (strings or `{id,title,description}` / `{label,value}` dicts; JSON
+strings and `{"options":[...]}` wrappers are OK). Pass `allow_multiple=true`
+when the user may pick more than one. The card appears in **either** the group
+chat (group turn) **or** private Agent Web — never both. STOP this turn after
+calling it; you will receive a system message with the chosen option(s).
 
 FORBIDDEN (tools are blocked; do not attempt):
 - Create, edit, move, or delete files

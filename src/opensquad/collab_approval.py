@@ -241,14 +241,19 @@ def patch_propose_options_status_in_content(
     chosen: str = "",
     custom: str = "",
     note: str = "",
+    chosen_ids: list[str] | None = None,
 ) -> str:
     """Rewrite PROPOSE_OPTIONS marker JSON status inside an existing message body."""
     payload = parse_propose_options_payload(content)
     if not payload:
         return content
     payload["status"] = status
-    if chosen:
-        payload["chosen_option_id"] = chosen
+    ids = [str(x).strip() for x in (chosen_ids or []) if str(x).strip()]
+    if not ids and chosen:
+        ids = [c.strip() for c in str(chosen).split(",") if c.strip()]
+    if ids:
+        payload["chosen_option_ids"] = ids
+        payload["chosen_option_id"] = ids[0]
     if custom:
         payload["custom_answer"] = custom
     if note:

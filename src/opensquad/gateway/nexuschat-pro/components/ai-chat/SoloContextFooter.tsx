@@ -7,7 +7,7 @@ import { Check, ChevronDown, Folder, FolderOpen, X } from 'lucide-react';
 import {
   folderLabel,
   loadCwdRecents,
-  pickFolderPath,
+  pickFolder,
   pushCwdRecent,
 } from '../../utils/cwdRecents';
 
@@ -163,7 +163,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
       document.removeEventListener('mousedown', onDoc);
       document.removeEventListener('keydown', onKey);
     };
-  }, [cwdOpen]);
+  }, [cwdOpen, locked]);
 
   const applyPath = async (path: string) => {
     const trimmed = path.trim();
@@ -178,8 +178,17 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
     try {
       // Close popover first so the native dialog is clearly in front
       setCwdOpen(false);
-      const picked = await pickFolderPath();
-      if (picked) await applyPath(picked);
+      const result = await pickFolder(cwd);
+      if (result.cancelled) return;
+      if (result.path) {
+        await applyPath(result.path);
+        return;
+      }
+      alert(
+        result.error
+          ? `无法打开本机目录选择器：${result.error}`
+          : '未能获取所选文件夹的绝对路径，请确认 Launcher 正在本机运行。',
+      );
     } finally {
       setPicking(false);
     }
@@ -264,7 +273,6 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                 </div>
               ))
             )}
-            {/* Session stats when Other segment is hidden (0 tokens) */}
             {tokenStats?.session && !segments.some((s) => s.key === 'overhead') && (
               <div className="flex items-center gap-2 text-[12px]">
                 <span className="w-2 h-2 rounded-[3px] shrink-0 bg-slate-500" />

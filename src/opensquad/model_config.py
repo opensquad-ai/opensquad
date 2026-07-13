@@ -19,6 +19,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Default when ``is_think`` (or equivalent long-reasoning) is enabled and the
+# config does not set ``timeout``. Runner adds +15s on top for asyncio.wait_for.
+LONG_REASONING_TIMEOUT = 1200.0  # 20 minutes — 5+ min thinking turns are normal
+
 
 @dataclass
 class ModelConfig:
@@ -31,6 +35,9 @@ class ModelConfig:
     prompt: str = ""  # System prompt / template
 
     # ── Common optional ──
+    # Wall-clock budget for one LLM call (HTTP client + Runner asyncio.wait_for).
+    # Short chats: 120s is fine. Native thinking / long reasoning often needs
+    # many minutes; from_dict() defaults to LONG_REASONING_TIMEOUT when is_think.
     timeout: float = 120.0
     token_max: int = 100_000
     temperature: float = 0.3
@@ -89,12 +96,19 @@ class ModelConfig:
         def _get(key: str, default: Any) -> Any:
             return model_cfg.get(key, default)
 
+        is_think = bool(_get("is_think", False))
+        # Prefer explicit timeout; otherwise give thinking models a long budget.
+        if "timeout" in model_cfg and model_cfg.get("timeout") is not None:
+            timeout = float(model_cfg["timeout"])
+        else:
+            timeout = LONG_REASONING_TIMEOUT if is_think else 120.0
+
         return cls(
             api_key=_get("api_key", ""),
             model=_get("model_name", ""),
             base_url=_get("base_url", ""),
             prompt=prompt,
-            timeout=float(_get("timeout", 120.0)),
+            timeout=timeout,
             token_max=int(_get("token_max", 100_000)),
             temperature=float(_get("temperature", 0.3)),
             reduction_strategy=_get("reduction_strategy", "start"),
@@ -113,7 +127,7 @@ class ModelConfig:
             enable_repetition_check=_get("enable_repetition_check", False),
             # Claude-specific
             max_video_frames=min(int(_get("max_video_frames", 8)), 20),
-            is_think=_get("is_think", False),
+            is_think=is_think,
             thinking_budget_tokens=int(_get("thinking_budget_tokens", 10_000)),
             reasoning_effort=str(_get("reasoning_effort", "high") or "high").strip().lower(),
             # Google-specific

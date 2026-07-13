@@ -77,13 +77,15 @@ async def _proxy_get(
             raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
-async def _proxy_post(path: str, json: dict | None = None, launcher_url: str | None = None) -> dict:
+async def _proxy_post(
+    path: str, json: dict | None = None, launcher_url: str | None = None, *, timeout: float = 5.0
+) -> dict:
     """POST proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
     if launcher_url is None and launcher_handler.has_connections():
         node_id = launcher_handler.get_any_node_id()
         try:
-            return await launcher_handler.rpc(node_id, "POST", path, body=json, timeout=5.0)
+            return await launcher_handler.rpc(node_id, "POST", path, body=json, timeout=timeout)
         except Exception:
             pass  # Fall through to HTTP fallback
     if launcher_url is None and not _url:
@@ -91,7 +93,7 @@ async def _proxy_post(path: str, json: dict | None = None, launcher_url: str | N
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(f"{base}{path}", json=json)
             if resp.status_code >= 400:
@@ -307,6 +309,20 @@ async def admin_set_working_directory(
     needed.
     """
     return await _proxy_put(f"/api/agents/{name}/working-directory", body, http_only=True)
+
+
+@admin_router.post("/admin/system/pick-directory")
+async def admin_pick_directory(
+    body: dict | None = Body(None),
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Open a native folder dialog on the Launcher host and return the absolute path.
+
+    Used by Agent Web ``Open Folder`` — browsers cannot read absolute paths from
+    ``webkitdirectory``, so the local Launcher must pick the folder.
+    """
+    # Dialog can stay open for several minutes while the user browses.
+    return await _proxy_post("/api/system/pick-directory", body or {}, timeout=600.0)
 
 
 @admin_router.put("/admin/agents/{name}/config")

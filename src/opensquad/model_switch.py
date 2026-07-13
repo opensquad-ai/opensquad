@@ -561,10 +561,16 @@ async def resolve_proposed_options(
     request_id: str,
     *,
     chosen_option_id: str = "",
+    chosen_option_ids: list[str] | None = None,
     custom_answer: str = "",
     ignored: bool = False,
 ) -> dict:
     """Resolve a pending propose_options card and nudge the agent to continue."""
+    ids = [str(x).strip() for x in (chosen_option_ids or []) if str(x).strip()]
+    if not ids and chosen_option_id:
+        # Support comma-separated multi ids from older callers.
+        ids = [p.strip() for p in str(chosen_option_id).split(",") if p.strip()]
+    primary = ids[0] if ids else ""
     status = "ignored" if ignored else ("custom" if custom_answer else "chosen")
     try:
         await bus.emit_async(
@@ -573,11 +579,29 @@ async def resolve_proposed_options(
                 "event": "propose_options_resolved",
                 "id": request_id,
                 "status": status,
-                "chosen_option_id": chosen_option_id,
+                "chosen_option_id": primary,
+                "chosen_option_ids": ids,
                 "custom_answer": custom_answer,
                 "text": f"Propose options {status}",
             },
         )
+        try:
+            from opensquad import session_manager as _sm_mod
+
+            _sm_mod.session_manager.add_event(
+                "info",
+                {
+                    "event": "propose_options_resolved",
+                    "id": request_id,
+                    "status": status,
+                    "chosen_option_id": primary,
+                    "chosen_option_ids": ids,
+                    "custom_answer": custom_answer,
+                    "text": f"Propose options {status}",
+                },
+            )
+        except Exception as persist_err:
+            logger.debug("[model_switch] propose_options resolve persist skipped: %s", persist_err)
     except Exception as e:
         logger.warning("[model_switch] propose_options resolve emit failed: %s", e)
         return {"ok": False, "error": str(e)}
@@ -592,15 +616,20 @@ async def resolve_proposed_options(
             f"[System] The user typed their own answer instead of picking a listed option: "
             f'"{custom_answer.strip()[:500]}". Follow their answer as the chosen plan.'
         )
-    elif chosen_option_id:
+    elif len(ids) > 1:
+        joined = ", ".join(ids)
         cue = (
-            f"[System] The user chose option '{chosen_option_id}'. "
-            "Continue with that plan now. Do not ask for the choice again."
+            f"[System] The user chose multiple options: [{joined}]. "
+            "Continue with those plans now (in a sensible order). Do not ask for the choice again."
+        )
+    elif primary:
+        cue = (
+            f"[System] The user chose option '{primary}'. Continue with that plan now. Do not ask for the choice again."
         )
     else:
         cue = "[System] The user resolved the proposed options without a clear selection. Ask which option they prefer."
     await _nudge_agent_after_mode_decision(cue)
-    return {"ok": True, "status": status}
+    return {"ok": True, "status": status, "chosen_option_ids": ids}
 
 
 async def _on_agent_mode_requested(data: dict) -> None:
