@@ -1,0 +1,173 @@
+/* OpenSquad TUI — theme-aware (Textual $variables from App.theme) */
+
+Screen {
+    background: $background;
+    color: $foreground;
+}
+
+#header-bar {
+    dock: top;
+    height: 1;
+    background: $background;
+    color: $text-muted;
+    content-align: left middle;
+    padding: 0 2;
+}
+
+#chat-log {
+    height: 1fr;
+    border: none;
+    background: $background;
+    color: $foreground;
+    padding: 1 2;
+    scrollbar-background: $background;
+    scrollbar-color: $panel;
+}
+
+#live-side {
+    height: 1fr;
+    border: none;
+    background: $background;
+    color: $foreground;
+    padding: 1 2;
+    display: none;
+    scrollbar-background: $background;
+    scrollbar-color: $panel;
+}
+
+#live-side.visible {
+    display: block;
+}
+
+#chat-log.hidden {
+    display: none;
+}
+
+#live-think {
+    height: auto;
+    max-height: 12;
+    display: none;
+    background: $surface;
+    color: $text-muted;
+    padding: 0 2;
+    margin: 0 2 0 2;
+    border-left: tall $primary-muted;
+}
+
+#live-think.visible {
+    display: block;
+}
+
+#prompt-dock {
+    dock: bottom;
+    height: auto;
+    min-height: 7;
+    background: $background;
+    padding: 0 2 0 2;
+}
+
+/* OpenCode-style command palette above the input */
+#slash-menu {
+    height: auto;
+    max-height: 14;
+    display: none;
+    background: $panel;
+    color: $foreground;
+    border: round $primary;
+    padding: 0 0;
+    margin: 0 0 1 0;
+}
+
+#slash-menu.visible {
+    display: block;
+}
+
+#prompt-frame {
+    height: auto;
+    min-height: 4;
+    border: tall $primary-muted;
+    background: $surface;
+    padding: 0 1;
+    border-left: tall $primary;
+}
+
+#prompt-frame:focus-within {
+    border: tall $primary;
+    border-left: tall $primary;
+}
+
+#chat-input {
+    background: $surface;
+    border: none;
+    padding: 0 1;
+    color: $foreground;
+}
+
+#chat-input:focus {
+    border: none;
+}
+
+#prompt-meta {
+    height: 1;
+    color: $text-muted;
+    background: $surface;
+    padding: 0 1;
+}
+
+#footer-path {
+    height: 1;
+    color: $text-muted;
+    background: $background;
+    padding: 0 1;
+    margin-top: 0;
+}
+
+#status-bar {
+    height: 1;
+    color: $text-muted;
+    background: $background;
+    padding: 0 1;
+    margin-top: 0;
+    display: none;
+}
+
+#status-bar.waiting {
+    color: $warning;
+}
+
+#wait-banner {
+    height: 1;
+    color: $warning;
+    background: $background;
+    padding: 0 1;
+    display: none;
+}
+
+#wait-banner.visible {
+    display: block;
+}
+
+Footer {
+    background: $panel;
+    color: $text-muted;
+}
+
+.msg-user {
+    color: $secondary;
+}
+
+.msg-agent {
+    color: $foreground;
+}
+
+.msg-system {
+    color: $text-muted;
+}
+
+.msg-tool {
+    color: $accent;
+}
+
+.msg-error {
+    color: $error;
+}

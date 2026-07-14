@@ -59,17 +59,105 @@ def _trigger_reload(plugins_dir):
 
 def run_plugin(args):
     if not args.plugin_action:
-        print("[plugin] Usage: opensquad plugin {install|uninstall|list}")
+        print("[plugin] Usage: opensquad plugin {install|uninstall|list|enable|disable|config|status}")
         sys.exit(1)
 
     plugins_dir = _get_plugins_dir()
+    action = args.plugin_action
 
-    if args.plugin_action == "list":
+    if action == "list":
+        # Prefer live Gateway list when logged in; fall back to local filesystem.
+        try:
+            from opensquad.cli.api_client import GatewayClient, load_credentials
+
+            if load_credentials().get("token"):
+                _cmd_list_api(GatewayClient(gateway_url=getattr(args, "gateway", None)))
+                return
+        except Exception:
+            pass
         _cmd_list(plugins_dir)
-    elif args.plugin_action == "install":
+    elif action == "install":
         _cmd_install(plugins_dir, args.plugin_id, args.mode)
-    elif args.plugin_action == "uninstall":
+    elif action == "uninstall":
         _cmd_uninstall(plugins_dir, args.plugin_id)
+    elif action in ("enable", "disable", "config", "status"):
+        _cmd_api(args)
+    else:
+        print(f"[plugin] Unknown action: {action}")
+        sys.exit(1)
+
+
+def _cmd_list_api(client):
+    from opensquad.cli.api_client import handle_api_error, print_table
+
+    try:
+        data = client.admin_get("plugins")
+    except Exception as e:
+        handle_api_error(e)
+        raise
+    if isinstance(data, list):
+        plugins = data
+    elif isinstance(data, dict):
+        plugins = data.get("plugins") or []
+    else:
+        plugins = []
+    rows = []
+    for p in plugins:
+        rows.append(
+            {
+                "id": p.get("id") or p.get("name") or "",
+                "name": p.get("display_name") or p.get("name") or "",
+                "version": p.get("version") or "",
+                "enabled": "yes" if p.get("enabled", True) else "no",
+            }
+        )
+    print_table(
+        rows,
+        [("id", "ID"), ("name", "NAME"), ("version", "VER"), ("enabled", "ENABLED")],
+    )
+
+
+def _cmd_api(args):
+    from opensquad.cli.api_client import GatewayClient, handle_api_error, print_json
+
+    client = GatewayClient(gateway_url=getattr(args, "gateway", None))
+    name = getattr(args, "plugin_id", None) or getattr(args, "name", None)
+    try:
+        if args.plugin_action == "enable":
+            result = client.admin_put(f"plugins/{name}/enable", {})
+            print(f"[plugin] enabled: {name}")
+            print_json(result)
+        elif args.plugin_action == "disable":
+            result = client.admin_put(f"plugins/{name}/disable", {})
+            print(f"[plugin] disabled: {name}")
+            print_json(result)
+        elif args.plugin_action == "status":
+            data = client.admin_get("plugins")
+            plugins = data.get("plugins") if isinstance(data, dict) else data
+            if not isinstance(plugins, list):
+                plugins = []
+            match = next(
+                (p for p in plugins if (p.get("id") or p.get("name")) == name),
+                None,
+            )
+            if not match:
+                print(f"[plugin] Not found: {name}")
+                sys.exit(1)
+            print_json(match)
+        elif args.plugin_action == "config":
+            if getattr(args, "set_json", None):
+                with open(args.set_json, encoding="utf-8") as f:
+                    body = json.load(f)
+                result = client.admin_put(f"plugins/{name}/config", body)
+                print(f"[plugin] config updated: {name}")
+                print_json(result)
+            else:
+                data = client.admin_get(f"plugins/{name}/config")
+                print_json(data)
+    except Exception as e:
+        handle_api_error(e)
+        print(f"[plugin] {e}")
+        sys.exit(1)
 
 
 def _cmd_list(plugins_dir):

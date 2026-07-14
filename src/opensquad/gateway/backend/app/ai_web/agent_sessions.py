@@ -31,6 +31,8 @@ ROOT_DIR = syscfg.get_workspace()
 def _build_agent_id_map() -> dict:
     """
     Scan agents/ directory to build agent_id -> agent_dir mapping.
+    Also indexes by directory name so /agent-sessions/agent305/list works
+    when config.agent_id is agent305-001.
     """
     agents_root = syscfg.workspace_agents_dir()
     id_map = {}
@@ -41,8 +43,14 @@ def _build_agent_id_map() -> dict:
                 try:
                     with open(cfg_path, encoding="utf-8") as f:
                         cfg = json.load(f)
+                    agent_dir = os.path.join(agents_root, name)
                     aid = cfg.get("agent_id", name)
-                    id_map[aid] = os.path.join(agents_root, name)
+                    id_map[aid] = agent_dir
+                    # dir_name / folder alias (CLI often uses this)
+                    id_map[name] = agent_dir
+                    aname = cfg.get("agent_name") or cfg.get("name")
+                    if aname and aname not in id_map:
+                        id_map[str(aname)] = agent_dir
                 except Exception:
                     pass
     return id_map

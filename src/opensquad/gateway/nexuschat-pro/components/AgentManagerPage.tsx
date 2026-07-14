@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
-  LayoutGrid, ArrowLeft, RefreshCw, Plus, Power, PowerOff, RotateCcw,
+  LayoutGrid, List, ArrowLeft, RefreshCw, Plus, Power, PowerOff, RotateCcw,
   Settings, FileText, Terminal, X, Save, ChevronDown, ChevronUp,
   Monitor, Code, PenTool, BarChart3, Globe, Bot, Wrench,
   Circle, Loader2, MessageSquare, Trash2, Pencil, Eye, EyeOff,
@@ -26,6 +26,18 @@ import {
 interface AgentManagerPageProps {
   onBack: () => void;
   onChat?: (agentId: string) => void;
+}
+
+const LAYOUT_KEY = 'agent_manager_layout';
+type AgentLayoutMode = 'grid' | 'list';
+
+function loadLayoutMode(): AgentLayoutMode {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    return raw === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
 }
 
 type DetailTab = 'config' | 'role' | 'logs';
@@ -139,6 +151,11 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   const [agents, setAgents] = useState<AdminAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [layoutMode, setLayoutMode] = useState<AgentLayoutMode>(loadLayoutMode);
+  const setLayout = useCallback((mode: AgentLayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem(LAYOUT_KEY, mode); } catch { /* ignore */ }
+  }, []);
 
   // 详情面板
   const [detailAgent, setDetailAgent] = useState<AdminAgent | null>(null);
@@ -1177,6 +1194,26 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             )}
             <span>{totalCount} total</span>
           </div>
+          <div className="flex items-center rounded-lg border border-border bg-bgLight p-0.5 shrink-0">
+            <button
+              onClick={() => setLayout('grid')}
+              title={t('agentManager.layoutGrid')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'grid' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+            <button
+              onClick={() => setLayout('list')}
+              title={t('agentManager.layoutList')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'list' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <List size={13} />
+            </button>
+          </div>
           <button
             onClick={() => setShowCreate(true)}
             className={adminHeaderCta}
@@ -1219,14 +1256,103 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             <p className="text-sm">Click "New" to create your first agent, or start launcher.py</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className={
+            layoutMode === 'list'
+              ? 'grid grid-cols-1 xl:grid-cols-2 gap-1.5'
+              : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4'
+          }>
             {agents.map(agent => {
               const key = getAgentKey(agent);
               const isRunning = agent.process_status === 'running';
               const isLoading = actionLoading[key] || false;
               const starting = isAgentStarting(agent);
               const ready = isAgentReady(agent);
+              const displayName = agent.agent_name || resolveChatName(agent.chat_profile) || key;
+              const avatarUrl = resolveChatAvatar(agent.chat_profile);
+              const statusLabel = starting
+                ? t('agentManager.statusStarting')
+                : (STATUS_LABELS[agent.process_status] ? t(STATUS_LABELS[agent.process_status]) : agent.process_status);
 
+              const actionButtons = (
+                <>
+                  {isRunning ? (
+                    <>
+                      <button onClick={() => doAction(agent, 'stop')} disabled={isLoading || starting} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
+                        {isLoading ? <Loader2 size={11} className="animate-spin" /> : <PowerOff size={11} />} Stop
+                      </button>
+                      <button onClick={() => doAction(agent, 'restart')} disabled={isLoading || starting} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
+                        <RotateCcw size={11} /> Restart
+                      </button>
+                    </>
+                  ) : agent.process_status !== 'external' ? (
+                    <button onClick={() => doAction(agent, 'start')} disabled={isLoading} className="py-1 px-2 text-[11px] font-medium rounded-md bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50 flex items-center justify-center gap-1">
+                      {isLoading ? <Loader2 size={11} className="animate-spin" /> : <Power size={11} />} Start
+                    </button>
+                  ) : (
+                    <span className="py-1 px-2 text-[11px] text-textMuted">External</span>
+                  )}
+                  {isRunning && onChat && (
+                    <button onClick={() => onChat(agent.agent_id)} disabled={starting} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-blue-50 text-blue-600 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-blue-100'}`}>
+                      <MessageSquare size={11} /> {t('agentManager.chat')}
+                    </button>
+                  )}
+                  <button onClick={() => openDetail(agent, 'config')} className="py-1 px-1.5 text-[11px] rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Settings">
+                    <Settings size={12} />
+                  </button>
+                  {isRunning && (
+                    <button onClick={() => openDetail(agent, 'logs')} className="py-1 px-1.5 text-[11px] rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Logs">
+                      <Terminal size={12} />
+                    </button>
+                  )}
+                  {!isRunning && agent.process_status !== 'external' && (
+                    <button onClick={() => handleDelete(agent)} disabled={isLoading} className="py-1 px-1.5 text-[11px] rounded-md bg-red-50 text-red-400 hover:bg-red-100 hover:text-red-600 transition-colors disabled:opacity-50" title="Delete">
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </>
+              );
+
+              // ── Compact list row ──
+              if (layoutMode === 'list') {
+                return (
+                  <div
+                    key={key}
+                    className={`bg-panel border rounded-lg px-3 py-2 flex items-center gap-3 transition-all hover:border-primary/30 ${
+                      ready ? 'border-green-500/30' : starting ? 'border-yellow-400/30' : 'border-border'
+                    }`}
+                  >
+                    {avatarUrl ? (
+                      <img src={avatarUrl} alt={displayName} className="w-8 h-8 rounded-lg object-cover shrink-0" loading="lazy" />
+                    ) : (
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}`}>
+                        {TYPE_ICONS[agent.agent_type] || <Wrench size={16} />}
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">{displayName}</h3>
+                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${getBreathColor(agent)} ${getBreathClass(agent)}`} />
+                        <span className="text-[10px] text-textMuted shrink-0">{statusLabel}</span>
+                        {(agent.node_label || agent.node_id) && (
+                          <span className="text-[9px] px-1.5 py-0.5 bg-primary/10 text-primary rounded-full truncate max-w-[80px] shrink-0" title={agent.node_id}>
+                            {agent.node_label || agent.node_id}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">
+                        {agent.agent_type} · {key}
+                        {isRunning && !starting ? ` · Load ${agent.load_percent}% · ${agent.today_chats} chats` : ''}
+                        {agent.model_card ? ` · ${agent.model_card}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {actionButtons}
+                    </div>
+                  </div>
+                );
+              }
+
+              // ── Grid card ──
               return (
                 <div
                   key={key}
@@ -1236,11 +1362,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                   <div className="absolute top-3 right-3 flex flex-col items-end gap-1">
                     <div className="flex items-center gap-1.5">
                       <span className={`w-2.5 h-2.5 rounded-full ${getBreathColor(agent)} ${getBreathClass(agent)}`} />
-                      <span className="text-[10px] text-textMuted">
-                        {starting
-                          ? t('agentManager.statusStarting')
-                          : (STATUS_LABELS[agent.process_status] ? t(STATUS_LABELS[agent.process_status]) : agent.process_status)}
-                      </span>
+                      <span className="text-[10px] text-textMuted">{statusLabel}</span>
                     </div>
                     {(agent.node_label || agent.node_id) && (
                       <span className="text-[9px] px-1.5 py-0.5 bg-primary/10 text-primary rounded-full truncate max-w-[90px]" title={agent.node_id}>
@@ -1251,17 +1373,15 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
 
                   {/* Agent 头像 + 名称 */}
                   <div className="flex items-center gap-3 mb-3">
-                    {resolveChatAvatar(agent.chat_profile) ? (
-                      <img src={resolveChatAvatar(agent.chat_profile)!} alt={resolveChatName(agent.chat_profile)} className="w-10 h-10 rounded-lg object-cover shrink-0" loading="lazy" />
+                    {avatarUrl ? (
+                      <img src={avatarUrl} alt={displayName} className="w-10 h-10 rounded-lg object-cover shrink-0" loading="lazy" />
                     ) : (
                       <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${ready ? 'bg-green-500/10 text-green-600' : starting ? 'bg-yellow-400/10 text-yellow-600' : 'bg-primary/10 text-primary'}`}>
                         {TYPE_ICONS[agent.agent_type] || <Wrench size={20} />}
                       </div>
                     )}
                     <div className="min-w-0">
-                      <h3 className="font-semibold text-textMain text-sm truncate">
-                        {agent.agent_name || resolveChatName(agent.chat_profile) || key}
-                      </h3>
+                      <h3 className="font-semibold text-textMain text-sm truncate">{displayName}</h3>
                       <p className="text-[10px] text-textMuted truncate">{agent.agent_type} | {key}</p>
                       {agent.model_card && (
                         <p className="text-[10px] text-primary truncate" title={agent.model_card}>
@@ -1271,14 +1391,10 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     </div>
                   </div>
 
-                  {/* 描述 */}
-                  {/* 描述 — follow the user's interface language, fall back to
-                      the base description if a specific language is missing. */}
                   <p className="text-xs text-textMuted mb-3 line-clamp-2 h-8">
                     {getAgentDescription(agent, i18n.language) || t('agentManager.noDescription')}
                   </p>
 
-                  {/* 指标行 */}
                   {isRunning && (
                     <div className="flex items-center gap-3 text-[10px] text-textMuted mb-3">
                       {starting ? (
@@ -1296,7 +1412,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     </div>
                   )}
 
-                  {/* Token 消耗进度条 */}
                   {isRunning && agent.token_stats && (
                     <div className="mb-3">
                       <div className="flex items-center justify-between text-[10px] text-textMuted mb-1">
@@ -1315,42 +1430,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     </div>
                   )}
 
-                  {/* 操作按钮 */}
-                  <div className="flex items-center gap-1.5 pt-2 border-t border-border">
-                    {isRunning ? (
-                      <>
-                        <button onClick={() => doAction(agent, 'stop')} disabled={isLoading || starting} className={`flex-1 py-1.5 text-xs font-medium rounded-lg bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
-                          {isLoading ? <Loader2 size={12} className="animate-spin" /> : <PowerOff size={12} />} Stop
-                        </button>
-                        <button onClick={() => doAction(agent, 'restart')} disabled={isLoading || starting} className={`flex-1 py-1.5 text-xs font-medium rounded-lg bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
-                          <RotateCcw size={12} /> Restart
-                        </button>
-                      </>
-                    ) : agent.process_status !== 'external' ? (
-                      <button onClick={() => doAction(agent, 'start')} disabled={isLoading} className="flex-1 py-1.5 text-xs font-medium rounded-lg bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50 flex items-center justify-center gap-1">
-                        {isLoading ? <Loader2 size={12} className="animate-spin" /> : <Power size={12} />} Start
-                      </button>
-                    ) : (
-                      <span className="flex-1 py-1.5 text-xs text-center text-textMuted">External process</span>
-                    )}
-                    {isRunning && onChat && (
-                      <button onClick={() => onChat(agent.agent_id)} disabled={starting} className={`flex-1 py-1.5 text-xs font-medium rounded-lg bg-blue-50 text-blue-600 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-blue-100'}`}>
-                        <MessageSquare size={12} /> {t('agentManager.chat')}
-                      </button>
-                    )}
-                    <button onClick={() => openDetail(agent, 'config')} className="py-1.5 px-2 text-xs rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Settings">
-                      <Settings size={12} />
-                    </button>
-                    {isRunning && (
-                      <button onClick={() => openDetail(agent, 'logs')} className="py-1.5 px-2 text-xs rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors" title="Logs">
-                        <Terminal size={12} />
-                      </button>
-                    )}
-                    {!isRunning && agent.process_status !== 'external' && (
-                      <button onClick={() => handleDelete(agent)} disabled={isLoading} className="py-1.5 px-2 text-xs rounded-lg bg-red-50 text-red-400 hover:bg-red-100 hover:text-red-600 transition-colors disabled:opacity-50" title="Delete">
-                        <Trash2 size={12} />
-                      </button>
-                    )}
+                  <div className="flex items-center gap-1.5 pt-2 border-t border-border flex-wrap">
+                    {actionButtons}
                   </div>
                 </div>
               );

@@ -3987,8 +3987,9 @@ if __name__ == "__main__":
                 p = os.path.abspath(path)  # try cwd relative
 
         if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                return f.read()
+            from opensquad.prompt_includes import read_prompt_with_includes
+
+            return read_prompt_with_includes(p, os.path.dirname(os.path.abspath(p)))
         logger.warning(f"Prompt file not found: {path} (looked in {agent_dir} and cwd)")
         return ""
 

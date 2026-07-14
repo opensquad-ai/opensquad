@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   RefreshCw, Plus, UserCircle, Users2, Star, Search,
   X, Save, Trash2, Users, Check, Loader2, AlertCircle, FileText, BookOpen,
-  Eye, Pencil, Menu,
+  Eye, Pencil, Menu, LayoutGrid, List,
 } from 'lucide-react';
 import { marked } from 'marked';
 import { adminAPI, roleCardAPI, collabCardAPI, CardInfo, AdminAgent } from '../services/api';
@@ -28,6 +28,18 @@ interface RolesPageProps {
 }
 
 type TabType = 'role' | 'collab';
+type CardLayoutMode = 'grid' | 'list';
+
+const LAYOUT_KEY = 'roles_collab_layout';
+
+function loadLayoutMode(): CardLayoutMode {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    return raw === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
+}
 
 // ---- Categories ----
 
@@ -103,6 +115,11 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
   const [filter, setFilter]     = useState<'all' | 'starred'>('all');
   const [search, setSearch]     = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [layoutMode, setLayoutMode] = useState<CardLayoutMode>(loadLayoutMode);
+  const setLayout = useCallback((mode: CardLayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem(LAYOUT_KEY, mode); } catch { /* ignore */ }
+  }, []);
 
   // drawer
   const [drawerCard, setDrawerCard] = useState<string | null>(null); // name or '__new__'
@@ -314,6 +331,26 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center rounded-lg border border-border bg-bgLight p-0.5 shrink-0">
+            <button
+              onClick={() => setLayout('grid')}
+              title={t('rolesPage.layoutGrid')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'grid' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+            <button
+              onClick={() => setLayout('list')}
+              title={t('rolesPage.layoutList')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'list' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <List size={13} />
+            </button>
+          </div>
           <button
             onClick={openNew}
             className={adminHeaderCta}
@@ -426,12 +463,17 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className={
+            layoutMode === 'list'
+              ? 'grid grid-cols-1 xl:grid-cols-2 gap-1.5'
+              : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4'
+          }>
             {filtered.map(card => (
               <RoleCardItem
                 key={card.name}
                 card={card}
                 tab={tab}
+                layout={layoutMode}
                 starred={favorites.has(card.name)}
                 onToggleStar={e => toggleFav(card.name, e)}
                 onClick={() => openCard(card.name)}
@@ -607,6 +649,7 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
 interface RoleCardItemProps {
   card: CardInfo;
   tab: TabType;
+  layout?: CardLayoutMode;
   starred: boolean;
   onToggleStar: (e: React.MouseEvent) => void;
   onClick: () => void;
@@ -614,12 +657,58 @@ interface RoleCardItemProps {
 }
 
 const RoleCardItem: React.FC<RoleCardItemProps> = ({
-  card, tab, starred, onToggleStar, onClick, assignedAgents,
+  card, tab, layout = 'grid', starred, onToggleStar, onClick, assignedAgents,
 }) => {
   const { t } = useTranslation();
   const pt  = primaryTag(card.tags ?? []);
   const cls = tagColor(pt);
+  const isList = layout === 'list';
 
+  const starBtn = (
+    <button
+      onClick={onToggleStar}
+      className="p-0.5 rounded transition-colors shrink-0"
+      title={starred ? t('pluginManager.starred') : t('pluginManager.starred')}
+    >
+      <Star
+        size={isList ? 14 : 15}
+        className={starred ? 'fill-yellow-400 text-yellow-400' : 'text-textMuted hover:text-yellow-400 transition-colors'}
+      />
+    </button>
+  );
+
+  // ── Compact list row ──
+  if (isList) {
+    return (
+      <div
+        onClick={onClick}
+        className="bg-panel rounded-lg border border-border px-3 py-2 flex items-center gap-3 cursor-pointer transition-all hover:border-primary/30 group"
+      >
+        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${cls}`}>
+          {pt ?? (tab === 'role' ? 'role' : 'collab')}
+        </span>
+        <div className="flex-1 min-w-0">
+          <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
+            {card.title || card.name}
+          </h3>
+          <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">
+            {card.description
+              || (tab === 'role'
+                ? (assignedAgents.length > 0
+                  ? `${assignedAgents.length} agent${assignedAgents.length > 1 ? 's' : ''}`
+                  : t('common.noData'))
+                : (card.char_count > 0 ? `${card.char_count} chars` : t('rolesPage.collabTab')))}
+          </p>
+        </div>
+        {starBtn}
+        <span className="text-[11px] text-textMuted group-hover:text-primary transition-colors shrink-0">
+          {t('rolesPage.edit')} →
+        </span>
+      </div>
+    );
+  }
+
+  // ── Grid card ──
   return (
     <div
       onClick={onClick}
@@ -630,16 +719,7 @@ const RoleCardItem: React.FC<RoleCardItemProps> = ({
         <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${cls}`}>
           {pt ?? (tab === 'role' ? 'role' : 'collab')}
         </span>
-        <button
-          onClick={onToggleStar}
-          className="p-0.5 rounded transition-colors"
-          title={starred ? t('pluginManager.starred') : t('pluginManager.starred')}
-        >
-          <Star
-            size={15}
-            className={starred ? 'fill-yellow-400 text-yellow-400' : 'text-textMuted hover:text-yellow-400 transition-colors'}
-          />
-        </button>
+        {starBtn}
       </div>
 
       {/* Title + description */}
@@ -655,9 +735,9 @@ const RoleCardItem: React.FC<RoleCardItemProps> = ({
       {/* Tags */}
       {(card.tags ?? []).length > 1 && (
         <div className="flex flex-wrap gap-1 -mt-1">
-          {card.tags.slice(1).map(t => (
-            <span key={t} className="text-[11px] px-1.5 py-0.5 rounded-md bg-hover border border-border/50 text-textMuted">
-              {t}
+          {card.tags.slice(1).map(tag => (
+            <span key={tag} className="text-[11px] px-1.5 py-0.5 rounded-md bg-hover border border-border/50 text-textMuted">
+              {tag}
             </span>
           ))}
         </div>

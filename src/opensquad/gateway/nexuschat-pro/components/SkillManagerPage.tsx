@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import {
   ArrowLeft, RefreshCw, BookOpen, Search, Tag, Code, Terminal,
   Loader2, AlertCircle, Package, Plus, Upload, X, FolderOpen, Trash2, Menu,
-  FileText, ChevronRight, File as FileIcon, Eye,
+  FileText, ChevronRight, File as FileIcon, Eye, LayoutGrid, List,
 } from 'lucide-react';
 import { skillAPI, SkillInfo, SkillSourceResponse, adminAPI, AdminAgent } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -12,19 +12,106 @@ interface SkillManagerPageProps {
   onBack: () => void;
 }
 
+const LAYOUT_KEY = 'skill_manager_layout';
+type SkillLayoutMode = 'grid' | 'list';
+
+function loadLayoutMode(): SkillLayoutMode {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    return raw === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
+}
+
 // ---- Skill Card ----
 
 const SkillCard: React.FC<{
   skill: SkillInfo;
+  layout?: SkillLayoutMode;
   onDelete: (name: string) => void;
   onView: (skill: SkillInfo) => void;
   skillLevel?: 'full' | 'summary' | 'hidden';
   onSkillLevelChange?: (name: string, level: 'full' | 'summary' | 'hidden') => void;
-}> = ({ skill, onDelete, onView, skillLevel = 'summary', onSkillLevelChange }) => {
+}> = ({ skill, layout = 'grid', onDelete, onView, skillLevel = 'summary', onSkillLevelChange }) => {
   const { t } = useTranslation();
   const hasBins = skill.requires?.bins && skill.requires.bins.length > 0;
   const hasEnv  = skill.requires?.env  && skill.requires.env.length  > 0;
+  const isList = layout === 'list';
 
+  const levelToggle = onSkillLevelChange && (
+    <div
+      className="flex items-center rounded-md border border-border overflow-hidden text-[11px] font-medium shrink-0"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'full'); }}
+        className="px-1.5 py-0.5 transition-colors"
+        style={skillLevel === 'full'
+          ? { background: 'rgba(34,197,94,0.15)', color: '#22c55e' }
+          : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
+        title={t('skillManager.fullTooltip')}
+      >
+        full
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'summary'); }}
+        className="px-1.5 py-0.5 transition-colors border-l border-border"
+        style={skillLevel === 'summary'
+          ? { background: 'rgba(99,102,241,0.15)', color: '#818cf8' }
+          : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
+        title={t('skillManager.summaryTooltip')}
+      >
+        summary
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'hidden'); }}
+        className="px-1.5 py-0.5 transition-colors border-l border-border"
+        style={skillLevel === 'hidden'
+          ? { background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }
+          : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
+        title={t('skillManager.hiddenTooltip')}
+      >
+        hidden
+      </button>
+    </div>
+  );
+
+  // ── Compact list row ──
+  if (isList) {
+    return (
+      <div
+        onClick={() => onView(skill)}
+        className="bg-panel border border-border rounded-lg px-3 py-2 flex items-center gap-3 hover:border-primary/30 transition-colors cursor-pointer group"
+      >
+        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+          <BookOpen size={16} className="text-primary" />
+        </div>
+        <div
+          className="flex-1 min-w-0 select-text cursor-text"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
+            {skill.display_name || skill.name}
+          </h3>
+          {skill.description && (
+            <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">{skill.description}</p>
+          )}
+        </div>
+        {levelToggle}
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(skill.name); }}
+          className="p-1 rounded text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors shrink-0"
+          title={t('common.delete')}
+        >
+          <Trash2 size={13} />
+        </button>
+        <ChevronRight size={14} className="text-textMuted opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+      </div>
+    );
+  }
+
+  // ── Grid card ──
   return (
     <div
       onClick={() => onView(skill)}
@@ -109,38 +196,7 @@ const SkillCard: React.FC<{
         {onSkillLevelChange && (
           <div>
             <div className="mb-1 text-[10px] text-textMuted">{t('skillManager.injectLevel')}</div>
-            <div className="flex items-center rounded-md border border-border overflow-hidden text-[11px] font-medium w-fit">
-              <button
-                onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'full'); }}
-                className="px-2 py-1 transition-colors"
-                style={skillLevel === 'full'
-                  ? { background: 'rgba(34,197,94,0.15)', color: '#22c55e' }
-                  : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
-                title={t('skillManager.fullTooltip')}
-              >
-                full
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'summary'); }}
-                className="px-2 py-1 transition-colors border-l border-border"
-                style={skillLevel === 'summary'
-                  ? { background: 'rgba(99,102,241,0.15)', color: '#818cf8' }
-                  : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
-                title={t('skillManager.summaryTooltip')}
-              >
-                summary
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onSkillLevelChange(skill.name, 'hidden'); }}
-                className="px-2 py-1 transition-colors border-l border-border"
-                style={skillLevel === 'hidden'
-                  ? { background: 'rgba(245,158,11,0.15)', color: '#f59e0b' }
-                  : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)' }}
-                title={t('skillManager.hiddenTooltip')}
-              >
-                hidden
-              </button>
-            </div>
+            {levelToggle}
           </div>
         )}
 
@@ -441,6 +497,11 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) =>
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('');
+  const [layoutMode, setLayoutMode] = useState<SkillLayoutMode>(loadLayoutMode);
+  const setLayout = useCallback((mode: SkillLayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem(LAYOUT_KEY, mode); } catch { /* ignore */ }
+  }, []);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -732,6 +793,26 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) =>
 
         <div className="ml-auto flex items-center gap-1 md:gap-2 shrink-0">
           <span className="text-[10px] md:text-xs text-textMuted hidden sm:inline">{skills.filter(s => s.has_skill_json !== false).length} {t('nav.skills')}</span>
+          <div className="flex items-center rounded-lg border border-border bg-bgLight p-0.5 shrink-0">
+            <button
+              onClick={() => setLayout('grid')}
+              title={t('skillManager.layoutGrid')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'grid' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+            <button
+              onClick={() => setLayout('list')}
+              title={t('skillManager.layoutList')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'list' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <List size={13} />
+            </button>
+          </div>
           <button
             onClick={() => setShowUploadModal(true)}
             className="p-1.5 md:p-2 rounded-lg text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
@@ -822,11 +903,16 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) =>
             <p>{search || selectedCategory ? t('skillManager.noSkills') : t('skillManager.noSkills')}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className={
+            layoutMode === 'list'
+              ? 'grid grid-cols-1 xl:grid-cols-2 gap-1.5'
+              : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4'
+          }>
             {filtered.map(skill => (
               <SkillCard
                 key={skill.dir}
                 skill={skill}
+                layout={layoutMode}
                 onDelete={handleDeleteClick}
                 onView={handleViewSkill}
                 skillLevel={resolveSkillLevel(skill.name)}

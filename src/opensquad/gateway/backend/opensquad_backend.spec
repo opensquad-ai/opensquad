@@ -377,12 +377,13 @@ for _cfg_name in ("system_config.example.json", "system_config.json"):
         datas += [(str(_cfg_src), ".")]
         print(f"[spec] bundling {_cfg_name} -> _internal/")
 
-# prompts/ — base prompt templates (base_fc.md, thought_xml.md, etc.) loaded
-# by agents_boot.build_system_prompt(). collect_data_files("opensquad") does
-# NOT pick up .md files from this subdirectory reliably, so add it explicitly.
+# prompts/ — base prompt templates (base_fc.md, thought_xml.md, etc.) and
+# shared fragments under prompts/parts/ loaded by agents_boot.build_system_prompt()
+# via {{include:...}}. collect_data_files("opensquad") does NOT pick up .md files
+# from this subdirectory reliably, so add the whole tree explicitly.
 # Ship to _internal/prompts/ to match the older_legacy_prompt_root fallback in
 # agents_boot.py.
-_prompts_src = _builtin_root / "prompts"  # src/prompts/
+_prompts_src = _builtin_root / "prompts"  # src/prompts/ (includes parts/)
 if _prompts_src.exists():
     datas += [(str(_prompts_src), "prompts")]
     print(f"[spec] bundling prompts/ -> _internal/prompts/")

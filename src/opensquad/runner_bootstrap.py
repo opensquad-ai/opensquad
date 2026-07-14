@@ -65,8 +65,9 @@ def resolve_prompt_path(path: str, agent_dir: str) -> str:
 def read_prompt_file(path: str, agent_dir: str) -> str:
     resolved_path = resolve_prompt_path(path, agent_dir)
     if resolved_path and os.path.exists(resolved_path):
-        with open(resolved_path, encoding="utf-8") as file_obj:
-            return file_obj.read()
+        from opensquad.prompt_includes import read_prompt_with_includes
+
+        return read_prompt_with_includes(resolved_path, os.path.dirname(resolved_path))
     logger.warning("Prompt file not found: %s (looked in %s and cwd)", path, agent_dir)
     return ""
 

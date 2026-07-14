@@ -3,6 +3,7 @@ import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
+  LayoutGrid, List,
 } from 'lucide-react';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -18,6 +19,18 @@ import {
 
 interface ServiceManagerPageProps {
   onBack: () => void;
+}
+
+const LAYOUT_KEY = 'service_manager_layout';
+type ServiceLayoutMode = 'grid' | 'list';
+
+function loadLayoutMode(): ServiceLayoutMode {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    return raw === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -61,6 +74,12 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
   const [savingConfig, setSavingConfig] = useState<Record<string, boolean>>({});
   const [configSaved, setConfigSaved] = useState<Record<string, boolean>>({});
   const [togglingAutoStart, setTogglingAutoStart] = useState<Record<string, boolean>>({});
+
+  const [layoutMode, setLayoutMode] = useState<ServiceLayoutMode>(loadLayoutMode);
+  const setLayout = useCallback((mode: ServiceLayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem(LAYOUT_KEY, mode); } catch { /* ignore */ }
+  }, []);
 
   const fetchServices = useCallback(async () => {
     try {
@@ -308,13 +327,35 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
             </p>
           </div>
         </div>
-        <button
-          onClick={() => { setLoading(true); fetchServices(); }}
-          className={adminHeaderGhostBtn}
-          title="Refresh"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center rounded-lg border border-border bg-bgLight p-0.5">
+            <button
+              onClick={() => setLayout('grid')}
+              title={tr('pluginManager.layoutGrid')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'grid' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+            <button
+              onClick={() => setLayout('list')}
+              title={tr('pluginManager.layoutList')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'list' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <List size={13} />
+            </button>
+          </div>
+          <button
+            onClick={() => { setLoading(true); fetchServices(); }}
+            className={adminHeaderGhostBtn}
+            title="Refresh"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* Content */}
@@ -330,11 +371,16 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
             <p className="text-textMuted text-sm">{tr('pluginManager.noServices') || 'No services configured'}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4">
+          <div className={
+            layoutMode === 'list'
+              ? 'grid grid-cols-1 xl:grid-cols-2 gap-1.5'
+              : 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4'
+          }>
             {services.map(svc => (
               <ServiceCard
                 key={svc.plugin_id}
                 svc={svc}
+                layout={layoutMode}
                 acting={acting[svc.plugin_id] || false}
                 onStart={() => handleStart(svc.plugin_id)}
                 onStop={() => handleStop(svc.plugin_id)}
@@ -369,6 +415,7 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
 
 interface ServiceCardProps {
   svc: ServiceStatus;
+  layout?: ServiceLayoutMode;
   acting: boolean;
   onStart: () => void;
   onStop: () => void;
@@ -393,7 +440,7 @@ interface ServiceCardProps {
 }
 
 const ServiceCard: React.FC<ServiceCardProps> = ({
-  svc, acting, onStart, onStop, onRestart, onToggleLogs,
+  svc, layout = 'grid', acting, onStart, onStop, onRestart, onToggleLogs,
   logsOpen, logs, logsLoading,
   editPort, editHost, configDirty, savingConfig, configSaved,
   onConfigChange, onSaveConfig, onSaveAndRestartConfig,
@@ -405,7 +452,261 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
   const portChanged = parseInt(editPort, 10) !== svc.port && !isNaN(parseInt(editPort, 10));
   const needsRestart = configDirty && portChanged;
   const hasPort = svc.port > 0;
+  const isList = layout === 'list';
+  const state = svc.state ?? (svc.alive ? 'running' : 'stopped');
 
+  const statusBadge = (() => {
+    const badgeMap: Record<string, { cls: string; dot: string; label: string; spin?: boolean }> = {
+      running:   { cls: 'bg-emerald-500/15 text-emerald-400', dot: 'bg-emerald-400 animate-pulse', label: tr('pluginManager.statusRunning') || 'Running' },
+      starting:  { cls: 'bg-amber-500/15 text-amber-400',      dot: 'bg-amber-400 animate-pulse',  label: 'Starting...', spin: true },
+      error:     { cls: 'bg-red-500/15 text-red-400',         dot: 'bg-red-400',                  label: 'Error' },
+      stopped:   { cls: 'bg-slate-500/15 text-slate-400',     dot: 'bg-slate-500',                label: tr('pluginManager.statusStopped') || 'Stopped' },
+    };
+    const b = badgeMap[state] || badgeMap.stopped;
+    return (
+      <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${b.cls}`}>
+        {b.spin
+          ? <Loader2 size={9} className="animate-spin" />
+          : <span className={`w-1.5 h-1.5 rounded-full ${b.dot}`} />}
+        {b.label}
+      </span>
+    );
+  })();
+
+  const actionButtons = (() => {
+    if (state === 'starting') {
+      return (
+        <button
+          disabled
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/10 text-amber-400 cursor-not-allowed opacity-75"
+        >
+          <Loader2 size={11} className="animate-spin" />
+          Starting...
+        </button>
+      );
+    }
+    if (state === 'running') {
+      return (
+        <>
+          <button
+            onClick={onStop}
+            disabled={acting}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+          >
+            {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
+            Stop
+          </button>
+          <button
+            onClick={onRestart}
+            disabled={acting}
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
+              needsRestart
+                ? 'bg-primary/20 text-primary hover:bg-primary/30 ring-1 ring-primary/40'
+                : 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+            }`}
+            title={needsRestart ? 'Restart to apply config changes' : 'Restart service'}
+          >
+            {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
+            Restart{needsRestart ? ' *' : ''}
+          </button>
+        </>
+      );
+    }
+    return (
+      <button
+        onClick={onStart}
+        disabled={acting}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
+          state === 'error'
+            ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
+            : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+        }`}
+        title={state === 'error' ? 'Retry start (previous attempt failed)' : 'Start service'}
+      >
+        {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+        {state === 'error' ? 'Retry' : 'Start'}
+      </button>
+    );
+  })();
+
+  const settingsBtn = (
+    <button
+      onClick={() => setConfigExpanded(v => !v)}
+      className={`p-1 rounded transition-colors ${
+        configExpanded
+          ? 'bg-primary/15 text-primary'
+          : configDirty
+            ? 'text-amber-400 hover:bg-primary/10'
+            : 'text-textMuted hover:text-primary hover:bg-primary/10'
+      }`}
+      title={configDirty ? 'Service settings (unsaved changes)' : 'Service settings'}
+    >
+      <Settings size={14} />
+    </button>
+  );
+
+  const configPanel = configExpanded && (
+    <div className="bg-bgLight/50 rounded-lg border border-border/40 px-3 py-2.5 space-y-2">
+      <div className="flex items-center gap-1.5 text-[10px] text-textMuted font-medium">
+        <Settings size={11} className="shrink-0" />
+        <span>Service Config</span>
+        {configDirty && (
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={onSaveConfig}
+              disabled={savingConfig}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                configSaved
+                  ? 'bg-emerald-500/15 text-emerald-400'
+                  : 'bg-primary/15 text-primary hover:bg-primary/25'
+              }`}
+            >
+              {savingConfig && !acting ? <Loader2 size={10} className="animate-spin" />
+               : configSaved ? <><Check size={10} /> Saved</>
+               : <><Save size={10} /> Save</>}
+            </button>
+            {hasPort && (
+              <button
+                onClick={onSaveAndRestartConfig}
+                disabled={savingConfig || acting}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+              >
+                {(savingConfig && acting) ? <Loader2 size={10} className="animate-spin" />
+                 : <><RotateCw size={10} /> {tr('pluginManager.saveAndRestart')}</>}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-0.5">
+          <label className="text-[10px] text-textMuted flex items-center gap-1">
+            <Hash size={10} className="shrink-0" />Port
+            {portChanged && (
+              <span className="text-[9px] text-amber-400">(was {svc.port || '—'})</span>
+            )}
+          </label>
+          {hasPort ? (
+            <input
+              type="number"
+              value={editPort}
+              onChange={e => onConfigChange('port', e.target.value)}
+              className={inputClass}
+              placeholder="9001"
+              min={1}
+              max={65535}
+            />
+          ) : (
+            <span className="text-[11px] text-textMuted italic py-1 block">N/A (client adapter)</span>
+          )}
+        </div>
+        <div className="space-y-0.5">
+          <label className="text-[10px] text-textMuted flex items-center gap-1">
+            <Globe size={10} className="shrink-0" />Host
+          </label>
+          <input
+            type="text"
+            value={editHost}
+            onChange={e => onConfigChange('host', e.target.value)}
+            className={inputClass}
+            placeholder="0.0.0.0"
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-textMuted">Auto-start on boot</span>
+        <button
+          onClick={onAutoStartToggle}
+          disabled={togglingAutoStart}
+          className="transition-colors disabled:opacity-50"
+          title={editAutoStart ? 'Disable auto-start' : 'Enable auto-start'}
+        >
+          {togglingAutoStart ? (
+            <Loader2 size={18} className="animate-spin text-textMuted" />
+          ) : editAutoStart ? (
+            <ToggleRight size={22} className="text-primary" />
+          ) : (
+            <ToggleLeft size={22} className="text-textMuted" />
+          )}
+        </button>
+      </div>
+
+      {needsRestart && (
+        <div className="flex items-center gap-1.5 text-[10px] text-amber-400 bg-amber-500/10 rounded-md px-2 py-1">
+          <RotateCw size={10} className="shrink-0" />
+          <span>{tr('pluginManager.portChangedRestartHint')}</span>
+        </div>
+      )}
+    </div>
+  );
+
+  const logsPanel = logsOpen && (
+    <div className={`border-t border-border/40 bg-black/30 px-3 py-2 max-h-48 overflow-y-auto ${
+      isList ? 'rounded-b-lg -mx-3 -mb-2' : 'rounded-b-lg -mx-5 -mb-5 rounded-t-none'
+    }`}>
+      {logsLoading ? (
+        <div className="flex justify-center py-2">
+          <Loader2 size={13} className="animate-spin text-textMuted" />
+        </div>
+      ) : logs.length === 0 ? (
+        <p className="text-[10px] text-textMuted">No logs</p>
+      ) : (
+        <pre className="text-[10px] text-slate-300 whitespace-pre-wrap leading-relaxed font-mono">
+          {logs.join('\n')}
+        </pre>
+      )}
+    </div>
+  );
+
+  // ── Compact list row ──
+  if (isList) {
+    return (
+      <div className="bg-panel rounded-lg border border-border px-3 py-2 flex flex-col gap-2 transition-all hover:border-primary/30">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+            svc.alive ? 'bg-emerald-500/15' : 'bg-slate-500/15'
+          }`}>
+            <Server size={16} className={svc.alive ? 'text-emerald-400' : 'text-slate-400'} />
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">{svc.display_name}</h3>
+              {statusBadge}
+              {svc.auto_start && (
+                <span className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20 shrink-0" title="Auto-start">
+                  <Zap size={9} />
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">
+              {svc.plugin_id}
+              {hasPort ? ` · :${svc.port}` : ''}
+              {svc.alive && svc.uptime_seconds != null ? ` · ${formatUptime(svc.uptime_seconds)}` : ''}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {actionButtons}
+            {settingsBtn}
+            <button
+              onClick={onToggleLogs}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[11px] font-medium text-textMuted hover:text-textMain hover:bg-slate-500/10 transition-colors"
+            >
+              <Terminal size={11} />
+              {logsOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </button>
+          </div>
+        </div>
+        {configPanel}
+        {logsPanel}
+      </div>
+    );
+  }
+
+  // ── Grid card ──
   return (
     <div className="bg-panel rounded-xl border border-border p-5 flex flex-col gap-3 transition-all hover:shadow-md">
       {/* Header */}
@@ -421,28 +722,8 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           <p className="text-[10px] text-textMuted">{svc.plugin_id}</p>
         </div>
 
-        {/* Status badge + gear */}
         <div className="flex items-center gap-1 shrink-0">
-          {(() => {
-            // Derive display state: prefer backend `state` (4-state), fall
-            // back to binary `alive` (2-state) for older backends.
-            const s = svc.state ?? (svc.alive ? 'running' : 'stopped');
-            const badgeMap: Record<string, { cls: string; dot: string; label: string; spin?: boolean }> = {
-              running:   { cls: 'bg-emerald-500/15 text-emerald-400', dot: 'bg-emerald-400 animate-pulse', label: tr('pluginManager.statusRunning') || 'Running' },
-              starting:  { cls: 'bg-amber-500/15 text-amber-400',      dot: 'bg-amber-400 animate-pulse',  label: 'Starting...', spin: true },
-              error:     { cls: 'bg-red-500/15 text-red-400',         dot: 'bg-red-400',                  label: 'Error' },
-              stopped:   { cls: 'bg-slate-500/15 text-slate-400',     dot: 'bg-slate-500',                label: tr('pluginManager.statusStopped') || 'Stopped' },
-            };
-            const b = badgeMap[s] || badgeMap.stopped;
-            return (
-              <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${b.cls}`}>
-                {b.spin
-                  ? <Loader2 size={9} className="animate-spin" />
-                  : <span className={`w-1.5 h-1.5 rounded-full ${b.dot}`} />}
-                {b.label}
-              </span>
-            );
-          })()}
+          {statusBadge}
           {svc.auto_start && (
             <span
               className="inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20"
@@ -452,128 +733,14 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
               Auto
             </span>
           )}
-          <button
-            onClick={() => setConfigExpanded(v => !v)}
-            className={`p-1 rounded transition-colors ${
-              configExpanded
-                ? 'bg-primary/15 text-primary'
-                : configDirty
-                  ? 'text-amber-400 hover:bg-primary/10'
-                  : 'text-textMuted hover:text-primary hover:bg-primary/10'
-            }`}
-            title={configDirty ? 'Service settings (unsaved changes)' : 'Service settings'}
-          >
-            <Settings size={14} />
-          </button>
+          {settingsBtn}
         </div>
       </div>
 
-      {/* Editable config section (collapsed by default) */}
-      {configExpanded && (
-      <div className="bg-bgLight/50 rounded-lg border border-border/40 px-3 py-2.5 space-y-2">
-        <div className="flex items-center gap-1.5 text-[10px] text-textMuted font-medium">
-          <Settings size={11} className="shrink-0" />
-          <span>Service Config</span>
-          {configDirty && (
-            <div className="ml-auto flex items-center gap-1">
-              <button
-                onClick={onSaveConfig}
-                disabled={savingConfig}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                  configSaved
-                    ? 'bg-emerald-500/15 text-emerald-400'
-                    : 'bg-primary/15 text-primary hover:bg-primary/25'
-                }`}
-              >
-                {savingConfig && !acting ? <Loader2 size={10} className="animate-spin" />
-                 : configSaved ? <><Check size={10} /> Saved</>
-                 : <><Save size={10} /> Save</>}
-              </button>
-              {hasPort && (
-                <button
-                  onClick={onSaveAndRestartConfig}
-                  disabled={savingConfig || acting}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
-                >
-                  {(savingConfig && acting) ? <Loader2 size={10} className="animate-spin" />
-                   : <><RotateCw size={10} /> {tr('pluginManager.saveAndRestart')}</>}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          {/* Port */}
-          <div className="space-y-0.5">
-            <label className="text-[10px] text-textMuted flex items-center gap-1">
-              <Hash size={10} className="shrink-0" />Port
-              {portChanged && (
-                <span className="text-[9px] text-amber-400">(was {svc.port || '—'})</span>
-              )}
-            </label>
-            {hasPort ? (
-              <input
-                type="number"
-                value={editPort}
-                onChange={e => onConfigChange('port', e.target.value)}
-                className={inputClass}
-                placeholder="9001"
-                min={1}
-                max={65535}
-              />
-            ) : (
-              <span className="text-[11px] text-textMuted italic py-1 block">N/A (client adapter)</span>
-            )}
-          </div>
-
-          {/* Host */}
-          <div className="space-y-0.5">
-            <label className="text-[10px] text-textMuted flex items-center gap-1">
-              <Globe size={10} className="shrink-0" />Host
-            </label>
-            <input
-              type="text"
-              value={editHost}
-              onChange={e => onConfigChange('host', e.target.value)}
-              className={inputClass}
-              placeholder="0.0.0.0"
-            />
-          </div>
-        </div>
-
-        {/* Auto-start on boot */}
-        <div className="flex items-center justify-between">
-          <span className="text-[10px] text-textMuted">Auto-start on boot</span>
-          <button
-            onClick={onAutoStartToggle}
-            disabled={togglingAutoStart}
-            className="transition-colors disabled:opacity-50"
-            title={editAutoStart ? 'Disable auto-start' : 'Enable auto-start'}
-          >
-            {togglingAutoStart ? (
-              <Loader2 size={18} className="animate-spin text-textMuted" />
-            ) : editAutoStart ? (
-              <ToggleRight size={22} className="text-primary" />
-            ) : (
-              <ToggleLeft size={22} className="text-textMuted" />
-            )}
-          </button>
-        </div>
-
-        {/* Restart needed hint */}
-        {needsRestart && (
-          <div className="flex items-center gap-1.5 text-[10px] text-amber-400 bg-amber-500/10 rounded-md px-2 py-1">
-            <RotateCw size={10} className="shrink-0" />
-            <span>{tr('pluginManager.portChangedRestartHint')}</span>
-          </div>
-        )}
-      </div>
-      )}
+      {configPanel}
 
       {/* Details grid */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
-        {/* Port — always shown */}
         <div className="flex items-center gap-1.5 text-textMuted">
           <Hash size={12} className="shrink-0" />
           <span>Port</span>
@@ -582,7 +749,6 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           {hasPort ? svc.port : '—'}
         </span>
 
-        {/* Host — always shown */}
         <div className="flex items-center gap-1.5 text-textMuted">
           <Globe size={12} className="shrink-0" />
           <span>Host</span>
@@ -621,7 +787,6 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           </>
         )}
 
-        {/* Health check status */}
         <div className="flex items-center gap-1.5 text-textMuted">
           <Activity size={12} className="shrink-0" />
           <span>Health</span>
@@ -637,7 +802,6 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
         </span>
       </div>
 
-      {/* Plugin type badge */}
       <div className="flex items-center gap-2">
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border ${typeClass}`}>
           {TYPE_ICONS[svc.plugin_type]}
@@ -645,67 +809,8 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
         </span>
       </div>
 
-      {/* Actions */}
       <div className="flex items-center gap-2 mt-auto pt-2 border-t border-border/50">
-        {(() => {
-          const s = svc.state ?? (svc.alive ? 'running' : 'stopped');
-          if (s === 'starting') {
-            // Starting: show disabled Starting button (no Stop/Restart yet —
-              // the user just clicked Start or it's auto-starting in background)
-            return (
-              <button
-                disabled
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-500/10 text-amber-400 cursor-not-allowed opacity-75"
-              >
-                <Loader2 size={11} className="animate-spin" />
-                Starting...
-              </button>
-            );
-          }
-          if (s === 'running') {
-            return (
-              <>
-                <button
-                  onClick={onStop}
-                  disabled={acting}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-                >
-                  {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
-                  Stop
-                </button>
-                <button
-                  onClick={onRestart}
-                  disabled={acting}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                    needsRestart
-                      ? 'bg-primary/20 text-primary hover:bg-primary/30 ring-1 ring-primary/40'
-                      : 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
-                  }`}
-                  title={needsRestart ? 'Restart to apply config changes' : 'Restart service'}
-                >
-                  {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
-                  Restart{needsRestart ? ' *' : ''}
-                </button>
-              </>
-            );
-          }
-          // stopped or error: show Start button (error is recoverable via Start)
-          return (
-            <button
-              onClick={onStart}
-              disabled={acting}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                s === 'error'
-                  ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
-                  : 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-              }`}
-              title={s === 'error' ? 'Retry start (previous attempt failed)' : 'Start service'}
-            >
-              {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
-              {s === 'error' ? 'Retry' : 'Start'}
-            </button>
-          );
-        })()}
+        {actionButtons}
         <button
           onClick={onToggleLogs}
           className="ml-auto inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-textMuted hover:text-textMain hover:bg-slate-500/10 transition-colors"
@@ -716,22 +821,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
         </button>
       </div>
 
-      {/* Log panel */}
-      {logsOpen && (
-        <div className="border-t border-border/40 bg-black/30 rounded-b-lg px-3 py-2 max-h-48 overflow-y-auto -mx-5 -mb-5 rounded-t-none">
-          {logsLoading ? (
-            <div className="flex justify-center py-2">
-              <Loader2 size={13} className="animate-spin text-textMuted" />
-            </div>
-          ) : logs.length === 0 ? (
-            <p className="text-[10px] text-textMuted">No logs</p>
-          ) : (
-            <pre className="text-[10px] text-slate-300 whitespace-pre-wrap leading-relaxed font-mono">
-              {logs.join('\n')}
-            </pre>
-          )}
-        </div>
-      )}
+      {logsPanel}
     </div>
   );
 };

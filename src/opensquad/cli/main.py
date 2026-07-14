@@ -4,18 +4,26 @@ OpenSquad CLI
 Usage:
     opensquad                                   Start all services (same as 'opensquad start')
     opensquad --version                         Show current version
-    opensquad init [--workspace <path>]         Initialize workspace (default: ~/.opensquad/workspace)
-    opensquad start [--port <port>] [--no-launcher] [--no-gateway] [--no-registry] [--no-frontend]
-    opensquad status                            Show agent and service status
-    opensquad stop                              Kill all OpenSquad services by port
-    opensquad update                            Check for updates and upgrade
-    opensquad plugin install <id>               Install a plugin from the store
-    opensquad plugin uninstall <id>             Uninstall a plugin
-    opensquad plugin list                       List installed plugins
+    opensquad init [--workspace <path>]         Initialize workspace
+    opensquad start|stop|restart|status|doctor|logs|config|update|help
+
+    opensquad login|logout|whoami               Auth against Gateway
+    opensquad agent|mcp|skill|plugin|role|model|collab   Manage resources
+    opensquad code [agent]                      One-command TUI (auto-start services)
+    opensquad chat [agent]                      Interactive single-agent REPL
+    opensquad group …                           Group chat + approvals
 """
 
 import argparse
 import sys
+
+
+def _add_gateway_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--gateway",
+        default=None,
+        help="Gateway base URL (default: OPENSQUAD_GATEWAY_URL or system_config)",
+    )
 
 
 def main():
@@ -46,10 +54,8 @@ def main():
     p_status = sub.add_parser("status", help="Show agent and service status")
     p_status.add_argument("--port", type=int, default=None, help="Launcher management port")
 
-    # ── stop ──
+    # ── stop / restart ──
     sub.add_parser("stop", help="Kill all OpenSquad services (clean up ports)")
-
-    # ── restart ──
     sub.add_parser("restart", help="Stop then start all services")
 
     # ── config ──
@@ -58,39 +64,236 @@ def main():
         "action", nargs="?", default="validate", choices=["validate", "show"], help="Action (default: validate)"
     )
 
-    # ── doctor ──
+    # ── doctor / logs / help / update ──
     sub.add_parser("doctor", help="Run system diagnostic report")
-
-    # ── logs ──
     p_logs = sub.add_parser("logs", help="View and filter service logs")
     p_logs.add_argument("--service", "-s", default="gateway", help="Service to show logs for (default: gateway)")
     p_logs.add_argument("--list", action="store_true", dest="list_services", help="List available log sources")
     p_logs.add_argument("--tail", "-n", type=int, default=30, help="Show last N lines (default: 30, 0=show all)")
     p_logs.add_argument("--level", "-l", default="", help="Filter by log level (e.g. ERROR, WARNING)")
     p_logs.add_argument("--grep", "-g", default="", help="Filter lines containing text (case-insensitive)")
-
-    # ── help ──
     sub.add_parser("help", help="Show this help message")
-
-    # ── update ──
     sub.add_parser("update", help="Check for updates and upgrade to the latest version")
+
+    # ── Auth ──
+    p_login = sub.add_parser("login", help="Log in to Gateway (saves JWT)")
+    _add_gateway_flag(p_login)
+    p_login.add_argument("--email", "-e", default=None, help="Account email")
+    p_login.add_argument("--password", "-p", default=None, help="Password (prompted if omitted)")
+    p_login.add_argument("--language", default="zh", choices=["zh", "en"], help="UI language for first-login bootstrap")
+    sub.add_parser("logout", help="Clear saved CLI credentials")
+    p_whoami = sub.add_parser("whoami", help="Show current logged-in user")
+    _add_gateway_flag(p_whoami)
+
+    # ── agent ──
+    p_agent = sub.add_parser("agent", help="Manage agents")
+    _add_gateway_flag(p_agent)
+    agent_sub = p_agent.add_subparsers(dest="agent_action")
+    agent_sub.add_parser("list", help="List agents")
+    p_agent_show = agent_sub.add_parser("show", help="Show agent details")
+    p_agent_show.add_argument("name", help="Agent dir_name or agent_id")
+    for act in ("start", "stop", "restart"):
+        p = agent_sub.add_parser(act, help=f"{act.capitalize()} an agent")
+        p.add_argument("name", help="Agent dir_name")
+    p_agent_cfg = agent_sub.add_parser("config", help="Get or set agent config.json")
+    p_agent_cfg.add_argument("name", help="Agent dir_name")
+    p_agent_cfg.add_argument("--set-json", dest="set_json", default=None, help="Path to JSON file to upload")
+    p_agent_logs = agent_sub.add_parser("logs", help="Show agent logs")
+    p_agent_logs.add_argument("name", help="Agent dir_name")
+    p_agent_logs.add_argument("--tail", type=int, default=50, help="Tail lines")
+
+    # ── mcp ──
+    p_mcp = sub.add_parser("mcp", help="Manage MCP servers")
+    _add_gateway_flag(p_mcp)
+    mcp_sub = p_mcp.add_subparsers(dest="mcp_action")
+    mcp_sub.add_parser("list", help="List MCP servers")
+    p_mcp_show = mcp_sub.add_parser("show", help="Show one MCP server config")
+    p_mcp_show.add_argument("name")
+    p_mcp_en = mcp_sub.add_parser("enable", help="Enable MCP server globally")
+    p_mcp_en.add_argument("name")
+    p_mcp_dis = mcp_sub.add_parser("disable", help="Disable MCP server globally")
+    p_mcp_dis.add_argument("name")
+    p_mcp_set = mcp_sub.add_parser("set", help="Replace full mcpServers from JSON file")
+    p_mcp_set.add_argument("file", help="JSON file ({mcpServers:...} or bare map)")
+    p_mcp_add = mcp_sub.add_parser("add", help="Add or overwrite an MCP server")
+    p_mcp_add.add_argument("name")
+    p_mcp_add.add_argument("--command", default=None)
+    p_mcp_add.add_argument("--arg", action="append", default=[])
+    p_mcp_add.add_argument("--env", action="append", default=[], help="KEY=VALUE")
+    p_mcp_add.add_argument("--from-json", dest="from_json", default=None)
+    p_mcp_rm = mcp_sub.add_parser("remove", help="Remove an MCP server")
+    p_mcp_rm.add_argument("name")
+
+    # ── skill ──
+    p_skill = sub.add_parser("skill", help="Manage skills")
+    _add_gateway_flag(p_skill)
+    skill_sub = p_skill.add_subparsers(dest="skill_action")
+    skill_sub.add_parser("list", help="List skills")
+    p_skill_show = skill_sub.add_parser("show", help="Show SKILL.md")
+    p_skill_show.add_argument("name")
+    p_skill_inst = skill_sub.add_parser("install", help="Upload a skill directory")
+    p_skill_inst.add_argument("path", help="Path to skill folder")
+    p_skill_rm = skill_sub.add_parser("rm", help="Delete a skill")
+    p_skill_rm.add_argument("name")
 
     # ── plugin ──
     p_plugin = sub.add_parser("plugin", help="Manage plugins")
+    _add_gateway_flag(p_plugin)
     plugin_sub = p_plugin.add_subparsers(dest="plugin_action")
-
     p_install = plugin_sub.add_parser("install", help="Install a plugin from the store or Git URL")
     p_install.add_argument("plugin_id", help="Plugin ID or Git URL")
     p_install.add_argument("--mode", choices=["smart", "build"], default="smart", help="Install mode")
-
     p_uninstall = plugin_sub.add_parser("uninstall", help="Uninstall a plugin")
     p_uninstall.add_argument("plugin_id", help="Plugin ID to uninstall")
-
     plugin_sub.add_parser("list", help="List installed plugins")
+    for act, help_txt in (
+        ("enable", "Enable plugin via Gateway"),
+        ("disable", "Disable plugin via Gateway"),
+        ("status", "Show plugin status from Gateway"),
+    ):
+        p = plugin_sub.add_parser(act, help=help_txt)
+        p.add_argument("plugin_id", help="Plugin ID")
+    p_pcfg = plugin_sub.add_parser("config", help="Get/set plugin config via Gateway")
+    p_pcfg.add_argument("plugin_id", help="Plugin ID")
+    p_pcfg.add_argument("--set-json", dest="set_json", default=None, help="JSON file to upload as config")
+
+    # ── role ──
+    p_role = sub.add_parser("role", help="Manage role cards")
+    _add_gateway_flag(p_role)
+    role_sub = p_role.add_subparsers(dest="role_action")
+    role_sub.add_parser("list", help="List role cards")
+    p_role_show = role_sub.add_parser("show", help="Show role card markdown")
+    p_role_show.add_argument("name")
+    p_role_edit = role_sub.add_parser("edit", help="Create/update a role card")
+    p_role_edit.add_argument("name")
+    p_role_edit.add_argument("--file", default=None, help="Markdown file")
+    p_role_edit.add_argument("--content", default=None, help="Inline markdown content")
+    p_role_asg = role_sub.add_parser("assign", help="Assign role card to agent")
+    p_role_asg.add_argument("name", help="Role card name")
+    p_role_asg.add_argument("agent", help="Agent dir_name")
+    p_role_unasg = role_sub.add_parser("unassign", help="Unassign role card from agent")
+    p_role_unasg.add_argument("agent")
+    p_role_rm = role_sub.add_parser("rm", help="Delete role card")
+    p_role_rm.add_argument("name")
+
+    # ── model ──
+    p_model = sub.add_parser("model", help="Manage model cards")
+    _add_gateway_flag(p_model)
+    model_sub = p_model.add_subparsers(dest="model_action")
+    model_sub.add_parser("list", help="List model cards")
+    p_model_show = model_sub.add_parser("show", help="Show model card")
+    p_model_show.add_argument("name")
+    p_model_show.add_argument("--reveal", action="store_true", help="Show full api_key")
+    p_model_edit = model_sub.add_parser("edit", help="Create/update a model card")
+    p_model_edit.add_argument("name")
+    p_model_edit.add_argument("--file", default=None, help="JSON file with card fields")
+    p_model_edit.add_argument("--title", default=None)
+    p_model_edit.add_argument("--api-protocol", dest="api_protocol", default=None)
+    p_model_edit.add_argument("--provider", default=None)
+    p_model_edit.add_argument("--model-name", dest="model_name", default=None)
+    p_model_edit.add_argument("--base-url", dest="base_url", default=None)
+    p_model_edit.add_argument("--api-key", dest="api_key", default=None)
+    p_model_edit.add_argument("--token-max", dest="token_max", type=int, default=None)
+    p_model_edit.add_argument("--temperature", type=float, default=None)
+    p_model_edit.add_argument("--tool-call-mode", dest="tool_call_mode", default=None)
+    p_model_edit.add_argument("--render-mode", dest="render_mode", default=None)
+    p_model_asg = model_sub.add_parser("assign", help="Assign model card to agent")
+    p_model_asg.add_argument("name", help="Model card name")
+    p_model_asg.add_argument("agent", help="Agent dir_name")
+    p_model_unasg = model_sub.add_parser("unassign", help="Unassign model card from agent")
+    p_model_unasg.add_argument("agent")
+    p_model_rm = model_sub.add_parser("rm", help="Delete model card")
+    p_model_rm.add_argument("name")
+
+    # ── collab ──
+    p_collab = sub.add_parser("collab", help="Manage collab cards and board")
+    _add_gateway_flag(p_collab)
+    collab_sub = p_collab.add_subparsers(dest="collab_action")
+    collab_sub.add_parser("list", help="List collab cards")
+    p_collab_show = collab_sub.add_parser("show", help="Show collab card")
+    p_collab_show.add_argument("name")
+    p_collab_edit = collab_sub.add_parser("edit", help="Create/update collab card")
+    p_collab_edit.add_argument("name")
+    p_collab_edit.add_argument("--file", default=None)
+    p_collab_edit.add_argument("--content", default=None)
+    p_collab_rm = collab_sub.add_parser("rm", help="Delete collab card")
+    p_collab_rm.add_argument("name")
+    p_collab_board = collab_sub.add_parser("board", help="Inspect collab board")
+    board_sub = p_collab_board.add_subparsers(dest="board_action")
+    board_sub.add_parser("tasks", help="List board tasks")
+    p_board_items = board_sub.add_parser("items", help="List board items for a collab_id")
+    p_board_items.add_argument("collab_id")
+    p_board_items.add_argument("--agent-id", dest="agent_id", default=None)
+    p_board_items.add_argument("--scope", default="public", choices=["public", "all"])
+
+    # ── code (Claude Code / OpenCode style: one command → TUI) ──
+    p_code = sub.add_parser(
+        "code",
+        help="Start TUI in one command (auto-starts Gateway/Launcher if needed)",
+    )
+    _add_gateway_flag(p_code)
+    p_code.add_argument("agent", nargs="?", default=None, help="Agent dir_name (default: first ready)")
+    p_code.add_argument("-m", "--message", default=None, help="One-shot message (non-interactive)")
+    p_code.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Do not auto-start services (assume already running)",
+    )
+    p_code.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use framed prompt_toolkit REPL instead of full-screen Textual TUI",
+    )
+
+    # ── chat / shell (Claude-Code-like interactive UI) ──
+    p_chat = sub.add_parser(
+        "chat",
+        aliases=["shell"],
+        help="Interactive shell (slash commands + agent chat)",
+    )
+    _add_gateway_flag(p_chat)
+    p_chat.add_argument("agent", nargs="?", default=None, help="Agent dir_name (default: first ready)")
+    p_chat.add_argument("-m", "--message", default=None, help="One-shot message (non-interactive)")
+    p_chat.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use framed prompt_toolkit REPL instead of full-screen Textual TUI",
+    )
+    p_chat.add_argument(
+        "--start",
+        action="store_true",
+        help="Auto-start Gateway/Launcher if down (same as opensquad code)",
+    )
+
+    # ── group ──
+    p_group = sub.add_parser("group", help="Group chat and approvals")
+    _add_gateway_flag(p_group)
+    group_sub = p_group.add_subparsers(dest="group_action")
+    group_sub.add_parser("list", help="List groups")
+    p_gh = group_sub.add_parser("history", help="Show recent messages")
+    p_gh.add_argument("group_id")
+    p_gh.add_argument("--limit", type=int, default=30)
+    p_gs = group_sub.add_parser("send", help="Send a message")
+    p_gs.add_argument("group_id")
+    p_gs.add_argument("message")
+    p_gw = group_sub.add_parser("watch", help="Live group chat (WS)")
+    p_gw.add_argument("group_id")
+    p_ga = group_sub.add_parser("approve", help="Resolve a collab approval card")
+    p_ga.add_argument("group_id")
+    p_ga.add_argument("approval_id")
+    p_ga.add_argument("--reject", action="store_true", help="Reject instead of approve")
+    p_ga.add_argument("--note", default="")
+    p_ga.add_argument("--message-id", dest="message_id", default=None)
+    p_gc = group_sub.add_parser("choose", help="Resolve a propose-options card")
+    p_gc.add_argument("group_id")
+    p_gc.add_argument("proposal_id")
+    p_gc.add_argument("value")
+    p_gc.add_argument("--action", default="choose", choices=["choose", "custom", "ignore"])
+    p_gc.add_argument("--note", default="")
+    p_gc.add_argument("--message-id", dest="message_id", default=None)
 
     args = parser.parse_args()
 
-    # --version flag (before subcommand parsing)
     if getattr(args, "version", False):
         from opensquad import __version__
 
@@ -98,7 +301,6 @@ def main():
         sys.exit(0)
 
     if not args.command:
-        # Default: run 'start' when no subcommand is given
         from argparse import Namespace
 
         args = Namespace(
@@ -116,35 +318,40 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    if args.command == "init":
+    _dispatch(args)
+
+
+def _dispatch(args) -> None:
+    cmd = args.command
+    if cmd == "init":
         from opensquad.cli.commands.init_cmd import run_init
 
         run_init(args)
-    elif args.command == "start":
+    elif cmd == "start":
         from opensquad.cli.commands.start_cmd import run_start
 
         run_start(args)
-    elif args.command == "status":
+    elif cmd == "status":
         from opensquad.cli.commands.status_cmd import run_status
 
         run_status(args)
-    elif args.command == "stop":
+    elif cmd == "stop":
         from opensquad.cli.commands.stop_cmd import run_stop
 
         run_stop(args)
-    elif args.command == "doctor":
+    elif cmd == "doctor":
         from opensquad.cli.commands.doctor_cmd import run_doctor
 
         run_doctor(args)
-    elif args.command == "config":
+    elif cmd == "config":
         from opensquad.cli.commands.config_cmd import run_config
 
         run_config(args)
-    elif args.command == "logs":
+    elif cmd == "logs":
         from opensquad.cli.commands.logs_cmd import run_logs
 
         run_logs(args)
-    elif args.command == "restart":
+    elif cmd == "restart":
         print("[restart] Stopping services...")
         from opensquad.cli.commands.stop_cmd import run_stop
 
@@ -156,14 +363,70 @@ def main():
         from opensquad.cli.commands.start_cmd import run_start
 
         run_start(args)
-    elif args.command == "update":
+    elif cmd == "update":
         from opensquad.cli.commands.update_cmd import run_update
 
         run_update(args)
-    elif args.command == "plugin":
+    elif cmd == "login":
+        from opensquad.cli.commands.login_cmd import run_login
+
+        run_login(args)
+    elif cmd == "logout":
+        from opensquad.cli.commands.login_cmd import run_logout
+
+        run_logout(args)
+    elif cmd == "whoami":
+        from opensquad.cli.commands.login_cmd import run_whoami
+
+        run_whoami(args)
+    elif cmd == "agent":
+        from opensquad.cli.commands.agent_cmd import run_agent
+
+        run_agent(args)
+    elif cmd == "mcp":
+        from opensquad.cli.commands.mcp_cmd import run_mcp
+
+        run_mcp(args)
+    elif cmd == "skill":
+        from opensquad.cli.commands.skill_cmd import run_skill
+
+        run_skill(args)
+    elif cmd == "plugin":
         from opensquad.cli.commands.plugin_cmd import run_plugin
 
         run_plugin(args)
+    elif cmd == "role":
+        from opensquad.cli.commands.role_cmd import run_role
+
+        run_role(args)
+    elif cmd == "model":
+        from opensquad.cli.commands.model_cmd import run_model
+
+        run_model(args)
+    elif cmd == "collab":
+        from opensquad.cli.commands.collab_cmd import run_collab
+
+        run_collab(args)
+    elif cmd == "code":
+        from opensquad.cli.runtime_boot import run_code
+
+        run_code(args)
+    elif cmd in ("chat", "shell"):
+        if getattr(args, "start", False):
+            from opensquad.cli.runtime_boot import run_code
+
+            run_code(args)
+        else:
+            from opensquad.cli.commands.chat_cmd import run_chat
+
+            run_chat(args)
+    elif cmd == "group":
+        from opensquad.cli.commands.group_cmd import run_group
+
+        run_group(args)
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

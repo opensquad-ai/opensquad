@@ -7,7 +7,7 @@ import {
   Briefcase, Code2, MessageSquare, Sparkles, Film, SearchIcon,
   Languages, LineChart, Link2, LayoutTemplate, MoreHorizontal,
   Server, Play, StopCircle, RotateCw, Terminal, ChevronDown, ChevronUp,
-  Plus, Trash2, FolderOpen, Menu, Upload,
+  Plus, Trash2, FolderOpen, Menu, Upload, LayoutGrid, List,
 } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { pluginAPI, pluginServiceAPI, PluginInfo, PluginConfigField, PluginServiceStatus, adminAPI, AdminAgent } from '../services/api';
@@ -67,14 +67,17 @@ function pluginHasNavView(plugin: PluginInfo): boolean {
   return !!(plugin.contributes?.views && plugin.contributes.views.length > 0);
 }
 
-function getPluginIcon(plugin: PluginInfo): React.ReactNode {
+function getPluginIcon(plugin: PluginInfo, compact = false): React.ReactNode {
+  const box = compact ? 'w-8 h-8 rounded-lg' : 'w-10 h-10 rounded-xl';
+  const iconSize = compact ? 16 : 20;
+  const letterSize = compact ? 'text-sm' : 'text-base';
   const nav = plugin.contributes?.navigation;
   if (nav?.iconType === 'image' && nav.iconUrl) {
     return (
       <img
         src={nav.iconUrl}
         alt={plugin.display_name || plugin.name}
-        className="w-10 h-10 rounded-xl object-cover shrink-0"
+        className={`${box} object-cover shrink-0`}
         loading="lazy"
       />
     );
@@ -83,15 +86,15 @@ function getPluginIcon(plugin: PluginInfo): React.ReactNode {
     const Icon = (LucideIcons as any)[nav.icon] as React.FC<{ size?: number; className?: string }> | undefined;
     if (Icon) {
       return (
-        <div className="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center shrink-0">
-          <Icon size={20} className="text-primary" />
+        <div className={`${box} bg-primary/15 flex items-center justify-center shrink-0`}>
+          <Icon size={iconSize} className="text-primary" />
         </div>
       );
     }
   }
   // Fallback: colored letter
   return (
-    <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white text-base font-bold shrink-0 ${avatarColor(plugin.name)}`}>
+    <div className={`${box} flex items-center justify-center text-white ${letterSize} font-bold shrink-0 ${avatarColor(plugin.name)}`}>
       {(plugin.display_name || plugin.name).charAt(0).toUpperCase()}
     </div>
   );
@@ -104,6 +107,18 @@ const TYPE_LABELS: Record<string, string> = {
 };
 
 const FAVORITES_KEY = 'plugin_manager_favorites';
+const LAYOUT_KEY = 'plugin_manager_layout';
+
+type PluginLayoutMode = 'grid' | 'list';
+
+function loadLayoutMode(): PluginLayoutMode {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    return raw === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
+}
 
 // ---- Categories ----
 
@@ -176,6 +191,13 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
   // Search & sort
   const [search, setSearch] = useState('');
   const [sortAZ, setSortAZ] = useState(false);
+
+  // Layout: grid (cards) | list (compact rows) — persisted
+  const [layoutMode, setLayoutMode] = useState<PluginLayoutMode>(loadLayoutMode);
+  const setLayout = useCallback((mode: PluginLayoutMode) => {
+    setLayoutMode(mode);
+    try { localStorage.setItem(LAYOUT_KEY, mode); } catch { /* ignore */ }
+  }, []);
 
   // Favorites — persisted in localStorage
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
@@ -636,6 +658,27 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
           >
             {sortAZ ? <ArrowUpAZ size={13} /> : <ArrowDownAZ size={13} />}
           </button>
+          {/* Layout toggle: grid / list */}
+          <div className="flex items-center rounded-lg border border-border bg-bgLight p-0.5 shrink-0">
+            <button
+              onClick={() => setLayout('grid')}
+              title={tr('pluginManager.layoutGrid')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'grid' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <LayoutGrid size={13} />
+            </button>
+            <button
+              onClick={() => setLayout('list')}
+              title={tr('pluginManager.layoutList')}
+              className={`p-1 rounded-md transition-colors ${
+                layoutMode === 'list' ? 'bg-primary/15 text-primary' : 'text-textMuted hover:text-textMain'
+              }`}
+            >
+              <List size={13} />
+            </button>
+          </div>
           {agentToolsDirty && (
             <button
               onClick={saveAgentTools}
@@ -710,11 +753,16 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4">
+              <div className={
+                layoutMode === 'list'
+                  ? 'grid grid-cols-1 xl:grid-cols-2 gap-1.5'
+                  : 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3 md:gap-4'
+              }>
                 {filtered.map(plugin => (
                   <PluginCard
                     key={plugin.name}
                     plugin={plugin}
+                    layout={layoutMode}
                     toggling={toggling[plugin.name] || false}
                     onToggle={() => togglePlugin(plugin)}
                     configOpen={configOpen === plugin.name}
@@ -831,6 +879,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
 
 interface PluginCardProps {
   plugin: PluginInfo;
+  layout?: PluginLayoutMode;
   toggling: boolean;
   onToggle: () => void;
   configOpen: boolean;
@@ -848,7 +897,7 @@ interface PluginCardProps {
 }
 
 const PluginCard: React.FC<PluginCardProps> = ({
-  plugin, toggling, onToggle, configOpen, onConfigToggle,
+  plugin, layout = 'grid', toggling, onToggle, configOpen, onConfigToggle,
   onOpenView, starred, onToggleStar, agentLoaded, onAgentToggle,
   agentToolLevel, onToolLevelChange, onUninstall,
 }) => {
@@ -856,16 +905,152 @@ const PluginCard: React.FC<PluginCardProps> = ({
   const typeClass = TYPE_COLORS[plugin.type] || TYPE_COLORS.tool;
   const hasSettings = (plugin.config_schema && Object.keys(plugin.config_schema).length > 0) || !!plugin.service || agentLoaded !== null;
   const contributedViews = plugin.contributes?.views || [];
-
   const showGlobalDisabledStyle = !!plugin.service_toggle && !plugin.enabled;
+  const isList = layout === 'list';
 
+  const actionButtons = (
+    <div className="flex items-center gap-0.5 shrink-0">
+      <button
+        onClick={onToggleStar}
+        title={starred ? 'Remove from favorites' : 'Add to favorites'}
+        className="p-1 rounded transition-colors"
+      >
+        <Star
+          size={isList ? 14 : 16}
+          className={starred
+            ? 'fill-yellow-400 text-yellow-400'
+            : 'text-textMuted hover:text-yellow-400 transition-colors'
+          }
+        />
+      </button>
+
+      {plugin.service_toggle && (
+        <button
+          onClick={plugin.service_only ? undefined : onToggle}
+          disabled={toggling || !!plugin.service_only}
+          className="transition-colors"
+          title={plugin.service_only ? tr('pluginManager.serviceOnlyTitle') : plugin.enabled ? 'Disable' : 'Enable'}
+        >
+          {toggling ? (
+            <Loader2 size={isList ? 18 : 24} className="animate-spin text-textMuted" />
+          ) : plugin.enabled ? (
+            <ToggleRight size={isList ? 22 : 28} className={plugin.service_only ? 'text-textMuted opacity-30' : 'text-primary'} />
+          ) : (
+            <ToggleLeft size={isList ? 22 : 28} className="text-textMuted opacity-30" />
+          )}
+        </button>
+      )}
+
+      {agentLoaded !== null && !SYSTEM_TOOLS.includes(plugin.name) && (
+        <button
+          onClick={onAgentToggle}
+          title={agentLoaded ? tr('pluginManager.removeFromAgent') : tr('pluginManager.addToAgent')}
+          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md border text-[10px] font-medium transition-colors ml-0.5 shrink-0"
+          style={agentLoaded
+            ? { background: 'rgba(var(--color-primary-rgb,99,102,241),0.12)', color: 'var(--color-primary,#6366f1)', borderColor: 'rgba(var(--color-primary-rgb,99,102,241),0.3)' }
+            : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)', borderColor: 'rgba(156,163,175,0.3)' }
+          }
+        >
+          <Bot size={10} />
+          {agentLoaded ? 'On' : 'Off'}
+        </button>
+      )}
+
+      {!plugin.builtin && (
+        <button
+          onClick={onUninstall}
+          title={tr('pluginManager.uninstallTitle')}
+          className="p-1 rounded transition-colors text-textMuted hover:text-red-400 hover:bg-red-500/10 ml-0.5"
+        >
+          <Trash2 size={isList ? 13 : 14} />
+        </button>
+      )}
+    </div>
+  );
+
+  const configAndViews = (
+    <>
+      {hasSettings && (
+        <button
+          onClick={onConfigToggle}
+          className={`p-1 rounded transition-colors ${
+            configOpen
+              ? 'bg-primary/15 text-primary'
+              : 'text-textMuted hover:text-primary hover:bg-primary/10'
+          }`}
+          title="Settings"
+        >
+          <Settings size={14} />
+        </button>
+      )}
+      {contributedViews.map(view => (
+        <button
+          key={view.name}
+          onClick={() => onOpenView(view.name)}
+          className="p-1 rounded transition-colors text-textMuted hover:text-purple-400 hover:bg-purple-500/10"
+          title={view.title}
+        >
+          <BarChart3 size={14} />
+        </button>
+      ))}
+    </>
+  );
+
+  const configPanel = (hasSettings || agentLoaded) && configOpen && (
+    <PluginConfigPanel
+      plugin={plugin}
+      agentLoaded={agentLoaded}
+      agentToolLevel={agentToolLevel}
+      onToolLevelChange={onToolLevelChange}
+    />
+  );
+
+  // ── Compact list row ──
+  if (isList) {
+    return (
+      <div className={`bg-panel rounded-lg border border-border px-3 py-2 flex flex-col gap-2 transition-all hover:border-primary/30 ${
+        showGlobalDisabledStyle ? 'opacity-60' : ''
+      }`}>
+        <div className="flex items-center gap-3 min-w-0">
+          {getPluginIcon(plugin, true)}
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
+                {plugin.display_name || plugin.name}
+              </h3>
+              {plugin.builtin && SYSTEM_TOOLS.includes(plugin.name) && (
+                <span className="inline-flex items-center gap-0.5 px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0">
+                  <Shield size={8} />
+                  {tr('pluginManager.builtinBadge')}
+                </span>
+              )}
+              <span className={`inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-medium border shrink-0 ${typeClass}`}>
+                {TYPE_LABELS[plugin.type] ? tr(TYPE_LABELS[plugin.type]) : plugin.type}
+              </span>
+            </div>
+            <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">
+              {plugin.description || 'No description'}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-0.5 shrink-0">
+            {configAndViews}
+            {actionButtons}
+          </div>
+        </div>
+        {configPanel}
+      </div>
+    );
+  }
+
+  // ── Grid card ──
   return (
     <div className={`bg-panel rounded-xl border border-border p-5 flex flex-col gap-3 transition-all hover:shadow-md ${
       showGlobalDisabledStyle ? 'opacity-60' : ''
     }`}>
       {/* Header row */}
       <div className="flex items-start justify-between gap-2">
-        {/* Plugin icon */}
         {getPluginIcon(plugin)}
 
         <div className="flex-1 min-w-0">
@@ -886,68 +1071,7 @@ const PluginCard: React.FC<PluginCardProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
-          {/* Star / Favorite */}
-          <button
-            onClick={onToggleStar}
-            title={starred ? 'Remove from favorites' : 'Add to favorites'}
-            className="p-1 rounded transition-colors"
-          >
-            <Star
-              size={16}
-              className={starred
-                ? 'fill-yellow-400 text-yellow-400'
-                : 'text-textMuted hover:text-yellow-400 transition-colors'
-              }
-            />
-          </button>
-
-          {/* Enable / Disable toggle — only for plugins that need a global service toggle */}
-          {plugin.service_toggle && (
-            <button
-              onClick={plugin.service_only ? undefined : onToggle}
-              disabled={toggling || !!plugin.service_only}
-              className="transition-colors"
-              title={plugin.service_only ? tr('pluginManager.serviceOnlyTitle') : plugin.enabled ? 'Disable' : 'Enable'}
-            >
-              {toggling ? (
-                <Loader2 size={24} className="animate-spin text-textMuted" />
-              ) : plugin.enabled ? (
-                <ToggleRight size={28} className={plugin.service_only ? 'text-textMuted opacity-30' : 'text-primary'} />
-              ) : (
-                <ToggleLeft size={28} className="text-textMuted opacity-30" />
-              )}
-            </button>
-          )}
-
-          {/* Per-agent toggle — hidden for system built-in tools (always enabled) */}
-          {agentLoaded !== null && !SYSTEM_TOOLS.includes(plugin.name) && (
-            <button
-              onClick={onAgentToggle}
-              title={agentLoaded ? tr('pluginManager.removeFromAgent') : tr('pluginManager.addToAgent')}
-              className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md border text-[10px] font-medium transition-colors ml-0.5 shrink-0"
-              style={agentLoaded
-                ? { background: 'rgba(var(--color-primary-rgb,99,102,241),0.12)', color: 'var(--color-primary,#6366f1)', borderColor: 'rgba(var(--color-primary-rgb,99,102,241),0.3)' }
-                : { background: 'transparent', color: 'var(--tw-text-opacity,#9ca3af)', borderColor: 'rgba(156,163,175,0.3)' }
-              }
-            >
-              <Bot size={10} />
-              {agentLoaded ? 'On' : 'Off'}
-            </button>
-          )}
-
-          {/* Uninstall button — hidden for built-in plugins */}
-          {!plugin.builtin && (
-            <button
-              onClick={onUninstall}
-              title={tr('pluginManager.uninstallTitle')}
-              className="p-1 rounded transition-colors text-textMuted hover:text-red-400 hover:bg-red-500/10 ml-0.5"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
-
-        </div>
+        {actionButtons}
       </div>
 
       {/* Description */}
@@ -971,63 +1095,29 @@ const PluginCard: React.FC<PluginCardProps> = ({
 
       {/* Footer */}
       <div className="flex items-center gap-2 mt-auto pt-2 border-t border-border/50">
-        {/* Type badge */}
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium border ${typeClass}`}>
           {TYPE_ICONS[plugin.type]}
           {TYPE_LABELS[plugin.type] ? tr(TYPE_LABELS[plugin.type]) : plugin.type}
         </span>
 
-        {/* Tools count */}
         {plugin.tools && plugin.tools.length > 0 && (
           <span className="text-xs text-textMuted">
             {plugin.tools.length} tool{plugin.tools.length > 1 ? 's' : ''}
           </span>
         )}
 
-        {/* Hooks count */}
         {plugin.hooks && plugin.hooks.length > 0 && (
           <span className="text-xs text-textMuted">
             {plugin.hooks.length} hook{plugin.hooks.length > 1 ? 's' : ''}
           </span>
         )}
 
-        {/* Config button */}
-        {hasSettings && (
-          <button
-            onClick={onConfigToggle}
-            className={`ml-auto p-1 rounded transition-colors ${
-              configOpen
-                ? 'bg-primary/15 text-primary'
-                : 'text-textMuted hover:text-primary hover:bg-primary/10'
-            }`}
-            title="Settings"
-          >
-            <Settings size={14} />
-          </button>
-        )}
-
-        {/* Contributed view buttons */}
-        {contributedViews.map(view => (
-          <button
-            key={view.name}
-            onClick={() => onOpenView(view.name)}
-            className={`${hasSettings ? '' : 'ml-auto'} p-1 rounded transition-colors text-textMuted hover:text-purple-400 hover:bg-purple-500/10`}
-            title={view.title}
-          >
-            <BarChart3 size={14} />
-          </button>
-        ))}
+        <div className={`flex items-center gap-0.5 ${hasSettings || contributedViews.length > 0 ? 'ml-auto' : ''}`}>
+          {configAndViews}
+        </div>
       </div>
 
-      {/* Config Panel (expandable) */}
-      {(hasSettings || agentLoaded) && configOpen && (
-        <PluginConfigPanel
-          plugin={plugin}
-          agentLoaded={agentLoaded}
-          agentToolLevel={agentToolLevel}
-          onToolLevelChange={onToolLevelChange}
-        />
-      )}
+      {configPanel}
     </div>
   );
 };
@@ -1867,4 +1957,3 @@ const UninstallConfirmDialog: React.FC<UninstallConfirmDialogProps> = ({
     </div>
   );
 };
-

@@ -434,8 +434,11 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
     logger.info(f"[Boot] is_think={is_think}, base prompt: {base_path}")
     if not os.path.exists(base_path):
         raise FileNotFoundError(f"Base prompt not found: {base_path}")
-    with open(base_path, encoding="utf-8") as f:
-        base_prompt = f.read()
+    from opensquad.prompt_includes import read_prompt_with_includes
+
+    # Includes resolve relative to the directory containing the entry template
+    # (src/prompts/ or the bundled prompts/ root).
+    base_prompt = read_prompt_with_includes(base_path, os.path.dirname(base_path))
 
     # role.md path (relative to agent directory)
     role_file = prompt_cfg.get("role", "role.md")
