@@ -627,6 +627,18 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 # plus the permanent workspace root.
                 name = path.split("/")[3]
                 return self._handle_get_working_directory(name)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/list"):
+                # GET /api/agents/{name}/fs/list?path=&root=
+                name = path.split("/")[3]
+                rel = (qs.get("path") or [""])[0]
+                root = (qs.get("root") or [""])[0]
+                return self._handle_fs_list(name, rel, root)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/read"):
+                # GET /api/agents/{name}/fs/read?path=&root=
+                name = path.split("/")[3]
+                rel = (qs.get("path") or [""])[0]
+                root = (qs.get("root") or [""])[0]
+                return self._handle_fs_read(name, rel, root)
             elif path.startswith("/api/agents/") and path.endswith("/role"):
                 name = path.split("/")[3]
                 return self._handle_get_role(name)
@@ -1164,6 +1176,105 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     "active_cwd": session_cwd if session_cwd else workspace_root,
                 }
             )
+
+        def _resolve_agent_dir_name(self, name: str) -> str | None:
+            """Map API *name* (dir_name or agent_id) to on-disk agent folder name."""
+            name = (name or "").strip()
+            if not name:
+                return None
+            agents_root = syscfg.workspace_agents_dir()
+            direct = os.path.join(agents_root, name)
+            if os.path.isdir(direct):
+                return name
+            # Running processes are keyed by dir_name; also match agent_id.
+            if name in _processes:
+                return name
+            for dir_name, ap in _processes.items():
+                if getattr(ap, "agent_id", None) == name:
+                    return dir_name
+                cfg = getattr(ap, "config", None) or {}
+                if isinstance(cfg, dict) and str(cfg.get("agent_id") or "") == name:
+                    return dir_name
+            try:
+                for entry in os.listdir(agents_root):
+                    entry_path = os.path.join(agents_root, entry)
+                    if not os.path.isdir(entry_path):
+                        continue
+                    cfg_path = os.path.join(entry_path, "config.json")
+                    if not os.path.isfile(cfg_path):
+                        continue
+                    try:
+                        with open(cfg_path, encoding="utf-8") as f:
+                            cfg = json.load(f)
+                        if isinstance(cfg, dict) and str(cfg.get("agent_id") or "") == name:
+                            return entry
+                    except Exception:
+                        continue
+            except OSError:
+                pass
+            return None
+
+        def _agent_fs_root(self, name: str, root_override: str = "") -> tuple[str | None, dict | None]:
+            """Return (root_abs, error_response) for agent project browse.
+
+            Optional *root_override* (absolute path) lets the UI browse a
+            per-session project folder that may differ from the live session_cwd.
+            """
+            dir_name = self._resolve_agent_dir_name(name)
+            if not dir_name:
+                return None, self._send_json({"error": "Agent directory not found"}, 404)
+
+            override = (root_override or "").strip()
+            if override:
+                abs_override = os.path.normcase(os.path.abspath(override))
+                if not os.path.isdir(abs_override):
+                    return None, self._send_json(
+                        {"error": f"Root not found: {override}"},
+                        404,
+                    )
+                return abs_override, None
+
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), dir_name)
+            workspace_root = ""
+            try:
+                workspace_root = syscfg.get_workspace()
+            except Exception:
+                pass
+            from opensquad.utils.project_fs import resolve_agent_root
+
+            root = resolve_agent_root(agent_dir, workspace_root or "")
+            if not root or not os.path.isdir(root):
+                return None, self._send_json(
+                    {"error": "No project directory set. Choose a folder in the chat footer first."},
+                    400,
+                )
+            return root, None
+
+        def _handle_fs_list(self, name: str, rel_path: str = "", root_override: str = ""):
+            """GET /api/agents/{name}/fs/list?path=&root= — one-level directory listing."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import list_dir
+
+            result = list_dir(root, rel_path)
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_read(self, name: str, rel_path: str = "", root_override: str = ""):
+            """GET /api/agents/{name}/fs/read?path=&root= — text file preview."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import read_file
+
+            result = read_file(root, rel_path)
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
 
         def _handle_pick_directory(self, body: dict | None = None):
             """POST /api/system/pick-directory — native OS folder dialog on this host.

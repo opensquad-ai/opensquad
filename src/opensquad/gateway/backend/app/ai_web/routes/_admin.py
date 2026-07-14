@@ -39,7 +39,12 @@ admin_router = APIRouter()  # prefix comes from main router include
 
 
 async def _proxy_get(
-    path: str, params: dict | None = None, launcher_url: str | None = None, *, http_only: bool = False
+    path: str,
+    params: dict | None = None,
+    launcher_url: str | None = None,
+    *,
+    http_only: bool = False,
+    timeout: float = 5.0,
 ) -> dict:
     """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     _url = _launcher_url()
@@ -52,7 +57,7 @@ async def _proxy_get(
 
             full_path = f"{path}?{urlencode(params)}"
         try:
-            return await launcher_handler.rpc(node_id, "GET", full_path, timeout=5.0)
+            return await launcher_handler.rpc(node_id, "GET", full_path, timeout=timeout)
         except Exception:
             pass  # Fall through to HTTP fallback
     # No explicit launcher_url and WS tunnel not connected; raise error directly (no HTTP fallback needed)
@@ -62,7 +67,7 @@ async def _proxy_get(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.get(f"{base}{path}", params=params)
             if resp.status_code >= 400:
@@ -323,6 +328,37 @@ async def admin_pick_directory(
     """
     # Dialog can stay open for several minutes while the user browses.
     return await _proxy_post("/api/system/pick-directory", body or {}, timeout=600.0)
+
+
+@admin_router.get("/admin/agents/{name}/fs/list")
+async def admin_fs_list(
+    name: str,
+    path: str = "",
+    root: str = "",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """List one directory level under the agent's active project cwd."""
+    from urllib.parse import quote
+
+    q = quote(path or "", safe="")
+    r = f"&root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/fs/list?path={q}{r}", http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/fs/read")
+async def admin_fs_read(
+    name: str,
+    path: str = "",
+    root: str = "",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Read a text file or image preview under the agent's project cwd."""
+    from urllib.parse import quote
+
+    q = quote(path or "", safe="")
+    r = f"&root={quote(root, safe='')}" if root else ""
+    # Images may be several MB as base64 — allow a longer proxy window.
+    return await _proxy_get(f"/api/agents/{name}/fs/read?path={q}{r}", http_only=True, timeout=30.0)
 
 
 @admin_router.put("/admin/agents/{name}/config")

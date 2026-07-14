@@ -140,6 +140,8 @@ interface ToolCallBlockProps {
   diffOld?: string;
   diffNew?: string;
   diffStartLine?: number;
+  /** Open a project file in the right-side files panel */
+  onFileClick?: (path: string) => void;
 }
 
 export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
@@ -153,6 +155,7 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
   diffOld,
   diffNew,
   diffStartLine,
+  onFileClick,
 }) => {
   const { t } = useTranslation();
   const storageKey = persistKey ? `tool_call_open_${persistKey}` : null;
@@ -225,6 +228,7 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
         status={status}
         note={fileEditInfo.kind === 'read' ? undefined : noteText}
         resultContent={fileEditInfo.kind === 'read' ? resultStr : undefined}
+        onFileClick={onFileClick}
       />
     );
   }

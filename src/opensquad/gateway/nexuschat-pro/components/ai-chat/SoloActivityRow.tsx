@@ -37,6 +37,8 @@ interface SoloActivityRowProps {
   turnStartedMs?: number;
   /** Live shell job stdout keyed by tool call_id */
   shellStreams?: Record<string, ShellStreamState>;
+  /** Open a project file in the right-side files panel */
+  onOpenFile?: (path: string) => void;
 }
 
 function toolNameOf(evt: WorkflowEvent): string {
@@ -447,7 +449,10 @@ const TextChevronToggle: React.FC<{
   removedLines?: number;
   /** Failed tool outcome — red title + fail cue */
   errored?: boolean;
-}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored }) => {
+  /** Filename substring in primary — dashed underline + click (does not toggle) */
+  fileLabel?: string;
+  onFileClick?: () => void;
+}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick }) => {
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
   const faint = errored
@@ -456,9 +461,39 @@ const TextChevronToggle: React.FC<{
       ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
       : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
 
+  const fileIdx = fileLabel && onFileClick ? primary.indexOf(fileLabel) : -1;
+  const primaryNode =
+    fileIdx >= 0 && fileLabel && onFileClick ? (
+      <span className="font-normal">
+        {primary.slice(0, fileIdx)}
+        <span
+          role="link"
+          tabIndex={0}
+          className="underline decoration-dashed decoration-white/30 underline-offset-2 hover:decoration-white/50"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onFileClick();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.stopPropagation();
+              e.preventDefault();
+              onFileClick();
+            }
+          }}
+        >
+          {fileLabel}
+        </span>
+        {primary.slice(fileIdx + fileLabel.length)}
+      </span>
+    ) : (
+      <span className="font-normal">{primary}</span>
+    );
+
   const title = (
     <>
-      <span className="font-normal">{primary}</span>
+      {primaryNode}
       {secondary ? (
         <span className={errored && secondary === 'fail' ? 'font-medium' : undefined}>
           {' '}
@@ -643,7 +678,8 @@ const SoloEventLine: React.FC<{
   line: ActivityLine;
   defaultOpen?: boolean;
   shellStreamFor?: (callId: string) => ShellStreamState | null | undefined;
-}> = ({ line, defaultOpen = false, shellStreamFor }) => {
+  onOpenFile?: (path: string) => void;
+}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile }) => {
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
@@ -718,6 +754,12 @@ const SoloEventLine: React.FC<{
         addedLines={isFileEdit ? added : undefined}
         removedLines={isFileEdit ? removed : undefined}
         errored={line.kind === 'tool' && line.toolStatus === 'error'}
+        fileLabel={line.fileEdit?.fileName}
+        onFileClick={
+          line.fileEdit && onOpenFile
+            ? () => onOpenFile(line.fileEdit!.filePath)
+            : undefined
+        }
       />
 
       {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
@@ -839,6 +881,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   expandDetails = false,
   turnStartedMs,
   shellStreams = {},
+  onOpenFile,
 }) => {
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
@@ -1184,6 +1227,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             key={line.key}
             line={line}
             shellStreamFor={(id) => shellStreams[id]}
+            onOpenFile={onOpenFile}
             defaultOpen={
               (line.kind === 'thought' && expandDetails) ||
               !!(line.kind === 'summary' && line.running) ||

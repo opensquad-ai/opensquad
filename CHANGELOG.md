@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.5.1] | 2026-07-14 | [0.5.0 → 0.5.1](https://github.com/opensquad-ai/opensquad/compare/v0.5.0...v0.5.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.5.1) |
 | [0.4.12] | 2026-07-09 | [0.4.11 → 0.4.12](https://github.com/opensquad-ai/opensquad/compare/v0.4.11...v0.4.12) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.12) |
 | [0.4.11] | 2026-07-08 | [0.4.10 → 0.4.11](https://github.com/opensquad-ai/opensquad/compare/v0.4.10...v0.4.11) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.11) |
 | [0.4.3] | 2026-07-01 | [0.4.2 → 0.4.3](https://github.com/opensquad-ai/opensquad/compare/v0.4.2...v0.4.3) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.3) |
@@ -24,7 +25,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-> Changes since [0.4.12]. Will be folded into the next release section when cut.
+### Added
+
+- **agent-web: project files panel.** Right-side browse panel (breadcrumb,
+  search, syntax-highlighted preview, image/Markdown preview, dashed filename
+  links from tool stream); sandboxed Launcher FS list/read under session cwd.
 
 ### Fixed
 

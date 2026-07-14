@@ -37,7 +37,9 @@ repos:
     hooks:
       - id: sync-version
         name: sync version from pyproject.toml
-        entry: uv run python scripts/sync_version.py
+        # Prefer plain python so Windows file locks on .venv Scripts/opensquad.exe
+        # do not break commits when `uv run` tries to reinstall the editable package.
+        entry: python scripts/sync_version.py
         language: system
         pass_filenames: false
         files: ^pyproject\.toml$

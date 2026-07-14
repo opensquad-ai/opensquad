@@ -846,6 +846,38 @@ export const adminAPI = {
     );
   },
 
+  /** 列出项目目录下一层（可传 root 覆盖会话 cwd，用于按会话项目路径浏览） */
+  listProjectDir: async (name: string, path: string = '', root?: string) => {
+    const q = encodeURIComponent(path || '');
+    const r = root ? `&root=${encodeURIComponent(root)}` : '';
+    return apiRequest<{
+      agent: string;
+      cwd: string;
+      path: string;
+      absolute: string;
+      entries: Array<{ name: string; type: 'file' | 'dir'; size?: number | null }>;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/list?path=${q}${r}`);
+  },
+
+  /** 读取项目内文本 / 图片预览 */
+  readProjectFile: async (name: string, path: string, root?: string) => {
+    const q = encodeURIComponent(path || '');
+    const r = root ? `&root=${encodeURIComponent(root)}` : '';
+    return apiRequest<{
+      agent: string;
+      cwd: string;
+      path: string;
+      absolute: string;
+      kind?: 'text' | 'image';
+      mime?: string;
+      content: string;
+      content_base64?: string;
+      size: number;
+      truncated: boolean;
+      language: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/read?path=${q}${r}`);
+  },
+
   /** 获取 Agent 的 role.md */
   getRole: async (name: string) => {
     return apiRequest<{ content: string }>(`/ai-web/admin/agents/${name}/role`);

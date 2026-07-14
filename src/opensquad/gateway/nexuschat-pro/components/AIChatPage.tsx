@@ -18,7 +18,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Bot, ArrowLeft, Send, Square,
-  PanelLeftOpen, PanelLeftClose, X, FileIcon, Upload,
+  PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
   Loader2, Clock, AlignLeft, MessageSquare,
 } from 'lucide-react';
@@ -50,6 +50,7 @@ import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBub
 import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
+import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -179,7 +180,8 @@ const WorkflowBlockView: React.FC<{
   blockKey: number;
   turnStartedMs?: number;
   shellStreams?: Record<string, ShellStreamState>;
-}> = ({ block, blockKey, turnStartedMs, shellStreams = {} }) => {
+  onOpenFile?: (path: string) => void;
+}> = ({ block, blockKey, turnStartedMs, shellStreams = {}, onOpenFile }) => {
   const displayItems = useMemo(
     () => attachShellJobsToDisplayItems(buildDisplayWorkflowItems(block.events), shellStreams),
     [block.events, shellStreams],
@@ -315,6 +317,7 @@ const WorkflowBlockView: React.FC<{
               diffOld={evt.diffOld}
               diffNew={evt.diffNew}
               diffStartLine={evt.diffStartLine}
+              onFileClick={onOpenFile}
             />
           );
         }
@@ -329,6 +332,7 @@ const WorkflowBlockView: React.FC<{
               status={data.error ? 'error' : 'success'}
               subAgent={evt.subAgent}
               subTaskLabel={evt.subTaskLabel}
+              onFileClick={onOpenFile}
             />
           );
         }
@@ -585,6 +589,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [viewingHistorySession]);
   const [sessionTitleUpdate, setSessionTitleUpdate] = useState<{ id: string; title: string } | null>(null);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
+  const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
+    try {
+      return localStorage.getItem('opensquad.filesPanel.open') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [filesPanelWidth, setFilesPanelWidth] = useState(() => {
+    try {
+      const raw = localStorage.getItem('opensquad.filesPanel.width');
+      const n = raw ? parseInt(raw, 10) : 420;
+      return Number.isFinite(n) ? Math.min(720, Math.max(320, n)) : 420;
+    } catch {
+      return 420;
+    }
+  });
+  const [fileOpenRequest, setFileOpenRequest] = useState<ProjectFileOpenRequest | null>(null);
+  const openProjectFile = useCallback((path: string) => {
+    const p = (path || '').trim();
+    if (!p) return;
+    setFilesPanelOpen(true);
+    try {
+      localStorage.setItem('opensquad.filesPanel.open', 'true');
+    } catch {
+      /* ignore */
+    }
+    setFileOpenRequest({ path: p, nonce: Date.now() });
+  }, []);
 
   // Plan
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
@@ -1015,6 +1047,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // After agent profile loads, also fetch the session working directory
   // (set via the folder-picker button). This overrides the permanent
   // workspace root so ContextViewer shows the user-selected cwd.
+  // Prefer per-session locked projectPath when the current session has one.
   useEffect(() => {
     if (!agentProfile?.dir_name) return;
     adminAPI.getWorkingDirectory(agentProfile.dir_name)
@@ -1022,11 +1055,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const active = res.active_cwd || res.session_cwd || res.workspace_root || null;
         if (res.workspace_root) setDefaultCwd(res.workspace_root);
         else if (active) setDefaultCwd(active);
-        if (res.session_cwd) setAgentCwd(res.session_cwd);
-        else if (active) setAgentCwd((prev) => prev || active);
+        const sid = currentSessionIdRef.current;
+        const meta = sid ? getSessionMeta(agentId, sid) : null;
+        if (meta?.projectPath?.trim()) {
+          setAgentCwd(meta.projectPath.trim());
+        } else if (res.session_cwd) {
+          setAgentCwd(res.session_cwd);
+        } else if (active) {
+          setAgentCwd((prev) => prev || active);
+        }
       })
       .catch(() => {/* not critical, keep default */});
-  }, [agentProfile?.dir_name]);
+  }, [agentProfile?.dir_name, agentId]);
+
+  // When the active/viewed session changes, point the files panel at that
+  // session's locked project folder (localStorage meta). Do not fall back to
+  // defaultCwd here — that would clobber a freshly picked folder on new session.
+  useEffect(() => {
+    if (!agentId || !currentSessionId) return;
+    const meta = getSessionMeta(agentId, currentSessionId);
+    if (meta?.projectPath?.trim()) {
+      setAgentCwd(meta.projectPath.trim());
+    } else if (pendingProjectPathRef.current?.trim()) {
+      setAgentCwd(pendingProjectPathRef.current.trim());
+    }
+  }, [agentId, currentSessionId]);
 
   // Load available model cards once, to populate the runtime model-switch dropdown.
   useEffect(() => {
@@ -3855,6 +3908,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setHasMoreHistory(session.has_more ?? false);
         const meta = getSessionMeta(agentId, sessionId);
         if (meta?.projectPath) setAgentCwd(meta.projectPath);
+        else if (pendingProjectPathRef.current?.trim()) setAgentCwd(pendingProjectPathRef.current.trim());
+        else if (defaultCwd) setAgentCwd(defaultCwd);
       }
     } catch (err: any) {
       console.error('[AIChatPage] Failed to load session:', err);
@@ -3886,6 +3941,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setShellStreams(rebuildShellStreamsFromTimeline(entries));
         historyOffsetRef.current = session.messages?.length || 0;
         setHasMoreHistory(session.has_more ?? false);
+        const meta = getSessionMeta(agentId, sessionId);
+        if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
+        else if (defaultCwd) setAgentCwd(defaultCwd);
       }
     } catch (err: any) {
       console.error('[AIChatPage] Failed to reload session after switch:', err);
@@ -4195,6 +4253,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <ClipboardList size={16} className={showPlanViewer ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
+                onClick={() => {
+                  setFilesPanelOpen((v) => {
+                    const next = !v;
+                    try {
+                      localStorage.setItem('opensquad.filesPanel.open', String(next));
+                    } catch {
+                      /* ignore */
+                    }
+                    return next;
+                  });
+                }}
+                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
+                  filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
+                }`}
+                title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
+              >
+                {filesPanelOpen
+                  ? <PanelRightClose size={16} className="text-primary" />
+                  : <PanelRightOpen size={16} className="text-textMuted" />}
+              </button>
+              <button
                 onClick={() => setShowContextViewer(v => !v)}
                 className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   showContextViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
@@ -4408,6 +4487,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     expandDetails={soloExpandDetails}
                     turnStartedMs={turnMs}
                     shellStreams={shellStreams}
+                    onOpenFile={openProjectFile}
                   />
                 );
               }
@@ -4420,6 +4500,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   blockKey={i}
                   turnStartedMs={turnMs}
                   shellStreams={shellStreams}
+                  onOpenFile={openProjectFile}
                 />
               );
             }
@@ -4484,6 +4565,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                             expandDetails={soloExpandDetails}
                             turnStartedMs={undefined}
                             shellStreams={shellStreams}
+                            onOpenFile={openProjectFile}
                           />
                         );
                       }
@@ -4495,6 +4577,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           blockKey={ni}
                           turnStartedMs={undefined}
                           shellStreams={shellStreams}
+                          onOpenFile={openProjectFile}
                         />
                       );
                     }
@@ -5087,6 +5170,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         </div>
       </div>
+
+      <ProjectFilesPanel
+        isOpen={filesPanelOpen}
+        onClose={() => {
+          setFilesPanelOpen(false);
+          try {
+            localStorage.setItem('opensquad.filesPanel.open', 'false');
+          } catch {
+            /* ignore */
+          }
+        }}
+        agentId={agentProfile?.dir_name || agentId}
+        rootPath={(agentCwd || defaultCwd || '').trim()}
+        openRequest={fileOpenRequest}
+        width={filesPanelWidth}
+        onWidthChange={(w) => {
+          setFilesPanelWidth(w);
+          try {
+            localStorage.setItem('opensquad.filesPanel.width', String(w));
+          } catch {
+            /* ignore */
+          }
+        }}
+      />
     </div>
   );
 };
