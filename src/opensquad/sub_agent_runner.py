@@ -329,7 +329,7 @@ class SubAgentRunner:
     def _build_chat_api(self):
         """Instantiate the appropriate ChatAPI subclass based on api_protocol."""
         cfg = self.chat_api_cfg
-        provider = cfg.get("api_protocol", "openai")
+        provider = cfg.get("api_protocol") or cfg.get("provider") or "openai"
 
         # Sub-agent system prompt: concise version focused on completing a single task
         prompt = cfg.get(
@@ -449,12 +449,14 @@ class SubAgentRunner:
         sub_registry = self._get_sub_registry()
 
         # Extract fake config to select tool call strategy
+        _proto = self.chat_api_cfg.get("api_protocol") or self.chat_api_cfg.get("provider") or "openai"
+        _model = self.chat_api_cfg.get("model") or self.chat_api_cfg.get("model_name") or ""
         fake_config = {
             "model": {
                 "tool_call_mode": self.chat_api_cfg.get("tool_call_mode", "auto"),
                 "tool_filter": self.chat_api_cfg.get("tool_filter", "all"),
-                "api_protocol": self.chat_api_cfg.get("api_protocol", "openai"),
-                "model_name": self.chat_api_cfg.get("model", ""),
+                "api_protocol": _proto,
+                "model_name": _model,
             }
         }
 
@@ -467,6 +469,9 @@ class SubAgentRunner:
         llm_params = self.tool_call_strategy.prepare_llm_call(self._chat_api.get_system_prompt())
         new_sys = llm_params.get("system_prompt")
         if new_sys:
+            # Native FC leaves {{TOOL_DESCRIPTIONS}} untouched; strip leftovers.
+            if "{{TOOL_DESCRIPTIONS}}" in new_sys and llm_params.get("tools") is not None:
+                new_sys = new_sys.replace("{{TOOL_DESCRIPTIONS}}", "")
             self._chat_api.update_system_prompt(new_sys)
         current_tools = llm_params.get("tools")
         current_tool_choice = llm_params.get("tool_choice", "auto")
@@ -474,6 +479,8 @@ class SubAgentRunner:
         # First-turn input: task description (tool docs are no longer manually injected if Native FC is active)
         # Note: In Native FC, the tool docs are sent via tools parameter. In XML mode, they are injected into system_prompt.
         current_input = task
+        # After Native FC tool rounds, results are in chat history via add_tool_result — skip user msg
+        skip_add_user = False
 
         last_text = ""
 
@@ -494,6 +501,7 @@ class SubAgentRunner:
                         tools=current_tools,
                         tool_choice=current_tool_choice,
                         tool_call_strategy=self.tool_call_strategy,
+                        skip_add_user=skip_add_user,
                     ),
                     timeout=120.0,
                 )
@@ -529,6 +537,7 @@ class SubAgentRunner:
             if tool_calls:
                 # Execute all tool calls sequentially
                 all_results = []
+                use_native_fc = current_tools is not None
                 for call_index, (t_name, t_args) in enumerate(tool_calls):
                     if self._should_stop():
                         return f"Cancelled: {self.abort_reason}"
@@ -536,7 +545,8 @@ class SubAgentRunner:
 
                     # Build call_id consistent with main runner format
                     call_id = f"sub_{_dt.now().strftime('%M%S')}_{t_name}_{call_index}"
-                    t_args_json = _json.dumps(t_args, ensure_ascii=False, indent=2) if t_args else "{}"
+                    t_args_dict = t_args if isinstance(t_args, dict) else {}
+                    t_args_json = _json.dumps(t_args_dict, ensure_ascii=False, indent=2) if t_args_dict else "{}"
 
                     # Emit tool_call event to frontend (under parent session)
                     await self._emit_sub(
@@ -558,7 +568,7 @@ class SubAgentRunner:
                             tool_name=t_name,
                         )
                         try:
-                            tool_result = await sub_registry.call(t_name, t_args)
+                            tool_result = await sub_registry.call(t_name, t_args_dict)
                         finally:
                             reset_tool_call_context(_ctx_token)
                     except Exception as e:
@@ -575,10 +585,28 @@ class SubAgentRunner:
                         },
                     )
 
-                    all_results.append(f'[tool_result name="{t_name}"]\n{tool_result}\n[/tool_result]')
+                    if use_native_fc:
+                        # Native FC requires assistant.tool_calls + role=tool in history
+                        try:
+                            self._chat_api.add_tool_result(
+                                tool_name=t_name,
+                                tool_args=t_args_dict,
+                                result=str(tool_result) if tool_result else "(empty result)",
+                                tool_call_id=call_id,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[SubAgentRunner] add_tool_result failed: {e}")
+                            all_results.append(f'[tool_result name="{t_name}"]\n{tool_result}\n[/tool_result]')
+                    else:
+                        all_results.append(f'[tool_result name="{t_name}"]\n{tool_result}\n[/tool_result]')
 
-                # Combine all tool results as next-turn input
-                current_input = "\n\n".join(all_results)
+                if use_native_fc:
+                    # Next turn continues from tool messages already in req
+                    skip_add_user = True
+                    current_input = ""
+                else:
+                    skip_add_user = False
+                    current_input = "\n\n".join(all_results)
                 last_text = ""
             else:
                 # No tool call -> extract text, end this turn
@@ -622,10 +650,20 @@ class _FilteredRegistry:
     def _is_excluded(self, name: str) -> bool:
         """
         Check whether a fully-qualified tool name belongs to an excluded namespace.
-        name may be "delegate_task.delegate_task" (full name) or "delegate_task" (namespace).
+
+        Name formats:
+        - Native FC: ``namespace__function`` (double underscore)
+        - Legacy / XML: ``namespace.function``
+        - Bare namespace: ``delegate_task``
         """
-        # Full name format: ns.fn
-        ns = name.split(".", 1)[0] if "." in name else name
+        if not name:
+            return False
+        if "__" in name:
+            ns = name.split("__", 1)[0]
+        elif "." in name:
+            ns = name.split(".", 1)[0]
+        else:
+            ns = name
         return ns in self._exclude
 
     async def call(self, name: str, args: Any) -> str:

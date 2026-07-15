@@ -16,13 +16,40 @@ class SideStream:
     title: str
     lines: deque[str] = field(default_factory=lambda: deque(maxlen=2000))
     active: bool = True
+    # True when the last line is an incomplete stream (more tokens may follow)
+    _tail_open: bool = False
 
-    def append(self, text: str) -> None:
-        t = (text or "").rstrip("\n")
-        if not t:
+    def append(self, text: str, *, fresh: bool = False) -> None:
+        """Append streaming text.
+
+        Token/chunk streams coalesce onto the same line until a newline arrives
+        (bash/cat style). Pass ``fresh=True`` to start a new block (tool call,
+        status line, section header) without sticking to the previous token line.
+        """
+        if text is None:
             return
-        for line in t.splitlines() or [t]:
-            self.lines.append(line)
+        s = str(text)
+        if s == "":
+            return
+
+        if fresh:
+            self._tail_open = False
+
+        # Resume an incomplete line so "你"+"好" → "你好" instead of two rows
+        if self._tail_open and self.lines:
+            s = self.lines.pop() + s
+            self._tail_open = False
+
+        parts = s.split("\n")
+        for part in parts[:-1]:
+            self.lines.append(part)
+
+        if s.endswith("\n"):
+            # Trailing newline closed the line; empty last part is not kept open
+            self._tail_open = False
+        else:
+            self.lines.append(parts[-1])
+            self._tail_open = True
 
     def dump(self) -> str:
         return "\n".join(self.lines)
@@ -47,14 +74,23 @@ class SideStreamHub:
         self.active_key = key
         return s
 
-    def append(self, key: str, text: str, *, kind: str = "sub", title: str = "") -> None:
+    def append(
+        self,
+        key: str,
+        text: str,
+        *,
+        kind: str = "sub",
+        title: str = "",
+        fresh: bool = False,
+    ) -> None:
         s = self.ensure(key, kind=kind, title=title or key)
-        s.append(text)
+        s.append(text, fresh=fresh)
 
     def mark_done(self, key: str) -> None:
         s = self.streams.get(key)
         if s:
             s.active = False
+            s._tail_open = False
 
     def list_keys(self) -> list[str]:
         # active first, then by key

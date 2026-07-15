@@ -61,16 +61,35 @@ def set_chat_api_cfg(cfg: dict) -> None:
     credentials/model without a restart. Soft-switch semantics: an already
     running sub-agent keeps its own (independently built) ChatAPI instance
     and finishes with the old model; only *new* delegations read this.
+
+    Merges into the previous cfg so boot-only fields (parent_prompt, tool_*)
+    are not wiped when a model card is applied.
     """
     global _chat_api_cfg
     if not isinstance(cfg, dict):
         logger.warning("[delegate_task] set_chat_api_cfg ignored non-dict cfg")
         return
     with _chat_api_cfg_lock:
-        _chat_api_cfg = cfg
+        prev = dict(_chat_api_cfg) if isinstance(_chat_api_cfg, dict) else {}
+        merged = dict(prev)
+        merged.update(cfg)
+        # Normalize protocol / model keys used by SubAgentRunner
+        if not merged.get("api_protocol") and merged.get("provider"):
+            merged["api_protocol"] = merged["provider"]
+        if not merged.get("model") and merged.get("model_name"):
+            merged["model"] = merged["model_name"]
+        if not merged.get("model_name") and merged.get("model"):
+            merged["model_name"] = merged["model"]
+        if not merged.get("parent_prompt") and prev.get("parent_prompt"):
+            merged["parent_prompt"] = prev["parent_prompt"]
+        for keep in ("tool_call_mode", "tool_filter"):
+            if keep not in cfg and prev.get(keep) is not None:
+                merged[keep] = prev[keep]
+        _chat_api_cfg = merged
     logger.info(
-        "[delegate_task] Sub-agent chat_api_cfg updated (model=%s).",
-        cfg.get("model_name", cfg.get("model", "?")),
+        "[delegate_task] Sub-agent chat_api_cfg updated (model=%s api_protocol=%s).",
+        merged.get("model_name", merged.get("model", "?")),
+        merged.get("api_protocol", merged.get("provider", "?")),
     )
 
 
@@ -91,17 +110,13 @@ def _build_sub_prompt(parent_prompt: str) -> str:
     """
     Build a clean system prompt for the sub-agent based on the parent's prompt.
 
-    The parent prompt comes from thought_xml.md / base_xml.md and may contain
-    unreplaced dynamic placeholders ({{TOOL_DESCRIPTIONS}}, {{AGENT_WORKSPACE}},
-    {{AGENT_PROFILE}}, {{CONTEXT_SUMMARY}}, etc.) that are normally filled in by
-    context_base.py on every turn of the main runner loop.  These placeholders are
-    *never* injected for sub-agents, so they must be stripped before being passed to
-    the LLM, otherwise the model sees literal "{{...}}" tokens and behaves erratically
-    (calling tools in a loop without ever producing a final answer).
+    The parent prompt may contain dynamic placeholders filled by the main runner
+    each turn ({{AGENT_WORKSPACE}}, {{CONTEXT_SUMMARY}}, etc.). Those must be
+    stripped for sub-agents.
 
-    In addition, sub-agents should NOT use the full parent-agent state machine
-    (working/idle state, <to_system>task_complete</to_system>, sleep tags, etc.).
-    A concise override header is prepended to remind the sub-agent of its sole duty.
+    IMPORTANT: Keep {{TOOL_DESCRIPTIONS}} — XMLToolCallStrategy.prepare_llm_call
+    replaces it with the live tool list. Stripping it leaves the sub-agent with
+    no tool documentation in XML mode (and an empty tools=None path).
     """
     import re
 
@@ -112,17 +127,17 @@ def _build_sub_prompt(parent_prompt: str) -> str:
         "<to_user>...</to_user> tags and STOP. Do NOT call any more tools after you have\n"
         "produced the final answer. Do NOT output <state>, <sleep>, or\n"
         "<to_system>task_complete</to_system> — these are not processed here.\n\n"
+        "You HAVE the same tools as the parent agent (filesystem, shell, search, etc.),\n"
+        "except recursive delegation tools. Prefer calling tools over guessing.\n"
+        "Ignore any claim in the task text that you lack filesystem or tool access.\n\n"
     )
 
     if not parent_prompt:
         logger.warning("[delegate_task] parent_prompt is empty; sub-agent will use default header only.")
         return SUB_AGENT_HEADER
 
-    # Strip all {{PLACEHOLDER}} tokens that context_base.py normally fills in.
-    # This covers: {{TOOL_DESCRIPTIONS}}, {{AGENT_WORKSPACE}}, {{AGENT_PROFILE}},
-    # {{CONTEXT_SUMMARY}}, {{TEAM_COLLAB_CARDS}}, {{SKILLS_INSTRUCTIONS}},
-    # {{MCP_GUIDE}}, {{MCP_CURRENT_STATE}}, and any future additions.
-    cleaned = re.sub(r"\{\{[A-Z_]+\}\}", "", parent_prompt)
+    # Strip placeholders except TOOL_DESCRIPTIONS (filled by XMLToolCallStrategy).
+    cleaned = re.sub(r"\{\{(?!TOOL_DESCRIPTIONS)[A-Z_]+\}\}", "", parent_prompt)
 
     return SUB_AGENT_HEADER + cleaned
 
@@ -143,10 +158,9 @@ def _build_runner(depth: int, task_preview: str):
     with _chat_api_cfg_lock:
         sub_cfg = dict(_chat_api_cfg)
         parent_prompt = _chat_api_cfg.get("parent_prompt", "")
-    # Build a cleaned prompt: strip unreplaced {{PLACEHOLDER}} tokens from the parent
-    # prompt and prepend a sub-agent-specific header.  Without this, placeholders like
-    # {{TOOL_DESCRIPTIONS}} appear literally in the LLM context and cause the model to
-    # loop through tool calls indefinitely instead of producing a final answer.
+    # Build a cleaned prompt: strip non-tool {{PLACEHOLDER}} tokens from the parent
+    # prompt and prepend a sub-agent-specific header. Keep {{TOOL_DESCRIPTIONS}} so
+    # XMLToolCallStrategy can inject the live tool list.
     sub_cfg["prompt"] = _build_sub_prompt(parent_prompt)
 
     # Dynamically resolve the current session_id so sub-agent events are routed to the
@@ -188,6 +202,10 @@ async def delegate_task(task: str, context: str = "", depth: int = 0) -> str:
 
     Suitable for a single sub-task or scenarios that do not require concurrency. For running
     multiple independent sub-tasks simultaneously, use delegate_task_submit + delegate_task_result.
+
+    IMPORTANT: The sub-agent inherits the parent's full tool set (filesystem, shell, search,
+    memory, etc.) except further delegate_task recursion. Do NOT tell the sub-agent it lacks
+    filesystem or tool access — write a normal task that expects real tool use.
 
     Args:
         task: Sub-task description (detailed goal, constraints, and expected output format).
@@ -231,6 +249,9 @@ async def delegate_task_submit(task: str, context: str = "", depth: int = 0) -> 
       1. Call delegate_task_submit multiple times to submit all sub-tasks (each returns a job_id immediately)
       2. Use delegate_task_result(job_id) to poll each task's status
       3. Aggregate results after all are done
+
+    IMPORTANT: Sub-agents inherit the parent's full tool set (except recursive delegate_task).
+    Do NOT claim in `task` that the sub-agent lacks filesystem or tool access.
 
     Args:
         task: Sub-task description (detailed goal, constraints, and expected output format).

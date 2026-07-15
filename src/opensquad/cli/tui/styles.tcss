@@ -5,6 +5,13 @@ Screen {
     color: $foreground;
 }
 
+/* Selection must keep text readable (theme purple bg alone hides grey italics) */
+Screen > .screen--selection {
+    background: #1f6feb;
+    color: #ffffff;
+    text-style: bold;
+}
+
 #header-bar {
     dock: top;
     height: 1;
@@ -20,6 +27,9 @@ Screen {
     background: $background;
     color: $foreground;
     padding: 1 2;
+    overflow-x: hidden;
+    /* hide horizontal scrollbar (looks like a thick slider above the prompt) */
+    scrollbar-size: 0 1;
     scrollbar-background: $background;
     scrollbar-color: $panel;
 }
@@ -31,6 +41,8 @@ Screen {
     color: $foreground;
     padding: 1 2;
     display: none;
+    overflow-x: hidden;
+    scrollbar-size: 0 1;
     scrollbar-background: $background;
     scrollbar-color: $panel;
 }
@@ -48,10 +60,10 @@ Screen {
     max-height: 12;
     display: none;
     background: $surface;
-    color: $text-muted;
+    color: $success;
     padding: 0 2;
     margin: 0 2 0 2;
-    border-left: tall $primary-muted;
+    border-left: tall $success;
 }
 
 #live-think.visible {
@@ -74,7 +86,7 @@ Screen {
     background: $panel;
     color: $foreground;
     border: round $primary;
-    padding: 0 0;
+    padding: 0 1;
     margin: 0 0 1 0;
 }
 
@@ -82,21 +94,39 @@ Screen {
     display: block;
 }
 
+/* Decision / approve / options card (taller for numbered list + descriptions) */
+#slash-menu.decision {
+    max-height: 22;
+    border: solid $primary;
+    padding: 1 1;
+}
+
+/* OpenCode-style prompt: 1-cell left accent + top/bottom/right outline */
 #prompt-frame {
     height: auto;
     min-height: 4;
-    border: tall $primary-muted;
+    width: 100%;
     background: $surface;
     padding: 0 1;
+    /* solid frame; left replaced by tall primary accent (flush, no gap) */
+    border-top: solid $primary-muted;
+    border-right: solid $primary-muted;
+    border-bottom: solid $primary-muted;
     border-left: tall $primary;
+    overflow-x: hidden;
+    overflow-y: hidden;
+    scrollbar-size: 0 0;
 }
 
 #prompt-frame:focus-within {
-    border: tall $primary;
+    border-top: solid $primary;
+    border-right: solid $primary;
+    border-bottom: solid $primary;
     border-left: tall $primary;
 }
 
 #chat-input {
+    width: 1fr;
     background: $surface;
     border: none;
     padding: 0 1;
@@ -108,10 +138,13 @@ Screen {
 }
 
 #prompt-meta {
+    width: 1fr;
     height: 1;
     color: $text-muted;
     background: $surface;
     padding: 0 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 #footer-path {
@@ -135,16 +168,12 @@ Screen {
     color: $warning;
 }
 
+/* Always reserve one row — toggling display caused the prompt to jump/flicker */
 #wait-banner {
     height: 1;
     color: $warning;
     background: $background;
     padding: 0 1;
-    display: none;
-}
-
-#wait-banner.visible {
-    display: block;
 }
 
 Footer {

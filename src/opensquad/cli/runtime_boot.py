@@ -361,6 +361,15 @@ def run_code(args: Namespace) -> None:
     legacy = bool(getattr(args, "legacy", False))
     message = getattr(args, "message", None)
 
+    # Quiet HTTP client logs before any admin API traffic (avoids tty flicker in TUI)
+    if not legacy:
+        try:
+            from opensquad.cli.tui.app import _quiet_tui_loggers
+
+            _quiet_tui_loggers()
+        except Exception:
+            pass
+
     client, agent = prepare_code_session(
         gateway=gateway,
         agent=agent,

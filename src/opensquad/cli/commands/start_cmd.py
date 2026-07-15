@@ -1,15 +1,26 @@
 """opensquad start — Start all OpenSquad services (gateway, registry, frontend, launcher)."""
 
+import atexit
 import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
 _DEFAULT_VITE_PORT = 5173
+
+# Shared shutdown state for signal / console-close / atexit / finally paths.
+_SHUTDOWN_LOCK = threading.Lock()
+_SHUTDOWN_DONE = False
+_ACTIVE_PROCESSES: list[tuple[str, subprocess.Popen]] = []
+_ACTIVE_PORTS: tuple[int, ...] = ()
+_ACTIVE_JOB = None  # optional Windows kill-on-close job
+_LAUNCHER_PORT: int | None = None
+_WIN_CONSOLE_HANDLER = None  # keep alive for SetConsoleCtrlHandler
 
 
 def _get_managed_ports(syscfg):
@@ -69,6 +80,7 @@ def _kill_tree(pid: int) -> None:
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
                 check=False,
+                timeout=15,
             )
         else:
             try:
@@ -77,6 +89,204 @@ def _kill_tree(pid: int) -> None:
                 os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
+
+
+class _WindowsKillOnCloseJob:
+    """Bind child processes so they die when this job handle is closed.
+
+    Closing the console / killing the supervisor closes the job handle, which
+    triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE and reaps orphans that would
+    otherwise keep gateway/launcher ports alive.
+    """
+
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _JobObjectExtendedLimitInformation = 9
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self._kernel32 = ctypes.windll.kernel32
+        self._kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self._hjob = self._kernel32.CreateJobObjectW(None, None)
+        if not self._hjob:
+            raise OSError(f"CreateJobObjectW failed: {ctypes.get_last_error()}")
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):  # noqa: N801
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):  # noqa: N801
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._hjob,
+            self._JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            err = ctypes.get_last_error()
+            self.close()
+            raise OSError(f"SetInformationJobObject failed: {err}")
+
+    def add(self, proc: subprocess.Popen) -> bool:
+        handle = getattr(proc, "_handle", None)
+        if not handle:
+            return False
+        # Nested-job / already-assigned cases are non-fatal; explicit
+        # shutdown still cleans via taskkill / ports.
+        return bool(self._kernel32.AssignProcessToJobObject(self._hjob, int(handle)))
+
+    def close(self) -> None:
+        if getattr(self, "_hjob", None):
+            with contextlib.suppress(Exception):
+                self._kernel32.CloseHandle(self._hjob)
+            self._hjob = None
+
+
+def _try_graceful_launcher_shutdown(launcher_port: int | None, timeout_s: float = 1.5) -> None:
+    """Best-effort POST /api/shutdown so agents/plugins exit before force-kill."""
+    if not launcher_port or launcher_port <= 0:
+        return
+    try:
+        import socket
+        import urllib.request
+
+        with socket.create_connection(("127.0.0.1", int(launcher_port)), timeout=0.3):
+            pass
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{int(launcher_port)}/api/shutdown",
+            method="POST",
+            data=json.dumps({"timeout": 2}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=timeout_s)
+    except Exception:
+        pass
+
+
+def _shutdown_supervised_services(
+    processes: list[tuple[str, subprocess.Popen]] | None = None,
+    ports: tuple[int, ...] | None = None,
+    *,
+    reason: str = "shutdown",
+    graceful: bool = True,
+) -> None:
+    """Idempotent cleanup used by Ctrl+C, console close, atexit, and finally."""
+    global _SHUTDOWN_DONE, _ACTIVE_JOB
+
+    with _SHUTDOWN_LOCK:
+        if _SHUTDOWN_DONE:
+            return
+        _SHUTDOWN_DONE = True
+        procs = list(processes if processes is not None else _ACTIVE_PROCESSES)
+        port_list = tuple(ports if ports is not None else _ACTIVE_PORTS)
+        job = _ACTIVE_JOB
+        launcher_port = _LAUNCHER_PORT
+
+    print(f"\n[start] Shutting down all services ({reason})...")
+    if graceful:
+        _try_graceful_launcher_shutdown(launcher_port)
+
+    for name, p in procs:
+        pid = getattr(p, "pid", None)
+        if pid:
+            _kill_tree(pid)
+            print(f"[start] {name} (PID {pid}) killed.")
+
+    # Closing the Windows job also kills any still-assigned descendants
+    # (uvicorn reload workers, npm→node, launcher agents, etc.).
+    if job is not None:
+        with contextlib.suppress(Exception):
+            job.close()
+        with _SHUTDOWN_LOCK:
+            if _ACTIVE_JOB is job:
+                _ACTIVE_JOB = None
+
+    if port_list:
+        _kill_port_owners(*port_list)
+        print(f"[start] Cleared managed ports: {', '.join(str(p) for p in port_list)}")
+
+
+def _install_windows_console_close_handler() -> None:
+    """Ensure closing the CMD window still runs process/port cleanup."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        CTRL_C_EVENT = 0
+        CTRL_BREAK_EVENT = 1
+        CTRL_CLOSE_EVENT = 2
+        CTRL_LOGOFF_EVENT = 5
+        CTRL_SHUTDOWN_EVENT = 6
+
+        @HandlerRoutine
+        def _handler(ctrl_type):
+            # Console-close / logoff / shutdown: cleanup must finish quickly
+            # (Windows gives ~5s then force-kills the process).
+            if ctrl_type in (
+                CTRL_C_EVENT,
+                CTRL_BREAK_EVENT,
+                CTRL_CLOSE_EVENT,
+                CTRL_LOGOFF_EVENT,
+                CTRL_SHUTDOWN_EVENT,
+            ):
+                reason = {
+                    CTRL_C_EVENT: "Ctrl+C",
+                    CTRL_BREAK_EVENT: "Ctrl+Break",
+                    CTRL_CLOSE_EVENT: "console close",
+                    CTRL_LOGOFF_EVENT: "logoff",
+                    CTRL_SHUTDOWN_EVENT: "shutdown",
+                }.get(ctrl_type, f"console ctrl {ctrl_type}")
+                # Skip HTTP graceful path on hard close — not enough time.
+                _shutdown_supervised_services(
+                    reason=reason,
+                    graceful=ctrl_type in (CTRL_C_EVENT, CTRL_BREAK_EVENT),
+                )
+                # Console handlers run on a helper thread; leave the process
+                # immediately so the monitor loop cannot keep services alive.
+                os._exit(0)
+            return False
+
+        # Keep a module-level ref so the callback is not GC'd.
+        global _WIN_CONSOLE_HANDLER
+        _WIN_CONSOLE_HANDLER = _handler
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_WIN_CONSOLE_HANDLER, True):
+            print("[start] Warning: SetConsoleCtrlHandler failed; console-close cleanup may be incomplete")
+    except Exception as exc:
+        print(f"[start] Warning: console-close handler unavailable: {exc}")
 
 
 def _kill_port_owners(*ports: int) -> None:
@@ -270,7 +480,26 @@ def run_start(args):
     _t_after_kill = time.perf_counter()
     print(f"[start.timing] _kill_port_owners: {(_t_after_kill - _t_before_kill) * 1000:.0f}ms")
 
-    processes = []
+    global _ACTIVE_PROCESSES, _ACTIVE_PORTS, _ACTIVE_JOB, _LAUNCHER_PORT, _SHUTDOWN_DONE
+    _SHUTDOWN_DONE = False
+    _ACTIVE_PROCESSES = []
+    _ACTIVE_PORTS = _get_managed_ports(syscfg)
+    _LAUNCHER_PORT = None
+    _ACTIVE_JOB = None
+    if sys.platform == "win32":
+        try:
+            _ACTIVE_JOB = _WindowsKillOnCloseJob()
+            print("[start] Windows job object enabled (children die when this process exits)")
+        except Exception as exc:
+            print(f"[start] Warning: Windows job object unavailable: {exc}")
+
+    def _track(name: str, proc: subprocess.Popen) -> None:
+        _ACTIVE_PROCESSES.append((name, proc))
+        if _ACTIVE_JOB is not None:
+            if not _ACTIVE_JOB.add(proc):
+                print(f"[start] Warning: could not bind {name} (PID {proc.pid}) to kill-on-close job")
+
+    processes = _ACTIVE_PROCESSES
 
     # [1/4] Start gateway (FastAPI backend, default port 9555 per system_config)
     if not args.no_gateway:
@@ -303,7 +532,7 @@ def run_start(args):
             env=_gateway_env,
             **popts,
         )
-        processes.append(("gateway", p))
+        _track("gateway", p)
         print(f"[start] Gateway started (PID {p.pid})")
 
     # [2/4] Start plugin registry (port 9720)
@@ -317,7 +546,7 @@ def run_start(args):
             cwd=registry_cwd,
             **popts,
         )
-        processes.append(("registry", p))
+        _track("registry", p)
         print(f"[start] Plugin Registry started (PID {p.pid})")
 
     # [3/4] Start frontend dev server (Vite, port 5173)
@@ -329,7 +558,7 @@ def run_start(args):
             print(f"[start] [3/4] Starting Frontend Dev Server (port {_VITE_DEV_PORT})...")
             try:
                 p = subprocess.Popen([npm_exe, "run", "dev"], cwd=frontend_dir)
-                processes.append(("frontend", p))
+                _track("frontend", p)
                 print(f"[start] Frontend started (PID {p.pid})")
             except FileNotFoundError:
                 print("[start] Warning: npm not found. Install Node.js to run the frontend.")
@@ -339,9 +568,9 @@ def run_start(args):
             print("[start] [3/4] Skipping Frontend (package.json not found)")
 
     # [4/4] Start launcher (agent management, port 9600)
+    launcher_port = (args.port + 1) if args.port else syscfg.port("launcher")
+    _LAUNCHER_PORT = launcher_port
     if not args.no_launcher:
-        # Compute launcher port: defaults to (gateway port + 1) or 9600
-        launcher_port = (args.port + 1) if args.port else syscfg.port("launcher")
         launcher_cmd = [python_exe, os.path.join(_root, "src", "opensquad", "launcher_main.py")]
         launcher_cmd.extend(["--mgmt-port", str(launcher_port)])
 
@@ -351,7 +580,7 @@ def run_start(args):
             cwd=_root,
             **popts,
         )
-        processes.append(("launcher", p))
+        _track("launcher", p)
         print(f"[start] Launcher started (PID {p.pid})")
 
     # [5/5] Start watchdog (health check) — last so it has something to monitor
@@ -383,7 +612,7 @@ def run_start(args):
                     stderr=subprocess.PIPE,  # capture stderr for crash diagnostics
                     text=True,
                 )
-                processes.append(("watchdog", wd_p))
+                _track("watchdog", wd_p)
                 print(f"[start] Watchdog started (PID {wd_p.pid})")
             except Exception as e:
                 print(f"[start] Warning: Failed to start watchdog: {e}")
@@ -402,13 +631,14 @@ def run_start(args):
     print("  Watchdog        : health-checking (15s interval)")
     print(f"{'=' * 50}")
     print(f"\n[start] {len(processes)} service(s) running. Press Ctrl+C to stop.\n")
+    print("[start] Closing this window also stops services and frees ports.\n")
 
     # ── Health check: wait briefly then verify ports ──
     _check_ports = {
-        "gateway": gateway_port,
-        "registry": syscfg.port("registry"),
-        "frontend": _VITE_DEV_PORT,
-        "launcher": launcher_port,
+        "gateway": gateway_port if not args.no_gateway else None,
+        "registry": syscfg.port("registry") if not args.no_registry else None,
+        "frontend": _VITE_DEV_PORT if not args.no_frontend else None,
+        "launcher": launcher_port if not args.no_launcher else None,
         "external_api": syscfg.port("external_adapter"),
     }
     print("[start] Waiting for services to bind ports...")
@@ -418,6 +648,8 @@ def run_start(args):
     max_wait = 30
     _time.sleep(3)
     for name, port in _check_ports.items():
+        if port is None:
+            continue
         ok = False
         for attempt in range(max_wait):
             try:
@@ -433,25 +665,16 @@ def run_start(args):
         else:
             print(f"  \u274c {name}: port {port} FAILED to start ({max_wait}s timeout)")
 
-    # ── Shutdown state ──
-    _shutting_down = False
-
     def _signal_handler(sig, frame):
-        nonlocal _shutting_down
-        if _shutting_down:
-            return
-        _shutting_down = True
-        print("\n[start] Ctrl+C received, shutting down all services...")
-        for name, p in processes:
-            _kill_tree(p.pid)
-            print(f"[start] {name} (PID {p.pid}) killed.")
-        # 兜底：按端口强制清理孤儿进程
-        _kill_port_owners(*_get_managed_ports(syscfg))
-        sys.exit(0)
+        _shutdown_supervised_services(reason=f"signal {sig}")
+        raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)
-    if sys.platform != "win32":
+    # Windows may not deliver SIGTERM, but register anyway for completeness.
+    with contextlib.suppress(Exception):
         signal.signal(signal.SIGTERM, _signal_handler)
+    _install_windows_console_close_handler()
+    atexit.register(lambda: _shutdown_supervised_services(reason="atexit", graceful=False))
 
     try:
         failures: dict[str, int] = {}
@@ -509,6 +732,11 @@ def run_start(args):
                                 for i, (n, _) in enumerate(processes):
                                     if n == name:
                                         processes[i] = (name, new_p)
+                                        if _ACTIVE_JOB is not None and not _ACTIVE_JOB.add(new_p):
+                                            print(
+                                                f"[start] Warning: could not bind restarted {name} "
+                                                f"(PID {new_p.pid}) to kill-on-close job"
+                                            )
                                         print(f"[start] {name} restarted (PID {new_p.pid})")
                                         break
                         except Exception as e:
@@ -517,10 +745,6 @@ def run_start(args):
                         print(f"[start] {name} failed 5 times, giving up. Run 'opensquad stop' to clean up ports.")
             time.sleep(1)
     except KeyboardInterrupt:
-        if not _shutting_down:
-            print("\n[start] Ctrl+C received, shutting down all services...")
-            for name, p in processes:
-                _kill_tree(p.pid)
-                print(f"[start] {name} (PID {p.pid}) killed.")
-            # 兜底：按端口强制清理孤儿进程
-            _kill_port_owners(*_get_managed_ports(syscfg))
+        _shutdown_supervised_services(reason="KeyboardInterrupt")
+    finally:
+        _shutdown_supervised_services(reason="finally", graceful=False)

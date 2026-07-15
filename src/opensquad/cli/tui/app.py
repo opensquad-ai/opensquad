@@ -32,8 +32,37 @@ from opensquad.cli.media import (
     upload_for_group,
 )
 from opensquad.cli.slash_dispatch import dispatch_slash
+from opensquad.cli.tui.decision_picker import (
+    PendingDecision,
+    from_group_approval,
+    from_mode_switch,
+    from_propose_options,
+    render_decision_markup,
+)
 from opensquad.cli.tui.redact import redact_secrets
 from opensquad.cli.tui.side_stream import SideStreamHub
+
+
+def _quiet_tui_loggers() -> None:
+    """Keep httpx / httpcore from painting HTTP URLs into the Textual screen.
+
+    httpx logs ``HTTP Request: GET http://127.0.0.1:9555/api/...`` at INFO; when
+    written to the same tty as the TUI they flicker under the prompt dock.
+    """
+    import logging
+
+    for name in (
+        "httpx",
+        "httpcore",
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "urllib3",
+        "asyncio",
+        "websockets",
+        "websocket",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def run_tui(*, gateway: str | None = None, agent: str | None = None) -> None:
@@ -45,6 +74,8 @@ def run_tui(*, gateway: str | None = None, agent: str | None = None) -> None:
             raise ImportError("textual not installed")
     except ImportError as e:
         raise SystemExit(f"[tui] textual is required. Install with:\n  pip install 'textual>=8.2.8'\n  ({e})") from e
+
+    _quiet_tui_loggers()
 
     # Windows: allow IME-committed CJK (Space/Enter confirm) into Input
     from opensquad.cli.tui.win_ime_patch import apply_win_ime_patch
@@ -72,15 +103,39 @@ class OpenSquadApp:
         return _build_app_class()(client=client, agent=agent)
 
 
+def _same_reply(a: str, b: str) -> bool:
+    """True if two reply strings are the same turn (exact / whitespace-normalized).
+
+    Do NOT treat prefix/substring as equal — streamed text may miss the last
+    gateway debounce chunk while the final event is complete (Web prefers final).
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    na = " ".join(a.split())
+    nb = " ".join(b.split())
+    return bool(na and nb and na == nb)
+
+
+def _is_truncated_prefix(short: str, full: str) -> bool:
+    """True when ``short`` looks like an incomplete stream of ``full``."""
+    if not short or not full:
+        return False
+    s, f = short.strip(), full.strip()
+    return bool(s and f.startswith(s) and len(f) > len(s))
+
+
 def _build_app_class():
     from textual import on, work
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Vertical
-    from textual.widgets import Footer, Input, RichLog, Static
+    from textual.widgets import Footer, Input, Static
 
     from opensquad.cli.commands.chat_cmd import AgentBridge, AgentWsError
     from opensquad.cli.group_bridge import GroupBridge
+    from opensquad.cli.tui.selectable_rich_log import SelectableRichLog as RichLog
     from opensquad.cli.tui.slash_suggest import SlashSuggester, slash_completions
     from opensquad.cli.tui.themes import (
         DEFAULT_THEME,
@@ -110,6 +165,8 @@ def _build_app_class():
             Binding("escape", "hide_slash", "Hide menu", show=False),
             Binding("up", "slash_up", "Prev", show=False, priority=True),
             Binding("down", "slash_down", "Next", show=False, priority=True),
+            # Multi-select toggle on decision cards (SkipAction when idle → Input gets space)
+            Binding("space", "decision_space", show=False, priority=True),
         ]
 
         def __init__(self, client: GatewayClient, agent: str | None):
@@ -159,10 +216,27 @@ def _build_app_class():
             # OpenCode-style footer status fields
             self._model_card: str = ""
             self._model_label: str = "—"
+            self._model_name: str = ""
+            self._model_provider_label: str = ""
             self._reasoning_effort: str = "high"
             self._token_used: int = 0
             self._token_max: int = 0
-            self._project_path: str = self._resolve_project_path()
+            # Session / turn token meter (Claude Code–style ↑↓ + elapsed)
+            # ↑ = current context window (one upload), NOT cumulative session input
+            # ↓ = this-turn output, visually advanced one/few tokens per frame
+            self._session_out_tokens: int = 0
+            self._turn_started_at: float | None = None
+            self._turn_baseline_out: int = 0
+            self._turn_out_target: int = 0
+            self._turn_out_display: int = 0
+            self._last_turn_out: int = 0
+            self._last_turn_elapsed: float | None = None
+            self._turn_meter_timer = None
+            self._meter_paint_at: float = 0.0
+            # Freeze cwd at TUI launch (cmd address) — drives session project path
+            self._launch_cwd: str = self._resolve_project_path()
+            self._project_path: str = self._launch_cwd
+            self._cwd_synced_agent: str | None = None
             # Debounce duplicate compress-clear (summary + history_sync)
             self._compress_clear_at: float = 0.0
             # Message FIFO (solo)
@@ -173,9 +247,23 @@ def _build_app_class():
             self._side_hub = SideStreamHub()
             self._live_side_open: bool = False
             self._live_side_key: str | None = None
+            self._side_paint_at: float = 0.0
             # API key capture for Connect provider
             self._await_api_key: dict[str, Any] | None = None
+            # Model field edit capture (temperature / token_max / …)
+            self._await_model_field: dict[str, Any] | None = None
             self._follow_chat: bool = True
+            # Bash-like input history (↑/↓ when no menu open)
+            self._input_history: list[str] = []
+            self._input_hist_index: int | None = None  # None = editing live draft
+            self._input_hist_draft: str = ""
+            self._load_input_history()
+            # OpenCode-style decision picker (propose_options / mode_switch / group cards)
+            self._decision: PendingDecision | None = None
+            self._await_custom_answer: bool = False
+            self._decision_queue: list[PendingDecision] = []
+            # Dedup first-turn agent reply (stream flush vs final on_line race)
+            self._last_agent_reply: str = ""
 
         def compose(self) -> ComposeResult:
             yield Static(id="header-bar")
@@ -252,7 +340,8 @@ def _build_app_class():
                     f"Booting agent '{self.agent}' in background…",
                     style="system",
                 )
-                self._bootstrap_agent(self.agent, then_new=False)
+                # Always start a fresh session on TUI launch (do not resume last)
+                self._bootstrap_agent(self.agent, then_new=True)
             elif not self.agent:
                 self.log_line("No agent selected. /agent list then /start <name>", style="system")
 
@@ -273,7 +362,7 @@ def _build_app_class():
             except Exception:
                 return False
 
-        def _chat_write(self, content: str, *, follow: bool | None = None) -> None:
+        def _chat_write(self, content: Any, *, follow: bool | None = None, shrink: bool = True) -> None:
             """Append to chat log; sticky-bottom while agent streams unless user scrolled up."""
             log = self.query_one("#chat-log", RichLog)
             if self._is_selecting():
@@ -291,12 +380,77 @@ def _build_app_class():
                 # Pause sticky scroll when user has scrolled up; resume at bottom
                 self._follow_chat = at_end
                 scroll_end = at_end
-            log.write(content, scroll_end=scroll_end, animate=False)
+            log.write(content, scroll_end=scroll_end, animate=False, shrink=shrink)
             if scroll_end:
                 try:
                     log.scroll_end(animate=False)
                 except Exception:
                     pass
+
+        def _render_user_block(self, text: str) -> Any:
+            """User message card: 1-cell blue accent flush + top/bottom/right outline."""
+            from rich.console import Console, ConsoleOptions, RenderResult
+            from rich.segment import Segment
+            from rich.style import Style
+
+            surface = self._theme_hex("surface", "#161b22")
+            fg = self._theme_hex("foreground", "#e6edf3")
+            accent = self._theme_hex("primary", "#58a6ff")
+            edge = self._theme_hex("primary-muted", accent)
+            body = str(text) if text is not None else ""
+
+            class _UserCard:
+                def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+                    width = max(4, options.max_width)
+                    # Left accent flush to surface; keep top/bottom/right frame (no left │ gap)
+                    accent_st = Style.parse(f"on {accent}")
+                    edge_st = Style.parse(f"{edge} on {surface}")
+                    body_st = Style.parse(f"bold {fg} on {surface}")
+                    pad_st = Style.parse(f"on {surface}")
+                    inner_w = max(1, width - 2)  # accent + right │
+
+                    def _row(inner: str, *, pad_row: bool = False) -> RenderResult:
+                        text_st = pad_st if pad_row else body_st
+                        content = inner if len(inner) <= inner_w else inner[:inner_w]
+                        if len(content) < inner_w:
+                            content = content + (" " * (inner_w - len(content)))
+                        yield Segment(" ", accent_st)
+                        yield Segment(content, text_st)
+                        yield Segment("│", edge_st)
+                        yield Segment.line()
+
+                    yield Segment(" ", accent_st)
+                    yield Segment(("─" * inner_w) + "┐", edge_st)
+                    yield Segment.line()
+                    yield from _row("", pad_row=True)
+                    for line in body.splitlines() or [""]:
+                        yield from _row(f" {line}")
+                    yield from _row("", pad_row=True)
+                    yield Segment(" ", accent_st)
+                    yield Segment(("─" * inner_w) + "┘", edge_st)
+                    yield Segment.line()
+
+            return _UserCard()
+
+        def _thinking_markup(self, text: str) -> str:
+            """Highlighted Thinking: label + body (OpenCode-like green accent)."""
+            import re
+
+            accent = self._theme_hex("success", "#3fb950")
+            # Slightly brighter than muted so Thinking body stays readable
+            body = "#a3b3c3"
+            safe = self._escape_markup(text)
+
+            def _hl(m: re.Match[str]) -> str:
+                return f"[bold {accent}]{m.group(0)}[/]"
+
+            highlighted = re.sub(
+                r"(?i)\b(task|explore|sub-?agent|tool(?:call)?s?|agent|plan|build|"
+                r"delegat\w*|search|read|write|file|project|director\w*)\b",
+                _hl,
+                safe,
+            )
+            return f"[bold {accent}]Thinking:[/] [italic {body}]{highlighted}[/]"
 
         def on_key(self, event) -> None:
             """Recover from lost focus: refocus input and apply the printable key.
@@ -339,19 +493,16 @@ def _build_app_class():
         # ── wait animation ────────────────────────────────────────────
 
         def begin_wait(self, label: str) -> None:
-            """Show spinner for any long operation (boot / connect / reply)."""
+            """Show spinner for long ops. Banner row is always reserved (no layout jump)."""
 
             def _start() -> None:
-                self._wait_label = label
+                self._wait_label = self._sanitize_wait_label(label)
                 self._wait_tick = 0
-                banner = self.query_one("#wait-banner", Static)
-                banner.add_class("visible")
-                status = self.query_one("#status-bar", Static)
-                status.add_class("waiting")
                 if self._wait_timer is None:
-                    # Slow spin: 12.5fps redraws fight mouse selection highlight
-                    self._wait_timer = self.set_interval(0.2, self._tick_wait)
+                    # ~30fps meter: time hundredths + ↓ advances 1–3 tokens/frame
+                    self._wait_timer = self.set_interval(0.033, self._tick_wait)
                 self._paint_wait()
+                self._paint_prompt_meta_only()
 
             try:
                 self.call_from_thread(_start)
@@ -363,8 +514,9 @@ def _build_app_class():
 
         def update_wait(self, label: str) -> None:
             def _upd() -> None:
-                self._wait_label = label
+                self._wait_label = self._sanitize_wait_label(label)
                 self._paint_wait()
+                self._paint_prompt_meta_only()
 
             try:
                 self.call_from_thread(_upd)
@@ -381,10 +533,8 @@ def _build_app_class():
                     self._wait_timer.stop()
                     self._wait_timer = None
                 try:
-                    banner = self.query_one("#wait-banner", Static)
-                    banner.update("")
-                    banner.remove_class("visible")
-                    self.query_one("#status-bar", Static).remove_class("waiting")
+                    # Keep the reserved row; clear content so layout does not jump
+                    self.query_one("#wait-banner", Static).update("")
                 except Exception:
                     pass
                 self._refresh_chrome()
@@ -397,22 +547,197 @@ def _build_app_class():
                 except Exception:
                     pass
 
+        @staticmethod
+        def _sanitize_wait_label(label: str) -> str:
+            """Short, human status only — never echo URLs / API paths into the banner."""
+            text = " ".join(str(label or "").split())
+            if not text:
+                return "Working…"
+            low = text.lower()
+            if "http://" in low or "https://" in low or "/api/" in low:
+                if "thinking" in low:
+                    return "Thinking…"
+                if "reply" in low:
+                    return "Replying…"
+                if "connect" in low:
+                    return "Connecting…"
+                return "Working…"
+            # Cap length so stream previews cannot shove URLs under the prompt
+            if len(text) > 48:
+                text = text[:47] + "…"
+            return text
+
         def _tick_wait(self) -> None:
-            if not self._wait_label or self._is_selecting():
+            if self._is_selecting():
+                return
+            # Keep ticking meter/time even if wait label briefly unset mid-turn
+            if not self._wait_label and getattr(self, "_turn_started_at", None) is None:
                 return
             self._wait_tick += 1
+            if getattr(self, "_turn_started_at", None) is not None:
+                self._advance_out_display()
             self._paint_wait()
+            if getattr(self, "_turn_started_at", None) is not None:
+                self._paint_prompt_meta_only()
 
         def _paint_wait(self) -> None:
-            if not self._wait_label or self._is_selecting():
+            if self._is_selecting():
                 return
-            spin = self._SPIN[self._wait_tick % len(self._SPIN)]
-            text = f" {spin}  {self._wait_label}"
             try:
-                self.query_one("#wait-banner", Static).update(f"[bold yellow]{text}[/]")
-                self.query_one("#status-bar", Static).update(text)
+                banner = self.query_one("#wait-banner", Static)
+            except Exception:
+                return
+            if not self._wait_label:
+                banner.update("")
+                return
+            # Only status text here — ↑↓ / elapsed live in #prompt-meta (input box footer)
+            spin = self._SPIN[(self._wait_tick // 3) % len(self._SPIN)]
+            try:
+                banner.update(f"[bold yellow] {spin}  {self._wait_label}[/]")
             except Exception:
                 pass
+
+        def _paint_prompt_meta_only(self) -> None:
+            """Refresh #prompt-meta without touching header/placeholder (safe while waiting)."""
+            if self._is_selecting():
+                return
+            try:
+                meta = self.query_one("#prompt-meta", Static)
+                meta.update(self._opencode_status_markup())
+            except Exception:
+                pass
+
+        def _schedule_meter_paint(self) -> None:
+            """Raise down target from stream; display catches up 1-3 tokens/frame."""
+            now = time.monotonic()
+            last = float(getattr(self, "_meter_paint_at", 0.0) or 0.0)
+            if now - last < 0.03:
+                return
+            self._meter_paint_at = now
+
+            def _do() -> None:
+                if getattr(self, "_turn_started_at", None) is not None:
+                    self._advance_out_display()
+                self._paint_wait()
+                self._paint_prompt_meta_only()
+
+            try:
+                self.call_from_thread(_do)
+            except Exception:
+                try:
+                    _do()
+                except Exception:
+                    pass
+
+        @staticmethod
+        def _fmt_duration(secs: float) -> str:
+            """Smooth live clock: hundredths under 1m, then m:ss.ss."""
+            secs = max(0.0, float(secs or 0.0))
+            if secs < 60:
+                return f"{secs:.2f}s"
+            m = int(secs // 60)
+            s = secs - m * 60
+            return f"{m}m{s:05.2f}s"
+
+        @staticmethod
+        def _fmt_tokens_smooth(n: int) -> str:
+            """Prefer integer ticks while streaming so down-counter feels continuous."""
+            n = max(0, int(n or 0))
+            if n < 10_000:
+                return f"{n:,}"
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.2f}M"
+            return f"{n / 1000:.1f}K"
+
+        def _advance_out_display(self) -> None:
+            """Move down display toward target in tiny steps (never dump a whole chunk)."""
+            target = max(0, int(getattr(self, "_turn_out_target", 0) or 0))
+            display = max(0, int(getattr(self, "_turn_out_display", 0) or 0))
+            if display >= target:
+                return
+            gap = target - display
+            if gap <= 8:
+                step = 1
+            elif gap <= 40:
+                step = 2
+            else:
+                step = 3
+            self._turn_out_display = display + min(gap, step)
+
+        def _turn_meter_plain(self) -> str:
+            """Up = current context (one upload); down = this-turn output (animated)."""
+            up = int(getattr(self, "_token_used", 0) or 0)
+            started = getattr(self, "_turn_started_at", None)
+            if started is not None:
+                down = int(getattr(self, "_turn_out_display", 0) or 0)
+                elapsed = time.monotonic() - float(started)
+                return (
+                    f"↑{self._fmt_tokens_smooth(up)} ↓{self._fmt_tokens_smooth(down)} · {self._fmt_duration(elapsed)}"
+                )
+            down = int(getattr(self, "_last_turn_out", 0) or 0)
+            if up or down:
+                bit = f"↑{self._fmt_tokens_smooth(up)} ↓{self._fmt_tokens_smooth(down)}"
+                last = getattr(self, "_last_turn_elapsed", None)
+                if last is not None:
+                    bit += f" · {self._fmt_duration(last)}"
+                return bit
+            last = getattr(self, "_last_turn_elapsed", None)
+            if last is not None:
+                return self._fmt_duration(last)
+            return ""
+
+        def _begin_turn_meter(self) -> None:
+            """Start per-turn up/down / clock when the user sends a message."""
+
+            def _start() -> None:
+                self._turn_started_at = time.monotonic()
+                self._turn_baseline_out = int(getattr(self, "_session_out_tokens", 0) or 0)
+                self._turn_out_target = 0
+                self._turn_out_display = 0
+                self._last_turn_elapsed = None
+                self._meter_paint_at = 0.0
+                self._paint_prompt_meta_only()
+                self._paint_wait()
+
+            try:
+                self.call_from_thread(_start)
+            except Exception:
+                try:
+                    _start()
+                except Exception:
+                    pass
+
+        def _end_turn_meter(self) -> None:
+            """Freeze elapsed + snap down to final turn output."""
+
+            def _stop() -> None:
+                started = getattr(self, "_turn_started_at", None)
+                if started is not None:
+                    self._last_turn_elapsed = time.monotonic() - float(started)
+                target = max(
+                    int(getattr(self, "_turn_out_target", 0) or 0),
+                    int(getattr(self, "_turn_out_display", 0) or 0),
+                )
+                real = max(
+                    0,
+                    int(getattr(self, "_session_out_tokens", 0) or 0)
+                    - int(getattr(self, "_turn_baseline_out", 0) or 0),
+                )
+                if real > 0:
+                    target = max(target, real)
+                self._turn_out_display = target
+                self._turn_out_target = target
+                self._last_turn_out = target
+                self._turn_started_at = None
+                self._paint_prompt_meta_only()
+
+            try:
+                self.call_from_thread(_stop)
+            except Exception:
+                try:
+                    _stop()
+                except Exception:
+                    pass
 
         # ── chrome ────────────────────────────────────────────────────
 
@@ -420,6 +745,49 @@ def _build_app_class():
         def _resolve_project_path() -> str:
             """Current project directory (CLI process cwd), OpenCode-style footer."""
             return os.path.abspath(os.getcwd())
+
+        def _agent_dir_name(self, name: str | None = None) -> str:
+            """Resolve admin API dir_name (working-directory PUT keys on folder name)."""
+            key = (name or self.agent or "").strip()
+            if not key:
+                return ""
+            info = self._lookup_agent(key)
+            if info:
+                return str(info.get("dir_name") or info.get("agent_id") or key)
+            return key
+
+        def _sync_agent_cwd_from_launch(self, name: str | None = None) -> bool:
+            """Bind agent session cwd to the directory where `opensquad code` was started.
+
+            Writes ``.session_cwd`` via Gateway admin API so tools/session paths
+            follow the cmd launch address (not a leftover Web UI folder).
+            """
+            if not self.client.token:
+                return False
+            dir_name = self._agent_dir_name(name)
+            if not dir_name:
+                return False
+            cwd = (getattr(self, "_launch_cwd", None) or self._resolve_project_path()).strip()
+            if not cwd or not os.path.isdir(cwd):
+                return False
+            # Skip repeat PUT for same agent+path in this TUI process
+            mark = f"{dir_name}\0{cwd}"
+            if getattr(self, "_cwd_synced_agent", None) == mark:
+                self._project_path = cwd
+                return True
+            try:
+                self.client.admin_put(
+                    f"agents/{dir_name}/working-directory",
+                    {"path": cwd},
+                )
+            except Exception as e:
+                self.log_line(f"working directory sync failed: {e}", style="system")
+                return False
+            self._cwd_synced_agent = mark
+            self._project_path = cwd
+            short = self._short_path(cwd)
+            self.log_line(f"Working directory → {short}", style="system")
+            return True
 
         @staticmethod
         def _short_path(path: str, max_len: int = 48) -> str:
@@ -445,8 +813,14 @@ def _build_app_class():
 
         @staticmethod
         def _pretty_model_label(card: str = "", model: str = "") -> str:
-            raw = (card or model or "").strip()
+            """Human label for a model — never show raw prov-* card slugs."""
+            raw = (model or "").strip()
             if not raw:
+                raw = (card or "").strip()
+            if not raw:
+                return "—"
+            # Hide internal provider-card ids (prov-opencode → useless "Prov Opencode")
+            if raw.lower().startswith("prov-"):
                 return "—"
             # Prefer human title already spaced
             if " " in raw and not raw.startswith(("http://", "https://")):
@@ -490,19 +864,20 @@ def _build_app_class():
             return fallback
 
         def _opencode_status_markup(self) -> str:
-            """Line inside prompt-frame under input: mode · model · effort · tokens · Q."""
+            """OpenCode-style meta under input: left mode·model·provider·effort, right tokens."""
             mode = getattr(self, "_agent_mode", "build") or "build"
             primary = self._theme_hex("primary", "#58a6ff")
             warning = self._theme_hex("warning", "#d29922")
             fg = self._theme_hex("foreground", "#e6edf3")
+            muted = self._theme_hex("text-muted", "#8b949e")
             if mode == "plan":
                 mode_mk = f"[bold {warning}]Plan[/]"
             else:
                 mode_mk = f"[bold {primary}]Build[/]"
 
             model = self._escape_markup(getattr(self, "_model_label", None) or "—")
+            provider = self._escape_markup(getattr(self, "_model_provider_label", None) or "").strip()
             effort = self._escape_markup((getattr(self, "_reasoning_effort", None) or "high").lower())
-            tok = self._escape_markup(self._context_usage_label())
             qn = len(getattr(self, "_send_queue", ()) or ())
             qbit = f" · Q:{qn}" if qn else ""
             live = ""
@@ -512,7 +887,30 @@ def _build_app_class():
             media = ""
             if self.pending_media:
                 media = f" · {self._escape_markup(format_pending_chips(self.pending_media))}"
-            return f" {mode_mk} · [{fg}]{model}[/] · [bold {warning}]{effort}[/] · [{fg}]{tok}[/]{qbit}{live}{media}"
+            prov_bit = f" · [{muted}]{provider}[/]" if provider else ""
+            left = f" {mode_mk} · [{fg}]{model}[/]{prov_bit} · [bold {warning}]{effort}[/]{qbit}{live}{media}"
+            # Claude Code–style ↑↓ + elapsed, then context window usage
+            meter = self._turn_meter_plain()
+            ctx = self._context_usage_label()
+            if meter:
+                right = f"[{muted}]{self._escape_markup(meter)}[/]  [{fg}]{self._escape_markup(ctx)}[/] "
+            else:
+                right = f"[{fg}]{self._escape_markup(ctx)}[/] "
+            # Pad so tokens sit on the right without a second widget (avoids border overflow)
+            try:
+                meta = self.query_one("#prompt-meta", Static)
+                width = int(meta.size.width or 0)
+            except Exception:
+                width = 0
+            if width > 8:
+                # Approximate visible length without markup for padding
+                import re
+
+                plain_left = re.sub(r"\[/?[^\]]*\]", "", left)
+                plain_right = re.sub(r"\[/?[^\]]*\]", "", right)
+                gap = max(1, width - len(plain_left) - len(plain_right))
+                return left + (" " * gap) + right
+            return f"{left}  {right}"
 
         def _footer_path_markup(self) -> str:
             path = self._escape_markup(
@@ -523,7 +921,8 @@ def _build_app_class():
 
         def _sync_status_from_agent(self, name: str | None = None) -> None:
             """Pull model / tokens / effort / path from admin agents list + local config."""
-            self._project_path = self._resolve_project_path()
+            # Prefer frozen launch cwd (cmd address); fall back to live getcwd
+            self._project_path = getattr(self, "_launch_cwd", None) or self._resolve_project_path()
             agent_name = name or self.agent
             if not agent_name:
                 return
@@ -531,7 +930,18 @@ def _build_app_class():
             card = str(info.get("model_card") or "").strip()
             if card:
                 self._model_card = card
-                self._model_label = self._pretty_model_label(card)
+                try:
+                    full = (self.client.admin_get(f"model-cards/{card}") or {}).get("card") or {}
+                except Exception:
+                    full = {}
+                if isinstance(full, dict) and full:
+                    title = str(full.get("title") or "").strip()
+                    mn = str(full.get("model_name") or "").strip()
+                    self._model_name = mn
+                    self._model_label = title or self._pretty_model_label("", mn) or "—"
+                    self._model_provider_label = str(full.get("provider") or "").strip()
+                else:
+                    self._model_label = self._pretty_model_label(card)
             ts = info.get("token_stats")
             if isinstance(ts, dict):
                 try:
@@ -540,8 +950,18 @@ def _build_app_class():
                 except (TypeError, ValueError):
                     pass
                 m = str(ts.get("model") or "").strip()
-                if m and (not self._model_label or self._model_label == "—"):
-                    self._model_label = self._pretty_model_label(card, m)
+                if m:
+                    self._model_name = m
+                    if not self._model_label or self._model_label == "—":
+                        self._model_label = self._pretty_model_label("", m)
+                session = ts.get("session") if isinstance(ts.get("session"), dict) else {}
+                try:
+                    if session:
+                        sout = session.get("output_tokens", session.get("total_output_tokens"))
+                        if sout is not None:
+                            self._session_out_tokens = int(sout or 0)
+                except (TypeError, ValueError):
+                    pass
             # reasoning_effort from workspace agent config.json when available
             try:
                 from opensquad._syscfg import workspace_agents_dir
@@ -568,6 +988,7 @@ def _build_app_class():
         def _refresh_chrome(self) -> None:
             if self._wait_label:
                 self._paint_wait()
+                self._paint_prompt_meta_only()
                 return
             header = self.query_one("#header-bar", Static)
             inp = self.query_one("#chat-input", Input)
@@ -596,6 +1017,9 @@ def _build_app_class():
                 header.update(f"  OpenSquad  ·  [b]{self.agent or '—'}[/b]  ·  {state}  ·  {self.client.gateway_url}")
                 if getattr(self, "_await_api_key", None):
                     inp.placeholder = "Paste API key…  Enter save · Esc cancel"
+                elif getattr(self, "_await_model_field", None):
+                    fld = (self._await_model_field or {}).get("field") or "value"
+                    inp.placeholder = f"Enter {fld}…  Enter save · Esc cancel"
                 else:
                     inp.placeholder = f"Message {self.agent or 'agent'}…  Tab {mode_plain} · ^E effort · ^X live"
                 if meta:
@@ -605,26 +1029,45 @@ def _build_app_class():
 
         def log_line(self, text: str, style: str = "") -> None:
             """Thread-safe append to chat log (OpenCode-style blocks)."""
+            raw = str(text) if text is not None else ""
+            body = raw.strip()
+
+            # Chokepoint: never print the same agent reply twice (stream vs final race).
+            # Second copy often arrives with style="" (no · agent label) — still drop it.
+            # Exception: allow a longer final to replace a truncated stream prefix.
+            if body and style in ("agent", ""):
+                last = (getattr(self, "_last_agent_reply", None) or "").strip()
+                if last and _same_reply(body, last):
+                    self._reply_flushed = True
+                    return
+                if last and _is_truncated_prefix(body, last):
+                    # Incoming body is shorter than what we already showed — ignore
+                    self._reply_flushed = True
+                    return
+                # Claim synchronously before call_from_thread so a racing write is dropped
+                if style == "agent" or (style == "" and body and not body.startswith(("  ⚙", "  ✓", "  ·", "[", "/"))):
+                    self._last_agent_reply = body
+                    self._reply_flushed = True
+
             # Assistant/tool lines may arrive while a thought is still open — flush first
             if style in ("", "agent", "tool", "error") and getattr(self, "_think_pending", False):
                 if style != "thought":
                     self._flush_thinking_to_log()
 
-            safe = self._escape_markup(str(text) if text is not None else "")
+            safe = self._escape_markup(raw)
 
             def _write() -> None:
                 w = self._chat_write
                 if style == "user":
-                    # New user turn: always reveal the latest exchange
                     w("", follow=True)
-                    w(f"[on #21262d][bold #79c0ff]  {safe}  [/][/]", follow=True)
+                    w(self._render_user_block(raw), follow=True)
                     w("", follow=True)
                 elif style == "thought":
-                    w(f"[italic #8b949e]Thinking: {safe}[/]")
+                    w(self._thinking_markup(raw))
                     w("")
                 elif style == "agent":
                     w("")
-                    w(f"[#e6edf3]{safe}[/]")
+                    self._write_agent_body(raw, w)
                     w(f"[dim]· {self.agent or 'agent'}[/]")
                     w("")
                 elif style == "error":
@@ -637,8 +1080,13 @@ def _build_app_class():
                     if safe.startswith(("  ⚙", "  ✓", "  ·", "[")):
                         w(f"[dim]{safe}[/]")
                     else:
-                        w(f"[#e6edf3]{safe}[/]")
-                        w("")
+                        # Plain agent-like reply may still contain markdown tables
+                        if self._looks_like_agent_prose(raw):
+                            self._write_agent_body(raw, w)
+                            w("")
+                        else:
+                            w(f"[#e6edf3]{safe}[/]")
+                            w("")
 
             try:
                 self.call_from_thread(_write)
@@ -648,6 +1096,121 @@ def _build_app_class():
                 except Exception:
                     pass
 
+        def _looks_like_agent_prose(self, text: str) -> bool:
+            t = (text or "").strip()
+            if not t or t.startswith(("  ⚙", "  ✓", "  ·", "[", "/")):
+                return False
+            try:
+                from opensquad.cli.tui.md_table import has_markdown_table
+
+                return has_markdown_table(t)
+            except Exception:
+                return False
+
+        def _write_agent_body(self, text: str, write) -> None:
+            """Write agent reply, rendering GFM pipe-tables as bordered grids."""
+            fg = self._theme_hex("foreground", "#e6edf3")
+            border = self._theme_hex("text-muted", "#8b949e")
+            header = self._theme_hex("accent", "#d2a8ff")
+            try:
+                from opensquad.cli.tui.md_table import has_markdown_table, iter_text_and_tables
+
+                if not has_markdown_table(text):
+                    write(f"[{fg}]{self._escape_markup(text)}[/]")
+                    return
+                # Use chat width so exported grid matches the viewport
+                try:
+                    width = max(40, int(self.query_one("#chat-log", RichLog).size.width) - 2)
+                except Exception:
+                    width = 100
+                for kind, part in iter_text_and_tables(
+                    text,
+                    border=border,
+                    header_style=f"bold {header}",
+                    cell_style=fg,
+                    width=width,
+                ):
+                    if kind == "table":
+                        # Text.from_ansi with baked-in box chars; don't shrink/reflow
+                        write(part, follow=True, shrink=False)
+                    elif part == "":
+                        write("")
+                    else:
+                        write(f"[{fg}]{self._escape_markup(str(part))}[/]")
+            except Exception:
+                write(f"[{fg}]{self._escape_markup(text)}[/]")
+
+        def log_file_diff(self, lines: list) -> None:
+            """Append OpenCode-style file-edit markup (no purple escape path)."""
+            if not lines:
+                return
+            if getattr(self, "_think_pending", False):
+                self._flush_thinking_to_log()
+
+            def _write() -> None:
+                w = self._chat_write
+                for line in lines:
+                    w(str(line), follow=True)
+
+            try:
+                self.call_from_thread(_write)
+            except Exception:
+                try:
+                    _write()
+                except Exception:
+                    pass
+
+        def log_plan(self, lines: list) -> None:
+            """Append OpenCode-style # Todos plan block."""
+            if not lines:
+                return
+            if getattr(self, "_think_pending", False):
+                self._flush_thinking_to_log()
+
+            def _write() -> None:
+                w = self._chat_write
+                w("", follow=True)
+                for line in lines:
+                    w(str(line), follow=True)
+                w("", follow=True)
+
+            try:
+                self.call_from_thread(_write)
+            except Exception:
+                try:
+                    _write()
+                except Exception:
+                    pass
+
+        def log_plan_payload(self, payload) -> None:
+            """Parse plan WS payload and render with current theme colors."""
+            try:
+                from opensquad.cli.tui.plan_block import (
+                    format_opencode_todos_markup,
+                    parse_plan_content,
+                )
+
+                if isinstance(payload, dict):
+                    content = payload.get("text") or payload.get("content") or payload.get("plan")
+                    if content is None:
+                        content = payload.get("steps")
+                else:
+                    content = payload
+                steps = parse_plan_content(content)
+                if not steps:
+                    return
+                lines = format_opencode_todos_markup(
+                    steps,
+                    fg=self._theme_hex("foreground", "#c9d1d9"),
+                    muted=self._theme_hex("text-muted", "#8b949e"),
+                    green=self._theme_hex("success", "#3fb950"),
+                    cyan=self._theme_hex("primary", "#58a6ff"),
+                    red=self._theme_hex("error", "#f85149"),
+                )
+                self.log_plan(lines)
+            except Exception:
+                pass
+
         def _flush_thinking_to_log(self) -> None:
             """Persist thinking into the transcript (conversation order)."""
             buf = (getattr(self, "_think_buf_latest", None) or "").strip()
@@ -656,12 +1219,13 @@ def _build_app_class():
             self._hide_live_think()
             if not buf:
                 return
-            one_line = " ".join(buf.split())
-            safe = self._escape_markup(one_line)
+            # Keep paragraph breaks; collapse only runs of spaces within a line
+            body = "\n".join(" ".join(line.split()) for line in buf.splitlines() if line.strip())
+            if not body:
+                body = " ".join(buf.split())
 
             def _write() -> None:
-                muted = self._theme_hex("text-muted", "#8b949e")
-                self._chat_write(f"[italic {muted}]Thinking: {safe}[/]", follow=True)
+                self._chat_write(self._thinking_markup(body), follow=True)
                 self._chat_write("", follow=True)
 
             try:
@@ -686,13 +1250,11 @@ def _build_app_class():
                 return
             # Show last ~1200 chars so the widget stays readable
             show = buf if len(buf) <= 1200 else ("…" + buf[-1199:])
-            safe = self._escape_markup(show)
-            muted = self._theme_hex("text-muted", "#8b949e")
 
             def _do() -> None:
                 try:
                     w = self.query_one("#live-think", Static)
-                    w.update(f"[italic {muted}]Thinking: {safe}[/]")
+                    w.update(self._thinking_markup(show))
                     w.add_class("visible")
                     if getattr(self, "_follow_chat", True) and not self._is_selecting():
                         try:
@@ -717,7 +1279,11 @@ def _build_app_class():
             buf = (self._stream_buf or "").strip()
             if not buf:
                 return
-            self._reply_flushed = True
+            if buf == (getattr(self, "_last_agent_reply", None) or ""):
+                self._reply_flushed = True
+                return
+            # Do NOT set _last_agent_reply here — log_line claims it; pre-setting
+            # made log_line's dedup treat this as a duplicate and drop the write.
             self.log_line(buf, style="agent")
 
         def log_stream(self, chunk: str) -> None:
@@ -725,10 +1291,19 @@ def _build_app_class():
             if self._think_pending:
                 self._flush_thinking_to_log()
             self._stream_buf += chunk
-            preview = self._stream_buf.replace("\n", " ").strip()
-            if len(preview) > 42:
-                preview = "…" + preview[-42:]
-            self.update_wait(f"Replying… {preview}" if preview else "Replying…")
+            # Raise ↓ *target* from this chunk only (display animates 1–3/frame toward it)
+            piece = chunk or ""
+            cjk = sum(1 for ch in piece if ord(ch) > 0x2E80)
+            ascii_n = len(piece) - cjk
+            delta = cjk + (ascii_n // 4)
+            if delta <= 0 and piece.strip():
+                delta = 1  # tiny ascii chunks still nudge the counter
+            if delta > 0:
+                self._turn_out_target = int(getattr(self, "_turn_out_target", 0) or 0) + delta
+                self._schedule_meter_paint()
+            # Keep banner short — never mirror stream text (URLs/rest paths flicker at feet)
+            if (self._wait_label or "") != "Replying…":
+                self.update_wait("Replying…")
             # Sticky-scroll chat while reply accumulates (final flush still once)
             if getattr(self, "_follow_chat", True) and not self._is_selecting():
                 try:
@@ -740,7 +1315,8 @@ def _build_app_class():
             """Accumulate thought into #live-think (conversation area), not banner spam."""
             self._think_buf_latest = buf or ""
             self._think_pending = True
-            self.update_wait("Thinking…")
+            if (self._wait_label or "") != "Thinking…":
+                self.update_wait("Thinking…")
             now = time.monotonic()
             if now - getattr(self, "_think_paint_at", 0.0) < 0.1:
                 return
@@ -754,29 +1330,44 @@ def _build_app_class():
             if self._think_pending or (buf or "").strip():
                 self._think_pending = True
                 self._flush_thinking_to_log()
-            self.update_wait("Replying…")
+            if (self._wait_label or "") != "Replying…":
+                self.update_wait("Replying…")
 
         def on_agent_line(self, text: str) -> None:
-            """Bridge on_line: finalize thought, then show assistant/tool line."""
+            """Bridge on_line: finalize thought, then show assistant/tool line (once)."""
             if self._think_pending:
                 self._flush_thinking_to_log()
             t = str(text) if text is not None else ""
-            # If we already streamed the same reply, skip duplicate final message
+            t_norm = t.strip()
+            last = (getattr(self, "_last_agent_reply", None) or "").strip()
             streamed = (self._stream_buf or "").strip()
-            if streamed and t.strip() == streamed:
-                self._flush_reply_to_log()
-                return
+
             if t.startswith(("  ⚙", "  ✓")):
                 self.log_line(t, style="tool")
-            elif t.startswith("[error]") or t.startswith("[ws]"):
+                return
+            if t.startswith("[error]") or t.startswith("[ws]"):
                 self.log_line(t, style="error")
-            elif t.startswith("[") or t.startswith("  ·"):
+                return
+            if t.startswith("[") or t.startswith("  ·"):
                 self.log_line(t, style="system")
-            else:
-                if streamed and not self._reply_flushed:
-                    self._flush_reply_to_log()
-                elif t.strip():
-                    self.log_line(t, style="agent")
+                return
+
+            # Prefer final event text (complete) over stream buffer (may miss last
+            # debounced WS chunk). Matches Web AIChatPage finalText = text || stream.
+            final_text = t_norm or streamed
+            if not final_text:
+                return
+
+            # Drop stale incomplete stream so finally/flush cannot overwrite with a short copy
+            self._stream_buf = ""
+
+            if last and _same_reply(final_text, last):
+                self._reply_flushed = True
+                return
+
+            # Incomplete stream already committed → still write the complete final
+            # (exact-match dedup no longer drops it; log_line allows prefix upgrade).
+            self.log_line(final_text, style="agent")
 
         @on(Input.Submitted, "#chat-input")
         def on_submit(self, event: Input.Submitted) -> None:
@@ -795,7 +1386,8 @@ def _build_app_class():
             gen = self._submit_gen
             # Menus: Enter must confirm highlight immediately (no IME defer / empty submit)
             if (
-                getattr(self, "_nav_active", False)
+                getattr(self, "_decision", None)
+                or getattr(self, "_nav_active", False)
                 or getattr(self, "_session_pick_active", False)
                 or getattr(self, "_slash_items", None)
             ):
@@ -821,6 +1413,28 @@ def _build_app_class():
             except Exception:
                 return
 
+            # Decision picker: Enter confirms (or custom-answer capture / number shortcut)
+            if getattr(self, "_await_custom_answer", False) and getattr(self, "_decision", None):
+                line = (inp.value or "").rstrip("\n").strip()
+                inp.value = ""
+                if line:
+                    self._submit_custom_decision(line)
+                else:
+                    self._focus_input()
+                return
+            if getattr(self, "_decision", None):
+                line = (inp.value or "").rstrip("\n").strip()
+                inp.value = ""
+                if line.isdigit():
+                    n = int(line)
+                    rows = self._decision.rows
+                    if 1 <= n <= len(rows):
+                        self._decision.index = n - 1
+                        self._decision_confirm()
+                        return
+                self._decision_confirm()
+                return
+
             # Session / nav picker: Enter confirms highlighted item
             if getattr(self, "_nav_active", False):
                 inp.value = ""
@@ -838,6 +1452,7 @@ def _build_app_class():
                 inp.value = ""
                 self._hide_slash_menu()
                 if choice:
+                    self._push_input_history(choice)
                     self._handle_slash(choice)
                 else:
                     self._focus_input()
@@ -858,6 +1473,18 @@ def _build_app_class():
                 self._hide_nav()
                 self._finish_provider_with_key(pending, line)
                 return
+
+            # Model parameter edit capture
+            if getattr(self, "_await_model_field", None):
+                pending = self._await_model_field
+                self._await_model_field = None
+                inp.value = ""
+                self._hide_slash_menu()
+                self._finish_model_field_edit(pending, line)
+                return
+
+            if line:
+                self._push_input_history(line)
 
             inp.value = ""
             self._hide_slash_menu()
@@ -1006,6 +1633,22 @@ def _build_app_class():
                 self._refresh_chrome()
                 self._focus_input()
                 return
+            if getattr(self, "_await_model_field", None):
+                self._await_model_field = None
+                self.log_line("Parameter edit cancelled", style="system")
+                self._refresh_chrome()
+                self._focus_input()
+                return
+            # Decision card: Esc = dismiss / deny / ignore
+            if getattr(self, "_await_custom_answer", False):
+                self._await_custom_answer = False
+                self._paint_decision()
+                self._refresh_chrome()
+                self._focus_input()
+                return
+            if getattr(self, "_decision", None):
+                self._decision_dismiss()
+                return
             # Close Ctrl+X live sideview
             if getattr(self, "_live_side_open", False):
                 self._close_live_side()
@@ -1025,6 +1668,14 @@ def _build_app_class():
 
         def action_accept_slash(self) -> None:
             """Tab: confirm menu selection, or toggle Plan/Build when idle."""
+            from textual.actions import SkipAction
+
+            # Don't steal Tab from Textual Ctrl+P command palette
+            if self._command_palette_open():
+                raise SkipAction()
+            if getattr(self, "_decision", None):
+                self._decision_confirm()
+                return
             if self._nav_active:
                 self._nav_confirm()
                 return
@@ -1082,10 +1733,394 @@ def _build_app_class():
             if notify or send:
                 self._focus_input()
 
+        # ── Decision picker (propose_options / mode_switch / group cards) ──
+
+        def _on_bridge_decision(self, event: str, data: dict) -> None:
+            evt = str(event or "")
+            if evt == "propose_options":
+                d = from_propose_options(data, source="solo")
+                if d:
+                    self._enqueue_decision(d)
+                return
+            if evt == "mode_switch_approval":
+                d = from_mode_switch(data)
+                if d:
+                    self._enqueue_decision(d)
+                return
+            if evt == "propose_options_resolved":
+                rid = str(data.get("id") or "")
+                self._clear_decision_by_id(rid)
+                status = str(data.get("status") or "chosen")
+                self.log_line(f"→ Options {status}", style="system")
+                return
+            if evt == "mode_switch_resolved":
+                rid = str(data.get("id") or "")
+                self._clear_decision_by_id(rid)
+                status = str(data.get("status") or "")
+                if status:
+                    self.log_line(f"→ Mode switch {status}", style="system")
+                return
+
+        def _enqueue_decision(self, d: PendingDecision) -> None:
+            # Replace same id if already queued/open
+            self._decision_queue = [x for x in self._decision_queue if x.id != d.id]
+            if self._decision and self._decision.id == d.id:
+                self._decision = d
+                self._await_custom_answer = False
+                self._paint_decision()
+                self._focus_input()
+                return
+            if self._decision is None:
+                self._open_decision(d)
+            else:
+                self._decision_queue.append(d)
+                self.log_line(f"[decision] queued: {d.prompt.splitlines()[0][:60]}", style="system")
+
+        def _open_decision(self, d: PendingDecision) -> None:
+            self._hide_slash_menu()
+            self._hide_nav()
+            self._hide_session_picker()
+            self._decision = d
+            self._await_custom_answer = False
+            self._paint_decision()
+            # Compact line in transcript (OpenCode: "→ Asked 1 question")
+            n = len(d.options)
+            kind = "question" if d.kind.endswith("options") else "approval"
+            self.log_line(f"→ Asked {n} {kind}{'s' if n != 1 else ''}", style="tool")
+            self._refresh_chrome()
+            self._focus_input()
+
+        def _paint_decision(self) -> None:
+            d = self._decision
+            try:
+                menu = self.query_one("#slash-menu", Static)
+            except Exception:
+                return
+            if not d:
+                menu.update("")
+                menu.remove_class("visible")
+                menu.remove_class("decision")
+                return
+            markup = render_decision_markup(
+                d,
+                escape=self._escape_markup,
+                primary=self._theme_hex("primary", "#58a6ff"),
+                muted=self._theme_hex("text-muted", "#8b949e"),
+                fg=self._theme_hex("foreground", "#e6edf3"),
+            )
+            if self._await_custom_answer:
+                markup += "\n[bold]自定义答案[/] — 输入后 Enter 提交 · Esc 返回列表"
+            menu.update(markup)
+            menu.add_class("visible")
+            menu.add_class("decision")
+
+        def _hide_decision(self) -> None:
+            self._decision = None
+            self._await_custom_answer = False
+            try:
+                menu = self.query_one("#slash-menu", Static)
+                menu.update("")
+                menu.remove_class("visible")
+                menu.remove_class("decision")
+            except Exception:
+                pass
+            # Show next queued decision
+            if self._decision_queue:
+                nxt = self._decision_queue.pop(0)
+                self._open_decision(nxt)
+            else:
+                self._refresh_chrome()
+                self._focus_input()
+
+        def _clear_decision_by_id(self, rid: str) -> None:
+            if not rid:
+                return
+            self._decision_queue = [x for x in self._decision_queue if x.id != rid]
+            if self._decision and self._decision.id == rid:
+                self._hide_decision()
+
+        def _decision_confirm(self) -> None:
+            d = self._decision
+            if not d:
+                return
+            d.clamp_index()
+            rows = d.rows
+            if not rows:
+                return
+            opt = rows[d.index]
+            if opt.id == d.custom_row_id:
+                self._await_custom_answer = True
+                try:
+                    inp = self.query_one("#chat-input", Input)
+                    inp.placeholder = "Type your own answer…  Enter submit · Esc back"
+                except Exception:
+                    pass
+                self._paint_decision()
+                self._focus_input()
+                return
+            if d.allow_multiple and d.kind in ("options", "group_options"):
+                ids = sorted(d.selected_ids) if d.selected_ids else [opt.id]
+                if not ids:
+                    self.notify("先按 Space 勾选选项", timeout=2)
+                    return
+                self._resolve_decision_choose(d, ids)
+                return
+            if d.kind == "mode_switch":
+                if opt.id == "approve":
+                    self._resolve_mode_switch(d, approve=True)
+                else:
+                    self._resolve_mode_switch(d, approve=False)
+                return
+            if d.kind == "group_approval":
+                self._resolve_group_approval(d, reject=(opt.id != "approve"))
+                return
+            self._resolve_decision_choose(d, [opt.id])
+
+        def _decision_toggle_multi(self) -> None:
+            d = self._decision
+            if not d or not d.allow_multiple or self._await_custom_answer:
+                return
+            d.clamp_index()
+            rows = d.rows
+            if not rows:
+                return
+            opt = rows[d.index]
+            if opt.id == d.custom_row_id:
+                return
+            if opt.id in d.selected_ids:
+                d.selected_ids.discard(opt.id)
+            else:
+                d.selected_ids.add(opt.id)
+            self._paint_decision()
+
+        def action_decision_space(self) -> None:
+            """Space toggles multi-select on a decision card; otherwise let Input type a space."""
+            from textual.actions import SkipAction
+
+            d = getattr(self, "_decision", None)
+            if not d or not d.allow_multiple or self._await_custom_answer:
+                raise SkipAction()
+            try:
+                inp = self.query_one("#chat-input", Input)
+                if (inp.value or "").strip():
+                    raise SkipAction()
+            except SkipAction:
+                raise
+            except Exception:
+                pass
+            self._decision_toggle_multi()
+
+        def _decision_dismiss(self) -> None:
+            d = self._decision
+            if not d:
+                return
+            if d.kind == "mode_switch":
+                self._resolve_mode_switch(d, approve=False)
+                return
+            if d.kind == "group_approval":
+                self._resolve_group_approval(d, reject=True)
+                return
+            # options → ignore
+            self._resolve_decision_ignore(d)
+
+        def _submit_custom_decision(self, text: str) -> None:
+            d = self._decision
+            if not d:
+                return
+            self._await_custom_answer = False
+            if d.kind in ("options",) and d.source == "solo":
+                if not self.bridge or not getattr(self.bridge, "is_open", False):
+                    self.log_line("Not connected", style="error")
+                    return
+                try:
+                    self.bridge.send_command(
+                        "resolve_proposed_options",
+                        {"id": d.id, "custom_answer": text, "ignored": False},
+                    )
+                    self.log_line(f"→ Custom: {text[:80]}", style="system")
+                except Exception as e:
+                    self.log_line(f"resolve failed: {e}", style="error")
+                    return
+                self._hide_decision()
+                return
+            if d.kind == "group_options" and self.group:
+                try:
+                    self.group.resolve_choose(d.id, text, action="custom")
+                    self.log_line(f"[group] custom: {text[:80]}", style="system")
+                except Exception as e:
+                    self.log_line(str(e), style="error")
+                    return
+                self._hide_decision()
+                return
+            self._hide_decision()
+
+        def _resolve_decision_choose(self, d: PendingDecision, ids: list[str]) -> None:
+            titles = []
+            for oid in ids:
+                for o in d.options:
+                    if o.id == oid:
+                        titles.append(o.title)
+                        break
+            label = ", ".join(titles) if titles else ",".join(ids)
+            if d.source == "solo":
+                if not self.bridge or not getattr(self.bridge, "is_open", False):
+                    self.log_line("Not connected", style="error")
+                    return
+                try:
+                    self.bridge.send_command(
+                        "resolve_proposed_options",
+                        {
+                            "id": d.id,
+                            "chosen_option_id": ids[0] if ids else "",
+                            "chosen_option_ids": ids,
+                            "ignored": False,
+                        },
+                    )
+                    self.log_line(f"→ Chose: {label}", style="system")
+                except Exception as e:
+                    self.log_line(f"resolve failed: {e}", style="error")
+                    return
+            else:
+                if not self.group:
+                    self.log_line("No group", style="error")
+                    return
+                try:
+                    value = ",".join(ids)
+                    self.group.resolve_choose(d.id, value)
+                    self.log_line(f"[group] chose: {label}", style="system")
+                except Exception as e:
+                    self.log_line(str(e), style="error")
+                    return
+            self._hide_decision()
+
+        def _resolve_decision_ignore(self, d: PendingDecision) -> None:
+            if d.source == "solo":
+                if self.bridge and getattr(self.bridge, "is_open", False):
+                    try:
+                        self.bridge.send_command(
+                            "resolve_proposed_options",
+                            {"id": d.id, "ignored": True},
+                        )
+                    except Exception as e:
+                        self.log_line(f"ignore failed: {e}", style="error")
+                        return
+                self.log_line("→ Options dismissed", style="system")
+            else:
+                if self.group:
+                    try:
+                        self.group.resolve_choose(d.id, "", action="ignore")
+                    except Exception as e:
+                        self.log_line(str(e), style="error")
+                        return
+                self.log_line("[group] options ignored", style="system")
+            self._hide_decision()
+
+        def _resolve_mode_switch(self, d: PendingDecision, *, approve: bool) -> None:
+            if not self.bridge or not getattr(self.bridge, "is_open", False):
+                self.log_line("Not connected", style="error")
+                return
+            try:
+                if approve:
+                    self.bridge.send_command(
+                        "set_agent_mode",
+                        {
+                            "mode": d.to_mode,
+                            "id": d.id,
+                            "approved_request_id": d.id,
+                        },
+                    )
+                    self._agent_mode = d.to_mode
+                    self.log_line(f"→ Approved mode → {d.to_mode}", style="system")
+                else:
+                    self.bridge.send_command(
+                        "deny_mode_switch",
+                        {"id": d.id, "reason": "User denied"},
+                    )
+                    self.log_line("→ Mode switch denied", style="system")
+            except Exception as e:
+                self.log_line(f"mode resolve failed: {e}", style="error")
+                return
+            self._refresh_chrome()
+            self._hide_decision()
+
+        def _resolve_group_approval(self, d: PendingDecision, *, reject: bool) -> None:
+            if not self.group:
+                self.log_line("No group", style="error")
+                return
+            try:
+                self.group.resolve_approval(d.id, reject=reject)
+                self.log_line(
+                    f"[group] {'rejected' if reject else 'approved'} {d.id}",
+                    style="system",
+                )
+            except Exception as e:
+                self.log_line(str(e), style="error")
+                return
+            self._hide_decision()
+
+        def _open_group_pending_decision(self) -> None:
+            """Open latest pending group approval/options as the decision picker."""
+            if not self.group:
+                return
+            if self._decision:
+                return
+            # Prefer options, then approvals
+            pr = None
+            ap = None
+            try:
+                pr = self.group.latest_pending_proposal() if hasattr(self.group, "latest_pending_proposal") else None
+                if pr is None and getattr(self.group, "pending_proposals", None):
+                    pending = [
+                        p for p in self.group.pending_proposals if (p.raw.get("status") or "pending") == "pending"
+                    ]
+                    pr = pending[-1] if pending else None
+                ap = self.group.latest_pending_approval()
+            except Exception:
+                return
+            if pr and pr.options:
+                raw = dict(pr.raw or {})
+                raw.setdefault("id", pr.id)
+                raw.setdefault("prompt", pr.title)
+                # Rebuild options from parsed (label, value) if needed
+                if not raw.get("options"):
+                    raw["options"] = [{"id": value, "title": label, "description": ""} for label, value in pr.options]
+                raw["group_id"] = pr.group_id
+                raw["message_id"] = pr.message_id
+                d = from_propose_options(raw, source="group")
+                if d:
+                    self._enqueue_decision(d)
+                    return
+            if ap and ap.status == "pending":
+                d = from_group_approval(
+                    approval_id=ap.id,
+                    title=ap.title,
+                    group_id=ap.group_id,
+                    message_id=ap.message_id,
+                    summary=str((ap.raw or {}).get("summary") or ""),
+                )
+                self._enqueue_decision(d)
+
+        def _command_palette_open(self) -> bool:
+            """True while Textual's Ctrl+P command palette owns navigation keys."""
+            try:
+                from textual.command import CommandPalette
+
+                return bool(CommandPalette.is_open(self))
+            except Exception:
+                return False
+
         def action_slash_up(self) -> None:
             from textual.actions import SkipAction
 
-            if getattr(self, "_live_side_open", False) and not self._nav_active and not self._slash_items:
+            # Priority bindings steal arrows from Ctrl+P palette — yield when it is open
+            if self._command_palette_open():
+                raise SkipAction()
+            if (
+                getattr(self, "_live_side_open", False)
+                and not self._nav_active
+                and not self._slash_items
+                and not self._decision
+            ):
                 keys = self._side_hub.list_keys()
                 if len(keys) > 1:
                     cur = self._live_side_key or keys[0]
@@ -1096,6 +2131,10 @@ def _build_app_class():
                     self._live_side_key = keys[(i - 1) % len(keys)]
                     self._paint_live_side()
                     return
+            if self._decision and not self._await_custom_answer:
+                self._decision.index = max(0, self._decision.index - 1)
+                self._paint_decision()
+                return
             if self._nav_active:
                 self._nav_index = max(0, self._nav_index - 1)
                 self._paint_nav()
@@ -1104,15 +2143,26 @@ def _build_app_class():
                 self._session_pick_index = max(0, self._session_pick_index - 1)
                 self._paint_session_picker()
                 return
-            if not self._slash_items:
-                raise SkipAction()
-            self._slash_index = max(0, self._slash_index - 1)
-            self._paint_slash_menu()
+            if self._slash_items:
+                self._slash_index = max(0, self._slash_index - 1)
+                self._paint_slash_menu()
+                return
+            # No menu → bash-style previous input
+            if self._history_up():
+                return
+            raise SkipAction()
 
         def action_slash_down(self) -> None:
             from textual.actions import SkipAction
 
-            if getattr(self, "_live_side_open", False) and not self._nav_active and not self._slash_items:
+            if self._command_palette_open():
+                raise SkipAction()
+            if (
+                getattr(self, "_live_side_open", False)
+                and not self._nav_active
+                and not self._slash_items
+                and not self._decision
+            ):
                 keys = self._side_hub.list_keys()
                 if len(keys) > 1:
                     cur = self._live_side_key or keys[0]
@@ -1123,6 +2173,11 @@ def _build_app_class():
                     self._live_side_key = keys[(i + 1) % len(keys)]
                     self._paint_live_side()
                     return
+            if self._decision and not self._await_custom_answer:
+                rows = self._decision.rows
+                self._decision.index = min(len(rows) - 1, self._decision.index + 1)
+                self._paint_decision()
+                return
             if self._nav_active:
                 items = self._nav_current_items()
                 self._nav_index = min(len(items) - 1, self._nav_index + 1)
@@ -1132,10 +2187,95 @@ def _build_app_class():
                 self._session_pick_index = min(len(self._session_pick_items) - 1, self._session_pick_index + 1)
                 self._paint_session_picker()
                 return
-            if not self._slash_items:
-                raise SkipAction()
-            self._slash_index = min(len(self._slash_items) - 1, self._slash_index + 1)
-            self._paint_slash_menu()
+            if self._slash_items:
+                self._slash_index = min(len(self._slash_items) - 1, self._slash_index + 1)
+                self._paint_slash_menu()
+                return
+            # No menu → bash-style next input / restore draft
+            if self._history_down():
+                return
+            raise SkipAction()
+
+        def _input_history_path(self) -> str:
+            return os.path.join(os.path.expanduser("~"), ".opensquad", "tui_input_history")
+
+        def _load_input_history(self) -> None:
+            path = self._input_history_path()
+            try:
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8") as f:
+                        lines = [ln.rstrip("\n") for ln in f.readlines()]
+                    self._input_history = [ln for ln in lines if ln.strip()][-500:]
+            except Exception:
+                self._input_history = []
+
+        def _persist_input_history(self) -> None:
+            path = self._input_history_path()
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(self._input_history[-500:]))
+                    if self._input_history:
+                        f.write("\n")
+            except Exception:
+                pass
+
+        def _push_input_history(self, line: str) -> None:
+            """Record a submitted line (bash history semantics)."""
+            text = (line or "").rstrip("\n")
+            if not text.strip():
+                return
+            # Never store secrets from capture modes
+            if getattr(self, "_await_api_key", None) or getattr(self, "_await_model_field", None):
+                return
+            hist = self._input_history
+            if hist and hist[-1] == text:
+                self._input_hist_index = None
+                self._input_hist_draft = ""
+                return
+            hist.append(text)
+            if len(hist) > 500:
+                del hist[:-500]
+            self._input_hist_index = None
+            self._input_hist_draft = ""
+            self._persist_input_history()
+
+        def _history_up(self) -> bool:
+            """↑ previous entry. Returns True if handled."""
+            hist = getattr(self, "_input_history", None) or []
+            if not hist:
+                return False
+            try:
+                inp = self.query_one("#chat-input", Input)
+            except Exception:
+                return False
+            if self._input_hist_index is None:
+                self._input_hist_draft = inp.value or ""
+                self._input_hist_index = len(hist) - 1
+            else:
+                self._input_hist_index = max(0, self._input_hist_index - 1)
+            inp.value = hist[self._input_hist_index]
+            inp.cursor_position = len(inp.value or "")
+            return True
+
+        def _history_down(self) -> bool:
+            """↓ newer entry / restore draft. Returns True if handled."""
+            hist = getattr(self, "_input_history", None) or []
+            if self._input_hist_index is None:
+                return False
+            try:
+                inp = self.query_one("#chat-input", Input)
+            except Exception:
+                return False
+            if self._input_hist_index >= len(hist) - 1:
+                self._input_hist_index = None
+                inp.value = self._input_hist_draft
+                inp.cursor_position = len(inp.value or "")
+                return True
+            self._input_hist_index += 1
+            inp.value = hist[self._input_hist_index]
+            inp.cursor_position = len(inp.value or "")
+            return True
 
         def _hide_slash_menu(self) -> None:
             if not self._slash_items and not getattr(self, "_slash_visible", False):
@@ -1179,6 +2319,9 @@ def _build_app_class():
             self._slash_visible = True
 
         def _refresh_slash_menu(self, value: str) -> None:
+            # Decision overlay owns #slash-menu — never clobber it with command palette
+            if getattr(self, "_decision", None):
+                return
             if not value.startswith(("/", "+")):
                 self._hide_slash_menu()
                 return
@@ -1206,6 +2349,8 @@ def _build_app_class():
         @on(Input.Changed, "#chat-input")
         def on_input_changed(self, event: Input.Changed) -> None:
             val = event.value or ""
+            if getattr(self, "_decision", None):
+                return
             if self._nav_active or self._session_pick_active:
                 if val.startswith(("/", "+")):
                     self._hide_nav()
@@ -1229,6 +2374,7 @@ def _build_app_class():
                 self._think_buf_latest = ""
                 self._think_pending = False
                 self._reply_flushed = False
+                self._last_agent_reply = ""
                 self._sending = False
                 try:
                     self.end_wait()
@@ -1329,11 +2475,14 @@ def _build_app_class():
                 return
             self._stream_buf = ""
             self._reply_flushed = False
+            self._last_agent_reply = ""
             self._think_buf_latest = ""
             self._think_pending = False
-            self.begin_wait(f"Connecting {self.agent}…")
+            already = bool(self.bridge and getattr(self.bridge, "is_open", False))
+            self._begin_turn_meter()
+            self.begin_wait("Connecting…" if not already else "Thinking…")
             try:
-                if not self.bridge or not getattr(self.bridge, "is_open", False):
+                if not already:
                     if not self._ensure_agent_connected(self.agent):
                         self.log_line("Agent not ready — try /start then send again", style="error")
                         return
@@ -1380,6 +2529,8 @@ def _build_app_class():
                 self._sending = False
                 self._stream_buf = ""
                 self._reply_flushed = False
+                # keep _last_agent_reply so a late on_line cannot reprint the same turn
+                self._end_turn_meter()
                 self.end_wait()
                 self.call_from_thread(self._focus_input)
                 self.call_from_thread(self._drain_send_queue)
@@ -1447,8 +2598,20 @@ def _build_app_class():
                     if then_new and self.bridge:
                         self.update_wait("Opening new session…")
                         try:
+                            # Reset local turn/session state before asking agent for a new sid
+                            self._last_agent_reply = ""
+                            self._session_current_id = None
+                            self._send_queue.clear()
+                            self._stream_buf = ""
+                            self._reply_flushed = False
+                            self._session_out_tokens = 0
+                            self._turn_started_at = None
+                            self._turn_out_target = 0
+                            self._turn_out_display = 0
+                            self._last_turn_out = 0
+                            self._last_turn_elapsed = None
                             self.bridge.send_command("new_session")
-                            self.log_line("new session requested", style="system")
+                            self.log_line("New session started", style="system")
                         except Exception as e:
                             self.log_line(str(e), style="error")
                 else:
@@ -1507,6 +2670,8 @@ def _build_app_class():
                 self.log_line("Login required: /login", style="error")
                 return False
             self.agent = name
+            # Session project path = cmd cwd at TUI launch (before first turn)
+            self._sync_agent_cwd_from_launch(name)
             info = self._lookup_agent(name)
             if info and info.get("ready"):
                 self.update_wait(f"Connecting WebSocket to {name}…")
@@ -1556,13 +2721,18 @@ def _build_app_class():
                 lambda effort=e: self._on_reasoning_effort(effort)
             )
             self.bridge.on_context_compressed = lambda: self.call_from_thread(self._on_context_compressed)
-            self.bridge.on_side_chunk = lambda key, kind, title, text: self.call_from_thread(
-                lambda k=key, kd=kind, t=title, x=text: self._on_side_chunk(k, kd, t, x)
+            self.bridge.on_side_chunk = lambda key, kind, title, text, fresh=False: self.call_from_thread(
+                lambda k=key, kd=kind, t=title, x=text, f=fresh: self._on_side_chunk(k, kd, t, x, fresh=f)
             )
             self.bridge.on_side_summary = lambda s: self.call_from_thread(
                 lambda msg=s: self.log_line(msg, style="tool")
             )
             self.bridge.on_side_done = lambda key: self.call_from_thread(lambda k=key: self._on_side_done(k))
+            self.bridge.on_decision = lambda evt, data: self.call_from_thread(
+                lambda e=evt, d=data: self._on_bridge_decision(e, d if isinstance(d, dict) else {})
+            )
+            self.bridge.on_file_diff = lambda lines: self.log_file_diff(lines)
+            self.bridge.on_plan = lambda payload: self.log_plan_payload(payload)
             self._sync_status_from_agent(name)
             try:
                 # Longer retries: process may still be binding after ready=true
@@ -1592,9 +2762,30 @@ def _build_app_class():
                     self._token_max = int(data.get("max") or 0)
             except (TypeError, ValueError):
                 pass
+            # Session output cumulative — used only to finalize this-turn ↓ delta
+            session = data.get("session") if isinstance(data.get("session"), dict) else {}
+            try:
+                if session:
+                    sout = session.get("output_tokens")
+                    if sout is None:
+                        sout = session.get("total_output_tokens")
+                    if sout is not None:
+                        self._session_out_tokens = int(sout or 0)
+                        if getattr(self, "_turn_started_at", None) is not None:
+                            real = max(
+                                0,
+                                self._session_out_tokens - int(getattr(self, "_turn_baseline_out", 0) or 0),
+                            )
+                            # Raise target only — display keeps animating toward it
+                            if real > int(getattr(self, "_turn_out_target", 0) or 0):
+                                self._turn_out_target = real
+            except (TypeError, ValueError):
+                pass
             m = str(data.get("model") or "").strip()
-            if m and (not self._model_label or self._model_label == "—"):
-                self._model_label = self._pretty_model_label(self._model_card, m)
+            if m:
+                self._model_name = m
+                if not self._model_label or self._model_label == "—":
+                    self._model_label = self._pretty_model_label("", m)
             self._refresh_chrome()
 
         def _on_model_info(self, card: str | None, model: str | None) -> None:
@@ -1602,8 +2793,11 @@ def _build_app_class():
             m = str(model or "").strip()
             if c:
                 self._model_card = c
-            if c or m:
-                self._model_label = self._pretty_model_label(c, m)
+            if m:
+                self._model_name = m
+                # Prefer real model id/title over prov-* card slug
+                if not self._model_label or self._model_label == "—" or self._model_label.lower().startswith("prov"):
+                    self._model_label = self._pretty_model_label("", m)
             self._refresh_chrome()
 
         def _on_reasoning_effort(self, effort: str) -> None:
@@ -1634,6 +2828,7 @@ def _build_app_class():
             self.group = GroupBridge(self.client)
             self.group.muted = self.muted
             self.group.on_line = lambda t: self.log_line(t)
+            self.group.on_pending_cards = lambda: self.call_from_thread(self._open_group_pending_decision)
             try:
                 self.group.connect(gid, group_name=gname or gid, history_limit=15)
             except Exception as e:
@@ -1645,6 +2840,11 @@ def _build_app_class():
             self.log_line(f"Joined {gname} — mode=group (/leave to exit)", style="system")
             self._refresh_chrome()
             self._focus_input()
+            # Open picker if history already has pending cards
+            try:
+                self._open_group_pending_decision()
+            except Exception:
+                pass
 
         def leave_group(self) -> None:
             if self.group:
@@ -1782,16 +2982,25 @@ def _build_app_class():
             else:
                 self._open_live_side()
 
-        def _on_side_chunk(self, key: str, kind: str, title: str, text: str) -> None:
-            self._side_hub.append(key, text, kind=kind, title=title)
+        def _on_side_chunk(self, key: str, kind: str, title: str, text: str, *, fresh: bool = False) -> None:
+            self._side_hub.append(key, text, kind=kind, title=title, fresh=fresh)
             self._live_side_key = key
             self._refresh_chrome()
-            if getattr(self, "_live_side_open", False):
-                self._paint_live_side()
+            if not getattr(self, "_live_side_open", False):
+                return
+            # Throttle full repaint while tokens stream (avoid flicker / CPU spin)
+            now = time.monotonic()
+            if now - getattr(self, "_side_paint_at", 0.0) < 0.08 and not fresh:
+                return
+            self._side_paint_at = now
+            self._paint_live_side()
 
         def _on_side_done(self, key: str) -> None:
             self._side_hub.mark_done(key)
             self._refresh_chrome()
+            if getattr(self, "_live_side_open", False):
+                self._side_paint_at = 0.0
+                self._paint_live_side()
 
         def _open_live_side(self) -> None:
             stream = self._side_hub.get(self._live_side_key) or self._side_hub.get()
@@ -1881,50 +3090,79 @@ def _build_app_class():
                 self._refresh_chrome()
                 self._focus_input()
                 return
-            self.begin_wait("Saving model card…")
+            self.begin_wait("Connecting provider…")
             self._save_provider_card(provider, key)
+
+        def _reload_model_nav(self) -> None:
+            """Rebuild /model root menu (provider-grouped). Call from worker or UI thread."""
+            from opensquad.cli.tui.nav_menus import build_model_menu
+
+            try:
+                title, items = build_model_menu(
+                    self.client,
+                    self.agent,
+                    current_card=getattr(self, "_model_card", None) or "",
+                    current_model=getattr(self, "_model_name", None) or "",
+                )
+                self.call_from_thread(lambda: self._push_nav(title, items, replace=True))
+            except Exception as e:
+                self.log_line(f"[model] {e}", style="error")
+
+        def _current_model_name_hint(self) -> str:
+            return str(getattr(self, "_model_name", "") or "")
 
         @work(thread=True, group="nav-action")
         def _save_provider_card(self, provider: dict, api_key: str) -> None:
-            from opensquad.cli.tui.nav_menus import build_provider_model_menu
+            from opensquad.cli.tui.nav_menus import provider_card_name
 
             try:
                 models = list(provider.get("models") or [])
                 model = models[0] if models else {}
                 pid = str(provider.get("id") or "provider")
+                slug = provider_card_name(pid)
                 mn = str(model.get("model_name") or "default")
-                slug = f"{pid}-{mn}".replace("/", "-").replace(" ", "-").lower()
-                slug = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in slug)[:64]
-                card = {
-                    "name": slug,
-                    "title": str(model.get("title") or mn),
-                    "provider": str(provider.get("provider") or provider.get("label") or pid),
-                    "base_url": str(provider.get("base_url") or ""),
-                    "api_protocol": str(provider.get("api_protocol") or "openai_compat"),
-                    "api_key": api_key,
-                    "model_name": mn,
-                    "token_max": int(model.get("token_max") or 128000),
-                    "temperature": model.get("temperature", 0),
-                    "is_think": bool(model.get("is_think")),
-                    "is_image": bool(model.get("is_image")),
-                    "is_audio": bool(model.get("is_audio") or model.get("is_audio_output")),
-                }
+                # Keep existing card fields if reconnecting (except api_key / defaults)
+                existing: dict = {}
+                try:
+                    existing = (self.client.admin_get(f"model-cards/{slug}") or {}).get("card") or {}
+                except Exception:
+                    existing = {}
+                if not isinstance(existing, dict):
+                    existing = {}
+                card = dict(existing)
+                card.update(
+                    {
+                        "name": slug,
+                        "title": str(model.get("title") or existing.get("title") or mn),
+                        "provider": str(provider.get("provider") or provider.get("label") or pid),
+                        "base_url": str(provider.get("base_url") or ""),
+                        "api_protocol": str(provider.get("api_protocol") or "openai_compat"),
+                        "api_key": api_key,
+                        "model_name": str(existing.get("model_name") or mn),
+                        "token_max": int(existing.get("token_max") or model.get("token_max") or 128000),
+                        "temperature": existing.get("temperature", model.get("temperature", 0)),
+                        "is_think": bool(existing.get("is_think", model.get("is_think"))),
+                        "is_image": bool(existing.get("is_image", model.get("is_image"))),
+                        "is_audio": bool(
+                            existing.get(
+                                "is_audio",
+                                model.get("is_audio") or model.get("is_audio_output"),
+                            )
+                        ),
+                    }
+                )
                 self.client.admin_put(f"model-cards/{slug}", card)
                 masked = api_key[:4] + "…" if len(api_key) > 4 else "***"
-                self.log_line(f"Saved card '{slug}' (key {masked})", style="system")
-                if self.agent:
-                    body = dict(card)
-                    body["card_name"] = slug
-                    self.client.admin_put(f"agents/{self.agent}/model-card", body)
-                    if self.bridge and getattr(self.bridge, "is_open", False):
-                        try:
-                            self.bridge.send_command("switch_model", {"card": slug})
-                        except Exception:
-                            pass
-                    self._model_card = slug
-                    self._model_label = self._pretty_model_label(slug, str(card.get("title") or ""))
-                title, items = build_provider_model_menu(provider, card_name=slug)
-                self.call_from_thread(lambda: self._push_nav(title, items, replace=True))
+                plabel = provider.get("label") or provider.get("provider") or pid
+                self.log_line(
+                    f"Connected {plabel} (card '{slug}', key {masked}) — pick a model below",
+                    style="system",
+                )
+                self._model_card = slug
+                self._model_name = str(card.get("model_name") or "")
+                self._model_label = str(card.get("title") or card.get("model_name") or "")
+                self._model_provider_label = str(plabel)
+                self._reload_model_nav()
                 self.call_from_thread(self._refresh_chrome)
             except Exception as e:
                 self.log_line(f"[model] save failed: {e}", style="error")
@@ -1933,18 +3171,36 @@ def _build_app_class():
                 self.call_from_thread(self._focus_input)
 
         @work(thread=True, group="nav-action")
-        def _nav_provider_use_model(self, provider: dict, model: dict, card_name: str) -> None:
+        def _nav_provider_use_model(self, provider: dict, model: dict, card_name: str, key_card_name: str = "") -> None:
+            from opensquad.cli.tui.nav_menus import provider_card_name
+
             try:
                 pid = str(provider.get("id") or "provider")
                 mn = str(model.get("model_name") or "")
-                slug = (card_name or f"{pid}-{mn}").replace("/", "-")[:64]
-                # Load existing card to keep api_key
-                existing = {}
-                try:
-                    existing = (self.client.admin_get(f"model-cards/{slug}") or {}).get("card") or {}
-                except Exception:
+                slug = (card_name or provider_card_name(pid)).replace("/", "-")[:64]
+                # Load canonical card; fall back to legacy key_card for api_key
+                existing: dict = {}
+                try_names = [slug]
+                if key_card_name and key_card_name not in try_names:
+                    try_names.append(key_card_name)
+                legacy = f"{pid}-{mn}".replace("/", "-")
+                if legacy not in try_names:
+                    try_names.append(legacy)
+                for try_name in try_names:
+                    if not try_name:
+                        continue
+                    try:
+                        got = (self.client.admin_get(f"model-cards/{try_name}") or {}).get("card") or {}
+                        if isinstance(got, dict) and got.get("api_key"):
+                            existing = got
+                            break
+                        if isinstance(got, dict) and got and not existing:
+                            existing = got
+                    except Exception:
+                        pass
+                if not isinstance(existing, dict):
                     existing = {}
-                card = dict(existing) if isinstance(existing, dict) else {}
+                card = dict(existing)
                 card.update(
                     {
                         "name": slug,
@@ -1959,10 +3215,14 @@ def _build_app_class():
                         "temperature": model.get("temperature", card.get("temperature", 0)),
                         "is_think": bool(model.get("is_think")),
                         "is_image": bool(model.get("is_image")),
+                        "is_audio": bool(model.get("is_audio") or model.get("is_audio_output") or card.get("is_audio")),
                     }
                 )
                 if not card.get("api_key"):
-                    self.log_line("Card missing api_key — Connect provider again", style="error")
+                    self.log_line(
+                        f"No API key for {provider.get('label') or pid} — Connect a provider first",
+                        style="error",
+                    )
                     return
                 self.client.admin_put(f"model-cards/{slug}", card)
                 if self.agent:
@@ -1972,12 +3232,225 @@ def _build_app_class():
                     if self.bridge and getattr(self.bridge, "is_open", False):
                         self.bridge.send_command("switch_model", {"card": slug})
                 self._model_card = slug
-                self._model_label = self._pretty_model_label(slug, str(card.get("title") or mn))
-                self.log_line(f"Model → {card.get('title') or mn}", style="system")
+                self._model_name = mn
+                self._model_label = str(card.get("title") or mn)
+                self._model_provider_label = str(provider.get("label") or provider.get("provider") or pid)
+                plabel = self._model_provider_label
+                self.log_line(f"Model → {plabel} / {self._model_label}", style="system")
                 self.call_from_thread(self._hide_nav)
                 self.call_from_thread(self._refresh_chrome)
             except Exception as e:
                 self.log_line(f"[model] {e}", style="error")
+
+        def _nav_provider_show(self, provider: dict, model: dict, card_name: str) -> None:
+            pid = str(provider.get("id") or "")
+            plabel = str(provider.get("label") or provider.get("provider") or pid)
+            mn = str(model.get("model_name") or "")
+            title = str(model.get("title") or mn)
+            lines = [
+                f"Model: {title}",
+                f"  model_name: {mn}",
+                f"  provider: {plabel}",
+                f"  card: {card_name or '—'}",
+                f"  base_url: {provider.get('base_url') or '—'}",
+                f"  api_protocol: {provider.get('api_protocol') or '—'}",
+                f"  token_max: {model.get('token_max') or '—'}",
+                f"  temperature: {model.get('temperature', 0)}",
+                f"  is_think: {bool(model.get('is_think'))}",
+                f"  is_image: {bool(model.get('is_image'))}",
+            ]
+            self.log_line("[model] info", style="system")
+            for line in lines:
+                self.log_line(line, style="system")
+            self._focus_input()
+
+        def _nav_provider_edit_field(self, data: dict[str, Any]) -> None:
+            field = str(data.get("field") or "").strip()
+            if not field:
+                return
+            # Keep nav visible underneath; capture next Enter as value
+            self._await_model_field = dict(data)
+            self._await_model_field["mode"] = "provider"
+            self.log_line(f"Enter new value for {field} then Enter (Esc cancel)", style="system")
+            self._refresh_chrome()
+            self._focus_input()
+
+        def _nav_card_edit_field(self, data: dict[str, Any]) -> None:
+            field = str(data.get("field") or "").strip()
+            if not field:
+                return
+            self._await_model_field = dict(data)
+            self._await_model_field["mode"] = "card"
+            self.log_line(f"Enter new value for {field} then Enter (Esc cancel)", style="system")
+            self._refresh_chrome()
+            self._focus_input()
+
+        def _finish_model_field_edit(self, pending: dict, value: str) -> None:
+            field = str(pending.get("field") or "")
+            raw = (value or "").strip()
+            if not field or not raw:
+                self.log_line("Empty value — cancelled", style="system")
+                self._refresh_chrome()
+                self._focus_input()
+                return
+            mode = pending.get("mode") or "provider"
+            if mode == "card":
+                self._apply_card_field(str(pending.get("name") or ""), field, raw)
+            else:
+                self._apply_provider_model_field(pending, field, raw)
+
+        @work(thread=True, group="nav-action")
+        def _apply_provider_model_field(self, pending: dict, field: str, raw: str) -> None:
+            from opensquad.cli.tui.nav_menus import provider_card_name
+
+            try:
+                provider = pending.get("provider") or {}
+                model = dict(pending.get("model") or {})
+                pid = str(provider.get("id") or "provider")
+                slug = str(pending.get("card_name") or provider_card_name(pid))
+                key_card = str(pending.get("key_card_name") or slug)
+                existing: dict = {}
+                for try_name in (slug, key_card):
+                    try:
+                        got = (self.client.admin_get(f"model-cards/{try_name}") or {}).get("card") or {}
+                        if isinstance(got, dict) and got:
+                            existing = got
+                            if got.get("api_key"):
+                                break
+                    except Exception:
+                        pass
+                card = dict(existing) if isinstance(existing, dict) else {}
+                # Seed from preset model then overlay edit
+                mn = str(model.get("model_name") or card.get("model_name") or "default")
+                card.setdefault("name", slug)
+                card.setdefault("model_name", mn)
+                card.setdefault(
+                    "provider",
+                    str(provider.get("provider") or provider.get("label") or pid),
+                )
+                card.setdefault("base_url", str(provider.get("base_url") or ""))
+                card.setdefault(
+                    "api_protocol",
+                    str(provider.get("api_protocol") or "openai_compat"),
+                )
+                card.setdefault("title", str(model.get("title") or mn))
+                parsed: Any = raw
+                if field in ("temperature",):
+                    parsed = float(raw)
+                elif field in ("token_max",):
+                    parsed = int(float(raw))
+                elif field.startswith("is_"):
+                    parsed = raw.lower() in ("1", "true", "yes", "on")
+                card[field] = parsed
+                # Also reflect onto in-memory model for menu refresh
+                model[field] = parsed
+                if not card.get("api_key"):
+                    self.log_line("No API key on card — Connect provider first", style="error")
+                    return
+                self.client.admin_put(f"model-cards/{slug}", card)
+                self.log_line(f"Updated {field} = {parsed} on '{slug}'", style="system")
+                # Refresh L3 menu details
+                from opensquad.cli.tui.nav_menus import _provider_model_edit_menu
+
+                title = f"Edit · {card.get('title') or mn}"
+                items = _provider_model_edit_menu(provider, model, slug, key_card)
+                self.call_from_thread(lambda: self._push_nav(title, items, replace=True))
+                self.call_from_thread(self._refresh_chrome)
+            except Exception as e:
+                self.log_line(f"[model] edit failed: {e}", style="error")
+            finally:
+                self.call_from_thread(self._focus_input)
+
+        @work(thread=True, group="nav-action")
+        def _apply_card_field(self, name: str, field: str, raw: str) -> None:
+            if not name:
+                return
+            try:
+                existing = (self.client.admin_get(f"model-cards/{name}") or {}).get("card") or {}
+                card = dict(existing) if isinstance(existing, dict) else {"name": name}
+                parsed: Any = raw
+                if field in ("temperature",):
+                    parsed = float(raw)
+                elif field in ("token_max",):
+                    parsed = int(float(raw))
+                elif field.startswith("is_"):
+                    parsed = raw.lower() in ("1", "true", "yes", "on")
+                card[field] = parsed
+                self.client.admin_put(f"model-cards/{name}", card)
+                self.log_line(f"Updated {field} = {parsed} on '{name}'", style="system")
+                self.call_from_thread(self._refresh_chrome)
+            except Exception as e:
+                self.log_line(f"[model] edit failed: {e}", style="error")
+            finally:
+                self.call_from_thread(self._focus_input)
+
+        @work(thread=True, group="nav-action")
+        def _nav_provider_toggle_field(self, data: dict[str, Any]) -> None:
+            from opensquad.cli.tui.nav_menus import _provider_model_edit_menu, provider_card_name
+
+            try:
+                field = str(data.get("field") or "")
+                if not field.startswith("is_"):
+                    return
+                provider = data.get("provider") or {}
+                model = dict(data.get("model") or {})
+                pid = str(provider.get("id") or "provider")
+                slug = str(data.get("card_name") or provider_card_name(pid))
+                key_card = str(data.get("key_card_name") or slug)
+                existing: dict = {}
+                for try_name in (slug, key_card):
+                    try:
+                        got = (self.client.admin_get(f"model-cards/{try_name}") or {}).get("card") or {}
+                        if isinstance(got, dict) and got:
+                            existing = got
+                            if got.get("api_key"):
+                                break
+                    except Exception:
+                        pass
+                card = dict(existing) if isinstance(existing, dict) else {}
+                mn = str(model.get("model_name") or card.get("model_name") or "default")
+                card.setdefault("name", slug)
+                card.setdefault("model_name", mn)
+                card.setdefault(
+                    "provider",
+                    str(provider.get("provider") or provider.get("label") or pid),
+                )
+                card.setdefault("base_url", str(provider.get("base_url") or ""))
+                card.setdefault("title", str(model.get("title") or mn))
+                new_val = not bool(card.get(field, model.get(field)))
+                card[field] = new_val
+                model[field] = new_val
+                if not card.get("api_key"):
+                    # Allow toggling preset defaults into a new card only if key exists
+                    self.log_line("No API key — Connect provider first", style="error")
+                    return
+                self.client.admin_put(f"model-cards/{slug}", card)
+                self.log_line(f"Toggled {field} → {'on' if new_val else 'off'}", style="system")
+                title = f"Edit · {card.get('title') or mn}"
+                items = _provider_model_edit_menu(provider, model, slug, key_card)
+                self.call_from_thread(lambda: self._push_nav(title, items, replace=True))
+            except Exception as e:
+                self.log_line(f"[model] {e}", style="error")
+            finally:
+                self.call_from_thread(self._focus_input)
+
+        @work(thread=True, group="nav-action")
+        def _nav_card_toggle_field(self, data: dict[str, Any]) -> None:
+            name = str(data.get("name") or "")
+            field = str(data.get("field") or "")
+            if not name or not field.startswith("is_"):
+                return
+            try:
+                existing = (self.client.admin_get(f"model-cards/{name}") or {}).get("card") or {}
+                card = dict(existing) if isinstance(existing, dict) else {"name": name}
+                new_val = not bool(card.get(field))
+                card[field] = new_val
+                self.client.admin_put(f"model-cards/{name}", card)
+                self.log_line(f"Toggled {field} → {'on' if new_val else 'off'}", style="system")
+            except Exception as e:
+                self.log_line(f"[model] {e}", style="error")
+            finally:
+                self.call_from_thread(self._focus_input)
 
         @work(thread=True, group="nav-load")
         def _load_nav_kind(self, kind: str) -> None:
@@ -1994,7 +3467,12 @@ def _build_app_class():
 
             try:
                 if kind == "model":
-                    title, items = build_model_menu(self.client, self.agent)
+                    title, items = build_model_menu(
+                        self.client,
+                        self.agent,
+                        current_card=getattr(self, "_model_card", None) or "",
+                        current_model=getattr(self, "_model_name", None) or self._current_model_name_hint(),
+                    )
                 elif kind == "skill":
                     title, items = build_skill_menu(self.client)
                 elif kind == "role":
@@ -2109,7 +3587,8 @@ def _build_app_class():
             item = items[idx]
             children = getattr(item, "children", None)
             if children:
-                self._push_nav(str(item.label), list(children), replace=False)
+                label = str(getattr(item, "label", "") or "").strip()
+                self._push_nav(label, list(children), replace=False)
                 return
             action = getattr(item, "action", None)
             data = dict(getattr(item, "data", None) or {})
@@ -2140,7 +3619,22 @@ def _build_app_class():
                         data.get("provider") or {},
                         data.get("model") or {},
                         str(data.get("card_name") or ""),
+                        str(data.get("key_card_name") or ""),
                     )
+                elif action == "model.provider_show":
+                    self._nav_provider_show(
+                        data.get("provider") or {},
+                        data.get("model") or {},
+                        str(data.get("card_name") or ""),
+                    )
+                elif action == "model.provider_edit_field":
+                    self._nav_provider_edit_field(data)
+                elif action == "model.provider_toggle_field":
+                    self._nav_provider_toggle_field(data)
+                elif action == "model.card_edit_field":
+                    self._nav_card_edit_field(data)
+                elif action == "model.card_toggle_field":
+                    self._nav_card_toggle_field(data)
                 elif action == "theme.apply":
                     self.apply_theme(str(data.get("name") or ""))
                 elif action == "skill.show":
@@ -2204,7 +3698,9 @@ def _build_app_class():
                 title = ""
                 if isinstance(card, dict):
                     title = str(card.get("title") or card.get("display_name") or "").strip()
-                self._model_label = title or self._pretty_model_label(name)
+                    self._model_name = str(card.get("model_name") or "")
+                    self._model_provider_label = str(card.get("provider") or "").strip()
+                self._model_label = title or self._pretty_model_label("", self._model_name)
                 self.log_line(f"Model '{name}' → agent '{self.agent}'", style="system")
                 self.call_from_thread(self._hide_nav)
                 self.call_from_thread(self._refresh_chrome)

@@ -7,7 +7,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-APPROVAL_RE = re.compile(r"\[\[GROUP_APPROVAL\]\](.*?)\[\[/GROUP_APPROVAL\]\]", re.DOTALL)
+APPROVAL_RE = re.compile(
+    r"\[\[(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\](.*?)\[\[/(?:GROUP_APPROVAL|COLLAB_APPROVAL)\]\]",
+    re.DOTALL,
+)
 PROPOSE_RE = re.compile(r"\[\[PROPOSE_OPTIONS\]\](.*?)\[\[/PROPOSE_OPTIONS\]\]", re.DOTALL)
 
 
@@ -72,17 +75,25 @@ def parse_proposals(content: str, *, group_id: str = "", message_id: str = "") -
         if not isinstance(payload, dict):
             continue
         options: list[tuple[str, str]] = []
-        for opt in payload.get("options") or []:
+        for i, opt in enumerate(payload.get("options") or []):
             if isinstance(opt, dict):
-                label = str(opt.get("label") or opt.get("text") or opt.get("value") or opt)
-                value = str(opt.get("value") or label)
+                # Web / agent payload uses id+title; older CLI used label/value
+                label = str(
+                    opt.get("title")
+                    or opt.get("label")
+                    or opt.get("text")
+                    or opt.get("name")
+                    or opt.get("value")
+                    or opt
+                )
+                value = str(opt.get("id") or opt.get("value") or label or f"opt_{i + 1}")
             else:
                 label = value = str(opt)
             options.append((label, value))
         out.append(
             PendingProposal(
                 id=str(payload.get("id") or ""),
-                title=str(payload.get("title") or payload.get("prompt") or "options"),
+                title=str(payload.get("prompt") or payload.get("title") or "options"),
                 options=options,
                 group_id=group_id or str(payload.get("group_id") or ""),
                 message_id=message_id,

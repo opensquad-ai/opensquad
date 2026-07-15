@@ -610,9 +610,20 @@ class AgentBridge:
         self.on_reasoning_effort: Any = None  # Callable[[str], None] — low|medium|high
         self.on_context_compressed: Any = None  # Callable[[], None] — clear TUI after compress
         # Side streams (sub-agent / shell) — do not dump into main chat
-        self.on_side_chunk: Any = None  # Callable[[str, str, str, str], None] key,kind,title,text
+        self.on_side_chunk: Any = None  # Callable[[str, str, str, str], None] or with fresh kw
         self.on_side_summary: Any = None  # Callable[[str], None] — one-line main chat summary
         self.on_side_done: Any = None  # Callable[[str], None] — key done
+        # Decision cards (propose_options / mode_switch_approval) — TUI picker
+        self.on_decision: Any = None  # Callable[[str, dict], None] — event name + payload
+        # File edit diffs (OpenCode-style) — Callable[[list[str]], None] Rich markup lines
+        self.on_file_diff: Any = None
+        # Plan / Todos (OpenCode-style) — Callable[[Any], None] raw WS payload
+        self.on_plan: Any = None
+        # call_ids that already painted a diff from tool_call (avoid double on result)
+        self._file_diff_painted: set[str] = set()
+        # Per-side-channel section state (coalesce tokens; start new blocks cleanly)
+        self._side_thought_open: set[str] = set()
+        self._side_reply_open: set[str] = set()
 
     def _emit(self, text: str) -> None:
         if self.on_line:
@@ -634,6 +645,77 @@ class AgentBridge:
 
         sys.stdout.write(chunk)
         sys.stdout.flush()
+
+    def _emit_file_diff_lines(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        if self.on_file_diff:
+            try:
+                self.on_file_diff(lines)
+                return
+            except Exception:
+                pass
+        for line in lines:
+            self._emit(line)
+
+    def _try_emit_file_diff(self, payload: Any, *, phase: str) -> bool:
+        """Paint OpenCode-style file edit/write diff. Returns True if handled."""
+        if not isinstance(payload, dict):
+            return False
+        try:
+            from opensquad.cli.tui.file_diff import is_file_edit_tool, markup_from_event_payload, parse_tool_args
+        except Exception:
+            return False
+
+        name = str(payload.get("name") or payload.get("tool") or "")
+        args = parse_tool_args(payload.get("args") or payload.get("arguments") or {})
+        if not is_file_edit_tool(name, args):
+            return False
+
+        call_id = str(payload.get("id") or "")
+        painted = bool(call_id and call_id in self._file_diff_painted)
+
+        # Result already shown from args, and no server-expanded context → skip ✓
+        if phase == "result" and painted:
+            if payload.get("diff_old") is None or payload.get("diff_new") is None:
+                return True
+
+        lines = markup_from_event_payload(payload, phase=phase)
+        if not lines:
+            return False
+
+        self._emit_file_diff_lines(lines)
+        if call_id:
+            self._file_diff_painted.add(call_id)
+            if len(self._file_diff_painted) > 200:
+                self._file_diff_painted.clear()
+        return True
+
+    def _try_emit_plan(self, payload: Any) -> bool:
+        try:
+            from opensquad.cli.tui.plan_block import markup_from_plan_payload, parse_plan_content
+        except Exception:
+            return False
+        # Prefer TUI callback with raw payload (theme-aware render in app)
+        if self.on_plan:
+            try:
+                content = payload
+                if isinstance(payload, dict):
+                    content = (
+                        payload.get("text") or payload.get("content") or payload.get("plan") or payload.get("steps")
+                    )
+                if not parse_plan_content(content):
+                    return False
+                self.on_plan(payload)
+                return True
+            except Exception:
+                pass
+        lines = markup_from_plan_payload(payload)
+        if not lines:
+            return False
+        for line in lines:
+            self._emit(line)
+        return True
 
     @property
     def is_open(self) -> bool:
@@ -825,7 +907,23 @@ class AgentBridge:
             if not text:
                 return
             if _payload_is_sub(payload):
-                self._side_emit(payload, text, kind="sub")
+                key, _title = _side_key(payload if isinstance(payload, dict) else {}, default="sub")
+                if key not in self._side_thought_open:
+                    self._side_thought_open.add(key)
+                    self._side_reply_open.discard(key)
+                    self._side_emit(
+                        payload if isinstance(payload, dict) else {},
+                        f"Thinking: {text}",
+                        kind="sub",
+                        fresh=True,
+                    )
+                else:
+                    self._side_emit(
+                        payload if isinstance(payload, dict) else {},
+                        text,
+                        kind="sub",
+                        fresh=False,
+                    )
                 return
             if not self._thought_open:
                 self._thought_open = True
@@ -846,7 +944,17 @@ class AgentBridge:
             if _payload_is_sub(payload):
                 text = payload if isinstance(payload, str) else _extract_text(payload) or str(payload or "")
                 if text:
-                    self._side_emit(payload if isinstance(payload, dict) else {}, text, kind="sub")
+                    key, _title = _side_key(payload if isinstance(payload, dict) else {}, default="sub")
+                    fresh = key not in self._side_reply_open
+                    if fresh:
+                        self._side_reply_open.add(key)
+                        self._side_thought_open.discard(key)
+                    self._side_emit(
+                        payload if isinstance(payload, dict) else {},
+                        text,
+                        kind="sub",
+                        fresh=fresh,
+                    )
                 return
             self._finish_thought_line()
             text = payload if isinstance(payload, str) else str(payload or "")
@@ -860,7 +968,17 @@ class AgentBridge:
             if _payload_is_sub(payload):
                 text = _extract_text(payload) or ""
                 if text:
-                    self._side_emit(payload if isinstance(payload, dict) else {}, text, kind="sub")
+                    key, _title = _side_key(payload if isinstance(payload, dict) else {}, default="sub")
+                    # Final message may duplicate streamed tokens — only emit if not streaming
+                    if key not in self._side_reply_open:
+                        self._side_emit(
+                            payload if isinstance(payload, dict) else {},
+                            text,
+                            kind="sub",
+                            fresh=True,
+                        )
+                    self._side_reply_open.discard(key)
+                    self._side_thought_open.discard(key)
                 return
             self._finish_thought_line()
             text = _extract_text(payload) or self._stream_acc
@@ -869,6 +987,7 @@ class AgentBridge:
             if self._streaming and self.on_stream and not self.on_line:
                 self._emit_stream("\n")
             elif text:
+                # TUI sets both on_stream + on_line: on_line flushes stream once; dedup drops reprints.
                 self._emit(text)
             elif self._streaming and not self.on_line:
                 self._emit_stream("\n")
@@ -895,7 +1014,14 @@ class AgentBridge:
 
         if mtype == "propose_options":
             self._finish_thought_line()
-            _print_propose_list(payload, self._emit)
+            data = payload if isinstance(payload, dict) else {}
+            if self.on_decision and isinstance(data, dict):
+                try:
+                    self.on_decision("propose_options", data)
+                except Exception:
+                    _print_propose_list(payload, self._emit)
+            else:
+                _print_propose_list(payload, self._emit)
             return
 
         if mtype == "tool_call":
@@ -906,7 +1032,11 @@ class AgentBridge:
                     payload if isinstance(payload, dict) else {},
                     f"⚙ {name}({args_preview})",
                     kind="sub",
+                    fresh=True,
                 )
+                key, _t = _side_key(payload if isinstance(payload, dict) else {}, default="sub")
+                self._side_thought_open.discard(key)
+                self._side_reply_open.discard(key)
                 return
             from opensquad.cli.tui.side_stream import is_delegate_tool, is_shell_tool
 
@@ -929,7 +1059,12 @@ class AgentBridge:
                 key = f"sub:{task[:40] or name}"
                 if self.on_side_chunk:
                     try:
-                        self.on_side_chunk(key, "sub", task or str(name), f"— started {name} —")
+                        self.on_side_chunk(key, "sub", task or str(name), f"— started {name} —\n", True)
+                    except TypeError:
+                        try:
+                            self.on_side_chunk(key, "sub", task or str(name), f"— started {name} —\n")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 return
@@ -950,9 +1085,17 @@ class AgentBridge:
                 key = f"shell:{cmd[:40] or name}"
                 if self.on_side_chunk:
                     try:
-                        self.on_side_chunk(key, "shell", cmd or str(name), f"— started {name} —")
+                        self.on_side_chunk(key, "shell", cmd or str(name), f"— started {name} —\n", True)
+                    except TypeError:
+                        try:
+                            self.on_side_chunk(key, "shell", cmd or str(name), f"— started {name} —\n")
+                        except Exception:
+                            pass
                     except Exception:
                         pass
+                return
+            # File edit/write → OpenCode-style unified diff (from args preview)
+            if self._try_emit_file_diff(payload, phase="call"):
                 return
             self._emit(f"  ⚙ {name}({args_preview})")
             return
@@ -963,9 +1106,13 @@ class AgentBridge:
                 if text:
                     self._side_emit(
                         payload if isinstance(payload, dict) else {},
-                        f"✓ {text.replace(chr(10), ' ')[:200]}",
+                        f"✓ {text.replace(chr(10), ' ')[:200]}\n",
                         kind="sub",
+                        fresh=True,
                     )
+                    key, _t = _side_key(payload if isinstance(payload, dict) else {}, default="sub")
+                    self._side_thought_open.discard(key)
+                    self._side_reply_open.discard(key)
                 return
             text = _extract_text(payload)
             name = ""
@@ -986,8 +1133,20 @@ class AgentBridge:
                 else:
                     self._emit(summary)
                 return
+            # Prefer server diff_* on result; skip short ✓ if we already painted at call
+            if self._try_emit_file_diff(payload, phase="result"):
+                return
             if text:
                 self._emit(f"  ✓ {text.replace(chr(10), ' ')[:100]}")
+            return
+
+        if mtype == "plan":
+            if self._try_emit_plan(payload):
+                return
+            # Fallback: show raw plan text if parse failed
+            text = _extract_text(payload)
+            if text:
+                self._emit(f"  · Plan: {text.replace(chr(10), ' ')[:120]}")
             return
 
         if mtype == "job_stdout":
@@ -1050,6 +1209,33 @@ class AgentBridge:
                     self.on_agent_mode(str(mode))
                 except Exception:
                     pass
+            # Decision cards for TUI (same payloads as Web OptionsApprovalCard / ModeSwitchApprovalCard)
+            if (
+                evt
+                in (
+                    "propose_options",
+                    "propose_options_resolved",
+                    "mode_switch_approval",
+                    "mode_switch_resolved",
+                )
+                and self.on_decision
+            ):
+                try:
+                    self.on_decision(evt, data)
+                except Exception:
+                    if evt == "propose_options":
+                        _print_propose_list(data, self._emit)
+                    elif evt == "mode_switch_approval":
+                        self._emit(
+                            f"★ MODE SWITCH {data.get('from_mode')} → {data.get('to_mode')} (id={data.get('id')})"
+                        )
+            elif evt == "propose_options":
+                _print_propose_list(data, self._emit)
+            elif evt == "mode_switch_approval":
+                self._emit(
+                    f"★ MODE SWITCH {data.get('from_mode')} → {data.get('to_mode')} "
+                    f"— Approve/Deny (id={data.get('id')})"
+                )
             if evt == "model_card_switched" and self.on_model_info:
                 try:
                     self.on_model_info(data.get("card"), data.get("model"))
@@ -1105,12 +1291,18 @@ class AgentBridge:
                     pass
             return
 
-    def _side_emit(self, payload: dict, text: str, *, kind: str) -> None:
+    def _side_emit(self, payload: dict, text: str, *, kind: str, fresh: bool = False) -> None:
         key, title = _side_key(payload if isinstance(payload, dict) else {}, default=kind)
         if self.on_side_chunk:
             try:
-                self.on_side_chunk(key, kind, title, text)
+                self.on_side_chunk(key, kind, title, text, fresh)
                 return
+            except TypeError:
+                try:
+                    self.on_side_chunk(key, kind, title, text)
+                    return
+                except Exception:
+                    pass
             except Exception:
                 pass
         # fallback: do not spam main chat

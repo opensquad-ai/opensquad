@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 
 from opensquad import bus
@@ -417,6 +418,8 @@ class GatewayAdapter(BaseAgent):
     async def on_runner_output(self, data):
         """When Runner finishes a reply (final text response; content should be a string)."""
         logger.info(f"[GatewayAdapter] on_runner_output called, connected={self.connected}, data={str(data)[:200]}")
+        # Flush any pending stream debounce so clients don't keep a truncated preview.
+        await self._flush_stream_buffer_now()
         if self.connected:
             sid = self._extract_sid(data)
             content = self._unwrap(data)
@@ -433,6 +436,7 @@ class GatewayAdapter(BaseAgent):
     async def on_runner_end_task(self, data):
         """Complex-task final report — distinct WS type so the UI can fold the process."""
         logger.info(f"[GatewayAdapter] on_runner_end_task called, connected={self.connected}, data={str(data)[:200]}")
+        await self._flush_stream_buffer_now()
         if not self.connected:
             logger.warning("[GatewayAdapter] on_runner_end_task called but not connected, discarding response")
             return
@@ -478,20 +482,35 @@ class GatewayAdapter(BaseAgent):
 
     async def _flush_stream_buffer(self):
         """Wait 30ms then send all buffered chunks merged into one frame."""
-        await asyncio.sleep(0.03)
+        try:
+            await asyncio.sleep(0.03)
+        except asyncio.CancelledError:
+            return
+        await self._emit_stream_buffer()
+
+    async def _flush_stream_buffer_now(self) -> None:
+        """Immediately flush pending stream chunks (cancel debounce timer if any)."""
+        task = getattr(self, "_stream_flush_task", None)
+        current = asyncio.current_task()
+        if task is not None and not task.done() and task is not current:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._stream_flush_task = None
+        await self._emit_stream_buffer()
+
+    async def _emit_stream_buffer(self) -> None:
+        """Send and clear whatever is currently in the stream debounce buffer."""
         if not self._stream_buffer:
             return
-        # Take and clear the buffer
         chunks = self._stream_buffer[:]
         self._stream_buffer.clear()
         sid = self._stream_sid
-        # Merge string chunks (non-string content is not merged, sent individually)
         combined = "".join(c for c in chunks if isinstance(c, str))
-        if combined:
+        if combined and self.connected:
             await self._send_event(combined, "stream", sid=sid)
-        # Non-string chunks (theoretically non-existent; handled as safety net)
         for c in chunks:
-            if not isinstance(c, str):
+            if not isinstance(c, str) and self.connected:
                 await self._send_event(c, "stream", sid=sid)
 
     async def on_tool_call(self, data):

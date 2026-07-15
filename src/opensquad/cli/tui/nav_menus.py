@@ -37,38 +37,6 @@ def _back_item() -> NavItem:
 # ── builders (sync; call from worker threads) ─────────────────────────────
 
 
-def build_model_menu(client: Any, agent: str | None) -> tuple[str, list[NavItem]]:
-    data = client.admin_get("model-cards")
-    cards = data.get("cards") or []
-    items: list[NavItem] = [
-        NavItem(
-            id="__connect__",
-            label="Connect a provider…",
-            detail="API key only · auto defaults",
-            action="model.connect_providers",
-        )
-    ]
-    for c in cards:
-        name = str(c.get("name") or "")
-        title = str(c.get("title") or "")
-        model = str(c.get("model_name") or "")
-        provider = str(c.get("provider") or "")
-        detail = " · ".join(x for x in (title or model, provider) if x)
-        items.append(
-            NavItem(
-                id=name,
-                label=name,
-                detail=detail,
-                data={"card": c, "name": name},
-                children=_model_card_actions(name, agent),
-            )
-        )
-    if len(items) == 1:
-        items.append(NavItem(id="__empty__", label="(no model cards yet)", detail="", action="nav.noop"))
-    title = f"Model cards · {agent or '—'}"
-    return title, items
-
-
 _POPULAR_PROVIDER_IDS = (
     "deepseek",
     "openai",
@@ -81,20 +49,218 @@ _POPULAR_PROVIDER_IDS = (
 )
 
 
-def build_provider_menu(client: Any) -> tuple[str, list[NavItem]]:
+def provider_card_name(provider_id: str) -> str:
+    """Canonical model-card name for a connected provider (one card, many models)."""
+    pid = (provider_id or "provider").strip().lower()
+    pid = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in pid)[:48]
+    return f"prov-{pid}"
+
+
+def _norm(s: Any) -> str:
+    return str(s or "").strip().lower()
+
+
+def _provider_aliases(preset: dict[str, Any]) -> set[str]:
+    pid = _norm(preset.get("id"))
+    labels = {
+        pid,
+        _norm(preset.get("label")),
+        _norm(preset.get("provider")),
+    }
+    return {x for x in labels if x}
+
+
+def _card_matches_provider(card: dict[str, Any], preset: dict[str, Any]) -> bool:
+    """True if this model-card belongs to the preset provider."""
+    pid = _norm(preset.get("id"))
+    name = _norm(card.get("name"))
+    if not pid:
+        return False
+    if name == _norm(provider_card_name(pid)) or name.startswith(f"prov-{pid}"):
+        return True
+    if name.startswith(f"{pid}-") or name.startswith(f"{pid}_"):
+        return True
+    aliases = _provider_aliases(preset)
+    return _norm(card.get("provider")) in aliases
+
+
+def _sort_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    popular = [p for p in providers if _norm(p.get("id")) in _POPULAR_PROVIDER_IDS]
+    other = [p for p in providers if _norm(p.get("id")) not in _POPULAR_PROVIDER_IDS]
+    popular.sort(
+        key=lambda p: (
+            _POPULAR_PROVIDER_IDS.index(_norm(p.get("id"))) if _norm(p.get("id")) in _POPULAR_PROVIDER_IDS else 99
+        )
+    )
+    other.sort(key=lambda p: _norm(p.get("label") or p.get("id")))
+    return popular + other
+
+
+def build_model_menu(
+    client: Any,
+    agent: str | None,
+    *,
+    current_card: str | None = None,
+    current_model: str | None = None,
+) -> tuple[str, list[NavItem]]:
+    """Provider-grouped model picker.
+
+    Layout:
+      Connect a provider…
+      — DeepSeek —
+        deepseek-v4-flash *
+        deepseek-v4-pro
+      — OpenCode —
+        …
+
+    Only providers with at least one saved model-card (API key) are expanded.
+    Selecting a model switches via the provider's shared card ``prov-{id}``.
+    """
+    cards = list((client.admin_get("model-cards") or {}).get("cards") or [])
+    try:
+        presets = list((client.ai_web_get("model-presets") or {}).get("providers") or [])
+    except Exception:
+        presets = []
+
+    cur_card = _norm(current_card)
+    cur_model = _norm(current_model)
+    # Infer current model_name from cards list when only card name is known
+    if cur_card and not cur_model:
+        for c in cards:
+            if _norm(c.get("name")) == cur_card:
+                cur_model = _norm(c.get("model_name"))
+                break
+
+    items: list[NavItem] = [
+        NavItem(
+            id="__connect__",
+            label="Connect a provider…",
+            detail="paste API key · then pick models",
+            action="model.connect_providers",
+        )
+    ]
+
+    connected: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    matched_names: set[str] = set()
+    for p in _sort_providers(presets):
+        matched = [c for c in cards if _card_matches_provider(c, p)]
+        if matched:
+            connected.append((p, matched))
+            matched_names.update(_norm(c.get("name")) for c in matched)
+
+    for preset, matched in connected:
+        pid = str(preset.get("id") or "")
+        label = str(preset.get("label") or preset.get("provider") or pid)
+        card_slug = provider_card_name(pid)
+        # Prefer canonical card for key reuse; else any matched card name
+        key_card = next((c for c in matched if _norm(c.get("name")) == _norm(card_slug)), matched[0])
+        key_card_name = str(key_card.get("name") or card_slug)
+
+        items.append(
+            NavItem(
+                id=f"__h_{pid}__",
+                label=f"— {label} —",
+                detail=f"{len(preset.get('models') or [])} models",
+                action="nav.noop",
+            )
+        )
+        models = list(preset.get("models") or [])
+        if not models:
+            items.append(NavItem(id=f"__empty_{pid}__", label="  (no models in preset)", action="nav.noop"))
+            continue
+        for m in models:
+            mn = str(m.get("model_name") or m.get("id") or "")
+            title = str(m.get("title") or mn)
+            think = "think" if m.get("is_think") else ""
+            tok = m.get("token_max") or ""
+            detail = " · ".join(str(x) for x in (think, f"ctx {tok}" if tok else "") if x)
+            owns_current = bool(cur_card) and (
+                cur_card == _norm(card_slug) or any(_norm(c.get("name")) == cur_card for c in matched)
+            )
+            mark = "*" if owns_current and cur_model == _norm(mn) else " "
+            items.append(
+                NavItem(
+                    id=f"{pid}::{mn}",
+                    label=f"  {title[:42]}",
+                    detail=detail,
+                    mark=mark,
+                    data={
+                        "provider": preset,
+                        "model": m,
+                        "card_name": card_slug,
+                        "key_card_name": key_card_name,
+                    },
+                    children=_provider_model_actions(preset, m, card_slug, key_card_name, agent),
+                )
+            )
+
+    # Orphan / custom cards not mapped to a preset
+    orphans = [c for c in cards if _norm(c.get("name")) not in matched_names]
+    if orphans:
+        items.append(NavItem(id="__h_custom__", label="— Custom cards —", detail="", action="nav.noop"))
+        for c in orphans:
+            name = str(c.get("name") or "")
+            title = str(c.get("title") or "")
+            model = str(c.get("model_name") or "")
+            provider = str(c.get("provider") or "")
+            detail = " · ".join(x for x in (title or model, provider) if x)
+            mark = "*" if cur_card and _norm(name) == cur_card else " "
+            items.append(
+                NavItem(
+                    id=name,
+                    label=f"  {name}",
+                    detail=detail,
+                    mark=mark,
+                    data={"card": c, "name": name},
+                    children=_model_card_actions(name, agent),
+                )
+            )
+
+    if len(items) == 1:
+        items.append(
+            NavItem(
+                id="__empty__",
+                label="(no providers yet — Connect a provider…)",
+                detail="",
+                action="nav.noop",
+            )
+        )
+    title = f"Models · {agent or '—'}"
+    return title, items
+
+
+def build_provider_menu(client: Any, *, connected_ids: set[str] | None = None) -> tuple[str, list[NavItem]]:
     """Connect-a-provider list from model-presets."""
     data = client.ai_web_get("model-presets")
     providers = list(data.get("providers") or [])
+    connected_ids = {_norm(x) for x in (connected_ids or set())}
+    if not connected_ids:
+        # Infer from existing cards
+        try:
+            cards = list((client.admin_get("model-cards") or {}).get("cards") or [])
+            for p in providers:
+                if any(_card_matches_provider(c, p) for c in cards):
+                    connected_ids.add(_norm(p.get("id")))
+        except Exception:
+            pass
+
     popular: list[NavItem] = []
     other: list[NavItem] = []
     for p in providers:
         pid = str(p.get("id") or "")
         label = str(p.get("label") or p.get("provider") or pid)
         n_models = len(p.get("models") or [])
+        already = _norm(pid) in connected_ids
+        detail = (
+            f"connected · update key · {n_models} models"
+            if already
+            else f"{n_models} models · {p.get('api_protocol') or ''}"
+        )
         item = NavItem(
             id=pid,
             label=label,
-            detail=f"{n_models} models · {p.get('api_protocol') or ''}",
+            detail=detail,
+            mark="*" if already else " ",
             action="model.provider_pick",
             data={"provider": p},
         )
@@ -115,10 +281,18 @@ def build_provider_menu(client: Any) -> tuple[str, list[NavItem]]:
     return "Connect a provider", items
 
 
-def build_provider_model_menu(provider: dict[str, Any], card_name: str | None = None) -> tuple[str, list[NavItem]]:
+def build_provider_model_menu(
+    provider: dict[str, Any],
+    card_name: str | None = None,
+    *,
+    current_model: str | None = None,
+) -> tuple[str, list[NavItem]]:
     """Pick a model from a connected provider (realtime switch)."""
     label = str(provider.get("label") or provider.get("provider") or provider.get("id") or "provider")
+    pid = str(provider.get("id") or "")
+    slug = card_name or provider_card_name(pid)
     models = list(provider.get("models") or [])
+    cur = _norm(current_model)
     items: list[NavItem] = []
     for m in models:
         mn = str(m.get("model_name") or m.get("id") or "")
@@ -131,14 +305,115 @@ def build_provider_model_menu(provider: dict[str, Any], card_name: str | None = 
                 id=mn,
                 label=title[:40],
                 detail=detail,
-                action="model.provider_use_model",
-                data={"provider": provider, "model": m, "card_name": card_name or ""},
+                mark="*" if cur and _norm(mn) == cur else " ",
+                data={"provider": provider, "model": m, "card_name": slug, "key_card_name": slug},
+                children=_provider_model_actions(provider, m, slug, slug, None),
             )
         )
     if not items:
         items.append(NavItem(id="__empty__", label="(no models listed)", action="nav.noop"))
     items.append(_back_item())
     return f"Models · {label}", items
+
+
+def _provider_model_actions(
+    provider: dict[str, Any],
+    model: dict[str, Any],
+    card_name: str,
+    key_card_name: str,
+    agent: str | None,
+) -> list[NavItem]:
+    """L2: actions for one model under a provider (not immediate switch)."""
+    payload = {
+        "provider": provider,
+        "model": model,
+        "card_name": card_name,
+        "key_card_name": key_card_name,
+    }
+    mn = str(model.get("model_name") or model.get("id") or "")
+    title = str(model.get("title") or mn)
+    return [
+        NavItem(
+            id=f"use:{card_name}:{mn}",
+            label="Use for current agent",
+            detail="runtime switch + assign" if agent else "need /agent first",
+            action="model.provider_use_model",
+            data=payload,
+        ),
+        NavItem(
+            id=f"info:{card_name}:{mn}",
+            label="Show model info",
+            detail=title[:36],
+            action="model.provider_show",
+            data=payload,
+        ),
+        NavItem(
+            id=f"edit:{card_name}:{mn}",
+            label="Modify parameters…",
+            detail="temperature · ctx · flags",
+            data=payload,
+            children=_provider_model_edit_menu(provider, model, card_name, key_card_name),
+        ),
+        _back_item(),
+    ]
+
+
+def _provider_model_edit_menu(
+    provider: dict[str, Any],
+    model: dict[str, Any],
+    card_name: str,
+    key_card_name: str,
+) -> list[NavItem]:
+    """L3: editable fields for this model (saved onto provider card)."""
+    base = {
+        "provider": provider,
+        "model": model,
+        "card_name": card_name,
+        "key_card_name": key_card_name,
+    }
+    temp = model.get("temperature", 0)
+    tok = model.get("token_max") or ""
+    think = bool(model.get("is_think"))
+    image = bool(model.get("is_image"))
+    title = str(model.get("title") or model.get("model_name") or "")
+    return [
+        NavItem(
+            id="edit:title",
+            label="title",
+            detail=str(title)[:40] or "(empty)",
+            action="model.provider_edit_field",
+            data={**base, "field": "title"},
+        ),
+        NavItem(
+            id="edit:temperature",
+            label="temperature",
+            detail=str(temp),
+            action="model.provider_edit_field",
+            data={**base, "field": "temperature"},
+        ),
+        NavItem(
+            id="edit:token_max",
+            label="token_max",
+            detail=str(tok) if tok != "" else "(default)",
+            action="model.provider_edit_field",
+            data={**base, "field": "token_max"},
+        ),
+        NavItem(
+            id="edit:is_think",
+            label="is_think",
+            detail="on" if think else "off",
+            action="model.provider_toggle_field",
+            data={**base, "field": "is_think"},
+        ),
+        NavItem(
+            id="edit:is_image",
+            label="is_image",
+            detail="on" if image else "off",
+            action="model.provider_toggle_field",
+            data={**base, "field": "is_image"},
+        ),
+        _back_item(),
+    ]
 
 
 def _model_card_actions(name: str, agent: str | None) -> list[NavItem]:
@@ -164,9 +439,58 @@ def _model_card_actions(name: str, agent: str | None) -> list[NavItem]:
             action="model.show",
             data={"name": name},
         ),
+        NavItem(
+            id=f"editcard:{name}",
+            label="Modify parameters…",
+            detail="temperature · ctx · flags",
+            data={"name": name},
+            children=_legacy_card_edit_menu(name),
+        ),
         _back_item(),
     ]
     return items
+
+
+def _legacy_card_edit_menu(name: str) -> list[NavItem]:
+    base = {"name": name, "card_name": name}
+    return [
+        NavItem(
+            id=f"c:title:{name}",
+            label="title",
+            detail="edit",
+            action="model.card_edit_field",
+            data={**base, "field": "title"},
+        ),
+        NavItem(
+            id=f"c:temp:{name}",
+            label="temperature",
+            detail="edit",
+            action="model.card_edit_field",
+            data={**base, "field": "temperature"},
+        ),
+        NavItem(
+            id=f"c:tok:{name}",
+            label="token_max",
+            detail="edit",
+            action="model.card_edit_field",
+            data={**base, "field": "token_max"},
+        ),
+        NavItem(
+            id=f"c:think:{name}",
+            label="is_think",
+            detail="toggle",
+            action="model.card_toggle_field",
+            data={**base, "field": "is_think"},
+        ),
+        NavItem(
+            id=f"c:img:{name}",
+            label="is_image",
+            detail="toggle",
+            action="model.card_toggle_field",
+            data={**base, "field": "is_image"},
+        ),
+        _back_item(),
+    ]
 
 
 def build_skill_menu(client: Any) -> tuple[str, list[NavItem]]:

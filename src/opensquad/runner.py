@@ -2981,7 +2981,19 @@ class AgentRunner:
                 else:
                     _pipeline_events = ""
 
-                _tool_result_text = str(result) if result else "(empty result)"
+                # Prefer human message for LLM history; keep diff_* for UI emit
+                _ui_extras: dict = {}
+                if isinstance(result, dict):
+                    for _k in ("diff_old", "diff_new", "diff_start_line"):
+                        if _k in result and result[_k] is not None:
+                            _ui_extras[_k] = result[_k]
+                    _display = result.get("message")
+                    if isinstance(_display, str) and _display.strip():
+                        _tool_result_text = _display
+                    else:
+                        _tool_result_text = str(result) if result else "(empty result)"
+                else:
+                    _tool_result_text = str(result) if result else "(empty result)"
 
                 # Apply limit_token override or config-based truncation
                 if _limit_token is not None:
@@ -3091,6 +3103,7 @@ class AgentRunner:
                         "result_text": _tool_result_text,
                         "call_id": call_id,
                         "pipeline_events": _pipeline_events,
+                        "ui_extras": _ui_extras,
                     }
                 )
 
@@ -3117,6 +3130,7 @@ class AgentRunner:
                         "name": entry["name"],
                         "args": entry["args_json"],
                         "result": entry["result_text"],
+                        **(entry.get("ui_extras") or {}),
                     },
                     turn_id=self._current_turn,
                     round_id=self._current_round,
@@ -3128,6 +3142,7 @@ class AgentRunner:
                         "name": entry["name"],
                         "args": entry["args_json"],
                         "result": entry["result_text"],
+                        **(entry.get("ui_extras") or {}),
                     },
                 )
 

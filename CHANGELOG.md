@@ -9,6 +9,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version | Date | Compare to previous | Release page |
 |---------|------|---------------------|--------------|
+| [0.6.0] | 2026-07-15 | [0.5.1 → 0.6.0](https://github.com/opensquad-ai/opensquad/compare/v0.5.1...v0.6.0) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.6.0) |
 | [0.5.1] | 2026-07-14 | [0.5.0 → 0.5.1](https://github.com/opensquad-ai/opensquad/compare/v0.5.0...v0.5.1) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.5.1) |
 | [0.4.12] | 2026-07-09 | [0.4.11 → 0.4.12](https://github.com/opensquad-ai/opensquad/compare/v0.4.11...v0.4.12) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.12) |
 | [0.4.11] | 2026-07-08 | [0.4.10 → 0.4.11](https://github.com/opensquad-ai/opensquad/compare/v0.4.10...v0.4.11) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.4.11) |
@@ -25,14 +26,32 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+---
+
+## [0.6.0] — 2026-07-15
+
+> CLI TUI (OpenCode-style) + session/cwd/token UX; continues web/desktop hardening
+> from the 0.5.x line.
+
 ### Added
 
+- **cli: OpenCode-style Textual TUI.** Full-screen `opensquad code` chat with
+  queue, live thinking, Ctrl+X side stream, provider connect, Plan/Build, and
+  decision cards.
+- **cli: live ↑↓ token + elapsed meter.** Context upload (current window),
+  animated per-turn output, and turn duration in the prompt footer.
+- **cli: launch cwd → session working directory.** TUI binds agent
+  `.session_cwd` to the shell cwd at start; each TUI launch opens a new session.
 - **agent-web: project files panel.** Right-side browse panel (breadcrumb,
   search, syntax-highlighted preview, image/Markdown preview, dashed filename
   links from tool stream); sandboxed Launcher FS list/read under session cwd.
 
 ### Fixed
 
+- **cli: Ctrl+P palette vs history arrows.** Priority up/down no longer steal
+  keys from the command palette.
+- **cli: httpx URL flicker under the prompt.** Quiet HTTP client logs during TUI;
+  wait banner no longer mirrors stream/API paths.
 - **chat: context compression archive UI.** Chronological message/event archive,
   tool_call/result atomic pairs, frontend hydration merge + tool-id dedup so
   「已归档」 appears without refresh and without duplicated tool streams.

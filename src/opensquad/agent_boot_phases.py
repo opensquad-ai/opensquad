@@ -282,10 +282,13 @@ class AgentBootPhases:
             from opensquad.tools.delegate import init_delegate_tool
 
             delegate_config = {
+                # SubAgentRunner reads api_protocol (provider kept for backward compat)
+                "api_protocol": provider,
                 "provider": provider,
                 "api_key": model_cfg.get("api_key", ""),
                 "base_url": model_cfg.get("base_url", ""),
                 "model": model_cfg.get("model_name", ""),
+                "model_name": model_cfg.get("model_name", ""),
                 "token_max": model_cfg.get("token_max", 32000),
                 "temperature": model_cfg.get("temperature", 0.3),
                 "timeout": model_cfg.get("timeout", 60.0),
@@ -294,6 +297,9 @@ class AgentBootPhases:
                 "is_video_model": model_cfg.get("is_video", False),
                 "use_file_api": model_cfg.get("use_file_api", False),
                 "file_api_size_threshold": model_cfg.get("file_api_size_threshold", 4 * 1024 * 1024),
+                "is_think": model_cfg.get("is_think", False),
+                "reasoning_effort": model_cfg.get("reasoning_effort", "high"),
+                "thinking_budget_tokens": model_cfg.get("thinking_budget_tokens", 10000),
                 "tool_call_mode": model_cfg.get("tool_call_mode", "auto"),
                 "tool_filter": model_cfg.get("tool_filter", "all"),
                 "parent_prompt": system_prompt,

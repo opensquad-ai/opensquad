@@ -41,6 +41,8 @@ class GroupBridge:
         self._lock = threading.Lock()
         self.on_alert: Callable[[str], None] | None = None
         self.on_line: Callable[[str], None] | None = None
+        # Fired when new pending approval/options cards arrive (TUI decision picker)
+        self.on_pending_cards: Callable[[], None] | None = None
 
     def _emit(self, text: str) -> None:
         if self.on_line:
@@ -282,6 +284,14 @@ class GroupBridge:
                 text = line.lstrip("\n") if line.startswith("\n") else line
                 if text:
                     self._emit(text)
+            pending_now = [a for a in approvals if a.status == "pending"] or [
+                p for p in proposals if (p.raw.get("status") or "pending") == "pending"
+            ]
+            if pending_now and self.on_pending_cards:
+                try:
+                    self.on_pending_cards()
+                except Exception:
+                    pass
             return
 
         if self.muted:
@@ -295,5 +305,10 @@ class GroupBridge:
             if self.on_alert:
                 try:
                     self.on_alert(alert)
+                except Exception:
+                    pass
+            if self.on_pending_cards:
+                try:
+                    self.on_pending_cards()
                 except Exception:
                     pass
