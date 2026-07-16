@@ -12,17 +12,13 @@ Screen > .screen--selection {
     text-style: bold;
 }
 
-
 #header-bar {
     dock: top;
     height: 1;
-    min-height: 1;
-    max-height: 1;
     background: $background;
     color: $text-muted;
     content-align: left middle;
     padding: 0 2;
-    overflow: hidden;
 }
 
 #chat-log {
@@ -59,7 +55,7 @@ Screen > .screen--selection {
     display: none;
 }
 
-/* Live Thinking stream — fixed height while .streaming (no height:auto thrash) */
+/* Live Thinking stream — fixed height while .streaming (app.py uses this class) */
 #live-think {
     height: 0;
     min-height: 0;
@@ -80,21 +76,10 @@ Screen > .screen--selection {
 
 #prompt-dock {
     dock: bottom;
-    /* wait(1)+input(3)+meta(1)+bottom(1) — fixed to stop Win CMD reflow thrash */
-    height: 6;
-    min-height: 6;
-    max-height: 6;
+    height: auto;
+    min-height: 7;
     background: $background;
     padding: 0 2 0 2;
-    overflow-x: hidden;
-    overflow-y: hidden;
-}
-
-#prompt-dock.menu-open {
-    height: auto;
-    max-height: 22;
-    min-height: 6;
-    overflow-y: hidden;
 }
 
 /* OpenCode-style command palette above the input */
@@ -104,7 +89,7 @@ Screen > .screen--selection {
     display: none;
     background: $panel;
     color: $foreground;
-    border: solid $primary;
+    border: round $primary;
     padding: 0 1;
     margin: 0 0 1 0;
 }
@@ -113,87 +98,92 @@ Screen > .screen--selection {
     display: block;
 }
 
-/* Decision / approve / options card — keep compact so chat history stays visible */
+/* Decision / approve / options card (taller for numbered list + descriptions) */
 #slash-menu.decision {
-    max-height: 12;
+    max-height: 22;
     border: solid $primary;
-    padding: 0 1;
+    padding: 1 1;
 }
 
-/* Token / mode meter — above the input (closer to chat output) */
-#prompt-meta {
-    width: 1fr;
-    height: 1;
-    min-height: 1;
-    max-height: 1;
-    color: $text-muted;
-    background: $background;
-    padding: 0 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-/*
- * Blue send box on the Input itself (not a Vertical wrapper).
- * Win CMD: wrapping Input in a bordered Vertical(height=3) put typed text
- * below the bottom border. Border on Input keeps text inside the box.
- */
+/* OpenCode-style prompt: 1-cell left accent + top/bottom/right outline */
 #prompt-frame {
-    height: 3;
-    min-height: 3;
-    max-height: 3;
+    height: auto;
+    min-height: 4;
     width: 100%;
-    background: $background;
-    padding: 0;
-    border: none;
+    background: $surface;
+    padding: 0 1;
+    /* solid frame; left replaced by tall primary accent (flush, no gap) */
+    border-top: solid $primary-muted;
+    border-right: solid $primary-muted;
+    border-bottom: solid $primary-muted;
+    border-left: tall $primary;
     overflow-x: hidden;
     overflow-y: hidden;
     scrollbar-size: 0 0;
 }
 
-#chat-input {
-    width: 1fr;
-    height: 3;
-    min-height: 3;
-    max-height: 3;
-    background: $surface;
-    color: $foreground;
-    padding: 0 1;
+#prompt-frame:focus-within {
     border-top: solid $primary;
     border-right: solid $primary;
     border-bottom: solid $primary;
     border-left: tall $primary;
+}
+
+#chat-input {
+    width: 1fr;
+    background: $surface;
+    border: none;
+    padding: 0 1;
+    color: $foreground;
 }
 
 #chat-input:focus {
-    border-top: solid $primary;
-    border-right: solid $primary;
-    border-bottom: solid $primary;
-    border-left: tall $primary;
+    border: none;
 }
 
-#bottom-status {
+#prompt-meta {
+    width: 1fr;
     height: 1;
-    min-height: 1;
-    max-height: 1;
+    color: $text-muted;
+    background: $surface;
+    padding: 0 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#footer-path {
+    height: 1;
     color: $text-muted;
     background: $background;
     padding: 0 1;
-    overflow: hidden;
+    margin-top: 0;
+}
+
+#status-bar {
+    height: 1;
+    color: $text-muted;
+    background: $background;
+    padding: 0 1;
+    margin-top: 0;
+    display: none;
+}
+
+#status-bar.waiting {
+    color: $warning;
 }
 
 /* Always reserve one row — toggling display caused the prompt to jump/flicker */
 #wait-banner {
     height: 1;
-    min-height: 1;
-    max-height: 1;
     color: $warning;
     background: $background;
     padding: 0 1;
-    overflow: hidden;
 }
 
-/* Shortcuts live in the input placeholder — do not mount Footer */
+Footer {
+    background: $panel;
+    color: $text-muted;
+}
 
 .msg-user {
     color: $secondary;

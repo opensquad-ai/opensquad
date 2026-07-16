@@ -135,7 +135,7 @@ def _build_app_class():
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Vertical
-    from textual.widgets import Input, Static
+    from textual.widgets import Footer, Input, Static
 
     from opensquad.cli.group_bridge import GroupBridge
     from opensquad.cli.tui.i18n import (
@@ -305,6 +305,10 @@ def _build_app_class():
             # Sync claim before schedule_ui — blocks duplicate ✓ for same tool
             self._done_tool_keys: set[str] = set()
             self._last_tool_result_key: str = ""
+            # Ctrl+O: full tool/thinking bodies + RichLog strip handles for rewrite
+            self._tool_detail_pending: dict[str, str] = {}
+            self._tool_args_by_key: dict[str, str] = {}
+            self._detail_blocks: list[dict[str, Any]] = []
             self._last_flushed_think: str = ""
             self._think_gen: int = 0
             self._placeholder_cache: str = ""
@@ -331,6 +335,7 @@ def _build_app_class():
             with Vertical(id="prompt-dock"):
                 yield Static(id="slash-menu")
                 yield Static(id="wait-banner")
+                # 2d78e00 layout: Input + meta share the bordered #prompt-frame
                 with Vertical(id="prompt-frame"):
                     yield Input(
                         placeholder=t("placeholder_ask"),
@@ -338,10 +343,10 @@ def _build_app_class():
                         type="text",
                         suggester=SlashSuggester(),
                     )
-                yield Static(id="prompt-meta")
-                yield Static(id="bottom-status")
-            # No Textual Footer — shortcuts are in the input placeholder;
-            # an empty/hidden Footer caused Windows CMD layout thrash (repeated lines).
+                    yield Static(id="prompt-meta")
+                yield Static(id="footer-path")
+                yield Static(id="status-bar")
+            yield Footer()
 
         def on_mount(self) -> None:
             # Prevent non-input widgets from stealing keyboard / breaking IME
@@ -354,14 +359,19 @@ def _build_app_class():
                 "#header-bar",
                 "#slash-menu",
                 "#wait-banner",
+                "#status-bar",
                 "#prompt-meta",
-                "#bottom-status",
+                "#footer-path",
                 "#live-think",
             ):
                 try:
                     self.query_one(wid).can_focus = False
                 except Exception:
                     pass
+            try:
+                self.query_one(Footer).can_focus = False
+            except Exception:
+                pass
             self._sync_status_from_agent(self.agent)
             self._refresh_chrome()
             self._hide_slash_menu()
@@ -719,8 +729,8 @@ def _build_app_class():
 
             live=True → show a trailing window (streaming); else fold unless ^O.
             """
-            orange = self._theme_hex("warning", "#c9a227")
             muted = self._theme_hex("text-muted", "#8b949e")
+            orange = self._theme_hex("warning", "#c9a227")
             if live:
                 raw = (text or "").strip()
                 # Keep last ~900 chars so the fixed panel scrolls content, not layout
@@ -729,8 +739,9 @@ def _build_app_class():
                 body = raw
             else:
                 body = self._fold_detail_text(text)
+            label_mk = f"[{orange}]{t('thinking_label')}[/]"
             safe = self._escape_markup(body)
-            return f"[{orange}]{t('thinking_label')}[/] [dim {muted}]{safe}[/]"
+            return f"{label_mk} [dim {muted}]{safe}[/]"
 
         def _parse_tool_line(self, text: str) -> tuple[str, str, str, str]:
             """Return (kind, name, detail, state).
@@ -852,9 +863,11 @@ def _build_app_class():
                     if name_s:
                         return f"{lamp}[bold {white}]{name_s}[/]"
                     return f"{lamp}[bold {white}]done[/]"
+                # Expanded: show args/result (may be multi-line)
                 body = self._fold_detail_text(detail) if detail else ""
                 if name_s and body:
-                    return f"{lamp}[bold {white}]{name_s}[/] [dim {muted}]{self._escape_markup(body)}[/]"
+                    safe = self._escape_markup(body)
+                    return f"{lamp}[bold {white}]{name_s}[/]\n[dim {muted}]{safe}[/]"
                 if name_s:
                     return f"{lamp}[bold {white}]{name_s}[/]"
                 if body:
@@ -1145,15 +1158,8 @@ def _build_app_class():
             if not self._wait_label:
                 self._static_set("#wait-banner", "")
                 return
-            # On Windows, freeze spinner glyph — changing it every tick doubles dock rows
-            if sys.platform == "win32":
-                spin = "…"
-            else:
-                spin = self._SPIN[(self._wait_tick // 2) % len(self._SPIN)]
-            self._static_set(
-                "#wait-banner",
-                f"[bold]{spin}[/]  [dim]{self._escape_markup(self._wait_label)}[/]",
-            )
+            spin = self._SPIN[(self._wait_tick // 3) % len(self._SPIN)]
+            self._static_set("#wait-banner", f"[bold yellow] {spin}  {self._escape_markup(self._wait_label)}[/]")
 
         def _schedule_meter_paint(self) -> None:
             """Raise down target from stream; display catches up toward it."""
@@ -1168,8 +1174,9 @@ def _build_app_class():
             def _do() -> None:
                 if getattr(self, "_turn_started_at", None) is not None:
                     self._advance_out_display()
-                self._paint_wait()
-                self._paint_prompt_meta_only()
+                    self._paint_prompt_meta_only()
+                elif self._wait_label:
+                    self._paint_wait()
 
             try:
                 self.call_from_thread(_do)
@@ -1287,7 +1294,7 @@ def _build_app_class():
                 self._turn_out_target = target
                 self._last_turn_out = target
                 self._turn_started_at = None
-                self._paint_prompt_meta_only()
+                self._paint_prompt_meta_only(force=True)
 
             try:
                 self.call_from_thread(_stop)
@@ -1435,24 +1442,18 @@ def _build_app_class():
                 pass
             return fallback
 
-        def _token_meter_markup(self) -> str:
-            """Token / elapsed meter above the input box (near chat output)."""
-            muted = self._theme_hex("text-muted", "#8b949e")
-            fg = self._theme_hex("foreground", "#e6edf3")
-            meter = self._turn_meter_plain()
-            ctx = self._context_usage_label()
-            # Right-align-ish: just show meter + context
-            if meter:
-                return f" [{muted}]{self._escape_markup(meter)}[/]  [{fg}]{self._escape_markup(ctx)}[/]"
-            if ctx and ctx != "— (—%)":
-                return f" [{fg}]{self._escape_markup(ctx)}[/]"
-            return ""
+        def _opencode_status_markup(self) -> str:
+            """OpenCode-style meta under input: left mode·model, right tokens.
 
-        def _session_status_markup(self) -> str:
-            """Bottom bar: Build · model · provider · effort (outside the input box)."""
+            Restored to 2d78e00 layout (meta inside #prompt-frame). Build/Plan
+            kept muted grey per user preference (no blue/orange highlight).
+            """
+            if self.mode == "group" and self.group:
+                gname = self.group.group_name or self.group.group_id
+                return f" {gname} · group · /leave"
             mode = getattr(self, "_agent_mode", "build") or "build"
+            fg = self._theme_hex("foreground", "#e6edf3")
             muted = self._theme_hex("text-muted", "#8b949e")
-            # Build/Plan muted grey (same as model) — no blue/orange highlight
             if mode == "plan":
                 mode_mk = f"[{muted}]Plan[/]"
             else:
@@ -1476,30 +1477,49 @@ def _build_app_class():
                 if d:
                     skill = f" · [{muted}]/{d}[/]"
             prov_bit = f" · [{muted}]{provider}[/]" if provider else ""
-            return f" {mode_mk} · [{muted}]{model}[/]{prov_bit} · [{muted}]{effort}[/]{qbit}{live}{skill}{media}"
+            left = f" {mode_mk} · [{muted}]{model}[/]{prov_bit} · [{muted}]{effort}[/]{qbit}{live}{skill}{media}"
+            meter = self._turn_meter_plain()
+            ctx = self._context_usage_label()
+            if meter:
+                right = f"[{muted}]{self._escape_markup(meter)}[/]  [{fg}]{self._escape_markup(ctx)}[/] "
+            else:
+                right = f"[{fg}]{self._escape_markup(ctx)}[/] "
+            # Pad so tokens sit on the right without a second widget
+            try:
+                meta = self.query_one("#prompt-meta", Static)
+                width = int(meta.size.width or 0)
+            except Exception:
+                width = 0
+            if width > 8:
+                import re
 
-        def _opencode_status_markup(self) -> str:
-            """Backward-compat: token meter above input (session status is bottom bar)."""
-            return self._token_meter_markup()
+                plain_left = re.sub(r"\[/?[^\]]*\]", "", left)
+                plain_right = re.sub(r"\[/?[^\]]*\]", "", right)
+                gap = max(1, width - len(plain_left) - len(plain_right))
+                return left + (" " * gap) + right
+            return f"{left}  {right}"
 
         def _footer_path_markup(self) -> str:
-            """Reserved; cwd lives on welcome card. Keep empty to avoid clutter."""
-            return ""
+            """Footer path row (2d78e00): cwd + theme + shortcut hints."""
+            path = self._escape_markup(
+                self._short_path(getattr(self, "_project_path", None) or self._resolve_project_path())
+            )
+            theme_name = self._escape_markup(str(getattr(self, "theme", "") or ""))
+            return f" {path}  [dim]· theme {theme_name} · Tab mode · ^E effort · /help[/]"
 
         def _paint_bottom_status(self) -> None:
-            if self.mode == "group" and self.group:
-                gname = self.group.group_name or self.group.group_id
-                self._static_set("#bottom-status", f" {gname} · group · /leave")
-            else:
-                self._static_set("#bottom-status", self._session_status_markup())
+            """No-op (#bottom-status removed in 2d78e00 layout). Cache for tests."""
+            mode = getattr(self, "_agent_mode", "build") or "build"
+            self._paint_cache["bottom-status"] = "Plan" if mode == "plan" else "Build"
 
-        def _paint_prompt_meta_only(self) -> None:
-            """Refresh #prompt-meta (token meter) without touching placeholder / bottom bar."""
-            if self._is_selecting():
+        def _paint_prompt_meta_only(self, *, force: bool = False) -> None:
+            """Refresh #prompt-meta without touching header/placeholder (2d78e00)."""
+            if self._is_selecting() and not force:
                 return
-            self._static_set("#prompt-meta", self._token_meter_markup())
-            # Do NOT repaint #bottom-status here — 10Hz updates of identical
-            # Build·model lines caused Windows CMD to spam scrollback.
+            markup = self._opencode_status_markup()
+            if not force and markup == self._paint_cache.get("prompt-meta"):
+                return
+            self._static_set("#prompt-meta", markup)
 
         def _sync_status_from_agent(self, name: str | None = None) -> None:
             """Pull model / tokens / effort / path from admin agents list + local config."""
@@ -1584,8 +1604,12 @@ def _build_app_class():
             if self._wait_label:
                 self._paint_wait()
                 self._paint_prompt_meta_only()
-                # Skip bottom-status while waiting — cuts Win CMD ghost duplicates
                 self._static_set("#header-bar", self._header_bar_markup())
+                try:
+                    fpath = self.query_one("#footer-path", Static)
+                    fpath.update(self._footer_path_markup())
+                except Exception:
+                    pass
                 return
             try:
                 inp = self.query_one("#chat-input", Input)
@@ -1607,13 +1631,17 @@ def _build_app_class():
                 ph = t("placeholder_custom")
             else:
                 ph = t("placeholder_agent", agent=self.agent or "agent")
-            # Avoid re-assigning placeholder every chrome refresh (Win CMD doubles the row)
+            # Never re-assign placeholder unless text changed (Win CMD ghosts bordered dock)
             if ph != getattr(self, "_placeholder_cache", None):
                 self._placeholder_cache = ph
                 inp.placeholder = ph
             self._static_set("#header-bar", self._header_bar_markup())
-            self._static_set("#prompt-meta", self._token_meter_markup())
-            self._paint_bottom_status()
+            self._paint_prompt_meta_only()
+            try:
+                fpath = self.query_one("#footer-path", Static)
+                fpath.update(self._footer_path_markup())
+            except Exception:
+                pass
 
         def log_line(self, text: str, style: str = "") -> None:
             """Thread-safe append to chat log (OpenCode-style blocks)."""
@@ -1742,7 +1770,14 @@ def _build_app_class():
                 label = name or "tool"
                 self._open_tool = {"name": label}
                 self._last_tool_name = label
-                # Orange progress lives in the fixed wait-banner (no chat append)
+                # Remember args for Ctrl+O expand on the later green row
+                key = self._tool_dedupe_key("call", label, raw)
+                if detail:
+                    self._tool_args_by_key[key] = detail
+                    if key.startswith("id:"):
+                        self._tool_args_by_key[f"name:{label}"] = detail
+                    else:
+                        self._tool_args_by_key[f"name:{label}"] = detail
                 self.update_wait(f"● {label}")
                 return
             if kind == "result":
@@ -1752,7 +1787,6 @@ def _build_app_class():
                     or (str(open_meta.get("name")) if open_meta else "")
                     or (getattr(self, "_last_tool_name", "") or "tool")
                 )
-                # Dedup already claimed in _claim_tool_line; still guard identical key
                 dedup_key = f"done:{label}"
                 if dedup_key == getattr(self, "_last_tool_result_key", ""):
                     self._open_tool = None
@@ -1760,16 +1794,119 @@ def _build_app_class():
                 self._last_tool_result_key = dedup_key
                 if open_meta and str(open_meta.get("name") or "") == label:
                     self._open_tool = None
-                mk = self._tool_markup_parts("result", label, detail, state)
+                # Merge pending full body (from bridge.on_tool_detail) + call args
+                full_detail = self._take_tool_detail(label, raw)
+                if not full_detail and detail:
+                    full_detail = detail
+                args_key = self._tool_dedupe_key("done", label, raw)
+                args = (
+                    self._tool_args_by_key.pop(args_key, None)
+                    or self._tool_args_by_key.pop(f"name:{label}", None)
+                    or ""
+                )
+                if args and full_detail:
+                    combined = f"({args})\n{full_detail}"
+                elif args:
+                    combined = f"({args})"
+                else:
+                    combined = full_detail
+                mk = self._tool_markup_parts("result", label, combined, state)
                 if mk is not None:
-                    self._chat_write(mk, follow=True)
-                # Restore normal wait label if a turn is still open
+                    start = 0
+                    try:
+                        start = len(self.query_one("#chat-log", RichLog).lines)
+                    except Exception:
+                        start = 0
+                    n = self._chat_write_counted(mk, follow=True)
+                    self._detail_blocks.append(
+                        {
+                            "kind": "tool",
+                            "name": label,
+                            "detail": combined,
+                            "state": state,
+                            "start": start,
+                            "strips": n,
+                        }
+                    )
+                    if len(self._detail_blocks) > 200:
+                        self._detail_blocks = self._detail_blocks[-150:]
                 if getattr(self, "_wait_label", None) and getattr(self, "_turn_started_at", None):
                     self.update_wait(t("wait_thinking"))
                 return
             mk = self._tool_markup_parts(kind, name, detail, state)
             if mk is not None:
                 self._chat_write(mk, follow=True)
+
+        def _on_tool_detail(self, name: str, call_id: str, text: str) -> None:
+            """Bridge: stash full tool result body until the compact ✓ line arrives."""
+            body = str(text or "")
+            if call_id:
+                self._tool_detail_pending[f"id:{call_id}"] = body
+            label = (name or "tool").strip() or "tool"
+            self._tool_detail_pending[f"name:{label}"] = body
+
+        def _take_tool_detail(self, name: str, raw: str) -> str:
+            s = (raw or "").strip()
+            label = (name or getattr(self, "_last_tool_name", "") or "tool").strip()
+            m = re.search(r"[#]([A-Za-z0-9_.:\-]+)", s)
+            body = ""
+            if m:
+                body = self._tool_detail_pending.pop(f"id:{m.group(1)}", "") or ""
+            if not body:
+                body = self._tool_detail_pending.pop(f"name:{label}", "") or ""
+            else:
+                # Drop name alias so a later take cannot revive the same body
+                self._tool_detail_pending.pop(f"name:{label}", None)
+            return body
+
+        def _detail_block_markup(self, entry: dict[str, Any]) -> str | None:
+            kind = str(entry.get("kind") or "")
+            if kind == "thinking":
+                return self._thinking_markup(str(entry.get("detail") or ""), live=False)
+            if kind == "tool":
+                return self._tool_markup_parts(
+                    "result",
+                    str(entry.get("name") or "tool"),
+                    str(entry.get("detail") or ""),
+                    str(entry.get("state") or "done"),
+                )
+            return None
+
+        def _rewrite_detail_blocks(self) -> None:
+            """Re-render all stored thinking/tool rows after Ctrl+O toggle."""
+            blocks = getattr(self, "_detail_blocks", None) or []
+            if not blocks:
+                return
+            # End→start so strip-index shifts stay correct
+            for entry in reversed(blocks):
+                mk = self._detail_block_markup(entry)
+                if mk is None:
+                    continue
+                meta = {
+                    "start": int(entry.get("start", -1)),
+                    "strips": int(entry.get("strips", 0)),
+                    "name": entry.get("name") or entry.get("kind") or "",
+                }
+                updated = self._chat_replace_open(meta, mk, follow=False)
+                if updated:
+                    old_start = int(entry.get("start", -1))
+                    old_strips = int(entry.get("strips", 0))
+                    new_start = int(updated.get("start", old_start))
+                    new_strips = int(updated.get("strips", old_strips))
+                    delta = new_strips - old_strips
+                    entry["start"] = new_start
+                    entry["strips"] = new_strips
+                    if delta:
+                        for other in blocks:
+                            if other is entry:
+                                continue
+                            if int(other.get("start", -1)) > old_start:
+                                other["start"] = int(other["start"]) + delta
+            try:
+                if getattr(self, "_follow_chat", True) and not self._is_selecting():
+                    self.query_one("#chat-log", RichLog).scroll_end(animate=False)
+            except Exception:
+                pass
 
         def _looks_like_agent_prose(self, text: str) -> bool:
             t = (text or "").strip()
@@ -1933,8 +2070,24 @@ def _build_app_class():
                 self._hide_live_think()
                 if not body:
                     return
-                self._chat_write(self._thinking_markup(body, live=False), follow=True)
-                self._chat_write("", follow=True)
+                start = 0
+                try:
+                    start = len(self.query_one("#chat-log", RichLog).lines)
+                except Exception:
+                    start = 0
+                n = self._chat_write_counted(self._thinking_markup(body, live=False), follow=True)
+                n2 = self._chat_write_counted("", follow=True)
+                self._detail_blocks.append(
+                    {
+                        "kind": "thinking",
+                        "detail": body,
+                        "start": start,
+                        "strips": n,  # blank spacer not part of rewrite target
+                    }
+                )
+                if len(self._detail_blocks) > 200:
+                    self._detail_blocks = self._detail_blocks[-150:]
+                _ = n2
 
             try:
                 self._schedule_ui(_write)
@@ -3457,6 +3610,9 @@ def _build_app_class():
                 self._done_tool_keys = set()
                 self._last_tool_result_key = ""
                 self._last_flushed_think = ""
+                self._detail_blocks = []
+                self._tool_detail_pending = {}
+                self._tool_args_by_key = {}
                 self._reply_flushed = False
                 self._last_agent_reply = ""
                 self._turn_user_text = ""
@@ -3894,6 +4050,7 @@ def _build_app_class():
             )
             self.bridge.on_file_diff = lambda lines: self.log_file_diff(lines)
             self.bridge.on_plan = lambda payload: self.log_plan_payload(payload)
+            self.bridge.on_tool_detail = lambda name, cid, text: self._on_tool_detail(name, cid, text)
             self._sync_status_from_agent(name)
             try:
                 # Longer retries: process may still be binding after ready=true
@@ -3949,10 +4106,12 @@ def _build_app_class():
                 if not self._model_label or self._model_label == "—":
                     self._model_label = self._pretty_model_label("", m)
                     model_changed = True
-            # Idle token_stats must NOT full-refresh chrome — Win CMD stacks dock rows
-            if model_changed:
+            # Win CMD: any dock Static.update can ghost the bordered prompt box.
+            # Idle: skip. In-turn: only token meter (throttled), never touch Input.
+            if getattr(self, "_turn_started_at", None) is not None:
+                self._paint_prompt_meta_only()
+            elif model_changed:
                 self._paint_bottom_status()
-            self._paint_prompt_meta_only()
 
         def _on_model_info(self, card: str | None, model: str | None) -> None:
             c = str(card or "").strip()
@@ -3964,13 +4123,14 @@ def _build_app_class():
                 # Prefer real model id/title over prov-* card slug
                 if not self._model_label or self._model_label == "—" or self._model_label.lower().startswith("prov"):
                     self._model_label = self._pretty_model_label("", m)
-            self._refresh_chrome()
+            self._static_set("#header-bar", self._header_bar_markup())
+            self._paint_bottom_status()
 
         def _on_reasoning_effort(self, effort: str) -> None:
             e = str(effort or "").strip().lower()
             if e in ("low", "medium", "high"):
                 self._reasoning_effort = e
-                self._refresh_chrome()
+                self._paint_bottom_status()
 
         def _switch_agent(self, name: str) -> None:
             if self.mode == "group":
@@ -4224,10 +4384,15 @@ def _build_app_class():
             self._focus_input()
 
         def action_toggle_detail(self) -> None:
-            """Ctrl+O — expand/collapse long thinking & tool output."""
+            """Ctrl+O — expand/collapse all thinking & tool output (past + future)."""
             self._detail_expanded = not self._detail_expanded
             self.notify(t("detail_on") if self._detail_expanded else t("detail_off"), timeout=2)
+            try:
+                self._rewrite_detail_blocks()
+            except Exception:
+                pass
             if getattr(self, "_think_pending", False):
+                self._paint_cache.pop("live-think", None)
                 self._paint_live_think()
             self._focus_input()
 

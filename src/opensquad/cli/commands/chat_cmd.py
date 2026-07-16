@@ -619,6 +619,8 @@ class AgentBridge:
         self.on_file_diff: Any = None
         # Plan / Todos (OpenCode-style) — Callable[[Any], None] raw WS payload
         self.on_plan: Any = None
+        # Full tool result body for TUI ^O expand (name, call_id, text)
+        self.on_tool_detail: Any = None  # Callable[[str, str, str], None]
         # call_ids that already painted a diff from tool_call (avoid double on result)
         self._file_diff_painted: set[str] = set()
         # call_ids that already painted a ✓ tool_result (avoid duplicate green lamps)
@@ -1178,6 +1180,12 @@ class AgentBridge:
                     self._tool_result_painted.add(call_id)
                     if len(self._tool_result_painted) > 400:
                         self._tool_result_painted.clear()
+                # Keep full body for TUI Ctrl+O expand (chat line stays compact)
+                if self.on_tool_detail:
+                    try:
+                        self.on_tool_detail(label, call_id, text or "")
+                    except Exception:
+                        pass
                 if self.on_side_summary:
                     try:
                         self.on_side_summary(summary)
@@ -1191,9 +1199,16 @@ class AgentBridge:
                 if call_id:
                     self._tool_result_painted.add(call_id)
                 return
-            # Compact green lamp: tool NAME only (not result body — body varies and
-            # used to bypass TUI dedupe, painting the same tool many times).
+            # Compact green lamp in chat; full body via on_tool_detail for ^O
             label = (name or "tool").strip() or "tool"
+            if self.on_tool_detail:
+                try:
+                    body = text or ""
+                    if len(body) > 12000:
+                        body = body[:12000] + "…"
+                    self.on_tool_detail(label, call_id, body)
+                except Exception:
+                    pass
             if call_id:
                 self._tool_result_painted.add(call_id)
                 if len(self._tool_result_painted) > 400:

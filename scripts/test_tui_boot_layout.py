@@ -1,4 +1,4 @@
-"""Smoke: wait-then-enter boot + TUI layout widgets present (no overlap crash)."""
+"""Smoke: wait-then-enter boot + TUI layout widgets present (2d78e00 prompt layout)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ async def main() -> None:
     assert ensure_services(quiet=True)
 
     log.info("blocking prepare_code_session (login ss@ss if needed)")
-    # Ensure credentials exist
     c0 = GatewayClient()
     if not c0.token:
         c0.login("ss@ss", "ssssss", language="zh")
@@ -37,7 +36,6 @@ async def main() -> None:
     app = App(client=client, agent=agent, no_start=True)
 
     async with app.run_test(size=(100, 36)) as pilot:
-        # Allow bootstrap WS
         for i in range(40):
             await pilot.pause(0.25)
             ready = bool(app.bridge and getattr(app.bridge, "is_open", False))
@@ -45,25 +43,35 @@ async def main() -> None:
             if ready and not getattr(app, "_wait_label", None):
                 break
 
-        # Layout widgets must exist
-        for wid in ("#header-bar", "#chat-input", "#prompt-frame", "#prompt-meta", "#bottom-status", "#wait-banner"):
+        # 2d78e00 widgets: meta inside frame; footer-path + status-bar + Footer
+        for wid in (
+            "#header-bar",
+            "#chat-input",
+            "#prompt-frame",
+            "#prompt-meta",
+            "#footer-path",
+            "#status-bar",
+            "#wait-banner",
+        ):
             w = app.query_one(wid)
             assert w is not None, wid
             log.info("widget ok %s", wid)
 
         header_txt = str(getattr(app, "_paint_cache", {}).get("header-bar", ""))
-        bottom = str(getattr(app, "_paint_cache", {}).get("bottom-status", ""))
+        meta = str(getattr(app, "_paint_cache", {}).get("prompt-meta", ""))
         log.info("header=%r", header_txt)
-        log.info("bottom=%r", bottom)
+        log.info("meta=%r", meta)
 
-        # Input must be focusable / visible in tree
         inp = app.query_one("#chat-input")
         await pilot.click("#chat-input")
         await pilot.pause(0.2)
         assert app.focused is inp or getattr(app.focused, "id", None) == "chat-input"
 
         assert "OpenSquad" in header_txt or agent in header_txt
-        assert "Build" in bottom or "Plan" in bottom or "group" in bottom.lower() or bottom == ""
+        assert "Build" in meta or "Plan" in meta or "group" in meta.lower()
+        # prompt-meta must be INSIDE the bordered frame (2d78e00)
+        frame = app.query_one("#prompt-frame")
+        assert app.query_one("#prompt-meta") in frame.children
         log.info("SMOKE_OK agent=%s ready=%s", agent, bool(app.bridge and app.bridge.is_open))
         app.exit()
 
