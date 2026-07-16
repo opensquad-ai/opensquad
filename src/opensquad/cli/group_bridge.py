@@ -38,11 +38,42 @@ class GroupBridge:
         self._seen_ids: deque[str] = deque(maxlen=200)
         self.pending_approvals: list[PendingApproval] = []
         self.pending_proposals: list[PendingProposal] = []
+        self._member_names: dict[str, str] = {}
         self._lock = threading.Lock()
         self.on_alert: Callable[[str], None] | None = None
         self.on_line: Callable[[str], None] | None = None
         # Fired when new pending approval/options cards arrive (TUI decision picker)
         self.on_pending_cards: Callable[[], None] | None = None
+        # Fired when a card is resolved remotely (message_updated) so TUI can dismiss picker
+        self.on_resolved_card: Callable[[str], None] | None = None
+
+    def refresh_member_names(self) -> dict[str, str]:
+        """Load id→display-name map from group details (for [Name] prefixes)."""
+        gid = self.group_id
+        if not gid:
+            self._member_names = {}
+            return {}
+        try:
+            data = self.client.get(f"/api/groups/{gid}")
+            members = (data or {}).get("members") if isinstance(data, dict) else []
+            names: dict[str, str] = {}
+            if isinstance(members, list):
+                for mem in members:
+                    if not isinstance(mem, dict):
+                        continue
+                    mid = str(mem.get("id") or "").strip()
+                    name = str(mem.get("name") or "").strip()
+                    if mid and name:
+                        names[mid] = name
+            self._member_names = names
+        except Exception:
+            pass
+        return self._member_names
+
+    def enrich_message(self, m: dict) -> dict:
+        from opensquad.cli.group_render import enrich_message_sender
+
+        return enrich_message_sender(m, self._member_names)
 
     def _emit(self, text: str) -> None:
         if self.on_line:
@@ -69,6 +100,8 @@ class GroupBridge:
         self._seen_ids.clear()
         self.pending_approvals.clear()
         self.pending_proposals.clear()
+        self._member_names.clear()
+        self.refresh_member_names()
 
         if history_limit > 0:
             try:
@@ -133,7 +166,8 @@ class GroupBridge:
 
     def latest_pending_proposal(self) -> PendingProposal | None:
         with self._lock:
-            return self.pending_proposals[-1] if self.pending_proposals else None
+            pending = [p for p in self.pending_proposals if (p.status or "pending") == "pending"]
+            return pending[-1] if pending else None
 
     def find_approval(self, approval_id: str | None) -> PendingApproval | None:
         with self._lock:
@@ -189,6 +223,14 @@ class GroupBridge:
             f"/api/groups/{gid}/propose-options/{pid}/resolve",
             body,
         )
+        # Mark locally so rejoin / picker won't reopen a finished card
+        new_status = "ignored" if action == "ignore" else ("custom" if action == "custom" else "chosen")
+        with self._lock:
+            if pr:
+                pr.status = new_status
+                if isinstance(pr.raw, dict):
+                    pr.raw["status"] = new_status
+            self.pending_proposals = [p for p in self.pending_proposals if (p.status or "pending") == "pending"]
         return result if isinstance(result, dict) else {"ok": True}
 
     def resolve_numeric_reply(self, text: str) -> bool:
@@ -202,7 +244,11 @@ class GroupBridge:
             return False
         n = int(text)
         with self._lock:
-            pr = self.pending_proposals[-1] if self.pending_proposals else None
+            pr = None
+            for p in reversed(self.pending_proposals):
+                if (p.status or "pending") == "pending":
+                    pr = p
+                    break
             ap = None
             for a in reversed(self.pending_approvals):
                 if a.status == "pending":
@@ -267,27 +313,48 @@ class GroupBridge:
         with self._lock:
             for ap in approvals:
                 self.pending_approvals = [a for a in self.pending_approvals if a.id != ap.id]
-                self.pending_approvals.append(ap)
+                if ap.status == "pending":
+                    self.pending_approvals.append(ap)
                 if len(self.pending_approvals) > 50:
                     self.pending_approvals = self.pending_approvals[-50:]
             for pr in proposals:
                 self.pending_proposals = [p for p in self.pending_proposals if p.id != pr.id]
-                if pr.options:
+                # Only keep truly pending cards for the interactive picker
+                if pr.options and (pr.status or "pending") == "pending":
                     self.pending_proposals.append(pr)
                 if len(self.pending_proposals) > 50:
                     self.pending_proposals = self.pending_proposals[-50:]
 
+        pending_proposals = [p for p in proposals if (p.status or "pending") == "pending"]
+        pending_approvals_now = [a for a in approvals if a.status == "pending"]
+        resolved_ids = [p.id for p in proposals if p.id and (p.status or "pending") != "pending"] + [
+            a.id for a in approvals if a.id and a.status != "pending"
+        ]
+
         if print_full:
             from opensquad.cli.group_render import format_message_lines
 
-            for line in format_message_lines(m, shell_style=True):
+            enriched = self.enrich_message(m if isinstance(m, dict) else {})
+            # Learn name from live WS payloads (notify_new_message injects sender_name)
+            sid = str(enriched.get("sender_id") or "").strip()
+            sname = str(enriched.get("sender_name") or "").strip()
+            if sid and sname and sname not in ("?", "Unknown"):
+                self._member_names[sid] = sname
+            for line in format_message_lines(
+                enriched,
+                shell_style=True,
+                member_names=self._member_names,
+            ):
                 text = line.lstrip("\n") if line.startswith("\n") else line
                 if text:
                     self._emit(text)
-            pending_now = [a for a in approvals if a.status == "pending"] or [
-                p for p in proposals if (p.raw.get("status") or "pending") == "pending"
-            ]
-            if pending_now and self.on_pending_cards:
+            if resolved_ids and self.on_resolved_card:
+                for rid in resolved_ids:
+                    try:
+                        self.on_resolved_card(rid)
+                    except Exception:
+                        pass
+            if (pending_approvals_now or pending_proposals) and self.on_pending_cards:
                 try:
                     self.on_pending_cards()
                 except Exception:
@@ -296,10 +363,15 @@ class GroupBridge:
 
         if self.muted:
             return
-        pending_ap = [a for a in approvals if a.status == "pending"]
-        if pending_ap or proposals:
+        if resolved_ids and self.on_resolved_card:
+            for rid in resolved_ids:
+                try:
+                    self.on_resolved_card(rid)
+                except Exception:
+                    pass
+        if pending_approvals_now or pending_proposals:
             gname = self.group_name or gid
-            n = len(pending_ap) + len(proposals)
+            n = len(pending_approvals_now) + len(pending_proposals)
             alert = f"[group!] {n} pending card(s) in {gname} — /group join {gid}"
             self._emit(alert)
             if self.on_alert:

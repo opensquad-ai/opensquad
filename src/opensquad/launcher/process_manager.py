@@ -85,12 +85,14 @@ def _resolve_packaged_python_executable() -> str | None:
         if py_launcher:
             for ver in ("3.11",):
                 try:
+                    from opensquad.cli.win_process import hidden_run_kwargs
+
                     proc = subprocess.run(
                         [py_launcher, f"-{ver}", "-c", "import sys; print(sys.executable)"],
                         capture_output=True,
                         text=True,
                         timeout=10,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        **hidden_run_kwargs(),
                     )
                 except Exception:
                     continue

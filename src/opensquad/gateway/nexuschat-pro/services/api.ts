@@ -375,6 +375,7 @@ export interface MessageResponse {
   id: string;
   group_id: string;
   sender_id: string;
+  sender_name?: string;
   content: string;
   timestamp: string;
   type: string;

@@ -511,6 +511,13 @@ def build_skill_menu(client: Any) -> tuple[str, list[NavItem]]:
                 data={"skill": s, "name": name},
                 children=[
                     NavItem(
+                        id=f"use:{name}",
+                        label="Send to agent",
+                        detail="attach to chat",
+                        action="skill.compose",
+                        data={"name": name, "display": disp or name},
+                    ),
+                    NavItem(
                         id=f"show:{name}",
                         label="Show SKILL.md",
                         action="skill.show",
@@ -841,6 +848,32 @@ def build_theme_menu(app: Any, current: str | None = None) -> tuple[str, list[Na
     return "Themes · esc to close", items
 
 
+def build_language_menu(app: Any, current: str | None = None) -> tuple[str, list[NavItem]]:
+    """Interactive language picker (en / zh)."""
+    from opensquad.cli.tui.i18n import (
+        SUPPORTED_LOCALES,
+        get_locale,
+        locale_display_name,
+        t,
+    )
+
+    cur = (current or getattr(app, "_locale", None) or get_locale() or "").strip()
+    items: list[NavItem] = []
+    for code in SUPPORTED_LOCALES:
+        mark = "●" if code == cur else " "
+        items.append(
+            NavItem(
+                id=code,
+                label=locale_display_name(code),
+                detail=t("language_active") if code == cur else code,
+                mark=mark,
+                action="language.apply",
+                data={"code": code},
+            )
+        )
+    return t("language_menu_title"), items
+
+
 # kind → builder used by TUI open_nav(kind)
 NavBuilder = Callable[[Any, str | None], tuple[str, list[NavItem]]]
 
@@ -857,5 +890,6 @@ ROOT_KINDS = frozenset(
         "group",
         "agents",
         "theme",
+        "language",
     }
 )

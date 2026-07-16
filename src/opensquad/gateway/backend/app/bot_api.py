@@ -99,7 +99,7 @@ async def get_group_messages(
 
     query = query.order_by(desc(Message.timestamp)).limit(limit)
 
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     messages = result.scalars().all()
 
     return [
@@ -110,6 +110,7 @@ async def get_group_messages(
             content=m.content,
             timestamp=m.timestamp,
             type=m.type.value,
+            sender_name=(m.sender.name if m.sender else None),
             reply_to_id=m.reply_to_id,
             is_pinned=m.is_pinned,
             is_edited=m.is_edited,
@@ -233,6 +234,7 @@ async def send_bot_message(
         content=message.content,
         timestamp=message.timestamp,
         type=message.type.value,
+        sender_name=current_user.name,
         reply_to_id=message.reply_to_id,
         is_pinned=message.is_pinned,
         is_edited=message.is_edited,
@@ -270,6 +272,7 @@ async def send_bot_message(
         content=message.content,
         timestamp=message.timestamp,
         type=message.type.value,
+        sender_name=current_user.name,
         reply_to_id=message.reply_to_id,
         is_pinned=message.is_pinned,
         is_edited=message.is_edited,
@@ -349,7 +352,7 @@ async def get_mentions(
         query = query.where(Message.group_id == group_id)
 
     query = query.order_by(desc(Message.timestamp)).limit(limit)
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     messages = result.scalars().all()
 
     return [
@@ -360,6 +363,7 @@ async def get_mentions(
             content=m.content,
             timestamp=m.timestamp,
             type=m.type.value,
+            sender_name=(m.sender.name if m.sender else None),
             reply_to_id=m.reply_to_id,
             is_pinned=m.is_pinned,
             is_edited=m.is_edited,
@@ -443,7 +447,7 @@ async def search_group_messages(
 ):
     query = select(Message).where(and_(Message.group_id == group_id, Message.content.ilike(f"%{q}%")))
     query = query.order_by(desc(Message.timestamp)).limit(limit)
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     messages = result.scalars().all()
 
     return [
@@ -454,6 +458,7 @@ async def search_group_messages(
             content=str(m.content),
             timestamp=m.timestamp,
             type=m.type.value,
+            sender_name=(m.sender.name if m.sender else None),
             mentions=json.loads(m.mentions) if m.mentions else [],
             attachments=[],
         )

@@ -440,6 +440,15 @@ def _popen_opts(args):
 
 
 def run_start(args):
+    if getattr(args, "detach", False):
+        from opensquad.cli.runtime_boot import ensure_services
+
+        ok = ensure_services(quiet=False)
+        if ok:
+            print("[start] Daemon pre-warmed (optional).")
+            print("[start] Daily use is still just:  opensquad code  |  opensquad web")
+        sys.exit(0 if ok else 1)
+
     _t0 = time.perf_counter()
     _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     if _root not in sys.path:

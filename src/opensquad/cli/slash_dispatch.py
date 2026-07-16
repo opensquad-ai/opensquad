@@ -192,6 +192,24 @@ def dispatch_slash(line: str, ctx: dict[str, Any]) -> bool:
         print("[theme] Use inside `opensquad code` TUI — /theme [name]")
         return True
 
+    # Language picker — TUI only
+    if cmd.name == "language":
+        apply = ctx.get("apply_locale")
+        open_nav = ctx.get("open_nav")
+        if args:
+            if callable(apply):
+                apply(args[0])
+            elif callable(open_nav):
+                open_nav("language")
+            else:
+                print("[language] Use inside `opensquad code` TUI")
+            return True
+        if callable(open_nav):
+            open_nav("language")
+            return True
+        print("[language] Use inside `opensquad code` TUI — /language [en|zh]")
+        return True
+
     runner = runners.get(cmd.name)
     if runner:
         # TUI: bare /model|/skill|… opens interactive nav (↑↓ Enter)
@@ -249,6 +267,13 @@ def _status(ctx) -> None:
 
 
 def _run_login(ctx, args: list[str]) -> None:
+    # TUI must collect email/password via Input — never call input()/getpass here
+    # (those block stdin and freeze Textual).
+    tui_login = ctx.get("tui_login")
+    if callable(tui_login):
+        tui_login(args[0] if args else None)
+        return
+
     from opensquad.cli.commands.login_cmd import run_login
 
     email = args[0] if args else None
@@ -259,9 +284,24 @@ def _run_login(ctx, args: list[str]) -> None:
 
 
 def _run_login_whoami(ctx) -> None:
-    from opensquad.cli.commands.login_cmd import run_whoami
+    from opensquad.cli.api_client import GatewayClient, load_credentials
 
-    run_whoami(_ns(gateway=_gateway(ctx)))
+    # Avoid login_cmd.run_whoami — it calls sys.exit on failure and kills the TUI.
+    creds = load_credentials()
+    if not creds.get("token"):
+        print("[whoami] Not logged in. Run: /login")
+        return
+    client = ctx.get("client") or GatewayClient(gateway_url=_gateway(ctx))
+    try:
+        me = client.me()
+    except Exception as e:
+        print(f"[whoami] Failed: {e}")
+        return
+    print(f"Name:    {me.get('name')}")
+    print(f"Email:   {me.get('email')}")
+    print(f"ID:      {me.get('id')}")
+    print(f"Status:  {me.get('status')}")
+    print(f"Gateway: {getattr(client, 'gateway_url', None) or _gateway(ctx)}")
 
 
 def _agent_session(ctx, args: list[str]) -> bool:
@@ -320,10 +360,14 @@ def _run_group_shell(ctx, args: list[str]) -> bool:
 
     if action == "history":
         fn = ctx.get("history")
-        n = int(rest[1]) if len(rest) > 1 and rest[1].isdigit() else 20
+        n = (
+            int(rest[1])
+            if len(rest) > 1 and rest[1].isdigit()
+            else (int(rest[0]) if rest and rest[0].isdigit() else 20)
+        )
         if callable(fn):
             # if id given and not in group yet, join first? just history via REST
-            if rest and ctx.get("mode") != "group":
+            if rest and not rest[0].isdigit() and ctx.get("mode") != "group":
                 from opensquad.cli.commands.group_cmd import run_group
 
                 run_group(
@@ -336,6 +380,35 @@ def _run_group_shell(ctx, args: list[str]) -> bool:
                 )
             else:
                 fn(n)
+        return True
+
+    if action in ("more", "older"):
+        fn = ctx.get("group_more")
+        n = int(rest[0]) if rest and rest[0].isdigit() else 20
+        if callable(fn):
+            fn(n)
+        else:
+            print("/group more — join a group first (opensquad code)")
+        return True
+
+    if action in ("members", "who", "member"):
+        fn = ctx.get("group_members")
+        if callable(fn):
+            fn()
+        else:
+            print("/group members — join a group first (opensquad code)")
+        return True
+
+    if action in ("search", "find"):
+        fn = ctx.get("group_search")
+        if not rest:
+            print("usage: /group search <keyword>")
+            return True
+        q = " ".join(rest)
+        if callable(fn):
+            fn(q)
+        else:
+            print("/group search — join a group first (opensquad code)")
         return True
 
     if action == "send":
@@ -374,7 +447,7 @@ def _run_group_shell(ctx, args: list[str]) -> bool:
                 join(rest[0])
         return True
 
-    print("usage: /group list|join|switch|send|history|approve|choose")
+    print("usage: /group list|join|switch|members|search <q>|history [n]|more [n]|send|approve|choose")
     return True
 
 

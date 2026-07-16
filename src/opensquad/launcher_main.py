@@ -3920,17 +3920,41 @@ def _auto_start_plugin_services_parallel(plugin_ids: list[str]) -> None:
     threading.Thread(target=_run, daemon=True, name="plugin-autostart-pool").start()
 
 
+def _cli_last_agent_name() -> str | None:
+    """Last agent from ``opensquad code`` credentials (warm-start on launcher boot)."""
+    try:
+        cred_path = os.path.join(os.path.expanduser("~"), ".opensquad", "cli_credentials.json")
+        with open(cred_path, encoding="utf-8") as f:
+            data = json.load(f)
+        name = str((data or {}).get("last_agent") or "").strip()
+        return name or None
+    except Exception:
+        return None
+
+
 def _auto_start_agents(args, agents_info):
     """Phase 8: Auto-start agents with auto_start_on_boot=true (unless --no-auto-start)."""
     if not args.no_auto_start and agents_info:
         used_ports = [p.actual_port for p in _processes.values() if p.is_alive()]
+        boot_started: set[str] = set()
         for _name, ap in _processes.items():
             auto_flag = bool((ap.config or {}).get("ui", {}).get("auto_start_on_boot", False))
             if not auto_flag:
                 continue
             ap.start(allocated_ports=used_ports)
+            boot_started.add(_name)
             if ap.actual_port:
                 used_ports.append(ap.actual_port)
+
+        # Warm-start last CLI agent for fast ``opensquad code`` (Phase 2 keep-alive)
+        last_cli = _cli_last_agent_name()
+        if last_cli and last_cli in _processes and last_cli not in boot_started:
+            ap = _processes[last_cli]
+            if not ap.is_alive():
+                _log.info(f"[Launcher] Warm-starting last CLI agent '{last_cli}'")
+                ap.start(allocated_ports=used_ports)
+                if ap.actual_port:
+                    used_ports.append(ap.actual_port)
 
 
 def _setup_signal_handler():

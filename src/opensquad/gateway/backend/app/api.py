@@ -1085,7 +1085,7 @@ async def add_agent_to_group(
 # ========== Messages ==========
 
 
-def format_message_response(msg: Message) -> MessageResponse:
+def format_message_response(msg: Message, *, sender_name: str | None = None) -> MessageResponse:
     """Unified message conversion logic, including recall status calculation"""
     mentions = json.loads(msg.mentions) if msg.mentions else []
 
@@ -1115,6 +1115,11 @@ def format_message_response(msg: Message) -> MessageResponse:
                 )
             )
 
+    # Prefer explicit name; else use eager-loaded sender relation when available
+    resolved_name = (sender_name or "").strip() or None
+    if not resolved_name and "sender" not in state.unloaded and getattr(msg, "sender", None) is not None:
+        resolved_name = (getattr(msg.sender, "name", None) or "").strip() or None
+
     # Compute in real-time whether recall can be undone (within 2 minutes)
     can_undo = False
     is_deleted = bool(msg.is_deleted) if msg.is_deleted else False
@@ -1135,6 +1140,7 @@ def format_message_response(msg: Message) -> MessageResponse:
         content=str(msg.content) if msg.content else "",
         timestamp=dt_to_timestamp(msg.timestamp),
         type=msg.type,
+        sender_name=resolved_name,
         attachments=attachments_list,
         is_pinned=bool(msg.is_pinned) if msg.is_pinned else False,
         reply_to_id=str(msg.reply_to_id) if msg.reply_to_id else None,
@@ -1157,7 +1163,7 @@ async def get_messages(group_id: str, before: str | None = None, limit: int = 20
             query = query.where(Message.timestamp < before_msg.timestamp)
 
     query = query.order_by(desc(Message.timestamp)).limit(limit)
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     messages = result.scalars().all()
     return [format_message_response(msg) for msg in reversed(messages)]
 
@@ -1199,9 +1205,9 @@ async def get_messages_around(
     )
     exact_query = select(Message).where(and_(Message.group_id == group_id, Message.timestamp == center_dt))
 
-    before_res = await db.execute(before_query.options(selectinload(Message.attachments)))
-    after_res = await db.execute(after_query.options(selectinload(Message.attachments)))
-    exact_res = await db.execute(exact_query.options(selectinload(Message.attachments)))
+    before_res = await db.execute(before_query.options(selectinload(Message.attachments), selectinload(Message.sender)))
+    after_res = await db.execute(after_query.options(selectinload(Message.attachments), selectinload(Message.sender)))
+    exact_res = await db.execute(exact_query.options(selectinload(Message.attachments), selectinload(Message.sender)))
 
     all_messages = (
         list(reversed(before_res.scalars().all())) + list(exact_res.scalars().all()) + list(after_res.scalars().all())
@@ -1213,7 +1219,7 @@ async def get_messages_around(
 async def get_pinned_messages(group_id: str, db: AsyncSession = Depends(get_db)):
     """Get pinned messages in a group"""
     query = select(Message).where(and_(Message.group_id == group_id, Message.is_pinned is True))
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     return [format_message_response(msg) for msg in result.scalars().all()]
 
 
@@ -1239,7 +1245,7 @@ async def search_messages_in_group(
             query = query.where(Message.timestamp <= datetime.fromisoformat(date_to.replace("Z", "+00:00")))
 
     query = query.order_by(desc(Message.timestamp)).limit(limit)
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     return [format_message_response(msg) for msg in result.scalars().all()]
 
 
@@ -1355,6 +1361,7 @@ async def send_message(
         content=str(new_message.content) if new_message.content else "",
         timestamp=_dt_to_ts(new_message.timestamp),
         type=new_message.type,
+        sender_name=(current_user.name or "").strip() or None,
         attachments=attachments_for_response,
         is_pinned=bool(new_message.is_pinned) if new_message.is_pinned else False,
         reply_to_id=str(new_message.reply_to_id) if new_message.reply_to_id else None,
@@ -1387,7 +1394,9 @@ async def edit_message(
     if not isinstance(content, str):
         raise HTTPException(status_code=422, detail="content must be a string")
     result = await db.execute(
-        select(Message).where(Message.id == message_id).options(selectinload(Message.attachments))
+        select(Message)
+        .where(Message.id == message_id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
     )
     message = result.scalar_one_or_none()
     if not message or message.sender_id != current_user.id:
@@ -1526,7 +1535,9 @@ async def resolve_collab_approval(
     message.is_edited = True
     await db.commit()
     result = await db.execute(
-        select(Message).where(Message.id == message.id).options(selectinload(Message.attachments))
+        select(Message)
+        .where(Message.id == message.id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
     )
     message = result.scalar_one()
     formatted = format_message_response(message)
@@ -1727,7 +1738,9 @@ async def resolve_collab_approval(
         db.add(sys_msg)
         await db.commit()
         result = await db.execute(
-            select(Message).where(Message.id == sys_msg_id).options(selectinload(Message.attachments))
+            select(Message)
+            .where(Message.id == sys_msg_id)
+            .options(selectinload(Message.attachments), selectinload(Message.sender))
         )
         sys_msg = result.scalar_one()
         await notify_new_message(group_id, format_message_response(sys_msg).model_dump(mode="json"), current_user.id)
@@ -1852,7 +1865,9 @@ async def resolve_propose_options(
     message.is_edited = True
     await db.commit()
     result = await db.execute(
-        select(Message).where(Message.id == message.id).options(selectinload(Message.attachments))
+        select(Message)
+        .where(Message.id == message.id)
+        .options(selectinload(Message.attachments), selectinload(Message.sender))
     )
     message = result.scalar_one()
     formatted = format_message_response(message)
@@ -1990,7 +2005,9 @@ async def resolve_propose_options(
         db.add(sys_msg)
         await db.commit()
         result = await db.execute(
-            select(Message).where(Message.id == sys_msg_id).options(selectinload(Message.attachments))
+            select(Message)
+            .where(Message.id == sys_msg_id)
+            .options(selectinload(Message.attachments), selectinload(Message.sender))
         )
         sys_msg = result.scalar_one()
         await notify_new_message(group_id, format_message_response(sys_msg).model_dump(mode="json"), current_user.id)
@@ -2155,7 +2172,7 @@ async def search_all_messages(
     if search_query.group_id:
         query = query.where(Message.group_id == search_query.group_id)
     query = query.order_by(desc(Message.timestamp)).limit(50)
-    result = await db.execute(query.options(selectinload(Message.attachments)))
+    result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     return [format_message_response(m) for m in result.scalars().all()]
 
 

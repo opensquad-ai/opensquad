@@ -28,6 +28,13 @@ COMMANDS: tuple[SlashCommand, ...] = (
         category="session",
     ),
     SlashCommand(
+        "language",
+        "Switch TUI language (en/zh)",
+        "/language [en|zh]",
+        aliases=("lang", "locale"),
+        category="session",
+    ),
+    SlashCommand(
         "start",
         "Start agent process and connect (then /new to chat)",
         "/start [name]",
@@ -53,6 +60,12 @@ COMMANDS: tuple[SlashCommand, ...] = (
         category="session",
     ),
     SlashCommand("status", "Show gateway / mode / login", "/status", category="session"),
+    SlashCommand(
+        "debug",
+        "Toggle verbose boot/system logs (default off)",
+        "/debug [on|off]",
+        category="session",
+    ),
     SlashCommand("whoami", "Show logged-in user", "/whoami", category="session"),
     SlashCommand("login", "Log in to Gateway", "/login [email]", category="session"),
     SlashCommand("logout", "Clear CLI credentials", "/logout", category="session"),
@@ -84,7 +97,7 @@ COMMANDS: tuple[SlashCommand, ...] = (
         aliases=("attach", "img"),
         category="session",
     ),
-    SlashCommand("detach", "Clear pending image/file attachments", "/detach", category="session"),
+    SlashCommand("detach", "Clear pending attachments / skill chip", "/detach", category="session"),
     # Resources
     SlashCommand(
         "skill",
@@ -130,9 +143,22 @@ COMMANDS: tuple[SlashCommand, ...] = (
     ),
     SlashCommand(
         "group",
-        "Group chat (join/list/switch) — same as Web groups",
-        "/group list|join|switch|send|history …",
-        subcommands=("list", "join", "switch", "send", "history", "approve", "choose"),
+        "Group chat (join/list/members/search/more) — same as Web groups",
+        "/group list|join|members|search|history|more …",
+        subcommands=(
+            "list",
+            "join",
+            "switch",
+            "members",
+            "who",
+            "search",
+            "find",
+            "history",
+            "more",
+            "send",
+            "approve",
+            "choose",
+        ),
         category="manage",
     ),
     SlashCommand(

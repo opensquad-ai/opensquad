@@ -179,10 +179,16 @@ class GatewayClient:
                     data=json_body if files is not None and isinstance(json_body, dict) else None,
                 )
         except httpx.ConnectError as e:
-            raise SystemExit(
-                f"[cli] Cannot connect to Gateway at {self.gateway_url}\n"
-                f"  Hint: run 'opensquad code' (auto-starts) or 'opensquad start'.\n"
-                f"  Detail: {e}"
+            raise ApiError(
+                0,
+                f"Cannot connect to Gateway at {self.gateway_url}: {e}",
+                path,
+            ) from e
+        except httpx.TimeoutException as e:
+            raise ApiError(
+                0,
+                f"Gateway timeout at {self.gateway_url}: {e}",
+                path,
             ) from e
 
         if resp.status_code >= 400:

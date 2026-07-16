@@ -90,6 +90,7 @@ class MessageResponse(MessageBase):
     sender_id: str
     group_id: str
     timestamp: int | datetime  # Supports millisecond timestamp or datetime
+    sender_name: str | None = None  # Display name (REST history + WS)
     reply_to_id: str | None = None
     is_pinned: bool = False
     is_edited: bool = False

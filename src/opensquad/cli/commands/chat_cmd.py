@@ -621,9 +621,13 @@ class AgentBridge:
         self.on_plan: Any = None
         # call_ids that already painted a diff from tool_call (avoid double on result)
         self._file_diff_painted: set[str] = set()
+        # call_ids that already painted a ✓ tool_result (avoid duplicate green lamps)
+        self._tool_result_painted: set[str] = set()
         # Per-side-channel section state (coalesce tokens; start new blocks cleanly)
         self._side_thought_open: set[str] = set()
         self._side_reply_open: set[str] = set()
+        # Avoid double green lines: tool_result + job_status both used to emit ✓ Shell
+        self._shell_result_summarized: bool = False
 
     def _emit(self, text: str) -> None:
         if self.on_line:
@@ -742,6 +746,9 @@ class AgentBridge:
         self._thought_open = False
         self._thought_buf = ""
         self._stream_acc = ""
+        self._shell_result_summarized = False
+        # Keep _tool_result_painted across turns — call_ids stay unique enough;
+        # clear only when oversized (handled on add).
 
     def turn_done(self) -> None:
         self._turn_done.set()
@@ -933,11 +940,27 @@ class AgentBridge:
                 else:
                     # legacy: one prefix, then append chars on the same line
                     self._emit_stream("\n  · thought: ")
-            self._thought_buf += text
+            # Servers may send deltas OR cumulative snapshots. Blind += causes
+            # "LetLet me me" stutter when each event is the full text so far.
+            prev = self._thought_buf or ""
+            if not prev or text.startswith(prev):
+                self._thought_buf = text
+            elif prev.startswith(text):
+                pass  # stale shorter snapshot
+            elif text in prev:
+                pass
+            else:
+                self._thought_buf = prev + text
             if self.on_thinking:
                 self.on_thinking(self._thought_buf)
             else:
-                self._emit_stream(text.replace("\n", " "))
+                # legacy CLI: only emit the new tail
+                if self._thought_buf.startswith(prev):
+                    delta = self._thought_buf[len(prev) :]
+                else:
+                    delta = text
+                if delta:
+                    self._emit_stream(delta.replace("\n", " "))
             return
 
         if mtype == "stream":
@@ -965,6 +988,17 @@ class AgentBridge:
             return
 
         if mtype in ("message", "response", "to_user_final", "to_user_reply"):
+            # Multi-device sync (and similar) echo user text as type=message role=user.
+            # Web UI checks role; CLI must too — otherwise the user's own words are
+            # painted as an agent reply with a green lamp.
+            role = str(msg.get("role") or "").strip().lower()
+            if not role and isinstance(payload, dict):
+                role = str(payload.get("role") or "").strip().lower()
+            if role in ("user", "human"):
+                return
+            mid = str(msg.get("message_id") or msg.get("id") or "")
+            if mid.startswith("user_"):
+                return
             if _payload_is_sub(payload):
                 text = _extract_text(payload) or ""
                 if text:
@@ -1027,6 +1061,9 @@ class AgentBridge:
         if mtype == "tool_call":
             self._finish_thought_line()
             name, args_preview = _tool_call_preview(payload)
+            call_id = ""
+            if isinstance(payload, dict):
+                call_id = str(payload.get("id") or payload.get("call_id") or "").strip()
             if _payload_is_sub(payload):
                 self._side_emit(
                     payload if isinstance(payload, dict) else {},
@@ -1069,6 +1106,7 @@ class AgentBridge:
                         pass
                 return
             if is_shell_tool(str(name)):
+                self._shell_result_summarized = False
                 cmd = ""
                 if isinstance(payload, dict):
                     args = payload.get("arguments") or payload.get("args") or {}
@@ -1097,7 +1135,11 @@ class AgentBridge:
             # File edit/write → OpenCode-style unified diff (from args preview)
             if self._try_emit_file_diff(payload, phase="call"):
                 return
-            self._emit(f"  ⚙ {name}({args_preview})")
+            # Tag call_id so TUI can dedupe even if WS redelivers tool_result
+            if call_id:
+                self._emit(f"  ⚙ {name}#{call_id}({args_preview})")
+            else:
+                self._emit(f"  ⚙ {name}({args_preview})")
             return
 
         if mtype == "tool_result":
@@ -1116,8 +1158,13 @@ class AgentBridge:
                 return
             text = _extract_text(payload)
             name = ""
+            call_id = ""
             if isinstance(payload, dict):
                 name = str(payload.get("name") or payload.get("tool") or "")
+                call_id = str(payload.get("id") or payload.get("call_id") or "").strip()
+            # Hard dedupe by call_id (desktop shows one call; WS/history may redeliver)
+            if call_id and call_id in self._tool_result_painted:
+                return
             from opensquad.cli.tui.side_stream import is_delegate_tool, is_shell_tool
 
             if is_delegate_tool(name) or is_shell_tool(name):
@@ -1125,6 +1172,12 @@ class AgentBridge:
                 kind = "sub" if is_delegate_tool(name) else "shell"
                 label = "Sub-agent" if kind == "sub" else "Shell"
                 summary = f"  ✓ {label} done" + (f": {preview}" if preview else "")
+                if kind == "shell":
+                    self._shell_result_summarized = True
+                if call_id:
+                    self._tool_result_painted.add(call_id)
+                    if len(self._tool_result_painted) > 400:
+                        self._tool_result_painted.clear()
                 if self.on_side_summary:
                     try:
                         self.on_side_summary(summary)
@@ -1135,9 +1188,19 @@ class AgentBridge:
                 return
             # Prefer server diff_* on result; skip short ✓ if we already painted at call
             if self._try_emit_file_diff(payload, phase="result"):
+                if call_id:
+                    self._tool_result_painted.add(call_id)
                 return
-            if text:
-                self._emit(f"  ✓ {text.replace(chr(10), ' ')[:100]}")
+            # Compact green lamp: tool NAME only (not result body — body varies and
+            # used to bypass TUI dedupe, painting the same tool many times).
+            label = (name or "tool").strip() or "tool"
+            if call_id:
+                self._tool_result_painted.add(call_id)
+                if len(self._tool_result_painted) > 400:
+                    self._tool_result_painted.clear()
+                self._emit(f"  ✓ {label}#{call_id}")
+            else:
+                self._emit(f"  ✓ {label}")
             return
 
         if mtype == "plan":
@@ -1174,9 +1237,13 @@ class AgentBridge:
                             self.on_side_done(key)
                         except Exception:
                             pass
+                    # tool_result already painted ✓ Shell done — skip duplicate green line
+                    if getattr(self, "_shell_result_summarized", False):
+                        return
                     if self.on_side_summary:
                         try:
                             self.on_side_summary(f"  ✓ Shell {st}" + (f" ({jid[:12]})" if jid else ""))
+                            self._shell_result_summarized = True
                         except Exception:
                             pass
             return

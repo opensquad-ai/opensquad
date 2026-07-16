@@ -3,6 +3,11 @@ Bootstrap for `opensquad code` / chat: ensure Gateway + Launcher are up,
 auth is valid, and a default agent is ready — then hand off to TUI.
 
 Services stay running after the TUI exits (next `opensquad code` is instant).
+
+Startup strategy (Claude Code–style):
+  - ``prepare_code_session_fast`` — instant TUI (local cache only)
+  - ``run_tui_preflight`` — background services / auth / agent connect
+  - ``prepare_code_session`` — blocking path for ``-m`` / legacy
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ import subprocess
 import sys
 import time
 from argparse import Namespace
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -33,37 +38,122 @@ def _repo_root() -> str:
 
 def _detach_popen_kwargs() -> dict[str, Any]:
     """Spawn children that outlive this CLI process (no extra console windows)."""
-    kw: dict[str, Any] = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "stdin": subprocess.DEVNULL,
-    }
-    if sys.platform == "win32":
-        # CREATE_NO_WINDOW hides the black python.exe console flash on Windows.
-        # CREATE_NEW_PROCESS_GROUP lets the child outlive this CLI process.
-        # Do NOT use DETACHED_PROCESS here — it still allocates a visible console.
-        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        create_new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-        kw["creationflags"] = create_no_window | create_new_group
-        kw["close_fds"] = True
-    else:
-        kw["start_new_session"] = True
-    return kw
+    from opensquad.cli.win_process import detach_popen_kwargs
+
+    return detach_popen_kwargs()
 
 
-def _wait_port(name: str, port: int, timeout: float = 45.0) -> bool:
+def _wait_with_backoff(
+    check: Callable[[], bool],
+    *,
+    timeout: float = 45.0,
+    initial: float = 0.05,
+    max_delay: float = 0.5,
+    name: str = "resource",
+) -> bool:
     deadline = time.time() + timeout
+    delay = initial
     while time.time() < deadline:
-        if _port_open("127.0.0.1", port):
+        if check():
             return True
-        time.sleep(0.35)
-    print(f"[code] {name} port {port} not ready after {timeout:.0f}s", file=sys.stderr)
+        time.sleep(delay)
+        delay = min(delay * 1.4, max_delay)
+    print(f"[code] {name} not ready after {timeout:.0f}s", file=sys.stderr)
     return False
 
 
-def ensure_services(*, quiet: bool = False) -> bool:
+def _wait_port(name: str, port: int, timeout: float = 45.0) -> bool:
+    return _wait_with_backoff(
+        lambda: _port_open("127.0.0.1", port),
+        timeout=timeout,
+        initial=0.05,
+        max_delay=0.4,
+        name=f"{name} port {port}",
+    )
+
+
+def _gateway_url(port: int | None = None) -> str:
+    from opensquad.system_config import syscfg
+
+    p = int(port or syscfg.port("gateway") or 9555)
+    return f"http://127.0.0.1:{p}"
+
+
+def _wait_gateway_lite(gateway_url: str, timeout: float = 45.0) -> bool:
+    base = gateway_url.rstrip("/")
+
+    def _check() -> bool:
+        try:
+            r = httpx.get(f"{base}/health/ready-lite", timeout=1.0)
+            if r.status_code == 200:
+                return bool(r.json().get("ready_lite"))
+        except Exception:
+            pass
+        return False
+
+    return _wait_with_backoff(_check, timeout=timeout, initial=0.05, max_delay=0.35, name="gateway (ready-lite)")
+
+
+def _wait_gateway_full(gateway_url: str, timeout: float = 30.0) -> bool:
+    base = gateway_url.rstrip("/")
+
+    def _check() -> bool:
+        try:
+            r = httpx.get(f"{base}/health", timeout=1.0)
+            if r.status_code == 200:
+                return bool(r.json().get("ready"))
+        except Exception:
+            pass
+        return False
+
+    return _wait_with_backoff(_check, timeout=timeout, initial=0.08, max_delay=0.5, name="gateway (full ready)")
+
+
+def _frozen_backend_exe() -> str | None:
+    """PyInstaller gateway/launcher binary when built locally (Phase 3 fast-path)."""
+    root = _repo_root()
+    for rel in (
+        os.path.join("build", "backend-win", "run", "run.exe"),
+        os.path.join("build", "backend-win", "run", "run"),
+        os.path.join("build", "backend-linux", "run", "run"),
+        os.path.join("build", "backend-mac", "run", "run"),
+    ):
+        path = os.path.join(root, rel)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _service_command(component: str, *, launcher_port: int, python_exe: str, root: str) -> list[str]:
+    """Prefer frozen ``run.exe --service …`` when available; else Python scripts."""
+    frozen = _frozen_backend_exe()
+    if frozen:
+        if component == "gateway":
+            return [frozen, "--service", "gateway"]
+        if component == "launcher":
+            return [frozen, "--service", "launcher", "--mgmt-port", str(launcher_port)]
+    if component == "gateway":
+        gateway_cwd = os.path.join(root, "src", "opensquad", "gateway", "backend")
+        return [python_exe, os.path.join(gateway_cwd, "run.py")]
+    if component == "launcher":
+        return [
+            python_exe,
+            os.path.join(root, "src", "opensquad", "launcher_main.py"),
+            "--mgmt-port",
+            str(launcher_port),
+        ]
+    raise ValueError(f"unknown service component: {component}")
+
+
+def _service_cwd(component: str, root: str) -> str:
+    if component == "gateway":
+        return os.path.join(root, "src", "opensquad", "gateway", "backend")
+    return root
+
+
+def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool:
     """
-    If Gateway/Launcher (and Registry) are down, start them detached.
+    If Gateway/Launcher are down, start them detached.
     Skips frontend (TUI does not need Vite). Returns True if core ports ready.
     """
     from opensquad.cli.commands.start_cmd import _find_python, _setup_local_mode
@@ -107,8 +197,7 @@ def ensure_services(*, quiet: bool = False) -> bool:
     started: list[str] = []
 
     if not gw_ok:
-        gateway_cwd = os.path.join(root, "src", "opensquad", "gateway", "backend")
-        gateway_script = os.path.join(gateway_cwd, "run.py")
+        gateway_cwd = _service_cwd("gateway", root)
         env = {
             **os.environ,
             "VITE_DEV_PORT": str(vite_port),
@@ -117,34 +206,59 @@ def ensure_services(*, quiet: bool = False) -> bool:
             "HTTPS_PROXY": "",
             "ALL_PROXY": "",
         }
-        subprocess.Popen(
-            [python_exe, gateway_script],
-            cwd=gateway_cwd,
-            env=env,
-            **popts,
-        )
-        started.append("gateway")
+        try:
+            proc = subprocess.Popen(
+                _service_command("gateway", launcher_port=launcher_port, python_exe=python_exe, root=root),
+                cwd=gateway_cwd,
+                env=env,
+                **popts,
+            )
+            started.append("gateway")
+            time.sleep(0.15)
+            if proc.poll() is not None:
+                code = proc.returncode or 0
+                print(
+                    f"[code] Gateway exited immediately (code={code:#x}). Try: opensquad stop && opensquad code",
+                    file=sys.stderr,
+                )
+                return False
+        except OSError as e:
+            print(f"[code] Failed to start gateway: {e}", file=sys.stderr)
+            return False
 
-    if not _port_open("127.0.0.1", registry_port):
+    if not skip_registry and not _port_open("127.0.0.1", registry_port):
         registry_cwd = os.path.join(root, "src", "opensquad", "gateway", "plugin_registry")
         registry_script = os.path.join(registry_cwd, "main.py")
         if os.path.isfile(registry_script):
-            subprocess.Popen(
-                [python_exe, registry_script],
-                cwd=registry_cwd,
-                **popts,
-            )
-            started.append("registry")
+            try:
+                subprocess.Popen(
+                    [python_exe, registry_script],
+                    cwd=registry_cwd,
+                    **popts,
+                )
+                started.append("registry")
+            except OSError as e:
+                print(f"[code] Failed to start registry: {e}", file=sys.stderr)
 
     if not la_ok:
-        launcher_cmd = [
-            python_exe,
-            os.path.join(root, "src", "opensquad", "launcher_main.py"),
-            "--mgmt-port",
-            str(launcher_port),
-        ]
-        subprocess.Popen(launcher_cmd, cwd=root, **popts)
-        started.append("launcher")
+        try:
+            proc = subprocess.Popen(
+                _service_command("launcher", launcher_port=launcher_port, python_exe=python_exe, root=root),
+                cwd=_service_cwd("launcher", root),
+                **popts,
+            )
+            started.append("launcher")
+            time.sleep(0.15)
+            if proc.poll() is not None:
+                code = proc.returncode or 0
+                print(
+                    f"[code] Launcher exited immediately (code={code:#x}). Try: opensquad stop && opensquad code",
+                    file=sys.stderr,
+                )
+                return False
+        except OSError as e:
+            print(f"[code] Failed to start launcher: {e}", file=sys.stderr)
+            return False
 
     if started and not quiet:
         print(f"[code] Launched: {', '.join(started)}")
@@ -153,13 +267,18 @@ def ensure_services(*, quiet: bool = False) -> bool:
     ok_la = _wait_port("launcher", launcher_port)
     if not (ok_gw and ok_la):
         print(
-            "[code] Core services failed to start. Try: opensquad doctor / opensquad start",
+            "[code] Core services failed to start. Try: opensquad doctor / opensquad stop then opensquad code",
             file=sys.stderr,
         )
         return False
 
-    # Brief settle so auth routes are bound
-    time.sleep(0.6)
+    base = _gateway_url(gateway_port)
+    if not _wait_gateway_lite(base):
+        # Fallback: full ready (first install may need init_default_data)
+        if not _wait_gateway_full(base, timeout=60.0):
+            print("[code] Gateway did not become ready-lite in time", file=sys.stderr)
+            return False
+
     if not quiet:
         print("[code] Gateway + Launcher ready")
     return True
@@ -178,7 +297,6 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
             return True
         except ApiError as e:
             if e.status not in (401, 403):
-                # Gateway up but other error — still try proceed / re-login
                 pass
             client.token = ""
         except SystemExit:
@@ -195,16 +313,15 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
     if email and password:
         try:
             client.login(email, password, language="zh")
-            print(f"[code] Logged in as {email}")
+            if interactive:
+                print(f"[code] Logged in as {email}")
             return True
         except Exception as e:
             print(f"[code] Auto-login failed: {e}", file=sys.stderr)
 
     if not interactive:
-        print("[code] Not logged in. Run: opensquad login", file=sys.stderr)
         return False
 
-    # One prompt — then remember for next time
     print("[code] Login required (saved after first success)")
     try:
         if not email:
@@ -225,6 +342,18 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
     except Exception as e:
         print(f"[code] Login failed: {e}", file=sys.stderr)
         return False
+
+
+def pick_agent_name(client: Any, preferred: str | None = None) -> str | None:
+    """Pick agent name without blocking on start/ready (network list only)."""
+    from opensquad.cli.api_client import last_agent, pick_default_agent
+
+    chosen = (preferred or "").strip() or None
+    if chosen:
+        return chosen
+    if client.token:
+        return pick_default_agent(client)
+    return last_agent()
 
 
 def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 60.0) -> str | None:
@@ -274,7 +403,6 @@ def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 
     if hit and hit.get("ready"):
         return target
 
-    # running but not in Gateway registry → restart so it re-registers
     try:
         if hit and hit.get("process_status") == "running" and not hit.get("ready"):
             print(f"[code] {target} running but registry offline — restarting…")
@@ -287,7 +415,10 @@ def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 
     except Exception as e:
         print(f"[code] agent start failed: {e}", file=sys.stderr)
 
+    delay = 0.08
     deadline = time.time() + timeout
+    started = time.time()
+    last_print = 0.0
     while time.time() < deadline:
         agents = _list()
         hit = next(
@@ -297,10 +428,31 @@ def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 
         if hit and hit.get("ready"):
             print(f"[code] Agent ready: {target}")
             return target
-        time.sleep(0.8)
+        now = time.time()
+        if now - last_print >= 1.0:
+            elapsed = int(now - started)
+            proc = (hit or {}).get("process_status") or "?"
+            reg = (hit or {}).get("registry_status") or "offline"
+            print(f"[code] Waiting for {target}… {elapsed}s ({proc}/{reg})", flush=True)
+            last_print = now
+        time.sleep(delay)
+        delay = min(delay * 1.35, 0.6)
 
     print(f"[code] Agent {target} not ready yet — TUI will retry on connect", file=sys.stderr)
     return target
+
+
+def prepare_code_session_fast(
+    *,
+    gateway: str | None = None,
+    agent: str | None = None,
+) -> tuple[Any, str | None]:
+    """Instant path: GatewayClient + cached agent name (no network blocking)."""
+    from opensquad.cli.api_client import GatewayClient, last_agent
+
+    client = GatewayClient(gateway_url=gateway)
+    chosen = (agent or "").strip() or last_agent()
+    return client, chosen
 
 
 def prepare_code_session(
@@ -311,10 +463,10 @@ def prepare_code_session(
     skip_login: bool = False,
 ) -> tuple[Any, str | None]:
     """
-    Full preflight for `opensquad code`.
+    Blocking preflight for ``-m`` / legacy shell.
     Returns (GatewayClient, agent_name_or_None).
     """
-    from opensquad.cli.api_client import GatewayClient
+    from opensquad.cli.api_client import GatewayClient, remember_agent
 
     if not no_start:
         if not ensure_services():
@@ -322,46 +474,73 @@ def prepare_code_session(
 
     client = GatewayClient(gateway_url=gateway)
 
-    # Smoke: gateway accepts TCP/HTTP
     try:
         with httpx.Client(timeout=5.0) as h:
-            # Any response (even 401/404) means HTTP is up
             h.get(f"{client.gateway_url}/api/auth/me")
     except httpx.ConnectError:
         print(
-            f"[code] Cannot reach Gateway at {client.gateway_url}\n  Hint: opensquad start   or   opensquad doctor",
+            f"[code] Cannot reach Gateway at {client.gateway_url}\n"
+            f"  Hint: opensquad doctor   or   opensquad stop then opensquad code",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
     if not skip_login:
         if not ensure_auth(client, interactive=True):
-            # Still open TUI so user can /login — but warn
             print("[code] Continuing without auth — use /login inside TUI")
 
-    chosen = agent
-    if client.token:
-        if not chosen:
-            from opensquad.cli.api_client import pick_default_agent
-
-            chosen = pick_default_agent(client)
+    chosen = pick_agent_name(client, agent)
+    if client.token and chosen:
         chosen = ensure_agent(client, preferred=chosen)
         if chosen:
-            from opensquad.cli.api_client import remember_agent
-
             remember_agent(chosen)
     return client, chosen
 
 
+def run_tui_preflight(
+    client: Any,
+    agent: str | None,
+    *,
+    no_start: bool = False,
+) -> tuple[bool, str | None, bool]:
+    """
+    Background preflight for Instant TUI (services + auth + agent name only).
+
+    Returns ``(ok, agent_name, needs_new_session)``.
+    Agent start/connect happens once in the TUI worker via ``_ensure_agent_connected``.
+    """
+    if not no_start:
+        if not ensure_services(quiet=True, skip_registry=True):
+            return False, agent, False
+
+    try:
+        with httpx.Client(timeout=3.0) as h:
+            h.get(f"{client.gateway_url}/api/auth/me")
+    except httpx.ConnectError:
+        return False, agent, False
+
+    if client.token:
+        ensure_auth(client, interactive=False)
+
+    chosen = pick_agent_name(client, agent)
+    needs_session = bool(client.token and chosen)
+    return True, chosen, needs_session
+
+
 def run_code(args: Namespace) -> None:
-    """Entry for `opensquad code` — bootstrap then TUI (or legacy)."""
+    """Entry for `opensquad code` — start services, wait agent ready, then TUI.
+
+    Users only need ``opensquad code``. Gateway/Launcher are started automatically.
+    Agent is brought online in the terminal (with progress) before the TUI opens,
+    so the UI is not entered while still offline. Pass ``--no-start`` only for
+    advanced use.
+    """
     gateway = getattr(args, "gateway", None)
     agent = getattr(args, "agent", None)
     no_start = bool(getattr(args, "no_start", False))
     legacy = bool(getattr(args, "legacy", False))
     message = getattr(args, "message", None)
 
-    # Quiet HTTP client logs before any admin API traffic (avoids tty flicker in TUI)
     if not legacy:
         try:
             from opensquad.cli.tui.app import _quiet_tui_loggers
@@ -370,10 +549,25 @@ def run_code(args: Namespace) -> None:
         except Exception:
             pass
 
+    # Bring up Gateway + Launcher before any HTTP / TUI (unless --no-start).
+    if not no_start:
+        from opensquad.system_config import syscfg
+
+        gw_port = int(syscfg.port("gateway") or 9555)
+        la_port = int(syscfg.port("launcher") or 9600)
+        already = _port_open("127.0.0.1", gw_port) and _port_open("127.0.0.1", la_port)
+        if not ensure_services(quiet=already):
+            print(
+                "[code] Could not start Gateway/Launcher. Try: opensquad doctor",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+    # Blocking: auth + pick agent + wait ready (progress printed to terminal).
     client, agent = prepare_code_session(
         gateway=gateway,
         agent=agent,
-        no_start=no_start,
+        no_start=True,  # services already ensured (or user passed --no-start)
     )
 
     if message:
@@ -396,4 +590,6 @@ def run_code(args: Namespace) -> None:
 
     from opensquad.cli.tui import run_tui
 
-    run_tui(gateway=client.gateway_url, agent=agent)
+    # Agent should already be ready; TUI only opens WS + new_session.
+    print("[code] Opening TUI…", flush=True)
+    run_tui(gateway=client.gateway_url, agent=agent, no_start=True)

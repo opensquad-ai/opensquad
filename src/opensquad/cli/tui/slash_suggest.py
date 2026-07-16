@@ -7,7 +7,7 @@ from textual.suggester import Suggester
 from opensquad.cli.slash_commands import match_commands, resolve_command
 
 
-def slash_completions(value: str, *, limit: int = 12) -> list[tuple[str, str]]:
+def slash_completions(value: str, *, limit: int = 64) -> list[tuple[str, str]]:
     """
     Return [(completion_text, help), ...] for the current input value.
     completion_text includes the leading / or +.
@@ -32,15 +32,17 @@ def slash_completions(value: str, *, limit: int = 12) -> list[tuple[str, str]]:
     if not cmd or not cmd.subcommands:
         return []
 
+    # /group search <keyword> — once past the subcommand, hide the palette
+    # so Enter submits the full line (not just "/group search").
     if body.endswith(" ") and len(parts) == 1:
         sub_token = ""
-    elif len(parts) >= 2 and not body.endswith(" "):
+    elif len(parts) == 2 and not body.endswith(" "):
         sub_token = parts[1]
     else:
         return []
 
     for sub in cmd.subcommands:
-        if sub.startswith(sub_token.lower()) or sub_token.lower() in sub:
+        if sub.startswith(sub_token.lower()) or (sub_token and sub_token.lower() in sub):
             out.append((f"{prefix}{cmd.name} {sub}", cmd.help))
             if len(out) >= limit:
                 break

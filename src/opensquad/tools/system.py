@@ -177,10 +177,15 @@ class Job:
             # signals from the launcher are less likely to cascade into this job.
             creationflags = 0
             if platform.system() == "Windows":
-                # CREATE_NEW_PROCESS_GROUP: isolate from parent's Ctrl+C group
-                # CREATE_NO_WINDOW: fully detach from launcher's console so that
-                # taskkill /F on this process cannot leak console signals back
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                # CREATE_NEW_PROCESS_GROUP: isolate from parent's Ctrl+C group.
+                # Avoid CREATE_NO_WINDOW — it can raise Windows 0xc0000142 dialogs
+                # when spawning console python.exe (use SW_HIDE via startupinfo).
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+            else:
+                startupinfo = None
 
             self.process = subprocess.Popen(
                 self.command,
@@ -199,6 +204,7 @@ class Job:
                 env=env,
                 cwd=self.working_directory,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
             )
 
             # Start listener thread
@@ -400,19 +406,24 @@ class ShellSession:
         env = os.environ.copy()
         if os.name == "nt":
             env.setdefault("PYTHONIOENCODING", "utf-8")
-        self.process = subprocess.Popen(
-            [self.shell_type],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=env,
-            cwd=self.working_directory,
-            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0,
-        )
+        popen_kw: dict = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+            "env": env,
+            "cwd": self.working_directory,
+        }
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
+            popen_kw["startupinfo"] = si
+            popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        self.process = subprocess.Popen([self.shell_type], **popen_kw)
 
         # Shell bootstrap
         if os.name == "nt":

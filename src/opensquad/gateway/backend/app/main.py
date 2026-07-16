@@ -3,6 +3,7 @@ FastAPI main application entry point
 """
 
 import asyncio
+import contextlib
 import hmac
 import logging
 import logging.config
@@ -182,8 +183,24 @@ def load_config():
 config = load_config()
 cors_config = config.get("backend", {}).get("cors", {})
 
-# Startup readiness flag: True only after DB + default data init complete
+# Startup readiness flags:
+#   ready_lite — DB up; auth + agent admin API usable (CLI fast path)
+#   ready      — full init (default data, model presets, …)
+_app_ready_lite = False
 _app_ready = False
+
+_LITE_HTTP_PREFIXES = (
+    "/health",
+    "/api/auth",
+    "/api/ai-web/admin",
+    "/api/ai-web/nodes",
+    "/api/ai-web/agent-sessions",
+    "/api/launcher",
+)
+
+
+def _path_allowed_lite(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in _LITE_HTTP_PREFIXES)
 
 
 class ReadinessMiddleware:
@@ -201,7 +218,13 @@ class ReadinessMiddleware:
             return
         if not _app_ready:
             path = scope.get("path", "")
+            if _app_ready_lite and _path_allowed_lite(path):
+                await self.app(scope, receive, send)
+                return
             # Allow health check to pass even before ready
+            if path.startswith("/health"):
+                await self.app(scope, receive, send)
+                return
             if path != "/health":
                 _startup_log.warning(f"ReadinessMiddleware: 503 for {path} (backend not ready)")
                 await send(
@@ -224,17 +247,16 @@ class ReadinessMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management"""
-    global _app_ready
+    global _app_ready_lite, _app_ready
     _startup_log.info("Backend starting up...")
     # Initialize database on startup (create tables)
     await init_db()
     _startup_log.info("Database initialized")
 
-    # Parallelize independent startup tasks:
-    #   - init_default_data()   (DB: default users/groups, ~1s bcrypt)
-    #   - reset offline status   (DB: stale online -> offline)
-    #   - model_preset_service   (disk cache: LiteLLM + OpenRouter)
-    # All three are independent of each other (different DB sessions, no shared state).
+    # Phase 1 (fast): CLI / auth / agent admin can proceed
+    _app_ready_lite = True
+    _startup_log.info("Backend ready-lite (auth + agent admin)")
+
     async def _task_init_data():
         try:
             from init_data import init_default_data
@@ -267,16 +289,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             _startup_log.warning(f"Model preset service init failed: {e}")
 
-    await asyncio.gather(
-        _task_init_data(),
-        _task_reset_users(),
-        _task_model_presets(),
-    )
+    async def _finish_heavy_startup() -> None:
+        global _app_ready
+        await asyncio.gather(
+            _task_init_data(),
+            _task_reset_users(),
+            _task_model_presets(),
+        )
+        _app_ready = True
+        _startup_log.info("Backend fully ready")
 
-    # Mark app as ready AFTER all parallel tasks complete
-    global _app_ready
-    _app_ready = True
-    _startup_log.info("Backend fully ready")
+    _heavy_task = asyncio.create_task(_finish_heavy_startup())
 
     # ── Config hot-reload watcher ──
     _config_watch_stop = threading.Event()
@@ -329,6 +352,10 @@ async def lifespan(app: FastAPI):
     _startup_log.info("Config hot-reload watcher started")
 
     yield
+
+    _heavy_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await _heavy_task
 
     # Stop config watcher
     _config_watch_stop.set()
@@ -443,7 +470,18 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint (returns before full init; check ``ready`` for UI load)."""
-    return {"status": "ok", "service": "OpenSquad API", "ready": _app_ready}
+    return {
+        "status": "ok",
+        "service": "OpenSquad API",
+        "ready_lite": _app_ready_lite,
+        "ready": _app_ready,
+    }
+
+
+@app.get("/health/ready-lite")
+async def health_ready_lite():
+    """Fast readiness probe for CLI — DB up; auth + agent admin routes allowed."""
+    return {"ready_lite": _app_ready_lite, "ready": _app_ready}
 
 
 # Launcher management API proxy (production / desktop parity with Vite dev proxy).

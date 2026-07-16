@@ -32,14 +32,45 @@ class PendingProposal:
     options: list[tuple[str, str]]  # (label, value)
     group_id: str
     message_id: str = ""
+    status: str = "pending"
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def sender_name(m: dict) -> str:
-    sender = m.get("sender_name")
+def _message_sender_id(m: dict) -> str:
+    sid = m.get("sender_id") or m.get("senderId") or m.get("user_id") or m.get("userId") or ""
+    if not sid and isinstance(m.get("sender"), dict):
+        sid = (m.get("sender") or {}).get("id") or (m.get("sender") or {}).get("user_id") or ""
+    return str(sid or "").strip()
+
+
+def sender_name(m: dict, *, names: dict[str, str] | None = None) -> str:
+    """Best-effort display name for a group message sender."""
+    sender = m.get("sender_name") or m.get("senderName")
     if not sender and isinstance(m.get("sender"), dict):
         sender = (m.get("sender") or {}).get("name")
-    return str(sender or m.get("user_id") or "?")
+    sid = _message_sender_id(m)
+    if not sender and names and sid:
+        sender = names.get(sid) or names.get(sid.lower())
+    if not sender and sid:
+        # Prefer id over "?" so history without sender_name is still readable
+        sender = sid
+    text = str(sender or "").strip()
+    return text or "?"
+
+
+def enrich_message_sender(m: dict, names: dict[str, str] | None = None) -> dict:
+    """Copy message and fill sender_name from id→name map when missing."""
+    if not isinstance(m, dict):
+        return m
+    out = dict(m)
+    if out.get("sender_name") or out.get("senderName"):
+        if not out.get("sender_name") and out.get("senderName"):
+            out["sender_name"] = out.get("senderName")
+        return out
+    sid = _message_sender_id(out)
+    if names and sid and (names.get(sid) or names.get(sid.lower())):
+        out["sender_name"] = names.get(sid) or names.get(sid.lower())
+    return out
 
 
 def parse_approvals(content: str, *, group_id: str = "", message_id: str = "") -> list[PendingApproval]:
@@ -90,6 +121,7 @@ def parse_proposals(content: str, *, group_id: str = "", message_id: str = "") -
             else:
                 label = value = str(opt)
             options.append((label, value))
+        status = str(payload.get("status") or "pending").strip().lower() or "pending"
         out.append(
             PendingProposal(
                 id=str(payload.get("id") or ""),
@@ -97,10 +129,34 @@ def parse_proposals(content: str, *, group_id: str = "", message_id: str = "") -
                 options=options,
                 group_id=group_id or str(payload.get("group_id") or ""),
                 message_id=message_id,
+                status=status,
                 raw=payload,
             )
         )
     return out
+
+
+def _proposal_chosen_labels(pr: PendingProposal) -> str:
+    """Human summary of what was chosen / custom answer."""
+    raw = pr.raw or {}
+    custom = str(raw.get("custom_answer") or "").strip()
+    if custom:
+        return custom
+    ids: list[str] = []
+    for x in raw.get("chosen_option_ids") or []:
+        s = str(x).strip()
+        if s:
+            ids.append(s)
+    single = str(raw.get("chosen_option_id") or "").strip()
+    if single and single not in ids:
+        ids.insert(0, single)
+    if not ids:
+        return ""
+    labels: list[str] = []
+    by_id = {value: label for label, value in pr.options}
+    for oid in ids:
+        labels.append(by_id.get(oid, oid))
+    return ", ".join(labels)
 
 
 def format_message_lines(
@@ -108,21 +164,19 @@ def format_message_lines(
     *,
     shell_style: bool = True,
     show_raw_content: bool = True,
+    member_names: dict[str, str] | None = None,
 ) -> list[str]:
     """
     Format a group chat message for terminal.
 
-    Web clickable cards become numbered list options:
-      ★ APPROVAL …
-         [1] approve    [2] reject
-      ★ OPTIONS …
-         [1] FastAPI    [2] Flask
+    Pending cards show numbered actions; already-resolved cards collapse to a hint.
     """
     if not isinstance(m, dict):
         return [str(m)]
 
+    m = enrich_message_sender(m, member_names)
     lines: list[str] = []
-    sender = sender_name(m)
+    sender = sender_name(m, names=member_names)
     content = m.get("content") or ""
     mid = m.get("id") or ""
     gid = m.get("group_id") or ""
@@ -130,6 +184,25 @@ def format_message_lines(
     # Strip card markers from visible body for cleaner display
     body = APPROVAL_RE.sub("", content)
     body = PROPOSE_RE.sub("", body).strip()
+    # Propose-options encode also dumps a human list under the marker — drop that
+    # fluff for history so resolved cards don't look like an active picker.
+    has_propose = bool(PROPOSE_RE.search(content or ""))
+    has_approval = bool(APPROVAL_RE.search(content or ""))
+    if has_propose or has_approval:
+        # Keep only a short lead-in before the numbered option dump
+        lead: list[str] = []
+        for ln in body.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if s[:1].isdigit() and (". " in s[:4] or "．" in s[:4]):
+                break
+            if s.startswith("请在下方") or s.startswith("Please choose") or s.startswith("请选择"):
+                break
+            lead.append(s)
+            if len(lead) >= 2:
+                break
+        body = "\n".join(lead).strip()
 
     if show_raw_content:
         if body:
@@ -156,15 +229,26 @@ def format_message_lines(
             lines.append(f"     (already {ap.status})")
 
     for pr in parse_proposals(content, group_id=str(gid), message_id=str(mid)):
-        lines.append(f"  ★ OPTIONS  {pr.id}  — {pr.title}")
-        for i, (label, value) in enumerate(pr.options, 1):
-            suffix = f"  (value={value})" if value != label else ""
-            lines.append(f"     [{i}] {label}{suffix}")
-        if shell_style:
-            if pr.options:
-                lines.append(f"     → /choose {pr.id} <value>   or reply: 1..{len(pr.options)}")
+        st = (pr.status or "pending").lower()
+        if st == "pending":
+            lines.append(f"  ★ OPTIONS  {pr.id}  — {pr.title}")
+            for i, (label, value) in enumerate(pr.options, 1):
+                suffix = f"  (value={value})" if value != label else ""
+                lines.append(f"     [{i}] {label}{suffix}")
+            if shell_style:
+                if pr.options:
+                    lines.append(f"     → /choose {pr.id} <value>   or reply: 1..{len(pr.options)}")
+            else:
+                lines.append(f"     → opensquad group choose {gid or '<gid>'} {pr.id} <value>")
         else:
-            lines.append(f"     → opensquad group choose {gid or '<gid>'} {pr.id} <value>")
+            # Resolved: collapse to a normal hint (do not re-offer interactive choose)
+            chosen = _proposal_chosen_labels(pr)
+            if st == "ignored":
+                lines.append(f"  · OPTIONS dismissed — {pr.title}")
+            elif chosen:
+                lines.append(f"  · OPTIONS {st}: {chosen}")
+            else:
+                lines.append(f"  · OPTIONS {st} — {pr.title}")
 
     # Attachments as list (Web clickable chips → numbered list)
     attachments = m.get("attachments") or []

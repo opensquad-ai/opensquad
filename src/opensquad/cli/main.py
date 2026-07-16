@@ -1,17 +1,16 @@
 """
 OpenSquad CLI
 
-Usage:
-    opensquad                                   Start all services (same as 'opensquad start')
-    opensquad --version                         Show current version
-    opensquad init [--workspace <path>]         Initialize workspace
-    opensquad start|stop|restart|status|doctor|logs|config|update|help
+Daily (just use these — OpenSquad starts services for you):
+    opensquad code [agent]      Terminal TUI (auto-starts Gateway/Launcher if needed)
+    opensquad web               Browser Web UI (same)
 
-    opensquad login|logout|whoami               Auth against Gateway
-    opensquad agent|mcp|skill|plugin|role|model|collab   Manage resources
-    opensquad code [agent]                      One-command TUI (auto-start services)
-    opensquad chat [agent]                      Interactive single-agent REPL
-    opensquad group …                           Group chat + approvals
+Optional:
+    opensquad start --detach    Pre-warm daemon in background (faster next `code`/`web`)
+    opensquad start             Foreground all services (incl. Vite; Ctrl+C stops)
+    opensquad stop|restart|status|doctor|logs|config|update|help
+    opensquad login|logout|whoami
+    opensquad agent|mcp|skill|plugin|role|model|collab|group|chat
 """
 
 import argparse
@@ -41,7 +40,10 @@ def main():
     p_init.add_argument("--no-config", action="store_true", help="Skip copying system_config.json template")
 
     # ── start ──
-    p_start = sub.add_parser("start", help="Start all OpenSquad services")
+    p_start = sub.add_parser(
+        "start",
+        help="Start services (optional; `code`/`web` auto-start if needed)",
+    )
     p_start.add_argument("--verbose", action="store_true", help="Show all service logs in the console (default: quiet)")
     p_start.add_argument("--port", "-p", type=int, default=None, help="Gateway port (default: from config)")
     p_start.add_argument("--no-launcher", action="store_true", help="Skip launcher service")
@@ -49,6 +51,11 @@ def main():
     p_start.add_argument("--no-registry", action="store_true", help="Skip plugin registry")
     p_start.add_argument("--no-frontend", action="store_true", help="Skip frontend dev server")
     p_start.add_argument("--no-watchdog", action="store_true", help="Skip health-check watchdog")
+    p_start.add_argument(
+        "--detach",
+        action="store_true",
+        help="Optional: pre-warm Gateway+Launcher in background (not required before code/web)",
+    )
 
     # ── status ──
     p_status = sub.add_parser("status", help="Show agent and service status")
@@ -226,23 +233,40 @@ def main():
     p_board_items.add_argument("--agent-id", dest="agent_id", default=None)
     p_board_items.add_argument("--scope", default="public", choices=["public", "all"])
 
-    # ── code (Claude Code / OpenCode style: one command → TUI) ──
+    # ── code (daily TUI — auto-starts services) ──
     p_code = sub.add_parser(
         "code",
-        help="Start TUI in one command (auto-starts Gateway/Launcher if needed)",
+        help="Terminal TUI (auto-starts services; just run this)",
     )
     _add_gateway_flag(p_code)
-    p_code.add_argument("agent", nargs="?", default=None, help="Agent dir_name (default: first ready)")
+    p_code.add_argument("agent", nargs="?", default=None, help="Agent dir_name (default: last / first ready)")
     p_code.add_argument("-m", "--message", default=None, help="One-shot message (non-interactive)")
     p_code.add_argument(
         "--no-start",
         action="store_true",
-        help="Do not auto-start services (assume already running)",
+        help="Do not auto-start services (advanced; assume already running)",
     )
     p_code.add_argument(
         "--legacy",
         action="store_true",
         help="Use framed prompt_toolkit REPL instead of full-screen Textual TUI",
+    )
+
+    # ── web (browser UI — auto-starts services) ──
+    p_web = sub.add_parser(
+        "web",
+        help="Open Web UI (auto-starts services + Vite if needed)",
+    )
+    _add_gateway_flag(p_web)
+    p_web.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Do not start services / frontend (only open browser if already up)",
+    )
+    p_web.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print URL only; do not open a browser",
     )
 
     # ── chat / shell (Claude-Code-like interactive UI) ──
@@ -301,21 +325,24 @@ def main():
         sys.exit(0)
 
     if not args.command:
-        from argparse import Namespace
-
-        args = Namespace(
-            command="start",
-            port=None,
-            no_launcher=False,
-            no_gateway=False,
-            no_registry=False,
-            no_frontend=False,
-            no_watchdog=False,
-            verbose=getattr(args, "verbose", False),
+        print(
+            "OpenSquad — just run:\n"
+            "  opensquad code             # terminal TUI (auto-starts services)\n"
+            "  opensquad web              # browser Web UI\n"
+            "\n"
+            "Optional: opensquad start --detach  (pre-warm) · stop · help · --version\n"
         )
+        sys.exit(0)
 
     if args.command == "help":
         parser.print_help()
+        print(
+            "\nDaily:\n"
+            "  opensquad code             → TUI (services start automatically)\n"
+            "  opensquad web              → Web UI\n"
+            "\n"
+            "Optional: opensquad start --detach  (pre-warm daemon only)\n"
+        )
         sys.exit(0)
 
     _dispatch(args)
@@ -411,6 +438,10 @@ def _dispatch(args) -> None:
         from opensquad.cli.runtime_boot import run_code
 
         run_code(args)
+    elif cmd == "web":
+        from opensquad.cli.commands.web_cmd import run_web
+
+        run_web(args)
     elif cmd in ("chat", "shell"):
         if getattr(args, "start", False):
             from opensquad.cli.runtime_boot import run_code

@@ -2,10 +2,8 @@
 OpenSquad TUI — full-screen terminal UI (Textual).
 
 Layout (Claude Code / OpenCode style):
-  ┌─ header ─────────────────────────────────┐
-  │ OpenSquad CLI · agent · mode             │
-  ├─ chat log (scroll) ──────────────────────┤
-  │  messages / tool / cards                 │
+  ┌─ chat log (scroll) ──────────────────────┤
+  │  welcome card · messages / tool / cards  │
   ├─ prompt frame ───────────────────────────┤
   │  ❯ input…                                │
   └─ status bar ─────────────────────────────┘
@@ -14,6 +12,7 @@ Layout (Claude Code / OpenCode style):
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -21,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from opensquad import __version__
-from opensquad.cli.api_client import GatewayClient, load_credentials, pick_default_agent, remember_agent
+from opensquad.cli.api_client import GatewayClient, pick_default_agent, remember_agent
 from opensquad.cli.media import (
     PendingMedia,
     attach_from_clipboard,
@@ -65,8 +64,8 @@ def _quiet_tui_loggers() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def run_tui(*, gateway: str | None = None, agent: str | None = None) -> None:
-    """Entry: launch the Textual app (blocks until quit)."""
+def run_tui(*, gateway: str | None = None, agent: str | None = None, no_start: bool = False) -> None:
+    """Entry: launch Textual TUI (agent should already be ready from ``run_code``)."""
     try:
         import importlib.util
 
@@ -77,15 +76,16 @@ def run_tui(*, gateway: str | None = None, agent: str | None = None) -> None:
 
     _quiet_tui_loggers()
 
-    # Windows: allow IME-committed CJK (Space/Enter confirm) into Input
     from opensquad.cli.tui.win_ime_patch import apply_win_ime_patch
 
     apply_win_ime_patch()
 
+    from opensquad.cli.api_client import GatewayClient, last_agent
+
     client = GatewayClient(gateway_url=gateway)
-    if not agent and client.token:
-        agent = pick_default_agent(client)
-    app = OpenSquadApp(client=client, agent=agent)
+    if not agent:
+        agent = last_agent()
+    app = OpenSquadApp(client=client, agent=agent, no_start=no_start)
     app.run()
 
 
@@ -99,8 +99,8 @@ def _pick_default_agent(client: GatewayClient) -> str | None:
 class OpenSquadApp:
     """Factory that subclasses Textual App lazily (keeps import optional)."""
 
-    def __new__(cls, client: GatewayClient, agent: str | None):
-        return _build_app_class()(client=client, agent=agent)
+    def __new__(cls, client: GatewayClient, agent: str | None, no_start: bool = False):
+        return _build_app_class()(client=client, agent=agent, no_start=no_start)
 
 
 def _same_reply(a: str, b: str) -> bool:
@@ -127,14 +127,24 @@ def _is_truncated_prefix(short: str, full: str) -> bool:
 
 
 def _build_app_class():
+    import asyncio
+    import threading
+    from functools import partial
+
     from textual import on, work
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Vertical
-    from textual.widgets import Footer, Input, Static
+    from textual.widgets import Input, Static
 
-    from opensquad.cli.commands.chat_cmd import AgentBridge, AgentWsError
     from opensquad.cli.group_bridge import GroupBridge
+    from opensquad.cli.tui.i18n import (
+        get_locale,
+        load_saved_locale,
+        normalize_locale,
+        set_locale,
+        t,
+    )
     from opensquad.cli.tui.selectable_rich_log import SelectableRichLog as RichLog
     from opensquad.cli.tui.slash_suggest import SlashSuggester, slash_completions
     from opensquad.cli.tui.themes import (
@@ -153,15 +163,16 @@ def _build_app_class():
         # Drag-select must not edge-auto-scroll — that fights the highlight and feels like "画面抖动"
         ENABLE_SELECT_AUTO_SCROLL = False
         BINDINGS = [
-            Binding("ctrl+c", "cancel_or_clear", "^C×2 Exit", show=True),
-            Binding("ctrl+q", "quit", "Quit", show=True),
+            Binding("ctrl+c", "cancel_or_clear", "^C×2 Exit", show=False),
+            Binding("ctrl+q", "quit", "Quit", show=False),
             Binding("ctrl+l", "clear_log", "Clear", show=False),
             Binding("ctrl+shift+v", "paste_image", "Paste image", show=False),
-            Binding("ctrl+e", "cycle_effort", "Effort", show=True, priority=True),
-            Binding("ctrl+x", "toggle_live", "Live", show=True, priority=True),
+            Binding("ctrl+e", "cycle_effort", "Effort", show=False, priority=True),
+            Binding("ctrl+x", "toggle_live", "Live", show=False, priority=True),
+            Binding("ctrl+o", "toggle_detail", "Detail", show=False, priority=True),
             # priority so Tab does NOT move focus away from the input (that made typing die)
             # Idle Tab = Plan/Build; with slash/nav menu open = confirm selection
-            Binding("tab", "accept_slash", "Plan/Build", show=True, priority=True),
+            Binding("tab", "accept_slash", "Plan/Build", show=False, priority=True),
             Binding("escape", "hide_slash", "Hide menu", show=False),
             Binding("up", "slash_up", "Prev", show=False, priority=True),
             Binding("down", "slash_down", "Next", show=False, priority=True),
@@ -169,8 +180,11 @@ def _build_app_class():
             Binding("space", "decision_space", show=False, priority=True),
         ]
 
-        def __init__(self, client: GatewayClient, agent: str | None):
+        def __init__(self, client: GatewayClient, agent: str | None, no_start: bool = False):
             super().__init__()
+            self._no_start = bool(no_start)
+            self._needs_new_session = False
+            self._preflight_done = False
             register_opensquad_themes(self)
             # Apply before first paint when possible
             saved = load_saved_theme()
@@ -178,18 +192,22 @@ def _build_app_class():
                 self.theme = saved
             elif DEFAULT_THEME in (self.available_themes or {}):
                 self.theme = DEFAULT_THEME
+            self._locale = set_locale(load_saved_locale(), persist=False)
             self.client = client
             self.agent = agent
             self.mode = "solo"
-            self.bridge: AgentBridge | None = None
+            self.bridge: Any = None
             self.group: GroupBridge | None = None
             self.pending_media: list[PendingMedia] = []
+            # Skill chip for next send (Web pendingSkill) — injected as <user_send_skill>
+            self.pending_skill: dict[str, str] | None = None
             self.muted = False
             self._agent_paused = False
             self._stream_buf = ""
             self._sending = False
             # Wait animation state
             self._wait_label: str | None = None
+            self._wait_gen: int = 0  # invalidate begin_wait vs end_wait races
             self._wait_tick: int = 0
             self._wait_timer = None
             self._SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -240,7 +258,7 @@ def _build_app_class():
             # Debounce duplicate compress-clear (summary + history_sync)
             self._compress_clear_at: float = 0.0
             # Message FIFO (solo)
-            self._send_queue: deque[tuple[str, list]] = deque()
+            self._send_queue: deque[tuple[str, list, dict[str, str] | None]] = deque()
             # Live thinking paint throttle
             self._think_paint_at: float = 0.0
             # Side stream (Ctrl+X)
@@ -252,6 +270,8 @@ def _build_app_class():
             self._await_api_key: dict[str, Any] | None = None
             # Model field edit capture (temperature / token_max / …)
             self._await_model_field: dict[str, Any] | None = None
+            # /login capture: {"step": "email"|"password", "email": str|None}
+            self._await_login: dict[str, Any] | None = None
             self._follow_chat: bool = True
             # Bash-like input history (↑/↓ when no menu open)
             self._input_history: list[str] = []
@@ -262,14 +282,39 @@ def _build_app_class():
             self._decision: PendingDecision | None = None
             self._await_custom_answer: bool = False
             self._decision_queue: list[PendingDecision] = []
+            # Group @mention autocomplete
+            self._mention_items: list[dict[str, str]] = []
+            self._mention_index: int = 0
+            self._mention_active: bool = False
+            self._group_members: list[dict[str, str]] = []
+            self._group_oldest_id: str | None = None
             # Dedup first-turn agent reply (stream flush vs final on_line race)
             self._last_agent_reply: str = ""
+            # This turn's user text — drop WS echoes painted as agent output
+            self._turn_user_text: str = ""
+            # Production defaults: hide boot chatter; fold long thinking/tools
+            self._debug_mode: bool = False
+            self._detail_expanded: bool = False
+            self._welcome_posted: bool = False
+            self._DETAIL_TOKEN_LIMIT: int = 100
+            self._last_tool_name: str = ""
+            self._paint_cache: dict[str, str] = {}
+            # Open tools (progress in wait-banner); chat gets one green lamp per call_id/name
+            self._open_tool: dict[str, Any] | None = None
+            self._open_tool_keys: set[str] = set()
+            # Sync claim before schedule_ui — blocks duplicate ✓ for same tool
+            self._done_tool_keys: set[str] = set()
+            self._last_tool_result_key: str = ""
+            self._last_flushed_think: str = ""
+            self._think_gen: int = 0
+            self._placeholder_cache: str = ""
+            self._stream_scroll_at: float = 0.0
 
         def compose(self) -> ComposeResult:
             yield Static(id="header-bar")
             yield RichLog(
                 id="chat-log",
-                highlight=True,
+                highlight=False,
                 markup=True,
                 wrap=True,
                 auto_scroll=False,
@@ -281,21 +326,22 @@ def _build_app_class():
                 wrap=True,
                 auto_scroll=False,
             )
+            # Fixed-height live Thinking panel (stream tokens here; finalize into chat-log)
             yield Static(id="live-think")
             with Vertical(id="prompt-dock"):
                 yield Static(id="slash-menu")
                 yield Static(id="wait-banner")
                 with Vertical(id="prompt-frame"):
                     yield Input(
-                        placeholder='Ask anything…  "/" · Tab mode · ^E effort · ^X live',
+                        placeholder=t("placeholder_ask"),
                         id="chat-input",
                         type="text",
                         suggester=SlashSuggester(),
                     )
-                    yield Static(id="prompt-meta")
-                yield Static(id="footer-path")
-                yield Static(id="status-bar")
-            yield Footer()
+                yield Static(id="prompt-meta")
+                yield Static(id="bottom-status")
+            # No Textual Footer — shortcuts are in the input placeholder;
+            # an empty/hidden Footer caused Windows CMD layout thrash (repeated lines).
 
         def on_mount(self) -> None:
             # Prevent non-input widgets from stealing keyboard / breaking IME
@@ -308,42 +354,59 @@ def _build_app_class():
                 "#header-bar",
                 "#slash-menu",
                 "#wait-banner",
-                "#status-bar",
                 "#prompt-meta",
-                "#footer-path",
+                "#bottom-status",
                 "#live-think",
             ):
                 try:
-                    self.query_one(wid, Static).can_focus = False
+                    self.query_one(wid).can_focus = False
                 except Exception:
                     pass
-            try:
-                self.query_one(Footer).can_focus = False
-            except Exception:
-                pass
             self._sync_status_from_agent(self.agent)
             self._refresh_chrome()
-            creds = load_credentials()
-            self._chat_write(f"[bold]OpenSquad[/]  [dim]v{__version__}[/]", follow=True)
-            if creds.get("email"):
-                self._chat_write(f"[dim]{creds.get('email')} · {self.client.gateway_url}[/]", follow=True)
-            else:
-                self._chat_write("[yellow]Not logged in — /login[/]", follow=True)
-            self._chat_write(
-                "[dim]Tab Plan/Build · ^E effort · ^X live · /theme · /model Connect[/]\n",
-                follow=True,
-            )
             self._hide_slash_menu()
             self._focus_input()
+            # Agent is usually already ready (run_code waited). Open WS + new_session.
+            # Welcome card is posted after connect so it shows ready (not a stale offline).
+            self._preflight_done = True
             if self.client.token and self.agent:
-                self.log_line(
-                    f"Booting agent '{self.agent}' in background…",
-                    style="system",
-                )
-                # Always start a fresh session on TUI launch (do not resume last)
+                self.begin_wait(t("wait_boot_ws", name=self.agent))
                 self._bootstrap_agent(self.agent, then_new=True)
-            elif not self.agent:
-                self.log_line("No agent selected. /agent list then /start <name>", style="system")
+            else:
+                self._post_welcome_card()
+                if not self.client.token:
+                    self.log_line(t("not_logged_in"), style="system")
+                elif not self.agent:
+                    self.log_line(
+                        "No agent selected. /agent list then /start <name>",
+                        style="system",
+                    )
+
+        def _ensure_new_session(self) -> bool:
+            """Send new_session once before first message (deferred from boot)."""
+            if not getattr(self, "_needs_new_session", False):
+                return True
+            if not self.bridge:
+                return False
+            try:
+                self._last_agent_reply = ""
+                self._session_current_id = None
+                self._send_queue.clear()
+                self._stream_buf = ""
+                self._reply_flushed = False
+                self._session_out_tokens = 0
+                self._turn_started_at = None
+                self._turn_out_target = 0
+                self._turn_out_display = 0
+                self._last_turn_out = 0
+                self._last_turn_elapsed = None
+                self.bridge.send_command("new_session")
+                self._needs_new_session = False
+                self._log_verbose("New session started")
+                return True
+            except Exception as e:
+                self.log_line(str(e), style="error")
+                return False
 
         def _focus_input(self) -> None:
             try:
@@ -364,7 +427,12 @@ def _build_app_class():
 
         def _chat_write(self, content: Any, *, follow: bool | None = None, shrink: bool = True) -> None:
             """Append to chat log; sticky-bottom while agent streams unless user scrolled up."""
+            self._chat_write_counted(content, follow=follow, shrink=shrink)
+
+        def _chat_write_counted(self, content: Any, *, follow: bool | None = None, shrink: bool = True) -> int:
+            """Append to chat log; return how many RichLog strips were added."""
             log = self.query_one("#chat-log", RichLog)
+            before = len(log.lines)
             if self._is_selecting():
                 scroll_end = False
             elif follow is True:
@@ -386,6 +454,222 @@ def _build_app_class():
                     log.scroll_end(animate=False)
                 except Exception:
                     pass
+            return max(0, len(log.lines) - before)
+
+        def _chat_pop_strips(self, n: int) -> None:
+            """Remove the last ``n`` strips from the chat log (in-place rewrite helper)."""
+            if n <= 0:
+                return
+            try:
+                from textual.geometry import Size
+
+                log = self.query_one("#chat-log", RichLog)
+                n = min(int(n), len(log.lines))
+                if n <= 0:
+                    return
+                del log.lines[-n:]
+                log._line_cache.clear()
+                log.virtual_size = Size(
+                    int(getattr(log, "_widest_line_width", 0) or 0),
+                    len(log.lines),
+                )
+                log.refresh()
+            except Exception:
+                pass
+
+        def _chat_replace_open(
+            self,
+            open_meta: dict[str, Any] | None,
+            content: Any,
+            *,
+            follow: bool | None = True,
+        ) -> dict[str, Any] | None:
+            """Replace a previously written open row (tool/think) in-place when possible."""
+            log = self.query_one("#chat-log", RichLog)
+            if open_meta:
+                start = int(open_meta.get("start", -1))
+                strips = int(open_meta.get("strips", 0))
+                end = start + strips
+                # Prefer rewrite when the open row is still the tail (common path)
+                if strips > 0 and start >= 0 and end == len(log.lines):
+                    self._chat_pop_strips(strips)
+                elif strips > 0 and 0 <= start < len(log.lines):
+                    # Content was appended after the open row — splice it out
+                    try:
+                        from textual.geometry import Size
+
+                        tail = list(log.lines[end:]) if end < len(log.lines) else []
+                        del log.lines[start:]
+                        log._line_cache.clear()
+                        log.virtual_size = Size(
+                            int(getattr(log, "_widest_line_width", 0) or 0),
+                            len(log.lines),
+                        )
+                        n = self._chat_write_counted(content, follow=False, shrink=True)
+                        if tail:
+                            log.lines.extend(tail)
+                            log.virtual_size = Size(
+                                int(getattr(log, "_widest_line_width", 0) or 0),
+                                len(log.lines),
+                            )
+                            log.refresh()
+                        if follow and getattr(self, "_follow_chat", True) and not self._is_selecting():
+                            try:
+                                log.scroll_end(animate=False)
+                            except Exception:
+                                pass
+                        return {"start": start, "strips": n, "name": open_meta.get("name", "")}
+                    except Exception:
+                        pass
+                else:
+                    # Stale handle — just append
+                    pass
+            start = len(log.lines)
+            n = self._chat_write_counted(content, follow=follow, shrink=True)
+            return {"start": start, "strips": n, "name": (open_meta or {}).get("name", "")}
+
+        def _log_verbose(self, text: str) -> None:
+            """Boot / lifecycle chatter — only when /debug is on."""
+            if self._debug_mode:
+                self.log_line(text, style="system")
+
+        @staticmethod
+        def _approx_tokens(text: str) -> int:
+            import re
+
+            raw = text or ""
+            cjk = sum(1 for ch in raw if ord(ch) > 0x2E80)
+            words = len(re.findall(r"\S+", raw))
+            return max(cjk, words)
+
+        def _fold_detail_text(self, text: str) -> str:
+            """Show first ~100 tokens; append hint unless detail mode (^O)."""
+            body = str(text or "")
+            if self._detail_expanded or self._approx_tokens(body) <= self._DETAIL_TOKEN_LIMIT:
+                return body
+            limit = self._DETAIL_TOKEN_LIMIT
+            out: list[str] = []
+            used = 0
+            for ch in body:
+                if ord(ch) > 0x2E80:
+                    used += 1
+                elif ch.isspace():
+                    if out and out[-1] != " ":
+                        used += 1
+                elif ch.isalnum():
+                    if not out or out[-1].isspace() or (not out[-1].isalnum() and out[-1] != " "):
+                        used += 1
+                out.append(ch)
+                if used >= limit:
+                    break
+            trimmed = "".join(out).rstrip()
+            if len(trimmed) < len(body.strip()):
+                return trimmed + " " + t("detail_fold_hint")
+            return body
+
+        def _render_welcome_card(self) -> Any:
+            """Kimi-style welcome card with logo — scrolls with chat history."""
+            from rich.console import Console, ConsoleOptions, RenderResult
+            from rich.segment import Segment
+            from rich.style import Style
+
+            surface = self._theme_hex("surface", "#161b22")
+            fg = self._theme_hex("foreground", "#e6edf3")
+            primary = self._theme_hex("primary", "#58a6ff")
+            accent = self._theme_hex("accent", "#7c3aed")
+            edge = self._theme_hex("primary-muted", primary)
+
+            if self.mode == "group" and self.group:
+                gname = self._escape_markup(self.group.group_name or self.group.group_id)
+                meta = f"Group  {gname}  ·  /leave"
+            else:
+                ready = bool(self.bridge and getattr(self.bridge, "is_open", False))
+                state = "ready" if ready else "offline"
+                mode = getattr(self, "_agent_mode", "build") or "build"
+                mode_plain = t("mode_plan") if mode == "plan" else t("mode_build")
+                model = self._escape_markup(getattr(self, "_model_label", None) or "—")
+                agent = self._escape_markup(self.agent or "—")
+                meta = f"Model  {model}  ·  {agent}  ·  {state}  ·  {mode_plain}"
+
+            raw_cwd = (
+                getattr(self, "_launch_cwd", None)
+                or getattr(self, "_project_path", None)
+                or self._resolve_project_path()
+            )
+            # Fit path to card width; never collapse to a lone "~"
+            path_budget = 72
+            try:
+                path_budget = max(24, int(self.size.width) - 18)
+            except Exception:
+                pass
+            cwd_disp = self._display_project_path(raw_cwd, max_len=path_budget)
+            cwd = self._escape_markup(cwd_disp)
+            welcome = self._escape_markup(t("header_welcome"))
+            logo_lines = ("┌──┐", "│●●│", "│●●│", "└──┘")
+            text_lines = (
+                f"[bold {fg}]OpenSquad[/]  [dim]v{__version__}[/]",
+                f"[dim]{welcome}[/]",
+                f"[dim]{meta}[/]",
+                f"[dim]{t('header_project')}[/]  [{primary}]{cwd}[/]",
+            )
+
+            class _WelcomeCard:
+                def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+                    width = max(24, options.max_width)
+                    edge_st = Style.parse(f"{edge} on {surface}")
+                    pad_st = Style.parse(f"on {surface}")
+                    logo_bg = Style.parse(f"on {accent}")
+                    logo_dot = Style.parse(f"bold white on {accent}")
+                    inner_w = max(1, width - 2)
+                    logo_w = 4
+                    gap = 2
+                    n_rows = max(len(logo_lines), len(text_lines))
+
+                    def _emit_row(left: str, right_markup: str) -> RenderResult:
+                        from rich.text import Text
+
+                        row = Text("", style=pad_st)
+                        for ch in left.ljust(logo_w)[:logo_w]:
+                            if ch == "●":
+                                row.append(ch, style=logo_dot)
+                            elif ch in "┌┐└┘─│":
+                                row.append(ch, style=logo_bg)
+                            else:
+                                row.append(ch, style=pad_st)
+                        row.append(" " * gap, style=pad_st)
+                        if right_markup:
+                            row.append_text(Text.from_markup(right_markup))
+                        pad = max(0, inner_w - len(row.plain))
+                        yield from row
+                        if pad:
+                            yield Segment(" " * pad, pad_st)
+                        yield Segment("│", edge_st)
+                        yield Segment.line()
+
+                    yield Segment(("─" * inner_w) + "┐", edge_st)
+                    yield Segment.line()
+                    for i in range(n_rows):
+                        left = logo_lines[i] if i < len(logo_lines) else "    "
+                        right = text_lines[i] if i < len(text_lines) else ""
+                        yield from _emit_row(left, right)
+                    yield Segment(("─" * inner_w) + "┘", edge_st)
+                    yield Segment.line()
+
+            return _WelcomeCard()
+
+        def _post_welcome_card(self) -> None:
+            if getattr(self, "_welcome_posted", False):
+                return
+            self._welcome_posted = True
+
+            def _write() -> None:
+                self._chat_write(self._render_welcome_card(), follow=True)
+                self._chat_write("", follow=True)
+
+            try:
+                _write()
+            except Exception:
+                pass
 
         def _render_user_block(self, text: str) -> Any:
             """User message card: 1-cell blue accent flush + top/bottom/right outline."""
@@ -422,35 +706,220 @@ def _build_app_class():
                     yield Segment(" ", accent_st)
                     yield Segment(("─" * inner_w) + "┐", edge_st)
                     yield Segment.line()
-                    yield from _row("", pad_row=True)
                     for line in body.splitlines() or [""]:
                         yield from _row(f" {line}")
-                    yield from _row("", pad_row=True)
                     yield Segment(" ", accent_st)
                     yield Segment(("─" * inner_w) + "┘", edge_st)
                     yield Segment.line()
 
             return _UserCard()
 
-        def _thinking_markup(self, text: str) -> str:
-            """Highlighted Thinking: label + body (OpenCode-like green accent)."""
-            import re
+        def _thinking_markup(self, text: str, *, live: bool = False) -> str:
+            """Thinking: yellow label + light-gray body.
 
-            accent = self._theme_hex("success", "#3fb950")
-            # Slightly brighter than muted so Thinking body stays readable
-            body = "#a3b3c3"
-            safe = self._escape_markup(text)
+            live=True → show a trailing window (streaming); else fold unless ^O.
+            """
+            orange = self._theme_hex("warning", "#c9a227")
+            muted = self._theme_hex("text-muted", "#8b949e")
+            if live:
+                raw = (text or "").strip()
+                # Keep last ~900 chars so the fixed panel scrolls content, not layout
+                if len(raw) > 900:
+                    raw = "…" + raw[-899:]
+                body = raw
+            else:
+                body = self._fold_detail_text(text)
+            safe = self._escape_markup(body)
+            return f"[{orange}]{t('thinking_label')}[/] [dim {muted}]{safe}[/]"
 
-            def _hl(m: re.Match[str]) -> str:
-                return f"[bold {accent}]{m.group(0)}[/]"
+        def _parse_tool_line(self, text: str) -> tuple[str, str, str, str]:
+            """Return (kind, name, detail, state).
 
-            highlighted = re.sub(
-                r"(?i)\b(task|explore|sub-?agent|tool(?:call)?s?|agent|plan|build|"
-                r"delegat\w*|search|read|write|file|project|director\w*)\b",
-                _hl,
-                safe,
+            kind: call | result | other
+            state: progress | done | error
+
+            Bridge may tag ``name#call_id`` so we can dedupe by id.
+            """
+            raw = str(text or "")
+            stripped = raw.strip()
+            # Drop live-panel hints / running suffix so regex matches cleanly
+            stripped = re.sub(r"\s*\[dim\].*$", "", stripped)
+            stripped = re.sub(r"\s*\(running\)\s*$", "", stripped, flags=re.I)
+            failed = self._tool_line_failed(raw)
+
+            def _split_call_tag(label: str) -> tuple[str, str]:
+                """Split ``name#call_id`` → (display_name, dedupe_key)."""
+                lab = (label or "").strip()
+                if "#" in lab:
+                    base, cid = lab.rsplit("#", 1)
+                    base = base.strip() or lab
+                    cid = cid.strip()
+                    if cid:
+                        return base, f"id:{cid}"
+                return lab, f"name:{lab}" if lab else "name:tool"
+
+            if stripped.startswith("✓"):
+                body = re.sub(r"^✓\s*", "", stripped).strip()
+                # "Shell done: …" / "Sub-agent done: …" → keep prior tool name
+                m_done = re.match(r"^(Shell|Sub-agent)\s+done\b[:\s]*(.*)$", body, flags=re.I | re.S)
+                if m_done:
+                    label = m_done.group(1)
+                    rest = (m_done.group(2) or "").strip()
+                    prior = (getattr(self, "_last_tool_name", "") or "").strip()
+                    if prior:
+                        name = prior
+                    else:
+                        name = label
+                    disp, _key = _split_call_tag(name)
+                    state = "error" if failed else "done"
+                    return "result", disp, rest, state
+                # Prefer ``name#call_id`` (stable); ignore varying result body
+                head = body.split(":", 1)[0].strip() if body else ""
+                tagged = head or body
+                disp, _key = _split_call_tag(tagged)
+                if not disp:
+                    disp = (getattr(self, "_last_tool_name", "") or "").strip()
+                state = "error" if failed else "done"
+                return "result", disp, "", state
+
+            # ⚙ name(#call_id)?(args) — optionally "Sub-agent:" / "Shell:" prefix
+            m = re.match(
+                r"^⚙\s*((?:Sub-agent|Shell):\s*)?([^\(]+?)(?:\((.*)\))?\s*$",
+                stripped,
+                flags=re.S,
             )
-            return f"[bold {accent}]Thinking:[/] [italic {body}]{highlighted}[/]"
+            if m:
+                prefix = (m.group(1) or "").strip()  # "Shell:" / "Sub-agent:" / ""
+                name = (m.group(2) or "").strip()
+                args = (m.group(3) or "").strip()
+                if prefix:
+                    kind_l = prefix.rstrip(":").strip()
+                    label = f"{kind_l}: {name}" if name else kind_l
+                else:
+                    label = name or "tool"
+                label = re.sub(r"\s+", " ", label).strip()
+                disp, _key = _split_call_tag(label)
+                state = "error" if failed else "progress"
+                if disp:
+                    self._last_tool_name = disp
+                return "call", disp or "tool", args, state
+
+            if "⚙" in stripped[:6]:
+                name = re.sub(r"^.*?⚙\s*", "", stripped).split("(")[0].strip() or "tool"
+                name = re.sub(r"\s+", " ", name).strip()
+                disp, _key = _split_call_tag(name)
+                self._last_tool_name = disp
+                return "call", disp, "", "error" if failed else "progress"
+
+            state = "error" if failed else "done"
+            return "other", "", stripped, state
+
+        def _tool_markup(self, text: str) -> str | None:
+            """Tool line: white bold name + signal lamp; hide args/result unless ^O.
+
+            Returns None to skip writing the line entirely.
+            """
+            kind, name, detail, state = self._parse_tool_line(text)
+            return self._tool_markup_parts(kind, name, detail, state)
+
+        def _tool_markup_parts(self, kind: str, name: str, detail: str, state: str) -> str | None:
+            lamp = self._signal_lamp(state)
+            expanded = bool(getattr(self, "_detail_expanded", False))
+            white = "#e6edf3"
+            muted = self._theme_hex("text-muted", "#8b949e")
+
+            if kind == "call":
+                name_s = self._escape_markup(name or "tool")
+                if expanded and detail:
+                    args_s = self._escape_markup(detail)
+                    return f"{lamp}[bold {white}]{name_s}[/][dim {muted}]({args_s})[/]"
+                return f"{lamp}[bold {white}]{name_s}[/]"
+
+            if kind == "result":
+                # Prefer the open-call label so orange→green keeps the same text
+                open_name = ""
+                if getattr(self, "_open_tool", None):
+                    open_name = str(self._open_tool.get("name") or "")
+                label = open_name or name or getattr(self, "_last_tool_name", "") or ""
+                name_s = self._escape_markup(label) if label else ""
+                if state == "error":
+                    body = self._escape_markup((detail or "failed")[:160])
+                    if name_s:
+                        return f"{lamp}[bold {white}]{name_s}[/] [bold red]{body}[/]"
+                    return f"{lamp}[bold red]{body}[/]"
+                if not expanded:
+                    # Compact success: green lamp + same label as the running row
+                    if name_s:
+                        return f"{lamp}[bold {white}]{name_s}[/]"
+                    return f"{lamp}[bold {white}]done[/]"
+                body = self._fold_detail_text(detail) if detail else ""
+                if name_s and body:
+                    return f"{lamp}[bold {white}]{name_s}[/] [dim {muted}]{self._escape_markup(body)}[/]"
+                if name_s:
+                    return f"{lamp}[bold {white}]{name_s}[/]"
+                if body:
+                    return f"{lamp}[dim {muted}]{self._escape_markup(body)}[/]"
+                return None
+
+            if state == "error":
+                return f"{lamp}[bold red]{self._escape_markup(detail or name or 'error')}[/]"
+            if not expanded:
+                return None
+            return f"{lamp}[dim {muted}]{self._escape_markup(detail or name)}[/]"
+
+        def _agent_footer_markup(self) -> str:
+            """OpenCode-style turn footer: · agent · Build · model · 3.2s."""
+            muted = self._theme_hex("text-muted", "#8b949e")
+            agent = self._escape_markup(self.agent or "agent")
+            mode = getattr(self, "_agent_mode", "build") or "build"
+            mode_plain = t("mode_plan") if mode == "plan" else t("mode_build")
+            model = self._escape_markup(getattr(self, "_model_label", None) or "—")
+            # Prefer live elapsed if turn still open; else frozen last turn
+            started = getattr(self, "_turn_started_at", None)
+            if started is not None:
+                secs = time.monotonic() - float(started)
+            else:
+                secs = getattr(self, "_last_turn_elapsed", None)
+            time_bit = ""
+            if secs is not None:
+                time_bit = f" · [{muted}]{self._escape_markup(self._fmt_duration(float(secs)))}[/]"
+            # agent / mode / model all muted grey (no white highlight)
+            return (
+                f"  [dim]·[/] [{muted}]{agent}[/] · [{muted}]{self._escape_markup(mode_plain)}[/]"
+                f" · [{muted}]{model}[/]{time_bit}"
+            )
+
+        def _signal_lamp(self, state: str) -> str:
+            """Left traffic light for agent/tool blocks.
+
+            progress → yellow · error → red · done → green
+            """
+            st = (state or "").strip().lower()
+            if st in ("error", "fail", "failed", "red"):
+                color = self._theme_hex("error", "#f85149")
+            elif st in ("done", "ok", "success", "complete", "green"):
+                color = self._theme_hex("success", "#3fb950")
+            else:
+                color = self._theme_hex("warning", "#e3b341")
+            return f"[{color}]●[/] "
+
+        @staticmethod
+        def _tool_line_failed(text: str) -> bool:
+            low = (text or "").lower()
+            return any(
+                k in low
+                for k in (
+                    "fail",
+                    "error",
+                    "exception",
+                    "traceback",
+                    "denied",
+                    "timeout",
+                    "timed out",
+                    "✗",
+                    "❌",
+                )
+            )
 
         def on_key(self, event) -> None:
             """Recover from lost focus: refocus input and apply the printable key.
@@ -490,19 +959,64 @@ def _build_app_class():
         def _escape_markup(self, text: str) -> str:
             return text.replace("[", "\\[")
 
+        def _schedule_ui(self, callback, *args, **kwargs) -> None:
+            """Run ``callback`` on the UI thread without blocking the caller.
+
+            Textual's ``call_from_thread`` waits on ``future.result()``. If the UI
+            thread is mid HTTP (e.g. /group approve) while the group WS thread
+            schedules a log/picker update, both sides deadlock. Fire-and-forget
+            keeps the WS reader free so the Gateway can finish the HTTP response.
+            """
+            if getattr(self, "_thread_id", None) == threading.get_ident():
+                callback(*args, **kwargs)
+                return
+            loop = getattr(self, "_loop", None)
+            if loop is None:
+                return
+
+            bound = partial(callback, *args, **kwargs)
+
+            async def _run() -> None:
+                with self._context():
+                    from textual._callback import invoke
+
+                    await invoke(bound)
+
+            try:
+                asyncio.run_coroutine_threadsafe(_run(), loop)
+            except Exception:
+                pass
+
         # ── wait animation ────────────────────────────────────────────
+
+        def _static_set(self, widget_id: str, markup: str) -> None:
+            """Update a Static only when content changes (avoids Windows CMD line spam)."""
+            key = widget_id.lstrip("#")
+            prev = self._paint_cache.get(key)
+            if prev == markup:
+                return
+            self._paint_cache[key] = markup
+            try:
+                self.query_one(widget_id, Static).update(markup)
+            except Exception:
+                self._paint_cache.pop(key, None)
 
         def begin_wait(self, label: str) -> None:
             """Show spinner for long ops. Banner row is always reserved (no layout jump)."""
+            self._wait_gen = int(getattr(self, "_wait_gen", 0) or 0) + 1
+            gen = self._wait_gen
 
             def _start() -> None:
+                # Drop stale begin if end_wait already advanced the generation
+                if gen != getattr(self, "_wait_gen", 0):
+                    return
                 self._wait_label = self._sanitize_wait_label(label)
                 self._wait_tick = 0
                 if self._wait_timer is None:
-                    # ~30fps meter: time hundredths + ↓ advances 1–3 tokens/frame
-                    self._wait_timer = self.set_interval(0.033, self._tick_wait)
+                    # Win: ≤1Hz — frequent Static/Input updates ghost the dock
+                    interval = 1.0 if sys.platform == "win32" else 0.25
+                    self._wait_timer = self.set_interval(interval, self._tick_wait)
                 self._paint_wait()
-                self._paint_prompt_meta_only()
 
             try:
                 self.call_from_thread(_start)
@@ -513,10 +1027,16 @@ def _build_app_class():
                     pass
 
         def update_wait(self, label: str) -> None:
+            gen = int(getattr(self, "_wait_gen", 0) or 0)
+
             def _upd() -> None:
-                self._wait_label = self._sanitize_wait_label(label)
+                if gen != getattr(self, "_wait_gen", 0):
+                    return
+                new_label = self._sanitize_wait_label(label)
+                if new_label == self._wait_label:
+                    return
+                self._wait_label = new_label
                 self._paint_wait()
-                self._paint_prompt_meta_only()
 
             try:
                 self.call_from_thread(_upd)
@@ -527,17 +1047,19 @@ def _build_app_class():
                     pass
 
         def end_wait(self) -> None:
+            # Invalidate any in-flight begin_wait / update_wait from workers
+            self._wait_gen = int(getattr(self, "_wait_gen", 0) or 0) + 1
+
             def _stop() -> None:
                 self._wait_label = None
                 if self._wait_timer is not None:
-                    self._wait_timer.stop()
+                    try:
+                        self._wait_timer.stop()
+                    except Exception:
+                        pass
                     self._wait_timer = None
-                try:
-                    # Keep the reserved row; clear content so layout does not jump
-                    self.query_one("#wait-banner", Static).update("")
-                except Exception:
-                    pass
-                self._refresh_chrome()
+                self._static_set("#wait-banner", "")
+                # Do NOT full _refresh_chrome here — thrash Win CMD dock rows
 
             try:
                 self.call_from_thread(_stop)
@@ -547,71 +1069,99 @@ def _build_app_class():
                 except Exception:
                     pass
 
-        @staticmethod
-        def _sanitize_wait_label(label: str) -> str:
+        def _sanitize_wait_label(self, label: str) -> str:
             """Short, human status only — never echo URLs / API paths into the banner."""
             text = " ".join(str(label or "").split())
             if not text:
-                return "Working…"
+                return t("wait_working")
+            # Tool activity from _write_tool_line — keep label (do not map to Preparing)
+            if text.startswith(("●", "⚙")):
+                return text[:56] + ("…" if len(text) > 56 else "")
             low = text.lower()
+            # Keep intentional boot / agent-start progress (do not collapse to Preparing)
+            boot_keep = (
+                "starting services",
+                "starting agent",
+                "waiting for",
+                "connecting to",
+                "agent ready",
+                "正在启动",
+                "等待",
+                "正在连接",
+                "已就绪",
+            )
+            if any(k in low or k in text for k in boot_keep):
+                if len(text) > 56:
+                    return text[:55] + "…"
+                return text
+            if not getattr(self, "_debug_mode", False):
+                if "thinking" in low or "思考" in text:
+                    return t("wait_thinking")
+                if "reply" in low or "回复" in text:
+                    return t("wait_replying")
+                # Generic lifecycle chatter only
+                if any(
+                    k in low
+                    for k in (
+                        "websocket",
+                        "preparing",
+                        "booting",
+                    )
+                ):
+                    return t("wait_preparing")
             if "http://" in low or "https://" in low or "/api/" in low:
-                if "thinking" in low:
-                    return "Thinking…"
-                if "reply" in low:
-                    return "Replying…"
-                if "connect" in low:
-                    return "Connecting…"
-                return "Working…"
+                if "thinking" in low or "思考" in text:
+                    return t("wait_thinking")
+                if "reply" in low or "回复" in text:
+                    return t("wait_replying")
+                if "connect" in low or "连接" in text:
+                    return t("wait_connecting")
+                return t("wait_working")
             # Cap length so stream previews cannot shove URLs under the prompt
-            if len(text) > 48:
-                text = text[:47] + "…"
+            if len(text) > 56:
+                text = text[:55] + "…"
             return text
 
         def _tick_wait(self) -> None:
-            if self._is_selecting():
-                return
-            # Keep ticking meter/time even if wait label briefly unset mid-turn
+            # Idle: stop timer so we never keep repainting the dock on Win CMD
             if not self._wait_label and getattr(self, "_turn_started_at", None) is None:
+                if self._wait_timer is not None:
+                    try:
+                        self._wait_timer.stop()
+                    except Exception:
+                        pass
+                    self._wait_timer = None
                 return
-            self._wait_tick += 1
+            self._wait_tick = int(getattr(self, "_wait_tick", 0) or 0) + 1
             if getattr(self, "_turn_started_at", None) is not None:
                 self._advance_out_display()
-            self._paint_wait()
-            if getattr(self, "_turn_started_at", None) is not None:
                 self._paint_prompt_meta_only()
+            if self._wait_label:
+                self._paint_wait()
 
         def _paint_wait(self) -> None:
             if self._is_selecting():
                 return
-            try:
-                banner = self.query_one("#wait-banner", Static)
-            except Exception:
-                return
             if not self._wait_label:
-                banner.update("")
+                self._static_set("#wait-banner", "")
                 return
-            # Only status text here — ↑↓ / elapsed live in #prompt-meta (input box footer)
-            spin = self._SPIN[(self._wait_tick // 3) % len(self._SPIN)]
-            try:
-                banner.update(f"[bold yellow] {spin}  {self._wait_label}[/]")
-            except Exception:
-                pass
-
-        def _paint_prompt_meta_only(self) -> None:
-            """Refresh #prompt-meta without touching header/placeholder (safe while waiting)."""
-            if self._is_selecting():
-                return
-            try:
-                meta = self.query_one("#prompt-meta", Static)
-                meta.update(self._opencode_status_markup())
-            except Exception:
-                pass
+            # On Windows, freeze spinner glyph — changing it every tick doubles dock rows
+            if sys.platform == "win32":
+                spin = "…"
+            else:
+                spin = self._SPIN[(self._wait_tick // 2) % len(self._SPIN)]
+            self._static_set(
+                "#wait-banner",
+                f"[bold]{spin}[/]  [dim]{self._escape_markup(self._wait_label)}[/]",
+            )
 
         def _schedule_meter_paint(self) -> None:
-            """Raise down target from stream; display catches up 1-3 tokens/frame."""
+            """Raise down target from stream; display catches up toward it."""
             now = time.monotonic()
             last = float(getattr(self, "_meter_paint_at", 0.0) or 0.0)
-            if now - last < 0.03:
+            # Win: ≤2Hz; elsewhere ~5Hz — frequent Static updates ghost the dock
+            min_gap = 0.5 if sys.platform == "win32" else 0.2
+            if now - last < min_gap:
                 return
             self._meter_paint_at = now
 
@@ -631,23 +1181,29 @@ def _build_app_class():
 
         @staticmethod
         def _fmt_duration(secs: float) -> str:
-            """Smooth live clock: hundredths under 1m, then m:ss.ss."""
+            """Live clock. Integer seconds on Windows to cut prompt-meta paint churn."""
             secs = max(0.0, float(secs or 0.0))
             if secs < 60:
-                return f"{secs:.2f}s"
-            m = int(secs // 60)
-            s = secs - m * 60
-            return f"{m}m{s:05.2f}s"
+                if sys.platform == "win32":
+                    return f"{int(secs)}s"
+                return f"{secs:.1f}s"
+            total = int(secs)
+            h = total // 3600
+            m = (total % 3600) // 60
+            s = total % 60
+            if h:
+                return f"{h}h{m}m{s}s"
+            return f"{m}m{s}s"
 
         @staticmethod
         def _fmt_tokens_smooth(n: int) -> str:
-            """Prefer integer ticks while streaming so down-counter feels continuous."""
+            """Token count for ↑↓ meter — use K from 1000+ (same scale as context)."""
             n = max(0, int(n or 0))
-            if n < 10_000:
-                return f"{n:,}"
             if n >= 1_000_000:
                 return f"{n / 1_000_000:.2f}M"
-            return f"{n / 1000:.1f}K"
+            if n >= 1000:
+                return f"{n / 1000:.1f}K"
+            return str(n)
 
         def _advance_out_display(self) -> None:
             """Move down display toward target in tiny steps (never dump a whole chunk)."""
@@ -656,7 +1212,15 @@ def _build_app_class():
             if display >= target:
                 return
             gap = target - display
-            if gap <= 8:
+            # Windows: jump in larger steps so 2Hz ticks don't churn unique strings forever
+            if sys.platform == "win32":
+                if gap <= 20:
+                    step = gap
+                elif gap <= 200:
+                    step = max(8, gap // 4)
+                else:
+                    step = max(20, gap // 3)
+            elif gap <= 8:
                 step = 1
             elif gap <= 40:
                 step = 2
@@ -665,7 +1229,7 @@ def _build_app_class():
             self._turn_out_display = display + min(gap, step)
 
         def _turn_meter_plain(self) -> str:
-            """Up = current context (one upload); down = this-turn output (animated)."""
+            """Up = context; down = this-turn output. Elapsed only while turn is active."""
             up = int(getattr(self, "_token_used", 0) or 0)
             started = getattr(self, "_turn_started_at", None)
             if started is not None:
@@ -674,16 +1238,10 @@ def _build_app_class():
                 return (
                     f"↑{self._fmt_tokens_smooth(up)} ↓{self._fmt_tokens_smooth(down)} · {self._fmt_duration(elapsed)}"
                 )
+            # After turn ends: tokens only (elapsed lives on agent footer)
             down = int(getattr(self, "_last_turn_out", 0) or 0)
             if up or down:
-                bit = f"↑{self._fmt_tokens_smooth(up)} ↓{self._fmt_tokens_smooth(down)}"
-                last = getattr(self, "_last_turn_elapsed", None)
-                if last is not None:
-                    bit += f" · {self._fmt_duration(last)}"
-                return bit
-            last = getattr(self, "_last_turn_elapsed", None)
-            if last is not None:
-                return self._fmt_duration(last)
+                return f"↑{self._fmt_tokens_smooth(up)} ↓{self._fmt_tokens_smooth(down)}"
             return ""
 
         def _begin_turn_meter(self) -> None:
@@ -786,14 +1344,18 @@ def _build_app_class():
             self._cwd_synced_agent = mark
             self._project_path = cwd
             short = self._short_path(cwd)
-            self.log_line(f"Working directory → {short}", style="system")
+            self._log_verbose(f"Working directory → {short}")
             return True
 
         @staticmethod
         def _short_path(path: str, max_len: int = 48) -> str:
             p = (path or "").strip() or "—"
             home = str(Path.home())
-            if p.startswith(home):
+            # Windows paths differ in drive-letter case (C:\ vs c:\)
+            if sys.platform == "win32":
+                if p.lower().startswith(home.lower()):
+                    p = "~" + p[len(home) :]
+            elif p.startswith(home):
                 p = "~" + p[len(home) :]
             if len(p) <= max_len:
                 return p
@@ -801,6 +1363,16 @@ def _build_app_class():
             left = max(8, keep // 2)
             right = keep - left
             return p[:left] + "…" + p[-right:]
+
+        def _display_project_path(self, path: str | None = None, max_len: int = 72) -> str:
+            """Path for the welcome card — always readable (never a lone '~')."""
+            raw = (path or getattr(self, "_launch_cwd", None) or self._resolve_project_path() or "").strip()
+            if not raw:
+                return "—"
+            short = self._short_path(raw, max_len=max_len)
+            if short in ("~", "~/", "~\\"):
+                return raw
+            return short
 
         @staticmethod
         def _fmt_tokens(n: int) -> str:
@@ -863,17 +1435,28 @@ def _build_app_class():
                 pass
             return fallback
 
-        def _opencode_status_markup(self) -> str:
-            """OpenCode-style meta under input: left mode·model·provider·effort, right tokens."""
-            mode = getattr(self, "_agent_mode", "build") or "build"
-            primary = self._theme_hex("primary", "#58a6ff")
-            warning = self._theme_hex("warning", "#d29922")
-            fg = self._theme_hex("foreground", "#e6edf3")
+        def _token_meter_markup(self) -> str:
+            """Token / elapsed meter above the input box (near chat output)."""
             muted = self._theme_hex("text-muted", "#8b949e")
+            fg = self._theme_hex("foreground", "#e6edf3")
+            meter = self._turn_meter_plain()
+            ctx = self._context_usage_label()
+            # Right-align-ish: just show meter + context
+            if meter:
+                return f" [{muted}]{self._escape_markup(meter)}[/]  [{fg}]{self._escape_markup(ctx)}[/]"
+            if ctx and ctx != "— (—%)":
+                return f" [{fg}]{self._escape_markup(ctx)}[/]"
+            return ""
+
+        def _session_status_markup(self) -> str:
+            """Bottom bar: Build · model · provider · effort (outside the input box)."""
+            mode = getattr(self, "_agent_mode", "build") or "build"
+            muted = self._theme_hex("text-muted", "#8b949e")
+            # Build/Plan muted grey (same as model) — no blue/orange highlight
             if mode == "plan":
-                mode_mk = f"[bold {warning}]Plan[/]"
+                mode_mk = f"[{muted}]Plan[/]"
             else:
-                mode_mk = f"[bold {primary}]Build[/]"
+                mode_mk = f"[{muted}]Build[/]"
 
             model = self._escape_markup(getattr(self, "_model_label", None) or "—")
             provider = self._escape_markup(getattr(self, "_model_provider_label", None) or "").strip()
@@ -887,37 +1470,36 @@ def _build_app_class():
             media = ""
             if self.pending_media:
                 media = f" · {self._escape_markup(format_pending_chips(self.pending_media))}"
+            skill = ""
+            if getattr(self, "pending_skill", None):
+                d = self._escape_markup(str(self.pending_skill.get("dir") or ""))
+                if d:
+                    skill = f" · [{muted}]/{d}[/]"
             prov_bit = f" · [{muted}]{provider}[/]" if provider else ""
-            left = f" {mode_mk} · [{fg}]{model}[/]{prov_bit} · [bold {warning}]{effort}[/]{qbit}{live}{media}"
-            # Claude Code–style ↑↓ + elapsed, then context window usage
-            meter = self._turn_meter_plain()
-            ctx = self._context_usage_label()
-            if meter:
-                right = f"[{muted}]{self._escape_markup(meter)}[/]  [{fg}]{self._escape_markup(ctx)}[/] "
-            else:
-                right = f"[{fg}]{self._escape_markup(ctx)}[/] "
-            # Pad so tokens sit on the right without a second widget (avoids border overflow)
-            try:
-                meta = self.query_one("#prompt-meta", Static)
-                width = int(meta.size.width or 0)
-            except Exception:
-                width = 0
-            if width > 8:
-                # Approximate visible length without markup for padding
-                import re
+            return f" {mode_mk} · [{muted}]{model}[/]{prov_bit} · [{muted}]{effort}[/]{qbit}{live}{skill}{media}"
 
-                plain_left = re.sub(r"\[/?[^\]]*\]", "", left)
-                plain_right = re.sub(r"\[/?[^\]]*\]", "", right)
-                gap = max(1, width - len(plain_left) - len(plain_right))
-                return left + (" " * gap) + right
-            return f"{left}  {right}"
+        def _opencode_status_markup(self) -> str:
+            """Backward-compat: token meter above input (session status is bottom bar)."""
+            return self._token_meter_markup()
 
         def _footer_path_markup(self) -> str:
-            path = self._escape_markup(
-                self._short_path(getattr(self, "_project_path", None) or self._resolve_project_path())
-            )
-            theme_name = self._escape_markup(str(getattr(self, "theme", "") or ""))
-            return f" {path}  [dim]· theme {theme_name} · Tab mode · ^E effort · /help[/]"
+            """Reserved; cwd lives on welcome card. Keep empty to avoid clutter."""
+            return ""
+
+        def _paint_bottom_status(self) -> None:
+            if self.mode == "group" and self.group:
+                gname = self.group.group_name or self.group.group_id
+                self._static_set("#bottom-status", f" {gname} · group · /leave")
+            else:
+                self._static_set("#bottom-status", self._session_status_markup())
+
+        def _paint_prompt_meta_only(self) -> None:
+            """Refresh #prompt-meta (token meter) without touching placeholder / bottom bar."""
+            if self._is_selecting():
+                return
+            self._static_set("#prompt-meta", self._token_meter_markup())
+            # Do NOT repaint #bottom-status here — 10Hz updates of identical
+            # Build·model lines caused Windows CMD to spam scrollback.
 
         def _sync_status_from_agent(self, name: str | None = None) -> None:
             """Pull model / tokens / effort / path from admin agents list + local config."""
@@ -985,47 +1567,53 @@ def _build_app_class():
             except Exception:
                 pass
 
+        def _header_bar_markup(self) -> str:
+            """Top dock: OpenSquad · agent · ready/offline · gateway."""
+            muted = self._theme_hex("text-muted", "#8b949e")
+            fg = self._theme_hex("foreground", "#e6edf3")
+            if self.mode == "group" and self.group:
+                gname = self._escape_markup(self.group.group_name or self.group.group_id)
+                return f"  [{fg}]OpenSquad[/]  ·  [b]{gname}[/b]  ·  [{muted}]group[/]"
+            ready = bool(self.bridge and getattr(self.bridge, "is_open", False))
+            state = "ready" if ready else "offline"
+            agent = self._escape_markup(self.agent or "—")
+            gw = self._escape_markup(getattr(self.client, "gateway_url", "") or "")
+            return f"  [{fg}]OpenSquad[/]  ·  [b]{agent}[/b]  ·  [{muted}]{state}[/]  ·  [{muted}]{gw}[/]"
+
         def _refresh_chrome(self) -> None:
             if self._wait_label:
                 self._paint_wait()
                 self._paint_prompt_meta_only()
+                # Skip bottom-status while waiting — cuts Win CMD ghost duplicates
+                self._static_set("#header-bar", self._header_bar_markup())
                 return
-            header = self.query_one("#header-bar", Static)
-            inp = self.query_one("#chat-input", Input)
             try:
-                meta = self.query_one("#prompt-meta", Static)
+                inp = self.query_one("#chat-input", Input)
             except Exception:
-                meta = None
-            try:
-                fpath = self.query_one("#footer-path", Static)
-            except Exception:
-                fpath = None
+                return
 
             if self.mode == "group" and self.group:
                 gname = self.group.group_name or self.group.group_id
-                header.update(f"  OpenSquad  ·  [b]{gname}[/b]  ·  group")
-                inp.placeholder = f"Message {gname}…  Enter send · /leave · /approve"
-                if meta:
-                    meta.update(f" {gname} · group · /leave")
-                if fpath:
-                    fpath.update(self._footer_path_markup())
+                ph = t("placeholder_group", gname=gname)
+            elif getattr(self, "_await_api_key", None):
+                ph = t("placeholder_api_key")
+            elif getattr(self, "_await_model_field", None):
+                fld = (self._await_model_field or {}).get("field") or "value"
+                ph = t("placeholder_field", fld=fld)
+            elif getattr(self, "_await_login", None):
+                step = (self._await_login or {}).get("step") or "email"
+                ph = t("placeholder_login_password") if step == "password" else t("placeholder_login_email")
+            elif getattr(self, "_await_custom_answer", False):
+                ph = t("placeholder_custom")
             else:
-                ready = bool(self.bridge and getattr(self.bridge, "is_open", False))
-                state = "ready" if ready else "offline"
-                mode = getattr(self, "_agent_mode", "build") or "build"
-                mode_plain = "Plan" if mode == "plan" else "Build"
-                header.update(f"  OpenSquad  ·  [b]{self.agent or '—'}[/b]  ·  {state}  ·  {self.client.gateway_url}")
-                if getattr(self, "_await_api_key", None):
-                    inp.placeholder = "Paste API key…  Enter save · Esc cancel"
-                elif getattr(self, "_await_model_field", None):
-                    fld = (self._await_model_field or {}).get("field") or "value"
-                    inp.placeholder = f"Enter {fld}…  Enter save · Esc cancel"
-                else:
-                    inp.placeholder = f"Message {self.agent or 'agent'}…  Tab {mode_plain} · ^E effort · ^X live"
-                if meta:
-                    meta.update(self._opencode_status_markup())
-                if fpath:
-                    fpath.update(self._footer_path_markup())
+                ph = t("placeholder_agent", agent=self.agent or "agent")
+            # Avoid re-assigning placeholder every chrome refresh (Win CMD doubles the row)
+            if ph != getattr(self, "_placeholder_cache", None):
+                self._placeholder_cache = ph
+                inp.placeholder = ph
+            self._static_set("#header-bar", self._header_bar_markup())
+            self._static_set("#prompt-meta", self._token_meter_markup())
+            self._paint_bottom_status()
 
         def log_line(self, text: str, style: str = "") -> None:
             """Thread-safe append to chat log (OpenCode-style blocks)."""
@@ -1036,6 +1624,8 @@ def _build_app_class():
             # Second copy often arrives with style="" (no · agent label) — still drop it.
             # Exception: allow a longer final to replace a truncated stream prefix.
             if body and style in ("agent", ""):
+                if self._is_user_echo(body):
+                    return
                 last = (getattr(self, "_last_agent_reply", None) or "").strip()
                 if last and _same_reply(body, last):
                     self._reply_flushed = True
@@ -1067,34 +1657,119 @@ def _build_app_class():
                     w("")
                 elif style == "agent":
                     w("")
-                    self._write_agent_body(raw, w)
-                    w(f"[dim]· {self.agent or 'agent'}[/]")
+                    self._write_agent_body(raw, w, lamp="done")
+                    w(self._agent_footer_markup())
                     w("")
                 elif style == "error":
-                    w(f"[bold red]{safe}[/]", follow=True)
+                    w(f"{self._signal_lamp('error')}[bold red]{safe}[/]", follow=True)
                 elif style == "system":
                     w(f"[dim]{safe}[/]")
                 elif style == "tool":
-                    w(f"[#d2a8ff]{safe}[/]")
+                    self._write_tool_line(raw)
                 else:
-                    if safe.startswith(("  ⚙", "  ✓", "  ·", "[")):
-                        w(f"[dim]{safe}[/]")
+                    if safe.startswith(("  ⚙", "  ✓", "  ·", "[")) or raw.lstrip().startswith(("⚙", "✓")):
+                        self._write_tool_line(raw)
                     else:
                         # Plain agent-like reply may still contain markdown tables
                         if self._looks_like_agent_prose(raw):
-                            self._write_agent_body(raw, w)
+                            self._write_agent_body(raw, w, lamp="done")
                             w("")
                         else:
-                            w(f"[#e6edf3]{safe}[/]")
+                            w(f"{self._signal_lamp('done')}[#e6edf3]{safe}[/]")
                             w("")
 
             try:
-                self.call_from_thread(_write)
+                self._schedule_ui(_write)
             except Exception:
                 try:
                     _write()
                 except Exception:
                     pass
+
+        def _tool_dedupe_key(self, kind: str, name: str, raw: str) -> str:
+            """Stable key for one green/orange tool row (prefer call_id)."""
+            s = (raw or "").strip()
+            # Explicit #call_id from bridge
+            m = re.search(r"[#]([A-Za-z0-9_.:\-]+)", s)
+            if m and ("⚙" in s[:4] or "✓" in s[:4] or s.startswith(("⚙", "✓"))):
+                return f"id:{m.group(1)}"
+            label = (name or getattr(self, "_last_tool_name", "") or "tool").strip()
+            return f"{kind}:{label}"
+
+        def _claim_tool_line(self, raw: str) -> bool:
+            """Return False if this tool line was already claimed (skip duplicate).
+
+            Must run on the WS/caller thread *before* schedule_ui so concurrent
+            redelivered tool_result events cannot all paint.
+            """
+            kind, name, _detail, _state = self._parse_tool_line(raw)
+            if kind == "call":
+                key = self._tool_dedupe_key("call", name, raw)
+                done_key = key.replace("call:", "done:", 1) if key.startswith("call:") else f"done:{key}"
+                # New call of same tool/id → allow a future green lamp
+                self._done_tool_keys.discard(done_key)
+                if key.startswith("id:"):
+                    self._done_tool_keys.discard(f"done:{key}")
+                else:
+                    # name-based
+                    self._done_tool_keys.discard(f"done:name:{name}")
+                self._open_tool_keys.add(key if key.startswith("id:") else f"name:{name}")
+                return True
+            if kind == "result":
+                key = self._tool_dedupe_key("done", name, raw)
+                if not key.startswith("id:"):
+                    key = f"done:name:{(name or getattr(self, '_last_tool_name', '') or 'tool').strip()}"
+                else:
+                    key = f"done:{key}"
+                if key in self._done_tool_keys:
+                    return False
+                self._done_tool_keys.add(key)
+                if len(self._done_tool_keys) > 500:
+                    # keep recent-ish by clearing oldest half via rebuild
+                    keep = list(self._done_tool_keys)[-250:]
+                    self._done_tool_keys = set(keep)
+                return True
+            return True
+
+        def _write_tool_line(self, raw: str) -> None:
+            """Stable tool rows: progress in wait-banner; one final green line in chat.
+
+            Never auto-finalize a prior tool when a new call arrives — that used to
+            paint a green lamp early, then tool_result painted the same tool again.
+            """
+            kind, name, detail, state = self._parse_tool_line(raw)
+            if kind == "call":
+                label = name or "tool"
+                self._open_tool = {"name": label}
+                self._last_tool_name = label
+                # Orange progress lives in the fixed wait-banner (no chat append)
+                self.update_wait(f"● {label}")
+                return
+            if kind == "result":
+                open_meta = getattr(self, "_open_tool", None)
+                label = (
+                    name
+                    or (str(open_meta.get("name")) if open_meta else "")
+                    or (getattr(self, "_last_tool_name", "") or "tool")
+                )
+                # Dedup already claimed in _claim_tool_line; still guard identical key
+                dedup_key = f"done:{label}"
+                if dedup_key == getattr(self, "_last_tool_result_key", ""):
+                    self._open_tool = None
+                    return
+                self._last_tool_result_key = dedup_key
+                if open_meta and str(open_meta.get("name") or "") == label:
+                    self._open_tool = None
+                mk = self._tool_markup_parts("result", label, detail, state)
+                if mk is not None:
+                    self._chat_write(mk, follow=True)
+                # Restore normal wait label if a turn is still open
+                if getattr(self, "_wait_label", None) and getattr(self, "_turn_started_at", None):
+                    self.update_wait(t("wait_thinking"))
+                return
+            mk = self._tool_markup_parts(kind, name, detail, state)
+            if mk is not None:
+                self._chat_write(mk, follow=True)
 
         def _looks_like_agent_prose(self, text: str) -> bool:
             t = (text or "").strip()
@@ -1107,22 +1782,31 @@ def _build_app_class():
             except Exception:
                 return False
 
-        def _write_agent_body(self, text: str, write) -> None:
-            """Write agent reply, rendering GFM pipe-tables as bordered grids."""
+        def _write_agent_body(self, text: str, write, *, lamp: str = "done") -> None:
+            """Write agent reply with left traffic light; render GFM tables as grids."""
             fg = self._theme_hex("foreground", "#e6edf3")
             border = self._theme_hex("text-muted", "#8b949e")
             header = self._theme_hex("accent", "#d2a8ff")
+            prefix = self._signal_lamp(lamp)
+            indent = "  "  # align continuation under text after ●␣
+
+            def _with_lamp(first: bool, line_markup: str) -> str:
+                return f"{prefix}{line_markup}" if first else f"{indent}{line_markup}"
+
             try:
                 from opensquad.cli.tui.md_table import has_markdown_table, iter_text_and_tables
 
                 if not has_markdown_table(text):
-                    write(f"[{fg}]{self._escape_markup(text)}[/]")
+                    lines = (text or "").splitlines() or [""]
+                    for i, ln in enumerate(lines):
+                        write(_with_lamp(i == 0, f"[{fg}]{self._escape_markup(ln)}[/]"))
                     return
                 # Use chat width so exported grid matches the viewport
                 try:
-                    width = max(40, int(self.query_one("#chat-log", RichLog).size.width) - 2)
+                    width = max(40, int(self.query_one("#chat-log", RichLog).size.width) - 4)
                 except Exception:
                     width = 100
+                first = True
                 for kind, part in iter_text_and_tables(
                     text,
                     border=border,
@@ -1132,13 +1816,18 @@ def _build_app_class():
                 ):
                     if kind == "table":
                         # Text.from_ansi with baked-in box chars; don't shrink/reflow
+                        if first:
+                            write(prefix.rstrip(), follow=True)
+                            first = False
                         write(part, follow=True, shrink=False)
                     elif part == "":
                         write("")
                     else:
-                        write(f"[{fg}]{self._escape_markup(str(part))}[/]")
+                        for i, ln in enumerate(str(part).splitlines() or [""]):
+                            write(_with_lamp(first and i == 0, f"[{fg}]{self._escape_markup(ln)}[/]"))
+                            first = False
             except Exception:
-                write(f"[{fg}]{self._escape_markup(text)}[/]")
+                write(_with_lamp(True, f"[{fg}]{self._escape_markup(text)}[/]"))
 
         def log_file_diff(self, lines: list) -> None:
             """Append OpenCode-style file-edit markup (no purple escape path)."""
@@ -1212,24 +1901,43 @@ def _build_app_class():
                 pass
 
         def _flush_thinking_to_log(self) -> None:
-            """Persist thinking into the transcript (conversation order)."""
+            """Finalize live Thinking → one transcript row; clear the live panel."""
             buf = (getattr(self, "_think_buf_latest", None) or "").strip()
             self._think_pending = False
             self._think_buf_latest = ""
-            self._hide_live_think()
-            if not buf:
-                return
+            self._think_gen = int(getattr(self, "_think_gen", 0) or 0) + 1
             # Keep paragraph breaks; collapse only runs of spaces within a line
-            body = "\n".join(" ".join(line.split()) for line in buf.splitlines() if line.strip())
-            if not body:
-                body = " ".join(buf.split())
+            body = ""
+            if buf:
+                body = "\n".join(" ".join(line.split()) for line in buf.splitlines() if line.strip())
+                if not body:
+                    body = " ".join(buf.split())
+            # Drop identical re-flush (tool_call + thinking_end both finalize)
+            if body and body == getattr(self, "_last_flushed_think", ""):
+
+                def _hide_only() -> None:
+                    self._hide_live_think()
+
+                try:
+                    self._schedule_ui(_hide_only)
+                except Exception:
+                    try:
+                        _hide_only()
+                    except Exception:
+                        pass
+                return
+            if body:
+                self._last_flushed_think = body
 
             def _write() -> None:
-                self._chat_write(self._thinking_markup(body), follow=True)
+                self._hide_live_think()
+                if not body:
+                    return
+                self._chat_write(self._thinking_markup(body, live=False), follow=True)
                 self._chat_write("", follow=True)
 
             try:
-                self.call_from_thread(_write)
+                self._schedule_ui(_write)
             except Exception:
                 try:
                     _write()
@@ -1240,32 +1948,39 @@ def _build_app_class():
             try:
                 w = self.query_one("#live-think", Static)
                 w.update("")
-                w.remove_class("visible")
+                w.remove_class("streaming")
+                self._paint_cache.pop("live-think", None)
             except Exception:
                 pass
 
         def _paint_live_think(self) -> None:
-            buf = (getattr(self, "_think_buf_latest", None) or "").strip()
-            if not buf:
+            """Stream Thinking tokens into the fixed-height #live-think panel."""
+            if not getattr(self, "_think_pending", False):
                 return
-            # Show last ~1200 chars so the widget stays readable
-            show = buf if len(buf) <= 1200 else ("…" + buf[-1199:])
+            gen = int(getattr(self, "_think_gen", 0) or 0)
 
             def _do() -> None:
                 try:
+                    if gen != int(getattr(self, "_think_gen", 0) or 0):
+                        return
+                    if not getattr(self, "_think_pending", False):
+                        return
+                    buf = (getattr(self, "_think_buf_latest", None) or "").strip()
+                    if not buf:
+                        return
+                    markup = self._thinking_markup(buf, live=True)
+                    if self._paint_cache.get("live-think") == markup:
+                        return
+                    self._paint_cache["live-think"] = markup
                     w = self.query_one("#live-think", Static)
-                    w.update(self._thinking_markup(show))
-                    w.add_class("visible")
-                    if getattr(self, "_follow_chat", True) and not self._is_selecting():
-                        try:
-                            self.query_one("#chat-log", RichLog).scroll_end(animate=False)
-                        except Exception:
-                            pass
+                    if "streaming" not in w.classes:
+                        w.add_class("streaming")
+                    w.update(markup)
                 except Exception:
                     pass
 
             try:
-                self.call_from_thread(_do)
+                self._schedule_ui(_do)
             except Exception:
                 try:
                     _do()
@@ -1279,6 +1994,9 @@ def _build_app_class():
             buf = (self._stream_buf or "").strip()
             if not buf:
                 return
+            if self._is_user_echo(buf):
+                self._stream_buf = ""
+                return
             if buf == (getattr(self, "_last_agent_reply", None) or ""):
                 self._reply_flushed = True
                 return
@@ -1286,52 +2004,101 @@ def _build_app_class():
             # made log_line's dedup treat this as a duplicate and drop the write.
             self.log_line(buf, style="agent")
 
+        def _approx_out_tokens(self, piece: str) -> int:
+            """Rough ↓ token delta for a streamed text piece (CJK≈1, ascii≈/4)."""
+            text = piece or ""
+            if not text:
+                return 0
+            cjk = sum(1 for ch in text if ord(ch) > 0x2E80)
+            ascii_n = len(text) - cjk
+            delta = cjk + (ascii_n // 4)
+            if delta <= 0 and text.strip():
+                return 1
+            return max(0, delta)
+
+        def _nudge_turn_out(self, piece: str) -> None:
+            """Accumulate ↓ meter from the first thinking/reply token of the turn."""
+            delta = self._approx_out_tokens(piece)
+            if delta <= 0:
+                return
+            self._turn_out_target = int(getattr(self, "_turn_out_target", 0) or 0) + delta
+            self._schedule_meter_paint()
+
         def log_stream(self, chunk: str) -> None:
             """Stream tokens: keep thinking in history, preview reply in status."""
             if self._think_pending:
                 self._flush_thinking_to_log()
             self._stream_buf += chunk
-            # Raise ↓ *target* from this chunk only (display animates 1–3/frame toward it)
-            piece = chunk or ""
-            cjk = sum(1 for ch in piece if ord(ch) > 0x2E80)
-            ascii_n = len(piece) - cjk
-            delta = cjk + (ascii_n // 4)
-            if delta <= 0 and piece.strip():
-                delta = 1  # tiny ascii chunks still nudge the counter
-            if delta > 0:
-                self._turn_out_target = int(getattr(self, "_turn_out_target", 0) or 0) + delta
-                self._schedule_meter_paint()
+            # ↓ starts / continues from reply stream tokens
+            self._nudge_turn_out(chunk or "")
             # Keep banner short — never mirror stream text (URLs/rest paths flicker at feet)
-            if (self._wait_label or "") != "Replying…":
-                self.update_wait("Replying…")
-            # Sticky-scroll chat while reply accumulates (final flush still once)
+            if (self._wait_label or "") != t("wait_replying"):
+                self.update_wait(t("wait_replying"))
+            # Throttle sticky-scroll — per-chunk scroll_end thrashes Windows CMD
             if getattr(self, "_follow_chat", True) and not self._is_selecting():
-                try:
-                    self.call_from_thread(lambda: self.query_one("#chat-log", RichLog).scroll_end(animate=False))
-                except Exception:
-                    pass
+                now = time.monotonic()
+                if now - float(getattr(self, "_stream_scroll_at", 0.0) or 0.0) >= 0.25:
+                    self._stream_scroll_at = now
+                    try:
+                        self.call_from_thread(lambda: self.query_one("#chat-log", RichLog).scroll_end(animate=False))
+                    except Exception:
+                        pass
 
         def log_thinking(self, buf: str) -> None:
-            """Accumulate thought into #live-think (conversation area), not banner spam."""
-            self._think_buf_latest = buf or ""
+            """Stream thought token-by-token into #live-think (fixed height)."""
+            incoming = buf or ""
+            prev = getattr(self, "_think_buf_latest", "") or ""
+            # New thought after a flush — allow the same text to be recorded again
+            if incoming and not prev and not getattr(self, "_think_pending", False):
+                self._last_flushed_think = ""
+            # Bridge sends full buffer after its own merge; still harden here.
+            if not incoming:
+                merged = prev
+            elif not prev or incoming.startswith(prev) or prev.startswith(incoming):
+                merged = incoming if len(incoming) >= len(prev) else prev
+            elif incoming in prev:
+                merged = prev
+            else:
+                merged = prev + incoming
+            # ↓ from first thinking token — only count newly appended text
+            if len(merged) > len(prev):
+                self._nudge_turn_out(merged[len(prev) :])
+            elif merged and not prev:
+                self._nudge_turn_out(merged)
+            self._think_buf_latest = merged
             self._think_pending = True
-            if (self._wait_label or "") != "Thinking…":
-                self.update_wait("Thinking…")
-            now = time.monotonic()
-            if now - getattr(self, "_think_paint_at", 0.0) < 0.1:
-                return
-            self._think_paint_at = now
+            if (self._wait_label or "") != t("wait_thinking"):
+                self.update_wait(t("wait_thinking"))
+            # Paint every chunk; _paint_live_think reads latest buf on the UI thread
             self._paint_live_think()
 
         def log_thinking_end(self, buf: str) -> None:
-            """Thought stream closed — write Thinking into transcript before the reply."""
+            """Thought stream closed — append Thinking once to the transcript."""
+            prev = getattr(self, "_think_buf_latest", "") or ""
             if buf:
-                self._think_buf_latest = buf
-            if self._think_pending or (buf or "").strip():
+                incoming = buf
+                if not prev or incoming.startswith(prev) or len(incoming) >= len(prev):
+                    merged = incoming
+                elif prev.startswith(incoming):
+                    merged = prev
+                else:
+                    merged = prev + incoming
+                if len(merged) > len(prev):
+                    self._nudge_turn_out(merged[len(prev) :])
+                self._think_buf_latest = merged
+            if self._think_pending or (getattr(self, "_think_buf_latest", "") or "").strip():
                 self._think_pending = True
                 self._flush_thinking_to_log()
-            if (self._wait_label or "") != "Replying…":
-                self.update_wait("Replying…")
+            if (self._wait_label or "") != t("wait_replying"):
+                self.update_wait(t("wait_replying"))
+
+        def _is_user_echo(self, text: str) -> bool:
+            """True when ``text`` is just this turn's user message (WS multi-device echo)."""
+            user = (getattr(self, "_turn_user_text", None) or "").strip()
+            body = (text or "").strip()
+            if not user or not body:
+                return False
+            return _same_reply(body, user)
 
         def on_agent_line(self, text: str) -> None:
             """Bridge on_line: finalize thought, then show assistant/tool line (once)."""
@@ -1343,12 +2110,17 @@ def _build_app_class():
             streamed = (self._stream_buf or "").strip()
 
             if t.startswith(("  ⚙", "  ✓")):
+                if not self._claim_tool_line(t):
+                    return
                 self.log_line(t, style="tool")
                 return
             if t.startswith("[error]") or t.startswith("[ws]"):
                 self.log_line(t, style="error")
                 return
-            if t.startswith("[") or t.startswith("  ·"):
+            if t.startswith("  ·"):
+                self._log_verbose(t)
+                return
+            if t.startswith("["):
                 self.log_line(t, style="system")
                 return
 
@@ -1356,6 +2128,10 @@ def _build_app_class():
             # debounced WS chunk). Matches Web AIChatPage finalText = text || stream.
             final_text = t_norm or streamed
             if not final_text:
+                return
+
+            # Never paint the user's own turn text as an agent reply
+            if self._is_user_echo(final_text):
                 return
 
             # Drop stale incomplete stream so finally/flush cannot overwrite with a short copy
@@ -1390,6 +2166,7 @@ def _build_app_class():
                 or getattr(self, "_nav_active", False)
                 or getattr(self, "_session_pick_active", False)
                 or getattr(self, "_slash_items", None)
+                or getattr(self, "_mention_active", False)
             ):
                 self._complete_submit(gen)
                 return
@@ -1397,7 +2174,7 @@ def _build_app_class():
             if sys.platform == "win32":
                 # Non-empty: short defer (trailing composing char).
                 # Empty: longer defer (Enter was likely IME confirm).
-                delay = 0.05 if (hinted or self.pending_media) else 0.15
+                delay = 0.05 if (hinted or self.pending_media or self.pending_skill) else 0.15
                 self.set_timer(delay, lambda g=gen: self._complete_submit(g))
             else:
                 self._complete_submit(gen)
@@ -1445,21 +2222,40 @@ def _build_app_class():
                 self._confirm_session_pick()
                 return
 
-            # Slash command palette: Enter confirms highlighted command (not raw/empty input)
+            # @mention picker: Enter inserts @name
+            if getattr(self, "_mention_active", False) and getattr(self, "_mention_items", None):
+                self._confirm_mention()
+                return
+
+            # Slash command palette: Enter confirms highlight — unless the input
+            # already has extra args beyond the choice (/group search 福州).
             if getattr(self, "_slash_items", None):
                 idx = max(0, min(self._slash_index, len(self._slash_items) - 1))
                 choice = self._slash_items[idx]
-                inp.value = ""
-                self._hide_slash_menu()
-                if choice:
-                    self._push_input_history(choice)
-                    self._handle_slash(choice)
+                typed = (inp.value or "").rstrip("\n")
+                typed_s = typed.strip()
+                choice_s = (choice or "").strip()
+                # Prefer full typed line when it extends the palette choice with args
+                if (
+                    typed_s
+                    and choice_s
+                    and typed_s != choice_s
+                    and (typed_s.startswith(choice_s + " ") or typed_s.startswith(choice_s + "\t"))
+                ):
+                    self._hide_slash_menu()
+                    # fall through to normal submit with full typed line
                 else:
-                    self._focus_input()
-                return
+                    inp.value = ""
+                    self._hide_slash_menu()
+                    if choice_s:
+                        self._push_input_history(choice_s)
+                        self._handle_slash(choice_s)
+                    else:
+                        self._focus_input()
+                    return
 
             line = (inp.value or "").rstrip("\n").strip()
-            if not line and not self.pending_media:
+            if not line and not self.pending_media and not self.pending_skill:
                 # Truly empty (or IME still open with nothing committed) — keep input
                 self._focus_input()
                 return
@@ -1483,6 +2279,14 @@ def _build_app_class():
                 self._finish_model_field_edit(pending, line)
                 return
 
+            # /login email or password capture
+            if getattr(self, "_await_login", None):
+                inp.value = ""
+                self._hide_slash_menu()
+                self._hide_nav()
+                self._on_login_input(line)
+                return
+
             if line:
                 self._push_input_history(line)
 
@@ -1495,16 +2299,25 @@ def _build_app_class():
                 self._handle_slash(line)
                 return
 
-            self.log_line(line or format_pending_chips(self.pending_media), style="user")
+            skill_snap = dict(self.pending_skill) if self.pending_skill else None
+            self.pending_skill = None
+            display = self._compose_skill_display(line, skill_snap)
+            if not display:
+                display = format_pending_chips(self.pending_media) if self.pending_media else ""
+            # Group: don't echo solo-style user bubble — WS new_message already shows [sender] …
             if self.mode == "group":
-                self._send_plain(line)
+                ws = self._compose_skill_ws(line, skill_snap)
+                self._send_plain(ws)
                 return
+            if display:
+                self.log_line(display, style="user")
+                self._turn_user_text = line.strip()
 
             # Solo FIFO: queue while a turn is in flight
             if self._sending:
                 snap = list(self.pending_media)
                 self.pending_media.clear()
-                self._send_queue.append((line, snap))
+                self._send_queue.append((line, snap, skill_snap))
                 self.log_line(f"Queued (#{len(self._send_queue)}) — will send after current reply", style="system")
                 self._refresh_chrome()
                 self._focus_input()
@@ -1512,7 +2325,7 @@ def _build_app_class():
 
             self._follow_chat = True
             self._sending = True
-            self._send_solo(line)
+            self._send_solo(line, skill=skill_snap)
 
         def _handle_slash(self, line: str) -> None:
             import contextlib
@@ -1545,6 +2358,9 @@ def _build_app_class():
                 "sessions": "sessions",
                 "theme": "theme",
                 "themes": "theme",
+                "language": "language",
+                "lang": "language",
+                "locale": "language",
             }
             # Bare command or explicit list → interactive picker (not static tables)
             if cmd_name in nav_aliases and (not cmd_args or cmd_args[0] in ("list", "ls")):
@@ -1562,7 +2378,18 @@ def _build_app_class():
                 return
             # /clear — wipe RichLog (ANSI clear from dispatch is useless in Textual)
             if cmd_name == "clear":
-                self.clear_chat_view(note="Screen cleared")
+                self.clear_chat_view(note=t("screen_cleared"))
+                return
+            # /debug — toggle verbose boot/system logs
+            if cmd_name == "debug":
+                if cmd_args and cmd_args[0].lower() in ("off", "0", "false"):
+                    self._debug_mode = False
+                elif cmd_args and cmd_args[0].lower() in ("on", "1", "true"):
+                    self._debug_mode = True
+                else:
+                    self._debug_mode = not self._debug_mode
+                self.log_line(t("debug_on") if self._debug_mode else t("debug_off"), style="system")
+                self._focus_input()
                 return
 
             buf = io.StringIO()
@@ -1602,14 +2429,14 @@ def _build_app_class():
                 selected = None
             if selected:
                 self.copy_to_clipboard(selected)
-                self.notify("已复制 · 再按 Ctrl+C 退出", timeout=2)
+                self.notify(t("ctrl_c_copied"), timeout=2)
                 return
 
             inp = self.query_one("#chat-input", Input)
             if inp.value:
                 inp.value = ""
                 self._hide_slash_menu()
-                self.notify("已清空 · 再按 Ctrl+C 退出", timeout=2)
+                self.notify(t("ctrl_c_cleared"), timeout=2)
                 return
 
             if self.bridge and self._sending:
@@ -1618,10 +2445,10 @@ def _build_app_class():
                     self.log_line("[system] stop requested", style="system")
                 except Exception:
                     pass
-                self.notify("已请求停止 · 再按 Ctrl+C 退出", timeout=2)
+                self.notify(t("ctrl_c_stopped"), timeout=2)
                 return
 
-            self.notify("再按一次 Ctrl+C 退出", timeout=2)
+            self.notify(t("ctrl_c_again"), timeout=2)
 
         def action_hide_slash(self) -> None:
             from textual.actions import SkipAction
@@ -1638,6 +2465,9 @@ def _build_app_class():
                 self.log_line("Parameter edit cancelled", style="system")
                 self._refresh_chrome()
                 self._focus_input()
+                return
+            if getattr(self, "_await_login", None):
+                self._cancel_login()
                 return
             # Decision card: Esc = dismiss / deny / ignore
             if getattr(self, "_await_custom_answer", False):
@@ -1661,13 +2491,17 @@ def _build_app_class():
                 self._hide_session_picker()
                 self._focus_input()
                 return
+            if getattr(self, "_mention_active", False):
+                self._hide_mention_menu()
+                self._focus_input()
+                return
             if not self._slash_items:
                 raise SkipAction()
             self._hide_slash_menu()
             self._focus_input()
 
         def action_accept_slash(self) -> None:
-            """Tab: confirm menu selection, or toggle Plan/Build when idle."""
+            """Tab: autocomplete highlighted slash/mention text; idle → Plan/Build."""
             from textual.actions import SkipAction
 
             # Don't steal Tab from Textual Ctrl+P command palette
@@ -1682,21 +2516,26 @@ def _build_app_class():
             if self._session_pick_active:
                 self._confirm_session_pick()
                 return
+            if getattr(self, "_mention_active", False) and getattr(self, "_mention_items", None):
+                self._confirm_mention()
+                return
 
-            # Slash palette: Tab also confirms highlighted command (same as Enter)
+            # Slash palette: Tab only fills the highlighted text (never executes)
             if self._slash_items:
                 idx = max(0, min(self._slash_index, len(self._slash_items) - 1))
-                choice = self._slash_items[idx]
-                inp = self.query_one("#chat-input", Input)
-                inp.value = ""
-                self._hide_slash_menu()
+                choice = (self._slash_items[idx] or "").strip()
                 if choice:
-                    self._handle_slash(choice)
+                    inp = self.query_one("#chat-input", Input)
+                    inp.value = choice + " "
+                    inp.cursor_position = len(inp.value)
+                    self._hide_slash_menu()
+                    self._refresh_slash_menu(inp.value)
+                    self._focus_input()
                 return
 
             inp = self.query_one("#chat-input", Input)
             value = inp.value or ""
-            # Mid-/ command without open palette: complete first match
+            # Mid-/ command without open palette: complete first match into input
             if value.startswith(("/", "+")):
                 matches = slash_completions(value, limit=1)
                 if matches:
@@ -1809,10 +2648,11 @@ def _build_app_class():
                 fg=self._theme_hex("foreground", "#e6edf3"),
             )
             if self._await_custom_answer:
-                markup += "\n[bold]自定义答案[/] — 输入后 Enter 提交 · Esc 返回列表"
+                markup += f"\n[bold]{t('custom_answer_banner')}[/]"
             menu.update(markup)
             menu.add_class("visible")
             menu.add_class("decision")
+            self._sync_prompt_dock_menu()
 
         def _hide_decision(self) -> None:
             self._decision = None
@@ -1824,6 +2664,7 @@ def _build_app_class():
                 menu.remove_class("decision")
             except Exception:
                 pass
+            self._sync_prompt_dock_menu()
             # Show next queued decision
             if self._decision_queue:
                 nxt = self._decision_queue.pop(0)
@@ -1852,7 +2693,7 @@ def _build_app_class():
                 self._await_custom_answer = True
                 try:
                     inp = self.query_one("#chat-input", Input)
-                    inp.placeholder = "Type your own answer…  Enter submit · Esc back"
+                    inp.placeholder = t("placeholder_custom")
                 except Exception:
                     pass
                 self._paint_decision()
@@ -1861,7 +2702,7 @@ def _build_app_class():
             if d.allow_multiple and d.kind in ("options", "group_options"):
                 ids = sorted(d.selected_ids) if d.selected_ids else [opt.id]
                 if not ids:
-                    self.notify("先按 Space 勾选选项", timeout=2)
+                    self.notify(t("notify_space_toggle"), timeout=2)
                     return
                 self._resolve_decision_choose(d, ids)
                 return
@@ -1944,13 +2785,7 @@ def _build_app_class():
                 self._hide_decision()
                 return
             if d.kind == "group_options" and self.group:
-                try:
-                    self.group.resolve_choose(d.id, text, action="custom")
-                    self.log_line(f"[group] custom: {text[:80]}", style="system")
-                except Exception as e:
-                    self.log_line(str(e), style="error")
-                    return
-                self._hide_decision()
+                self._group_choose_action_work(d.id, text, f"[group] custom: {text[:80]}", "custom")
                 return
             self._hide_decision()
 
@@ -1984,14 +2819,23 @@ def _build_app_class():
                 if not self.group:
                     self.log_line("No group", style="error")
                     return
-                try:
-                    value = ",".join(ids)
-                    self.group.resolve_choose(d.id, value)
-                    self.log_line(f"[group] chose: {label}", style="system")
-                except Exception as e:
-                    self.log_line(str(e), style="error")
-                    return
+                self._resolve_group_choose_work(d, ids, label)
+                return
             self._hide_decision()
+
+        @work(thread=True, group="group-action")
+        def _resolve_group_choose_work(self, d: PendingDecision, ids: list[str], label: str) -> None:
+            if not self.group:
+                self.log_line("No group", style="error")
+                return
+            try:
+                value = ",".join(ids)
+                self.group.resolve_choose(d.id, value)
+                self.log_line(f"[group] chose: {label}", style="system")
+            except Exception as e:
+                self.log_line(str(e), style="error")
+                return
+            self._schedule_ui(self._hide_decision)
 
         def _resolve_decision_ignore(self, d: PendingDecision) -> None:
             if d.source == "solo":
@@ -2007,13 +2851,23 @@ def _build_app_class():
                 self.log_line("→ Options dismissed", style="system")
             else:
                 if self.group:
-                    try:
-                        self.group.resolve_choose(d.id, "", action="ignore")
-                    except Exception as e:
-                        self.log_line(str(e), style="error")
-                        return
+                    self._group_choose_action_work(d.id, "", "[group] options ignored", "ignore")
+                    return
                 self.log_line("[group] options ignored", style="system")
             self._hide_decision()
+
+        @work(thread=True, group="group-action")
+        def _group_choose_action_work(self, proposal_id: str, value: str, ok_msg: str, action: str = "choose") -> None:
+            if not self.group:
+                self.log_line("No group", style="error")
+                return
+            try:
+                self.group.resolve_choose(proposal_id, value, action=action)
+                self.log_line(ok_msg, style="system")
+            except Exception as e:
+                self.log_line(str(e), style="error")
+                return
+            self._schedule_ui(self._hide_decision)
 
         def _resolve_mode_switch(self, d: PendingDecision, *, approve: bool) -> None:
             if not self.bridge or not getattr(self.bridge, "is_open", False):
@@ -2043,7 +2897,12 @@ def _build_app_class():
             self._refresh_chrome()
             self._hide_decision()
 
-        def _resolve_group_approval(self, d: PendingDecision, *, reject: bool) -> None:
+        def _resolve_group_approval(self, d: PendingDecision, *, reject: bool = False) -> None:
+            """UI entry: schedule HTTP off the main thread (avoids WS deadlock)."""
+            self._resolve_group_approval_work(d, reject=reject)
+
+        @work(thread=True, group="group-action")
+        def _resolve_group_approval_work(self, d: PendingDecision, reject: bool = False) -> None:
             if not self.group:
                 self.log_line("No group", style="error")
                 return
@@ -2056,28 +2915,23 @@ def _build_app_class():
             except Exception as e:
                 self.log_line(str(e), style="error")
                 return
-            self._hide_decision()
+            self._schedule_ui(self._hide_decision)
 
         def _open_group_pending_decision(self) -> None:
-            """Open latest pending group approval/options as the decision picker."""
+            """Open latest *pending* group approval/options as the decision picker."""
             if not self.group:
                 return
             if self._decision:
                 return
-            # Prefer options, then approvals
+            # Prefer options, then approvals — only truly pending cards
             pr = None
             ap = None
             try:
-                pr = self.group.latest_pending_proposal() if hasattr(self.group, "latest_pending_proposal") else None
-                if pr is None and getattr(self.group, "pending_proposals", None):
-                    pending = [
-                        p for p in self.group.pending_proposals if (p.raw.get("status") or "pending") == "pending"
-                    ]
-                    pr = pending[-1] if pending else None
+                pr = self.group.latest_pending_proposal()
                 ap = self.group.latest_pending_approval()
             except Exception:
                 return
-            if pr and pr.options:
+            if pr and pr.options and (getattr(pr, "status", None) or "pending") == "pending":
                 raw = dict(pr.raw or {})
                 raw.setdefault("id", pr.id)
                 raw.setdefault("prompt", pr.title)
@@ -2120,6 +2974,7 @@ def _build_app_class():
                 and not self._nav_active
                 and not self._slash_items
                 and not self._decision
+                and not getattr(self, "_mention_active", False)
             ):
                 keys = self._side_hub.list_keys()
                 if len(keys) > 1:
@@ -2143,6 +2998,10 @@ def _build_app_class():
                 self._session_pick_index = max(0, self._session_pick_index - 1)
                 self._paint_session_picker()
                 return
+            if getattr(self, "_mention_active", False) and self._mention_items:
+                self._mention_index = max(0, self._mention_index - 1)
+                self._paint_mention_menu()
+                return
             if self._slash_items:
                 self._slash_index = max(0, self._slash_index - 1)
                 self._paint_slash_menu()
@@ -2162,6 +3021,7 @@ def _build_app_class():
                 and not self._nav_active
                 and not self._slash_items
                 and not self._decision
+                and not getattr(self, "_mention_active", False)
             ):
                 keys = self._side_hub.list_keys()
                 if len(keys) > 1:
@@ -2186,6 +3046,10 @@ def _build_app_class():
             if self._session_pick_active:
                 self._session_pick_index = min(len(self._session_pick_items) - 1, self._session_pick_index + 1)
                 self._paint_session_picker()
+                return
+            if getattr(self, "_mention_active", False) and getattr(self, "_mention_items", None):
+                self._mention_index = min(len(self._mention_items) - 1, self._mention_index + 1)
+                self._paint_mention_menu()
                 return
             if self._slash_items:
                 self._slash_index = min(len(self._slash_items) - 1, self._slash_index + 1)
@@ -2226,7 +3090,11 @@ def _build_app_class():
             if not text.strip():
                 return
             # Never store secrets from capture modes
-            if getattr(self, "_await_api_key", None) or getattr(self, "_await_model_field", None):
+            if (
+                getattr(self, "_await_api_key", None)
+                or getattr(self, "_await_model_field", None)
+                or getattr(self, "_await_login", None)
+            ):
                 return
             hist = self._input_history
             if hist and hist[-1] == text:
@@ -2277,6 +3145,23 @@ def _build_app_class():
             inp.cursor_position = len(inp.value or "")
             return True
 
+        def _sync_prompt_dock_menu(self) -> None:
+            """Grow #prompt-dock only while a menu is visible (avoids Win CMD thrash)."""
+            try:
+                dock = self.query_one("#prompt-dock")
+                menu = self.query_one("#slash-menu", Static)
+                open_ = (
+                    "visible" in menu.classes
+                    or bool(getattr(self, "_slash_visible", False))
+                    or bool(getattr(self, "_mention_active", False))
+                    or bool(getattr(self, "_decision", None))
+                    or bool(getattr(self, "_nav_active", False))
+                    or bool(getattr(self, "_session_pick_active", False))
+                )
+                dock.set_class(open_, "menu-open")
+            except Exception:
+                pass
+
         def _hide_slash_menu(self) -> None:
             if not self._slash_items and not getattr(self, "_slash_visible", False):
                 return
@@ -2285,22 +3170,207 @@ def _build_app_class():
             self._slash_index = 0
             self._slash_visible = False
             try:
-                menu = self.query_one("#slash-menu", Static)
-                menu.update("")
-                menu.remove_class("visible")
+                if not getattr(self, "_mention_active", False) and not getattr(self, "_decision", None):
+                    menu = self.query_one("#slash-menu", Static)
+                    menu.update("")
+                    menu.remove_class("visible")
             except Exception:
                 pass
+            self._sync_prompt_dock_menu()
+
+        def _active_mention_query(self, value: str) -> str | None:
+            """Return filter text after trailing @… if an @-mention is being typed."""
+            if self.mode != "group" or not self.group:
+                return None
+            text = value or ""
+            # Match @token at end (CJK names allowed); stop after whitespace
+            m = re.search(r"(?:^|[\s])@([\w\u4e00-\u9fff\-]*)$", text)
+            if not m:
+                return None
+            return m.group(1)
+
+        def _ensure_group_members(self, *, force: bool = False) -> list[dict[str, str]]:
+            if not force and self._group_members:
+                return self._group_members
+            if not self.group or not self.group.group_id:
+                self._group_members = []
+                return []
+            try:
+                data = self.client.get(f"/api/groups/{self.group.group_id}")
+                members = (data or {}).get("members") if isinstance(data, dict) else []
+                out: list[dict[str, str]] = []
+                if isinstance(members, list):
+                    for m in members:
+                        if not isinstance(m, dict):
+                            continue
+                        name = str(m.get("name") or "").strip()
+                        mid = str(m.get("id") or "").strip()
+                        if not name:
+                            continue
+                        out.append(
+                            {
+                                "id": mid,
+                                "name": name,
+                                "status": str(m.get("status") or ""),
+                            }
+                        )
+                self._group_members = out
+                # Keep GroupBridge id→name map in sync for [Name] prefixes
+                if self.group is not None:
+                    names = {m["id"]: m["name"] for m in out if m.get("id") and m.get("name")}
+                    existing = getattr(self.group, "_member_names", None)
+                    if isinstance(existing, dict):
+                        existing.update(names)
+                    else:
+                        self.group._member_names = names
+            except Exception as e:
+                self.log_line(f"[group] members: {e}", style="error")
+                self._group_members = []
+            return self._group_members
+
+        def _refresh_mention_menu(self, value: str) -> None:
+            if getattr(self, "_decision", None) or self._nav_active or self._session_pick_active:
+                return
+            if value.startswith(("/", "+")):
+                self._hide_mention_menu()
+                return
+            query = self._active_mention_query(value)
+            if query is None:
+                self._hide_mention_menu()
+                return
+            members = self._ensure_group_members()
+            q = (query or "").lower()
+            items: list[dict[str, str]] = []
+            for m in members:
+                name = m.get("name") or ""
+                if not q or q in name.lower() or q in (m.get("id") or "").lower():
+                    items.append(m)
+            if not items:
+                # Still show empty state so user knows @ was recognized
+                self._mention_items = []
+                self._mention_index = 0
+                self._mention_active = True
+                self._paint_mention_menu()
+                return
+            prev = None
+            if self._mention_items and 0 <= self._mention_index < len(self._mention_items):
+                prev = self._mention_items[self._mention_index].get("name")
+            self._mention_items = items[:40]
+            self._mention_active = True
+            if prev:
+                for i, it in enumerate(self._mention_items):
+                    if it.get("name") == prev:
+                        self._mention_index = i
+                        break
+                else:
+                    self._mention_index = 0
+            else:
+                self._mention_index = 0
+            self._hide_slash_menu()
+            self._paint_mention_menu()
+
+        def _paint_mention_menu(self) -> None:
+            try:
+                menu = self.query_one("#slash-menu", Static)
+            except Exception:
+                return
+            if not self._mention_active:
+                return
+            hi = self._theme_hex("primary", "#58a6ff")
+            fg = self._theme_hex("foreground", "#e6edf3")
+            lines: list[str] = [f"[bold {fg}] {t('mention_menu_title')}[/]  [dim]esc[/]"]
+            items = self._mention_items
+            if not items:
+                lines.append("[dim]  (no matching members)[/]")
+            else:
+                n = len(items)
+                idx = max(0, min(self._mention_index, n - 1))
+                self._mention_index = idx
+                window = 8
+                start = max(0, idx - window // 2)
+                end = min(n, start + window)
+                start = max(0, end - window)
+                if start > 0:
+                    lines.append(f"[dim]  ↑ {start} more[/]")
+                for i in range(start, end):
+                    m = items[i]
+                    name = str(m.get("name") or "")
+                    st = str(m.get("status") or "")
+                    row = f" @{name:<20} {st}"
+                    if i == idx:
+                        lines.append(f"[bold black on {hi}]{self._escape_markup(row)}[/]")
+                    else:
+                        lines.append(f"[{fg}]{self._escape_markup(row)}[/]")
+                if end < n:
+                    lines.append(f"[dim]  ↓ {n - end} more[/]")
+            lines.append(f"[dim]  {t('hint_mention_menu')}[/]")
+            menu.update("\n".join(lines))
+            menu.add_class("visible")
+            self._sync_prompt_dock_menu()
+
+        def _hide_mention_menu(self) -> None:
+            was = self._mention_active or bool(self._mention_items)
+            self._mention_active = False
+            self._mention_items = []
+            self._mention_index = 0
+            if not was:
+                return
+            try:
+                if not self._slash_items and not getattr(self, "_decision", None):
+                    menu = self.query_one("#slash-menu", Static)
+                    menu.update("")
+                    menu.remove_class("visible")
+            except Exception:
+                pass
+            self._sync_prompt_dock_menu()
+
+        def _confirm_mention(self) -> None:
+            if not self._mention_active or not self._mention_items:
+                self._hide_mention_menu()
+                return
+            idx = max(0, min(self._mention_index, len(self._mention_items) - 1))
+            name = str(self._mention_items[idx].get("name") or "").strip()
+            if not name:
+                self._hide_mention_menu()
+                return
+            try:
+                inp = self.query_one("#chat-input", Input)
+            except Exception:
+                self._hide_mention_menu()
+                return
+            value = inp.value or ""
+            m = re.search(r"(?:^|[\s])@([\w\u4e00-\u9fff\-]*)$", value)
+            if m:
+                start = m.start(1) - 1  # include @
+                new_val = value[:start] + f"@{name} "
+            else:
+                new_val = value.rstrip() + f" @{name} "
+            inp.value = new_val
+            inp.cursor_position = len(new_val)
+            self._hide_mention_menu()
+            self._focus_input()
 
         def _paint_slash_menu(self) -> None:
-            """OpenCode-style floating command list with highlight bar."""
+            """OpenCode-style floating command list with highlight bar + scroll window."""
             menu = self.query_one("#slash-menu", Static)
             if not self._slash_items:
                 menu.update("")
                 menu.remove_class("visible")
                 self._slash_visible = False
                 return
+            n = len(self._slash_items)
+            idx = max(0, min(self._slash_index, n - 1))
+            self._slash_index = idx
+            # Keep a fixed window so ↑↓ can reach every match (menu max-height ~14)
+            window = 10
+            start = max(0, idx - window // 2)
+            end = min(n, start + window)
+            start = max(0, end - window)
             lines: list[str] = []
-            for i, text in enumerate(self._slash_items):
+            if start > 0:
+                lines.append(f"[dim]  ↑ {start} more[/]")
+            for i in range(start, end):
+                text = self._slash_items[i]
                 help_text = ""
                 if i < len(self._slash_helps):
                     help_text = self._slash_helps[i]
@@ -2308,15 +3378,18 @@ def _build_app_class():
                 cmd = text.ljust(18)
                 desc = (help_text[:42] + "…") if len(help_text) > 42 else help_text
                 row = f" {cmd} {desc}"
-                if i == self._slash_index:
+                if i == idx:
                     # amber highlight bar (OpenCode-like)
                     lines.append(f"[bold black on #f59e0b]{self._escape_markup(row)}[/]")
                 else:
                     lines.append(f"[#c9d1d9]{self._escape_markup(row)}[/]")
-            lines.append("[dim]  ↑↓ 选择 · Enter/Tab 确认 · Esc 关闭[/]")
+            if end < n:
+                lines.append(f"[dim]  ↓ {n - end} more[/]")
+            lines.append(f"[dim]  {t('hint_slash_menu')}[/]")
             menu.update("\n".join(lines))
             menu.add_class("visible")
             self._slash_visible = True
+            self._sync_prompt_dock_menu()
 
         def _refresh_slash_menu(self, value: str) -> None:
             # Decision overlay owns #slash-menu — never clobber it with command palette
@@ -2325,7 +3398,8 @@ def _build_app_class():
             if not value.startswith(("/", "+")):
                 self._hide_slash_menu()
                 return
-            matches = slash_completions(value, limit=10)
+            # Load all matches — paint window scrolls; do not truncate to first page
+            matches = slash_completions(value, limit=64)
             new_items = [m[0] for m in matches]
             new_helps = [m[1] for m in matches]
             if not new_items:
@@ -2357,10 +3431,15 @@ def _build_app_class():
                     self._hide_session_picker()
                     self._refresh_slash_menu(val)
                 return
-            self._refresh_slash_menu(val)
+            if val.startswith(("/", "+")):
+                self._hide_mention_menu()
+                self._refresh_slash_menu(val)
+                return
+            self._hide_slash_menu()
+            self._refresh_mention_menu(val)
 
         def action_clear_log(self) -> None:
-            self.clear_chat_view(note="Screen cleared")
+            self.clear_chat_view(note=t("screen_cleared"))
 
         def clear_chat_view(self, *, note: str | None = None) -> None:
             """Clear the visible chat transcript (RichLog), keep chrome/status."""
@@ -2373,14 +3452,24 @@ def _build_app_class():
                 self._stream_buf = ""
                 self._think_buf_latest = ""
                 self._think_pending = False
+                self._open_tool = None
+                self._open_tool_keys = set()
+                self._done_tool_keys = set()
+                self._last_tool_result_key = ""
+                self._last_flushed_think = ""
                 self._reply_flushed = False
                 self._last_agent_reply = ""
+                self._turn_user_text = ""
                 self._sending = False
+                try:
+                    self._hide_live_think()
+                except Exception:
+                    pass
                 try:
                     self.end_wait()
                 except Exception:
                     pass
-                msg = (note or "Screen cleared").strip()
+                msg = (note or t("screen_cleared")).strip()
                 if msg:
                     self._chat_write(
                         f"[dim]{self._escape_markup(msg)}[/]",
@@ -2436,39 +3525,78 @@ def _build_app_class():
                 "session_cmd": self._session_cmd,
                 "open_nav": self.open_nav,
                 "refresh_client": self._refresh_client,
+                "tui_login": self._start_login,
                 "join_group": self.join_group,
                 "leave_group": self.leave_group,
                 "attach_image": self.attach_image,
                 "detach_media": self.detach_media,
                 "set_muted": self.set_muted,
                 "history": self.show_history,
+                "group_members": self.show_group_members,
+                "group_search": self.search_group_messages,
+                "group_more": self.load_more_group_history,
                 "approve": self.approve,
                 "reject": self.reject,
                 "choose": self.choose,
-                "clear_screen": lambda: self.clear_chat_view(note="Screen cleared"),
+                "clear_screen": lambda: self.clear_chat_view(note=t("screen_cleared")),
                 "apply_theme": self.apply_theme,
+                "apply_locale": self.apply_locale,
             }
 
         # ── send ──────────────────────────────────────────────────────
+
+        @staticmethod
+        def _compose_skill_ws(line: str, skill: dict[str, str] | None) -> str:
+            """Wire content for agent: optional <user_send_skill> prefix (same as Web)."""
+            text = (line or "").strip()
+            if not skill:
+                return text
+            dir_name = str(skill.get("dir") or "").strip()
+            if not dir_name:
+                return text
+            tag = f"<user_send_skill>{dir_name}</user_send_skill>"
+            return f"{tag}\n\n{text}" if text else tag
+
+        @staticmethod
+        def _compose_skill_display(line: str, skill: dict[str, str] | None) -> str:
+            """User-visible line: /skillName + optional text (no XML)."""
+            text = (line or "").strip()
+            if not skill:
+                return text
+            dir_name = str(skill.get("dir") or "").strip()
+            if not dir_name:
+                return text
+            return f"/{dir_name} {text}".strip() if text else f"/{dir_name}"
 
         def _send_plain(self, line: str) -> None:
             if not self.client.token:
                 self.log_line("Login first: /login", style="error")
                 return
             if self.mode == "group" and self.group and line.isdigit():
-                try:
-                    if self.group.resolve_numeric_reply(line):
-                        return
-                except Exception as e:
-                    self.log_line(str(e), style="error")
-                    return
+                self._group_numeric_reply_work(line)
+                return
             if self.mode == "group":
                 self._send_group(line)
             else:
                 self._send_solo(line)
 
+        @work(thread=True, group="group-action")
+        def _group_numeric_reply_work(self, line: str) -> None:
+            if not self.group:
+                return
+            try:
+                if self.group.resolve_numeric_reply(line):
+                    return
+            except Exception as e:
+                self.log_line(str(e), style="error")
+                return
+            # Not a card shortcut — fall through as a normal group message
+            self._send_group(line)
+
         @work(thread=True, group="chat-send")
-        def _send_solo(self, line: str) -> None:
+        def _send_solo(self, line: str, skill: dict[str, str] | None = None) -> None:
+            from opensquad.cli.commands.chat_cmd import AgentWsError
+
             if not self.agent:
                 self.log_line("Select an agent: /agent <name> or /start <name>", style="error")
                 self._sending = False
@@ -2476,17 +3604,28 @@ def _build_app_class():
             self._stream_buf = ""
             self._reply_flushed = False
             self._last_agent_reply = ""
+            self._turn_user_text = (line or "").strip() or getattr(self, "_turn_user_text", "")
             self._think_buf_latest = ""
             self._think_pending = False
+            self._open_tool = None
+            self._last_tool_result_key = ""
+            self._think_gen = int(getattr(self, "_think_gen", 0) or 0) + 1
+            try:
+                self.call_from_thread(self._hide_live_think)
+            except Exception:
+                pass
             already = bool(self.bridge and getattr(self.bridge, "is_open", False))
             self._begin_turn_meter()
-            self.begin_wait("Connecting…" if not already else "Thinking…")
+            self.begin_wait(t("wait_connecting") if not already else t("wait_thinking"))
             try:
                 if not already:
                     if not self._ensure_agent_connected(self.agent):
                         self.log_line("Agent not ready — try /start then send again", style="error")
                         return
                 if not self.bridge:
+                    return
+                if not self._ensure_new_session():
+                    self.log_line("Session not ready — try /new or /start", style="error")
                     return
                 images: list[str] = []
                 attachments: list[dict] = []
@@ -2509,13 +3648,24 @@ def _build_app_class():
                     except Exception as e:
                         self.log_line(f"upload failed {media.label}: {e}", style="error")
                 self.pending_media.clear()
+                # Prefer explicit skill snap from submit/queue; fall back to pending
+                skill_snap = skill if skill is not None else (dict(self.pending_skill) if self.pending_skill else None)
+                if skill is None and self.pending_skill:
+                    self.pending_skill = None
+                ws_content = self._compose_skill_ws(line, skill_snap)
                 self.call_from_thread(self._refresh_chrome)
                 if chips:
                     self.log_line(f"sending with: {' '.join(chips)}", style="system")
-                self.update_wait("Thinking…")
+                if skill_snap and skill_snap.get("dir"):
+                    self.log_line(f"skill /{skill_snap['dir']}", style="system")
+                self.update_wait(t("wait_thinking"))
                 try:
                     self.bridge.turn_reset()
-                    self.bridge.send_chat(line, images=images or None, attachments=attachments or None)
+                    self.bridge.send_chat(
+                        ws_content,
+                        images=images or None,
+                        attachments=attachments or None,
+                    )
                     self.bridge.wait_turn(timeout=600)
                 except AgentWsError as e:
                     self.log_line(str(e), style="error")
@@ -2541,13 +3691,18 @@ def _build_app_class():
             if not self._send_queue:
                 self._refresh_chrome()
                 return
-            line, snap = self._send_queue.popleft()
+            item = self._send_queue.popleft()
+            if len(item) == 3:
+                line, snap, skill_snap = item
+            else:
+                line, snap = item[0], item[1]
+                skill_snap = None
             self.pending_media = list(snap)
             self.log_line(f"Dequeued — sending next ({len(self._send_queue)} left)", style="system")
             self._follow_chat = True
             self._sending = True
             self._refresh_chrome()
-            self._send_solo(line)
+            self._send_solo(line, skill=skill_snap)
 
         @work(thread=True)
         def _send_group(self, line: str) -> None:
@@ -2585,35 +3740,21 @@ def _build_app_class():
             if not target:
                 self.log_line("Usage: /start <agent>", style="error")
                 return
-            self.log_line(f"Starting agent '{target}'…", style="system")
+            self._log_verbose(f"Starting agent '{target}'…")
             self._bootstrap_agent(target, then_new=False)
 
         @work(thread=True, exclusive=True, group="agent-boot")
         def _bootstrap_agent(self, name: str, then_new: bool = False) -> None:
-            self.begin_wait(f"Starting agent {name}…")
+            # begin_wait may already be set by on_mount; keep a single wait gen
+            if not getattr(self, "_wait_label", None):
+                self.begin_wait(t("wait_preparing"))
             try:
                 ok = self._ensure_agent_connected(name)
                 if ok:
-                    self.log_line(f"Connected to agent '{name}' (solo)", style="system")
-                    if then_new and self.bridge:
-                        self.update_wait("Opening new session…")
-                        try:
-                            # Reset local turn/session state before asking agent for a new sid
-                            self._last_agent_reply = ""
-                            self._session_current_id = None
-                            self._send_queue.clear()
-                            self._stream_buf = ""
-                            self._reply_flushed = False
-                            self._session_out_tokens = 0
-                            self._turn_started_at = None
-                            self._turn_out_target = 0
-                            self._turn_out_display = 0
-                            self._last_turn_out = 0
-                            self._last_turn_elapsed = None
-                            self.bridge.send_command("new_session")
-                            self.log_line("New session started", style="system")
-                        except Exception as e:
-                            self.log_line(str(e), style="error")
+                    self._log_verbose(f"Connected to agent '{name}' (solo)")
+                    if then_new:
+                        self._needs_new_session = True
+                        self._ensure_new_session()
                 else:
                     self.log_line(
                         f"Agent '{name}' not ready yet. Retry /start or wait and /new",
@@ -2621,8 +3762,20 @@ def _build_app_class():
                     )
             finally:
                 self.end_wait()
-                self.call_from_thread(self._refresh_chrome)
-                self.call_from_thread(self._focus_input)
+
+                def _after() -> None:
+                    self._sync_status_from_agent(name)
+                    self._post_welcome_card()
+                    self._refresh_chrome()
+                    self._focus_input()
+
+                try:
+                    self.call_from_thread(_after)
+                except Exception:
+                    try:
+                        _after()
+                    except Exception:
+                        pass
 
         def _lookup_agent(self, name: str) -> dict[str, Any] | None:
             try:
@@ -2641,9 +3794,10 @@ def _build_app_class():
         def _start_agent_process(self, name: str, *, force_restart: bool = False) -> None:
             try:
                 if force_restart:
-                    self.update_wait(f"Restarting {name} (re-register)…")
+                    self.update_wait(t("wait_boot_agent", name=name) + " (restart)")
                     self.client.admin_post(f"agents/{name}/restart")
                 else:
+                    self.update_wait(t("wait_boot_agent", name=name))
                     self.client.admin_post(f"agents/{name}/start")
             except Exception as e:
                 msg = str(e).lower()
@@ -2654,14 +3808,23 @@ def _build_app_class():
             import time
 
             deadline = time.time() + timeout
+            started = time.time()
+            delay = 0.12
             while time.time() < deadline:
                 info = self._lookup_agent(name)
                 if info and info.get("ready"):
                     return True
                 status = (info or {}).get("process_status") or "?"
                 reg = (info or {}).get("registry_status") or "offline"
-                self.update_wait(f"Waiting {name} ready (proc={status} registry={reg})…")
-                time.sleep(0.8)
+                elapsed = int(time.time() - started)
+                # Compact human progress — avoid raw proc/registry spam in banner
+                st = f"{status}/{reg}"
+                # Win CMD: at most ~1Hz banner changes (elapsed string)
+                if sys.platform != "win32" or elapsed != getattr(self, "_boot_ready_last_s", -1):
+                    self._boot_ready_last_s = elapsed
+                    self.update_wait(t("wait_boot_ready", name=name, elapsed=elapsed, status=st))
+                time.sleep(delay)
+                delay = min(delay * 1.25, 0.7)
             return self._agent_is_ready(name)
 
         def _ensure_agent_connected(self, name: str) -> bool:
@@ -2674,7 +3837,7 @@ def _build_app_class():
             self._sync_agent_cwd_from_launch(name)
             info = self._lookup_agent(name)
             if info and info.get("ready"):
-                self.update_wait(f"Connecting WebSocket to {name}…")
+                self.update_wait(t("wait_boot_ws", name=name))
                 ok = self._connect_agent_sync(name)
                 if ok:
                     remember_agent(name)
@@ -2682,24 +3845,22 @@ def _build_app_class():
 
             # Process alive but not in Gateway registry → restart so it re-registers
             if info and info.get("process_status") == "running" and not info.get("ready"):
-                self.log_line(
-                    f"{name} process running but registry offline — restarting…",
-                    style="system",
-                )
+                self._log_verbose(f"{name} process running but registry offline — restarting…")
                 self._start_agent_process(name, force_restart=True)
             else:
-                self.update_wait(f"Starting process {name}…")
                 self._start_agent_process(name, force_restart=False)
 
             if not self._wait_agent_ready(name):
                 return False
-            self.update_wait(f"Connecting WebSocket to {name}…")
+            self.update_wait(t("wait_boot_ws", name=name))
             ok = self._connect_agent_sync(name)
             if ok:
                 remember_agent(name)
             return ok
 
         def _connect_agent_sync(self, name: str) -> bool:
+            from opensquad.cli.commands.chat_cmd import AgentBridge, AgentWsError
+
             if self.bridge:
                 self.bridge.close()
                 self.bridge = None
@@ -2736,7 +3897,7 @@ def _build_app_class():
             self._sync_status_from_agent(name)
             try:
                 # Longer retries: process may still be binding after ready=true
-                self.bridge.connect(retries=12, delay=0.8)
+                self.bridge.connect(retries=12, delay=0.35)
                 try:
                     self.bridge.send_command("request_token_stats")
                 except Exception:
@@ -2782,11 +3943,16 @@ def _build_app_class():
             except (TypeError, ValueError):
                 pass
             m = str(data.get("model") or "").strip()
+            model_changed = False
             if m:
                 self._model_name = m
                 if not self._model_label or self._model_label == "—":
                     self._model_label = self._pretty_model_label("", m)
-            self._refresh_chrome()
+                    model_changed = True
+            # Idle token_stats must NOT full-refresh chrome — Win CMD stacks dock rows
+            if model_changed:
+                self._paint_bottom_status()
+            self._paint_prompt_meta_only()
 
         def _on_model_info(self, card: str | None, model: str | None) -> None:
             c = str(card or "").strip()
@@ -2828,7 +3994,8 @@ def _build_app_class():
             self.group = GroupBridge(self.client)
             self.group.muted = self.muted
             self.group.on_line = lambda t: self.log_line(t)
-            self.group.on_pending_cards = lambda: self.call_from_thread(self._open_group_pending_decision)
+            self.group.on_pending_cards = lambda: self._schedule_ui(self._open_group_pending_decision)
+            self.group.on_resolved_card = lambda rid: self._schedule_ui(self._clear_decision_by_id, str(rid or ""))
             try:
                 self.group.connect(gid, group_name=gname or gid, history_limit=15)
             except Exception as e:
@@ -2837,7 +4004,22 @@ def _build_app_class():
                 return
             self.group.set_active(True)
             self.mode = "group"
-            self.log_line(f"Joined {gname} — mode=group (/leave to exit)", style="system")
+            self._group_oldest_id = None
+            self._ensure_group_members(force=True)
+            # Seed oldest cursor so /group more works after join history
+            try:
+                seed = self.client.get(
+                    f"/api/groups/{gid}/messages",
+                    params={"limit": 15},
+                )
+                if isinstance(seed, list) and seed and isinstance(seed[0], dict) and seed[0].get("id"):
+                    self._group_oldest_id = str(seed[0].get("id"))
+            except Exception:
+                pass
+            self.log_line(
+                f"Joined {gname} — mode=group  (@mention · /group members|search|more · /leave)",
+                style="system",
+            )
             self._refresh_chrome()
             self._focus_input()
             # Open picker if history already has pending cards
@@ -2853,6 +4035,16 @@ def _build_app_class():
                     self.group.close()
                     self.group = None
             self.mode = "solo"
+            self._hide_mention_menu()
+            self._group_members = []
+            self._group_oldest_id = None
+            # Don't keep a group options card open after leaving
+            try:
+                if self._decision and getattr(self._decision, "source", "") == "group":
+                    self._decision_queue = [d for d in self._decision_queue if getattr(d, "source", "") != "group"]
+                    self._hide_decision()
+            except Exception:
+                pass
             if self.bridge:
                 self.bridge.set_paused(False)
                 self._agent_paused = False
@@ -2897,10 +4089,13 @@ def _build_app_class():
             if kind in ("theme", "themes"):
                 self._open_theme_nav()
                 return
+            if kind in ("language", "lang", "locale"):
+                self._open_language_nav()
+                return
             if kind == "session" or kind == "sessions":
                 self._session_cmd("sessions")
                 return
-            self.begin_wait(f"Loading {kind}…")
+            self.begin_wait(t("wait_loading", kind=kind))
             self._load_nav_kind(kind)
 
         def _open_theme_nav(self) -> None:
@@ -2909,6 +4104,20 @@ def _build_app_class():
             title, items = build_theme_menu(self, current=str(self.theme or ""))
             # Jump highlight to current theme
             cur = str(self.theme or "")
+            idx = 0
+            for i, it in enumerate(items):
+                if getattr(it, "id", None) == cur:
+                    idx = i
+                    break
+            self._push_nav(title, items, replace=True)
+            self._nav_index = idx
+            self._paint_nav()
+
+        def _open_language_nav(self) -> None:
+            from opensquad.cli.tui.nav_menus import build_language_menu
+
+            title, items = build_language_menu(self, current=str(getattr(self, "_locale", None) or get_locale()))
+            cur = str(getattr(self, "_locale", None) or get_locale())
             idx = 0
             for i, it in enumerate(items):
                 if getattr(it, "id", None) == cur:
@@ -2957,6 +4166,44 @@ def _build_app_class():
             except Exception as e:
                 self.log_line(f"theme failed: {e}", style="error")
 
+        def apply_locale(self, name: str) -> None:
+            """Switch TUI language (en/zh) and persist preference."""
+            name = (name or "").strip()
+            if not name:
+                self._open_language_nav()
+                return
+            code = normalize_locale(name)
+            if not code:
+                self.log_line(t("language_unknown", name=name), style="error")
+                self._open_language_nav()
+                return
+            self._locale = set_locale(code, persist=True)
+            self._refresh_chrome()
+            if self._nav_active:
+                self._hide_nav()
+            if getattr(self, "_decision", None):
+                self._paint_decision()
+            if getattr(self, "_slash_visible", False):
+                self._paint_slash_menu()
+            if getattr(self, "_session_pick_active", False):
+                self._paint_session_picker()
+            try:
+                thinking = t("wait_thinking")
+                connecting = t("wait_connecting")
+                replying = t("wait_replying")
+                # Re-label wait banner if currently showing a known status
+                cur = self._wait_label or ""
+                if cur in ("Thinking…", "思考中…", thinking):
+                    self.update_wait(thinking)
+                elif cur in ("Connecting…", "连接中…", connecting):
+                    self.update_wait(connecting)
+                elif cur in ("Replying…", "回复中…", replying):
+                    self.update_wait(replying)
+            except Exception:
+                pass
+            self.log_line(t("language_set", code=code), style="system")
+            self._focus_input()
+
         def action_cycle_effort(self) -> None:
             order = ("low", "medium", "high")
             cur = (getattr(self, "_reasoning_effort", None) or "high").lower()
@@ -2974,6 +4221,14 @@ def _build_app_class():
                     self.log_line(f"effort switch failed: {e}", style="error")
                     return
             self.log_line(f"Reasoning effort → {nxt}", style="system")
+            self._focus_input()
+
+        def action_toggle_detail(self) -> None:
+            """Ctrl+O — expand/collapse long thinking & tool output."""
+            self._detail_expanded = not self._detail_expanded
+            self.notify(t("detail_on") if self._detail_expanded else t("detail_off"), timeout=2)
+            if getattr(self, "_think_pending", False):
+                self._paint_live_think()
             self._focus_input()
 
         def action_toggle_live(self) -> None:
@@ -3507,7 +4762,7 @@ def _build_app_class():
             self._nav_active = True
             self._paint_nav()
             self.log_line(
-                f"{title} — ↑↓ 选择 · Enter 进入/执行 · Esc 返回",
+                t("hint_nav_push", title=title),
                 style="system",
             )
             self._focus_input()
@@ -3555,9 +4810,10 @@ def _build_app_class():
                     lines.append(f"[bold black on {hi}]{self._escape_markup(row)}[/]")
                 else:
                     lines.append(f"[{fg}]{self._escape_markup(row)}[/]")
-            lines.append("[dim]  ↑↓ 选择 · Enter/Tab 确认 · Esc 返回/关闭[/]")
+            lines.append(f"[dim]  {t('hint_nav_paint')}[/]")
             menu.update("\n".join(lines))
             menu.add_class("visible")
+            self._sync_prompt_dock_menu()
 
         def _hide_nav(self) -> None:
             self._nav_active = False
@@ -3570,6 +4826,7 @@ def _build_app_class():
                     menu.remove_class("visible")
             except Exception:
                 pass
+            self._sync_prompt_dock_menu()
 
         def _nav_back_or_close(self) -> None:
             if len(self._nav_stack) > 1:
@@ -3637,6 +4894,13 @@ def _build_app_class():
                     self._nav_card_toggle_field(data)
                 elif action == "theme.apply":
                     self.apply_theme(str(data.get("name") or ""))
+                elif action == "language.apply":
+                    self.apply_locale(str(data.get("code") or ""))
+                elif action == "skill.compose":
+                    self._nav_skill_compose(
+                        str(data.get("name") or ""),
+                        display=str(data.get("display") or ""),
+                    )
                 elif action == "skill.show":
                     self._nav_skill_show(str(data.get("name") or ""))
                 elif action == "skill.rm":
@@ -3758,6 +5022,21 @@ def _build_app_class():
                     self.log_line(line, style="system")
             except Exception as e:
                 self.log_line(f"[{tag}] {e}", style="error")
+
+        def _nav_skill_compose(self, name: str, display: str = "") -> None:
+            """Attach skill chip for next message (Web pendingSkill)."""
+            dir_name = (name or "").strip()
+            if not dir_name:
+                self.log_line("No skill name", style="error")
+                return
+            self.pending_skill = {
+                "dir": dir_name,
+                "name": (display or dir_name).strip() or dir_name,
+            }
+            self._hide_nav()
+            self._refresh_chrome()
+            self.log_line(f"Skill /{dir_name} attached — type a message or Enter to send", style="system")
+            self._focus_input()
 
         @work(thread=True, group="nav-action")
         def _nav_skill_show(self, name: str) -> None:
@@ -3979,9 +5258,10 @@ def _build_app_class():
                     lines.append(f"[bold black on #f59e0b]{self._escape_markup(row)}[/]")
                 else:
                     lines.append(f"[#c9d1d9]{self._escape_markup(row)}[/]")
-            lines.append("[dim]  ↑↓ 选择 · Enter/Tab 切换 · Esc 取消 · /session <n> 直达[/]")
+            lines.append(f"[dim]  {t('hint_session_picker')}[/]")
             menu.update("\n".join(lines))
             menu.add_class("visible")
+            self._sync_prompt_dock_menu()
 
         def _hide_session_picker(self) -> None:
             self._session_pick_active = False
@@ -3994,6 +5274,7 @@ def _build_app_class():
                     menu.remove_class("visible")
             except Exception:
                 pass
+            self._sync_prompt_dock_menu()
 
         def _confirm_session_pick(self) -> None:
             if not self._session_pick_active or not self._session_pick_items:
@@ -4134,6 +5415,100 @@ def _build_app_class():
             )
             self._refresh_chrome()
 
+        def _set_input_password(self, on: bool) -> None:
+            """Toggle password masking on #chat-input (login / secrets)."""
+            try:
+                inp = self.query_one("#chat-input", Input)
+                inp.password = bool(on)
+            except Exception:
+                pass
+
+        def _start_login(self, email: str | None = None) -> None:
+            """Begin TUI login capture (never use stdin input/getpass)."""
+            email_s = (email or "").strip()
+            self._set_input_password(False)
+            if email_s:
+                self._await_login = {"step": "password", "email": email_s}
+                self._set_input_password(True)
+                self.log_line(t("login_ask_password", email=email_s), style="system")
+            else:
+                self._await_login = {"step": "email", "email": None}
+                self.log_line(t("login_ask_email"), style="system")
+            self._placeholder_cache = None
+            self._refresh_chrome()
+            self._focus_input()
+
+        def _cancel_login(self) -> None:
+            self._await_login = None
+            self._set_input_password(False)
+            self.log_line(t("login_cancelled"), style="system")
+            self._placeholder_cache = None
+            self._refresh_chrome()
+            self._focus_input()
+
+        def _on_login_input(self, line: str) -> None:
+            pending = getattr(self, "_await_login", None) or {}
+            step = pending.get("step") or "email"
+            if step == "email":
+                email = (line or "").strip()
+                if not email:
+                    self.log_line(t("login_email_required"), style="error")
+                    self._focus_input()
+                    return
+                self._await_login = {"step": "password", "email": email}
+                self._set_input_password(True)
+                self.log_line(t("login_ask_password", email=email), style="system")
+                self._placeholder_cache = None
+                self._refresh_chrome()
+                self._focus_input()
+                return
+            email = str(pending.get("email") or "").strip()
+            password = line if line is not None else ""
+            self._await_login = None
+            self._set_input_password(False)
+            self._placeholder_cache = None
+            if not email or not password:
+                self.log_line(t("login_cancelled"), style="system")
+                self._refresh_chrome()
+                self._focus_input()
+                return
+            self.begin_wait(t("login_working"))
+            self._do_login(email, password)
+
+        @work(thread=True, group="login")
+        def _do_login(self, email: str, password: str) -> None:
+            try:
+                lang = str(getattr(self, "_locale", None) or get_locale() or "zh")
+                data = self.client.login(email, password, language=lang)
+                user = (data or {}).get("user") or {}
+                name = str(user.get("name") or email)
+                mail = str(user.get("email") or email)
+
+                def _ok() -> None:
+                    self.end_wait()
+                    self.log_line(t("login_ok", name=name, email=mail), style="system")
+                    self._refresh_client()
+                    self._refresh_chrome()
+                    self._focus_input()
+
+                try:
+                    self.call_from_thread(_ok)
+                except Exception:
+                    _ok()
+            except Exception as e:
+                err = str(e)
+
+                def _fail() -> None:
+                    self.end_wait()
+                    self.log_line(t("login_failed", err=err), style="error")
+                    self._refresh_chrome()
+                    self._focus_input()
+
+                try:
+                    self.call_from_thread(_fail)
+                except Exception:
+                    _fail()
+
         def _refresh_client(self) -> None:
             self.client = GatewayClient(gateway_url=self.client.gateway_url)
             if self.agent and self.client.token and self.mode == "solo":
@@ -4153,8 +5528,15 @@ def _build_app_class():
 
         def detach_media(self) -> None:
             n = len(self.pending_media)
+            had_skill = bool(self.pending_skill)
             self.pending_media.clear()
-            self.log_line(f"cleared {n} pending", style="system")
+            self.pending_skill = None
+            bits = []
+            if n:
+                bits.append(f"{n} attachment(s)")
+            if had_skill:
+                bits.append("skill chip")
+            self.log_line(f"cleared {' · '.join(bits) if bits else 'pending'}", style="system")
             self._refresh_chrome()
 
         def set_muted(self, muted: bool) -> None:
@@ -4163,46 +5545,168 @@ def _build_app_class():
                 self.group.set_muted(muted)
             self.log_line(f"background alerts {'muted' if muted else 'on'}", style="system")
 
+        def _group_member_names(self) -> dict[str, str]:
+            """id→name map for group message prefixes."""
+            names: dict[str, str] = {}
+            if self.group and getattr(self.group, "_member_names", None):
+                names.update(self.group._member_names)
+            for m in getattr(self, "_group_members", None) or []:
+                mid = str(m.get("id") or "").strip()
+                name = str(m.get("name") or "").strip()
+                if mid and name:
+                    names[mid] = name
+            return names
+
+        def _format_group_message_lines(self, m: dict) -> list[str]:
+            from opensquad.cli.group_render import format_message_lines
+
+            names = self._group_member_names()
+            if self.group and hasattr(self.group, "enrich_message"):
+                m = self.group.enrich_message(m)
+            return format_message_lines(m, shell_style=True, member_names=names)
+
         def show_history(self, n: int = 20) -> None:
             if self.mode == "group" and self.group and self.group.group_id:
-                from opensquad.cli.group_render import format_message_lines
-
                 try:
+                    if hasattr(self.group, "refresh_member_names"):
+                        self.group.refresh_member_names()
                     msgs = self.client.get(
                         f"/api/groups/{self.group.group_id}/messages",
-                        params={"limit": n},
+                        params={"limit": max(1, min(int(n or 20), 100))},
                     )
                     if isinstance(msgs, list):
+                        if msgs and isinstance(msgs[0], dict) and msgs[0].get("id"):
+                            self._group_oldest_id = str(msgs[0].get("id"))
+                        self.log_line(f"[group] last {len(msgs)} messages:", style="system")
                         for m in msgs:
                             if isinstance(m, dict):
-                                for line in format_message_lines(m, shell_style=True):
+                                for line in self._format_group_message_lines(m):
                                     self.log_line(line.lstrip("\n") or line)
+                        if msgs:
+                            self.log_line(
+                                "[dim]/group more for older · /group search <kw> to find[/]",
+                                style="system",
+                            )
                 except Exception as e:
                     self.log_line(str(e), style="error")
                 return
             self._session_cmd("sessions")
 
+        def show_group_members(self) -> None:
+            if self.mode != "group" or not self.group or not self.group.group_id:
+                self.log_line("Join a group first: /group join <id>", style="error")
+                return
+            members = self._ensure_group_members(force=True)
+            gname = self.group.group_name or self.group.group_id
+            self.log_line(f"[group] members · {gname} ({len(members)})", style="system")
+            if not members:
+                self.log_line("  (no members)", style="system")
+                return
+            for i, m in enumerate(members, 1):
+                name = m.get("name") or "?"
+                mid = m.get("id") or ""
+                st = m.get("status") or ""
+                detail = f"  [{i}] @{name}"
+                if st:
+                    detail += f"  · {st}"
+                if mid:
+                    detail += f"  · {mid}"
+                self.log_line(detail, style="system")
+            self.log_line("[dim]Type @ in the input to mention a member[/]", style="system")
+
+        def search_group_messages(self, query: str, limit: int = 30) -> None:
+            if self.mode != "group" or not self.group or not self.group.group_id:
+                self.log_line("Join a group first: /group join <id>", style="error")
+                return
+            q = (query or "").strip()
+            if not q:
+                self.log_line("usage: /group search <keyword>", style="error")
+                return
+            try:
+                if hasattr(self.group, "refresh_member_names"):
+                    self.group.refresh_member_names()
+                msgs = self.client.get(
+                    f"/api/groups/{self.group.group_id}/search",
+                    params={"q": q, "limit": max(1, min(int(limit or 30), 100))},
+                )
+            except Exception as e:
+                self.log_line(f"[group] search failed: {e}", style="error")
+                return
+            if not isinstance(msgs, list):
+                self.log_line("[group] search: unexpected response", style="error")
+                return
+            self.log_line(f"[group] search “{q}” → {len(msgs)} hit(s)", style="system")
+            if not msgs:
+                return
+            for m in msgs:
+                if isinstance(m, dict):
+                    for line in self._format_group_message_lines(m):
+                        self.log_line(line.lstrip("\n") or line)
+
+        def load_more_group_history(self, n: int = 20) -> None:
+            """Load older messages (before the oldest currently shown)."""
+            if self.mode != "group" or not self.group or not self.group.group_id:
+                self.log_line("Join a group first: /group join <id>", style="error")
+                return
+            params: dict[str, Any] = {"limit": max(1, min(int(n or 20), 100))}
+            before = getattr(self, "_group_oldest_id", None)
+            if before:
+                params["before"] = before
+            try:
+                if hasattr(self.group, "refresh_member_names"):
+                    self.group.refresh_member_names()
+                msgs = self.client.get(
+                    f"/api/groups/{self.group.group_id}/messages",
+                    params=params,
+                )
+            except Exception as e:
+                self.log_line(f"[group] more failed: {e}", style="error")
+                return
+            if not isinstance(msgs, list) or not msgs:
+                self.log_line("[group] no older messages", style="system")
+                return
+            if isinstance(msgs[0], dict) and msgs[0].get("id"):
+                self._group_oldest_id = str(msgs[0].get("id"))
+            self.log_line(f"[group] +{len(msgs)} older message(s):", style="system")
+            for m in msgs:
+                if isinstance(m, dict):
+                    for line in self._format_group_message_lines(m):
+                        self.log_line(line.lstrip("\n") or line)
+
         def approve(self, approval_id: str | None = None, note: str = "") -> None:
             if not self.group:
                 self.log_line("Join a group first", style="error")
                 return
-            try:
-                self.group.resolve_approval(approval_id, reject=False, note=note)
-                self.log_line(f"approved {approval_id or '(latest)'}", style="system")
-            except Exception as e:
-                self.log_line(str(e), style="error")
+            self._approve_work(approval_id, note, reject=False)
 
         def reject(self, approval_id: str | None = None, note: str = "") -> None:
             if not self.group:
                 self.log_line("Join a group first", style="error")
                 return
+            self._approve_work(approval_id, note, reject=True)
+
+        @work(thread=True, group="group-action")
+        def _approve_work(self, approval_id: str | None = None, note: str = "", reject: bool = False) -> None:
+            if not self.group:
+                self.log_line("Join a group first", style="error")
+                return
             try:
-                self.group.resolve_approval(approval_id, reject=True, note=note)
-                self.log_line(f"rejected {approval_id or '(latest)'}", style="system")
+                self.group.resolve_approval(approval_id, reject=reject, note=note or "")
+                self.log_line(
+                    f"{'rejected' if reject else 'approved'} {approval_id or '(latest)'}",
+                    style="system",
+                )
             except Exception as e:
                 self.log_line(str(e), style="error")
 
         def choose(self, proposal_id: str | None, value: str) -> None:
+            if not self.group:
+                self.log_line("Join a group first", style="error")
+                return
+            self._choose_work(proposal_id, value)
+
+        @work(thread=True, group="group-action")
+        def _choose_work(self, proposal_id: str | None, value: str) -> None:
             if not self.group:
                 self.log_line("Join a group first", style="error")
                 return
