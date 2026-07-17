@@ -217,6 +217,14 @@ def _build_app_class():
             self._think_buf_latest: str = ""
             self._think_pending: bool = False
             self._reply_flushed: bool = False
+            # Live agent reply streaming (chat-log in-place rewrite)
+            self._live_reply: dict[str, Any] | None = None
+            self._live_reply_painted: str = ""
+            self._live_reply_dirty: bool = False
+            self._reply_paint_at: float = 0.0
+            # Soft gray sweep across in-progress titles (Thinking / tools / wait)
+            self._shimmer_tick: int = 0
+            self._shimmer_timer = None
             # Windows IME: Enter may fire before CJK text is committed into Input
             self._submit_gen: int = 0
             self._ctrl_c_at: float = 0.0
@@ -251,6 +259,7 @@ def _build_app_class():
             self._last_turn_elapsed: float | None = None
             self._turn_meter_timer = None
             self._meter_paint_at: float = 0.0
+            self._meter_last_clock: str = ""
             # Freeze cwd at TUI launch (cmd address) — drives session project path
             self._launch_cwd: str = self._resolve_project_path()
             self._project_path: str = self._launch_cwd
@@ -299,8 +308,9 @@ def _build_app_class():
             self._DETAIL_TOKEN_LIMIT: int = 100
             self._last_tool_name: str = ""
             self._paint_cache: dict[str, str] = {}
-            # Open tools (progress in wait-banner); chat gets one green lamp per call_id/name
-            self._open_tool: dict[str, Any] | None = None
+            # Open yellow tool rows keyed by call_id (or name:seq) until result turns green
+            self._open_tools: dict[str, dict[str, Any]] = {}
+            self._open_tool_seq: int = 0
             self._open_tool_keys: set[str] = set()
             # Sync claim before schedule_ui — blocks duplicate ✓ for same tool
             self._done_tool_keys: set[str] = set()
@@ -335,7 +345,7 @@ def _build_app_class():
             with Vertical(id="prompt-dock"):
                 yield Static(id="slash-menu")
                 yield Static(id="wait-banner")
-                # 2d78e00 layout: Input + meta share the bordered #prompt-frame
+                # Blue box wraps Input only; status (Build · tokens) sits below
                 with Vertical(id="prompt-frame"):
                     yield Input(
                         placeholder=t("placeholder_ask"),
@@ -343,7 +353,7 @@ def _build_app_class():
                         type="text",
                         suggester=SlashSuggester(),
                     )
-                    yield Static(id="prompt-meta")
+                yield Static(id="prompt-meta")
                 yield Static(id="footer-path")
                 yield Static(id="status-bar")
             yield Footer()
@@ -487,6 +497,38 @@ def _build_app_class():
             except Exception:
                 pass
 
+        def _shift_open_tool_starts(self, at: int, delta: int) -> None:
+            """After splicing chat strips, keep later open-tool indices in sync."""
+            if delta == 0 or at < 0:
+                return
+            for meta in (getattr(self, "_open_tools", None) or {}).values():
+                try:
+                    start = int(meta.get("start", -1))
+                except Exception:
+                    continue
+                if start >= at:
+                    meta["start"] = start + delta
+
+        def _pin_chat_bottom(self) -> None:
+            """Keep tool rows visible when #live-think steals/returns chat height."""
+            if self._is_selecting():
+                return
+            if not getattr(self, "_follow_chat", True):
+                return
+
+            def _go() -> None:
+                try:
+                    self.query_one("#chat-log", RichLog).scroll_end(animate=False)
+                except Exception:
+                    pass
+
+            _go()
+            # Height change from .streaming may apply on next layout pass
+            try:
+                self.call_after_refresh(_go)
+            except Exception:
+                pass
+
         def _chat_replace_open(
             self,
             open_meta: dict[str, Any] | None,
@@ -503,7 +545,10 @@ def _build_app_class():
                 # Prefer rewrite when the open row is still the tail (common path)
                 if strips > 0 and start >= 0 and end == len(log.lines):
                     self._chat_pop_strips(strips)
-                elif strips > 0 and 0 <= start < len(log.lines):
+                    n = self._chat_write_counted(content, follow=follow, shrink=True)
+                    self._shift_open_tool_starts(start + 1, n - strips)
+                    return {"start": start, "strips": n, "name": open_meta.get("name", "")}
+                elif strips > 0 and 0 <= start < len(log.lines) and end <= len(log.lines):
                     # Content was appended after the open row — splice it out
                     try:
                         from textual.geometry import Size
@@ -523,6 +568,8 @@ def _build_app_class():
                                 len(log.lines),
                             )
                             log.refresh()
+                        # Later open rows that lived in `tail` shift by (n - strips)
+                        self._shift_open_tool_starts(end, n - strips)
                         if follow and getattr(self, "_follow_chat", True) and not self._is_selecting():
                             try:
                                 log.scroll_end(animate=False)
@@ -724,22 +771,28 @@ def _build_app_class():
 
             return _UserCard()
 
-        def _thinking_markup(self, text: str, *, live: bool = False) -> str:
-            """Thinking: yellow label + light-gray body.
+        def _thinking_label_hex(self) -> str:
+            """OpenCode-style Thinking label: muted tan, lower chroma than warning amber."""
+            return "#a6926a"
 
-            live=True → show a trailing window (streaming); else fold unless ^O.
+        def _thinking_markup(self, text: str, *, live: bool = False) -> str:
+            """Thinking: muted tan label (+ soft shimmer while live) + gray body.
+
+            live=True → shimmer title + trailing window; else fold unless ^O.
             """
             muted = self._theme_hex("text-muted", "#8b949e")
-            orange = self._theme_hex("warning", "#c9a227")
+            label = t("thinking_label")
             if live:
                 raw = (text or "").strip()
                 # Keep last ~900 chars so the fixed panel scrolls content, not layout
                 if len(raw) > 900:
                     raw = "…" + raw[-899:]
                 body = raw
+                label_mk = self._shimmer_markup(label, base=self._thinking_label_hex())
             else:
                 body = self._fold_detail_text(text)
-            label_mk = f"[{orange}]{t('thinking_label')}[/]"
+                tan = self._thinking_label_hex()
+                label_mk = f"[{tan}]{label}[/]"
             safe = self._escape_markup(body)
             return f"{label_mk} [dim {muted}]{safe}[/]"
 
@@ -833,24 +886,30 @@ def _build_app_class():
             kind, name, detail, state = self._parse_tool_line(text)
             return self._tool_markup_parts(kind, name, detail, state)
 
-        def _tool_markup_parts(self, kind: str, name: str, detail: str, state: str) -> str | None:
+        def _tool_markup_parts(
+            self,
+            kind: str,
+            name: str,
+            detail: str,
+            state: str,
+            *,
+            open_name: str = "",
+        ) -> str | None:
             lamp = self._signal_lamp(state)
             expanded = bool(getattr(self, "_detail_expanded", False))
             white = "#e6edf3"
             muted = self._theme_hex("text-muted", "#8b949e")
 
             if kind == "call":
-                name_s = self._escape_markup(name or "tool")
+                # In-progress tool title: soft gray light sweeping across the name
+                name_mk = self._shimmer_markup(name or "tool")
                 if expanded and detail:
                     args_s = self._escape_markup(detail)
-                    return f"{lamp}[bold {white}]{name_s}[/][dim {muted}]({args_s})[/]"
-                return f"{lamp}[bold {white}]{name_s}[/]"
+                    return f"{lamp}{name_mk}[dim {muted}]({args_s})[/]"
+                return f"{lamp}{name_mk}"
 
             if kind == "result":
-                # Prefer the open-call label so orange→green keeps the same text
-                open_name = ""
-                if getattr(self, "_open_tool", None):
-                    open_name = str(self._open_tool.get("name") or "")
+                # Prefer the open-call label so yellow→green keeps the same text
                 label = open_name or name or getattr(self, "_last_tool_name", "") or ""
                 name_s = self._escape_markup(label) if label else ""
                 if state == "error":
@@ -1073,6 +1132,8 @@ def _build_app_class():
                     self._wait_timer = None
                 self._static_set("#wait-banner", "")
                 # Do NOT full _refresh_chrome here — thrash Win CMD dock rows
+                if not self._shimmer_active():
+                    self._stop_shimmer_timer()
 
             try:
                 self.call_from_thread(_stop)
@@ -1146,11 +1207,13 @@ def _build_app_class():
                     self._wait_timer = None
                 return
             self._wait_tick = int(getattr(self, "_wait_tick", 0) or 0) + 1
-            if getattr(self, "_turn_started_at", None) is not None:
-                self._advance_out_display()
-                self._paint_prompt_meta_only()
+            # ↓ odometer is owned by _turn_meter_timer (smooth +1); wait tick only
+            # refreshes the banner / keeps the wait timer alive.
             if self._wait_label:
                 self._paint_wait()
+            elif getattr(self, "_turn_started_at", None) is not None:
+                # No banner but turn still open — ensure meter timer is running
+                self._ensure_turn_meter_timer()
 
         def _paint_wait(self) -> None:
             if self._is_selecting():
@@ -1158,33 +1221,185 @@ def _build_app_class():
             if not self._wait_label:
                 self._static_set("#wait-banner", "")
                 return
-            spin = self._SPIN[(self._wait_tick // 3) % len(self._SPIN)]
-            self._static_set("#wait-banner", f"[bold yellow] {spin}  {self._escape_markup(self._wait_label)}[/]")
+            # Soft gray sweep on the progress title (Thinking / tool / Replying…)
+            label_mk = self._shimmer_markup(str(self._wait_label))
+            self._static_set("#wait-banner", f" {label_mk}")
+            self._ensure_shimmer_timer()
 
-        def _schedule_meter_paint(self) -> None:
-            """Raise down target from stream; display catches up toward it."""
-            now = time.monotonic()
-            last = float(getattr(self, "_meter_paint_at", 0.0) or 0.0)
-            # Win: ≤2Hz; elsewhere ~5Hz — frequent Static updates ghost the dock
-            min_gap = 0.5 if sys.platform == "win32" else 0.2
-            if now - last < min_gap:
+        def _shimmer_markup(self, plain: str, *, base: str | None = None) -> str:
+            """Soft light sweep — small steps at high Hz so motion looks fluid.
+
+            ``base`` selects the resting color. Thinking uses a muted OpenCode tan;
+            wait/tool titles keep cool gray.
+            """
+            text = str(plain or "")
+            if not text:
+                return ""
+            if base:
+                # Warm, low-chroma band (OpenCode Thinking depth)
+                base_c = base
+                soft = "#b49a74"
+                mid = "#c4b08c"
+                hi = "#d2c4a6"
+            else:
+                base_c = self._theme_hex("text-muted", "#8b949e")
+                soft = "#9aa3ad"
+                mid = "#b6bec6"
+                hi = "#c9d1d9"
+            tick = int(getattr(self, "_shimmer_tick", 0) or 0)
+            n = len(text)
+            # 1 cell/tick (not 3) — same overall pace with a higher timer rate
+            span = max(n + 8, 10)
+            pos = tick % span - 2
+            out: list[str] = []
+            for i, ch in enumerate(text):
+                esc = self._escape_markup(ch)
+                d = i - pos
+                if d == 0:
+                    out.append(f"[{hi}]{esc}[/]")
+                elif d in (-1, 1):
+                    out.append(f"[{mid}]{esc}[/]")
+                elif d in (-2, 2):
+                    out.append(f"[{soft}]{esc}[/]")
+                else:
+                    out.append(f"[dim {base_c}]{esc}[/]")
+            return "".join(out)
+
+        def _shimmer_active(self) -> bool:
+            return bool(
+                getattr(self, "_wait_label", None)
+                or getattr(self, "_think_pending", False)
+                or (getattr(self, "_open_tools", None) or {})
+            )
+
+        def _ensure_shimmer_timer(self) -> None:
+            if getattr(self, "_shimmer_timer", None) is not None:
                 return
-            self._meter_paint_at = now
 
-            def _do() -> None:
-                if getattr(self, "_turn_started_at", None) is not None:
-                    self._advance_out_display()
-                    self._paint_prompt_meta_only()
-                elif self._wait_label:
-                    self._paint_wait()
+            def _start() -> None:
+                if getattr(self, "_shimmer_timer", None) is not None:
+                    return
+                # Higher Hz + 1-cell steps ≈ prior sweep speed, but much smoother
+                interval = 0.055 if sys.platform == "win32" else 0.045
+                self._shimmer_timer = self.set_interval(interval, self._tick_shimmer)
 
+            if getattr(self, "_thread_id", None) == threading.get_ident():
+                _start()
+                return
             try:
-                self.call_from_thread(_do)
+                self.call_from_thread(_start)
             except Exception:
                 try:
-                    _do()
+                    _start()
                 except Exception:
                     pass
+
+        def _stop_shimmer_timer(self) -> None:
+            timer = getattr(self, "_shimmer_timer", None)
+            if timer is None:
+                return
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._shimmer_timer = None
+
+        def _repaint_open_tools_shimmer(self) -> None:
+            """Rewrite in-progress tool title rows so the sweep keeps moving."""
+            tools = getattr(self, "_open_tools", None)
+            if not isinstance(tools, dict) or not tools:
+                return
+            # High→low start so strip-index shifts stay correct
+            for _key, meta in sorted(
+                tools.items(),
+                key=lambda kv: int(kv[1].get("start", -1)),
+                reverse=True,
+            ):
+                if int(meta.get("strips", 0) or 0) <= 0:
+                    continue
+                label = str(meta.get("name") or "tool")
+                detail = str(meta.get("detail") or "")
+                mk = self._tool_markup_parts("call", label, detail, "progress")
+                if mk is None:
+                    continue
+                updated = self._chat_replace_open(meta, mk, follow=False)
+                if updated:
+                    meta["start"] = int(updated.get("start", meta.get("start", 0)))
+                    meta["strips"] = int(updated.get("strips", meta.get("strips", 0)))
+
+        def _tick_shimmer(self) -> None:
+            if not self._shimmer_active():
+                self._stop_shimmer_timer()
+                return
+            if self._is_selecting():
+                return
+            self._shimmer_tick = int(getattr(self, "_shimmer_tick", 0) or 0) + 1
+            tick = self._shimmer_tick
+            # Lightweight Static titles every frame
+            if getattr(self, "_wait_label", None):
+                self._paint_wait()
+            if getattr(self, "_think_pending", False):
+                self._paint_cache.pop("live-think", None)
+                self._paint_live_think()
+            # RichLog splice is expensive — every 2nd frame keeps motion, cuts hitch
+            if getattr(self, "_open_tools", None) and (tick % 2 == 0):
+                try:
+                    self._repaint_open_tools_shimmer()
+                except Exception:
+                    pass
+
+        def _schedule_meter_paint(self) -> None:
+            """Target rose from stream — keep the smooth ↓ odometer ticking."""
+            self._ensure_turn_meter_timer()
+
+        def _ensure_turn_meter_timer(self) -> None:
+            """High-frequency tick so ↓ climbs like +1 instead of jumping by dozens."""
+            if getattr(self, "_turn_meter_timer", None) is not None:
+                return
+
+            def _start() -> None:
+                if getattr(self, "_turn_meter_timer", None) is not None:
+                    return
+                # ~20Hz: smooth digit climb; #prompt-meta sits outside the blue box
+                interval = 0.05 if sys.platform == "win32" else 0.04
+                self._turn_meter_timer = self.set_interval(interval, self._tick_turn_meter)
+
+            if getattr(self, "_thread_id", None) == threading.get_ident():
+                _start()
+                return
+            try:
+                self.call_from_thread(_start)
+            except Exception:
+                try:
+                    _start()
+                except Exception:
+                    pass
+
+        def _stop_turn_meter_timer(self) -> None:
+            timer = getattr(self, "_turn_meter_timer", None)
+            if timer is None:
+                return
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._turn_meter_timer = None
+
+        def _tick_turn_meter(self) -> None:
+            if getattr(self, "_turn_started_at", None) is None:
+                self._stop_turn_meter_timer()
+                return
+            if self._is_selecting():
+                return
+            changed = self._advance_out_display()
+            # Also refresh when the elapsed clock text changes (even if ↓ idle)
+            try:
+                clock = self._turn_meter_plain()
+            except Exception:
+                clock = ""
+            if changed or clock != getattr(self, "_meter_last_clock", None):
+                self._meter_last_clock = clock
+                self._paint_prompt_meta_only()
 
         @staticmethod
         def _fmt_duration(secs: float) -> str:
@@ -1212,28 +1427,22 @@ def _build_app_class():
                 return f"{n / 1000:.1f}K"
             return str(n)
 
-        def _advance_out_display(self) -> None:
-            """Move down display toward target in tiny steps (never dump a whole chunk)."""
+        def _advance_out_display(self) -> bool:
+            """Move ↓ toward target like an odometer (+1); return True if changed."""
             target = max(0, int(getattr(self, "_turn_out_target", 0) or 0))
             display = max(0, int(getattr(self, "_turn_out_display", 0) or 0))
             if display >= target:
-                return
+                return False
             gap = target - display
-            # Windows: jump in larger steps so 2Hz ticks don't churn unique strings forever
-            if sys.platform == "win32":
-                if gap <= 20:
-                    step = gap
-                elif gap <= 200:
-                    step = max(8, gap // 4)
-                else:
-                    step = max(20, gap // 3)
-            elif gap <= 8:
+            # Odometer feel: +1 almost always. Tiny accel only when far behind.
+            if gap <= 80:
                 step = 1
-            elif gap <= 40:
+            elif gap <= 200:
                 step = 2
             else:
                 step = 3
             self._turn_out_display = display + min(gap, step)
+            return True
 
         def _turn_meter_plain(self) -> str:
             """Up = context; down = this-turn output. Elapsed only while turn is active."""
@@ -1261,8 +1470,10 @@ def _build_app_class():
                 self._turn_out_display = 0
                 self._last_turn_elapsed = None
                 self._meter_paint_at = 0.0
+                self._meter_last_clock = ""
                 self._paint_prompt_meta_only()
                 self._paint_wait()
+                self._ensure_turn_meter_timer()
 
             try:
                 self.call_from_thread(_start)
@@ -1276,6 +1487,7 @@ def _build_app_class():
             """Freeze elapsed + snap down to final turn output."""
 
             def _stop() -> None:
+                self._stop_turn_meter_timer()
                 started = getattr(self, "_turn_started_at", None)
                 if started is not None:
                     self._last_turn_elapsed = time.monotonic() - float(started)
@@ -1443,10 +1655,10 @@ def _build_app_class():
             return fallback
 
         def _opencode_status_markup(self) -> str:
-            """OpenCode-style meta under input: left mode·model, right tokens.
+            """OpenCode-style meta under the input box (outside the blue border).
 
-            Restored to 2d78e00 layout (meta inside #prompt-frame). Build/Plan
-            kept muted grey per user preference (no blue/orange highlight).
+            Left: Build · model · provider · effort; right: ↑↓ tokens + context %.
+            Build/Plan muted grey (no blue/orange highlight).
             """
             if self.mode == "group" and self.group:
                 gname = self.group.group_name or self.group.group_id
@@ -1648,6 +1860,13 @@ def _build_app_class():
             raw = str(text) if text is not None else ""
             body = raw.strip()
 
+            # Live stream already owns an open reply block — upgrade it in place
+            if body and style == "agent" and getattr(self, "_live_reply", None):
+                if getattr(self, "_think_pending", False):
+                    self._flush_thinking_to_log()
+                self._finalize_live_reply(raw)
+                return
+
             # Chokepoint: never print the same agent reply twice (stream vs final race).
             # Second copy often arrives with style="" (no · agent label) — still drop it.
             # Exception: allow a longer final to replace a truncated stream prefix.
@@ -1759,46 +1978,83 @@ def _build_app_class():
                 return True
             return True
 
-        def _write_tool_line(self, raw: str) -> None:
-            """Stable tool rows: progress in wait-banner; one final green line in chat.
+        def _pop_open_tool(self, result_key: str, label: str) -> dict[str, Any] | None:
+            """Find and remove the yellow open-row matching this result (by call_id, else FIFO name)."""
+            tools = getattr(self, "_open_tools", None)
+            if not isinstance(tools, dict) or not tools:
+                return None
+            if result_key.startswith("id:"):
+                meta = tools.pop(result_key, None)
+                if meta is not None:
+                    return meta
+            # FIFO match by tool name (parallel same-name without call_id)
+            for key, meta in list(tools.items()):
+                if str(meta.get("name") or "") == label:
+                    return tools.pop(key, None)
+            return None
 
-            Never auto-finalize a prior tool when a new call arrives — that used to
-            paint a green lamp early, then tool_result painted the same tool again.
+        def _write_tool_line(self, raw: str) -> None:
+            """Paint tool progress in chat (yellow) + wait-banner; green on result.
+
+            Call rows are written immediately so tools stay visible between Thinking
+            blocks. Result upgrades the matching yellow row in-place when possible.
+            Dedup is by call_id (not bare tool name) so repeated read_file etc. all show.
             """
             kind, name, detail, state = self._parse_tool_line(raw)
             if kind == "call":
                 label = name or "tool"
-                self._open_tool = {"name": label}
                 self._last_tool_name = label
-                # Remember args for Ctrl+O expand on the later green row
                 key = self._tool_dedupe_key("call", label, raw)
                 if detail:
                     self._tool_args_by_key[key] = detail
-                    if key.startswith("id:"):
-                        self._tool_args_by_key[f"name:{label}"] = detail
-                    else:
-                        self._tool_args_by_key[f"name:{label}"] = detail
+                    self._tool_args_by_key[f"name:{label}"] = detail
+                # Unique store key so parallel same-name calls each keep a yellow row
+                if key.startswith("id:"):
+                    store_key = key
+                else:
+                    self._open_tool_seq = int(getattr(self, "_open_tool_seq", 0) or 0) + 1
+                    store_key = f"name:{label}:{self._open_tool_seq}"
+                # Paint yellow lamp in chat immediately (between Thinking blocks)
+                mk = self._tool_markup_parts("call", label, detail, "progress")
+                open_meta: dict[str, Any] = {
+                    "name": label,
+                    "key": store_key,
+                    "detail": detail or "",
+                }
+                if mk is not None:
+                    try:
+                        start = len(self.query_one("#chat-log", RichLog).lines)
+                    except Exception:
+                        start = 0
+                    n = self._chat_write_counted(mk, follow=True)
+                    open_meta["start"] = start
+                    open_meta["strips"] = n
+                    self._pin_chat_bottom()
+                if not isinstance(getattr(self, "_open_tools", None), dict):
+                    self._open_tools = {}
+                self._open_tools[store_key] = open_meta
                 self.update_wait(f"● {label}")
+                self._ensure_shimmer_timer()
                 return
             if kind == "result":
-                open_meta = getattr(self, "_open_tool", None)
-                label = (
-                    name
-                    or (str(open_meta.get("name")) if open_meta else "")
-                    or (getattr(self, "_last_tool_name", "") or "tool")
-                )
-                dedup_key = f"done:{label}"
+                label = name or (getattr(self, "_last_tool_name", "") or "tool")
+                # Dedup by call_id — never drop a second same-name tool (e.g. read_file ×N)
+                result_key = self._tool_dedupe_key("done", label, raw)
+                if result_key.startswith("id:"):
+                    dedup_key = f"done:{result_key}"
+                else:
+                    dedup_key = f"done:name:{label}:{int(getattr(self, '_tool_result_seq', 0) or 0)}"
+                    self._tool_result_seq = int(getattr(self, "_tool_result_seq", 0) or 0) + 1
                 if dedup_key == getattr(self, "_last_tool_result_key", ""):
-                    self._open_tool = None
                     return
                 self._last_tool_result_key = dedup_key
-                if open_meta and str(open_meta.get("name") or "") == label:
-                    self._open_tool = None
-                # Merge pending full body (from bridge.on_tool_detail) + call args
+                open_meta = self._pop_open_tool(result_key, label)
+                if open_meta and not name:
+                    label = str(open_meta.get("name") or label)
                 full_detail = self._take_tool_detail(label, raw)
                 if not full_detail and detail:
                     full_detail = detail
-                args_key = self._tool_dedupe_key("done", label, raw)
+                args_key = result_key if result_key.startswith("id:") else f"name:{label}"
                 args = (
                     self._tool_args_by_key.pop(args_key, None)
                     or self._tool_args_by_key.pop(f"name:{label}", None)
@@ -1810,14 +2066,20 @@ def _build_app_class():
                     combined = f"({args})"
                 else:
                     combined = full_detail
-                mk = self._tool_markup_parts("result", label, combined, state)
+                open_label = str(open_meta.get("name") or "") if open_meta else ""
+                mk = self._tool_markup_parts("result", label, combined, state, open_name=open_label)
                 if mk is not None:
-                    start = 0
-                    try:
-                        start = len(self.query_one("#chat-log", RichLog).lines)
-                    except Exception:
-                        start = 0
-                    n = self._chat_write_counted(mk, follow=True)
+                    can_replace = bool(open_meta and int(open_meta.get("strips", 0) or 0) > 0)
+                    updated = self._chat_replace_open(open_meta, mk, follow=True) if can_replace else None
+                    if updated:
+                        start = int(updated.get("start", 0))
+                        n = int(updated.get("strips", 0))
+                    else:
+                        try:
+                            start = len(self.query_one("#chat-log", RichLog).lines)
+                        except Exception:
+                            start = 0
+                        n = self._chat_write_counted(mk, follow=True)
                     self._detail_blocks.append(
                         {
                             "kind": "tool",
@@ -2105,6 +2367,10 @@ def _build_app_class():
                 self._paint_cache.pop("live-think", None)
             except Exception:
                 pass
+            # Chat regains height — re-pin so prior tool rows stay in view
+            self._pin_chat_bottom()
+            if not self._shimmer_active():
+                self._stop_shimmer_timer()
 
         def _paint_live_think(self) -> None:
             """Stream Thinking tokens into the fixed-height #live-think panel."""
@@ -2126,9 +2392,15 @@ def _build_app_class():
                         return
                     self._paint_cache["live-think"] = markup
                     w = self.query_one("#live-think", Static)
-                    if "streaming" not in w.classes:
+                    grew = "streaming" not in w.classes
+                    if grew:
                         w.add_class("streaming")
                     w.update(markup)
+                    # #live-think.streaming steals 6 rows from chat — without re-pin,
+                    # already-painted tool rows scroll out of the shrink viewport.
+                    if grew:
+                        self._pin_chat_bottom()
+                    self._ensure_shimmer_timer()
                 except Exception:
                     pass
 
@@ -2140,8 +2412,220 @@ def _build_app_class():
                 except Exception:
                     pass
 
+        def _chat_write_markups(
+            self,
+            items: list[tuple[Any, dict[str, Any]]],
+            *,
+            follow: bool | None = True,
+        ) -> dict[str, Any]:
+            """Append several chat strips; return start/strips meta."""
+            log = self.query_one("#chat-log", RichLog)
+            start = len(log.lines)
+            n = 0
+            for i, (content, opts) in enumerate(items):
+                is_last = i == len(items) - 1
+                n += self._chat_write_counted(
+                    content,
+                    follow=(follow if is_last else False),
+                    shrink=bool(opts.get("shrink", True)),
+                )
+            return {"start": start, "strips": n}
+
+        def _chat_replace_markups(
+            self,
+            open_meta: dict[str, Any] | None,
+            items: list[tuple[Any, dict[str, Any]]],
+            *,
+            follow: bool | None = True,
+        ) -> dict[str, Any]:
+            """Replace an open multi-strip block with new markups."""
+            log = self.query_one("#chat-log", RichLog)
+            if open_meta:
+                start = int(open_meta.get("start", -1))
+                strips = int(open_meta.get("strips", 0))
+                end = start + strips
+                if strips > 0 and start >= 0 and end == len(log.lines):
+                    self._chat_pop_strips(strips)
+                    meta = self._chat_write_markups(items, follow=follow)
+                    self._shift_open_tool_starts(start + 1, int(meta["strips"]) - strips)
+                    return {"start": start, "strips": int(meta["strips"])}
+                if strips > 0 and 0 <= start < len(log.lines) and end <= len(log.lines):
+                    try:
+                        from textual.geometry import Size
+
+                        tail = list(log.lines[end:]) if end < len(log.lines) else []
+                        del log.lines[start:]
+                        log._line_cache.clear()
+                        log.virtual_size = Size(
+                            int(getattr(log, "_widest_line_width", 0) or 0),
+                            len(log.lines),
+                        )
+                        meta = self._chat_write_markups(items, follow=False)
+                        if tail:
+                            log.lines.extend(tail)
+                            log.virtual_size = Size(
+                                int(getattr(log, "_widest_line_width", 0) or 0),
+                                len(log.lines),
+                            )
+                            log.refresh()
+                        self._shift_open_tool_starts(end, int(meta["strips"]) - strips)
+                        if follow and getattr(self, "_follow_chat", True) and not self._is_selecting():
+                            try:
+                                log.scroll_end(animate=False)
+                            except Exception:
+                                pass
+                        return {"start": start, "strips": int(meta["strips"])}
+                    except Exception:
+                        pass
+            return self._chat_write_markups(items, follow=follow)
+
+        def _live_reply_items(self, text: str) -> list[tuple[Any, dict[str, Any]]]:
+            """Compact streaming reply (yellow lamp, plain lines — no table parse yet)."""
+            fg = self._theme_hex("foreground", "#e6edf3")
+            lamp = self._signal_lamp("progress")
+            # Keep trailing spaces/newlines so the cursor line grows naturally
+            raw = text if text is not None else ""
+            lines = raw.splitlines() or [""]
+            if raw.endswith("\n"):
+                lines.append("")
+            items: list[tuple[Any, dict[str, Any]]] = []
+            for i, ln in enumerate(lines):
+                esc = self._escape_markup(ln)
+                if i == 0:
+                    items.append((f"{lamp}[{fg}]{esc}[/]", {}))
+                else:
+                    items.append((f"  [{fg}]{esc}[/]", {}))
+            return items
+
+        def _final_reply_items(self, text: str) -> list[tuple[Any, dict[str, Any]]]:
+            """Final agent block: spacer + body + footer + spacer."""
+            items: list[tuple[Any, dict[str, Any]]] = [("", {})]
+            body: list[tuple[Any, dict[str, Any]]] = []
+
+            def _w(content: Any, follow: bool = True, shrink: bool = True) -> None:
+                body.append((content, {"shrink": shrink}))
+
+            self._write_agent_body(text, _w, lamp="done")
+            items.extend(body)
+            items.append((self._agent_footer_markup(), {}))
+            items.append(("", {}))
+            return items
+
+        def _reset_live_reply_state(self) -> None:
+            self._live_reply = None
+            self._live_reply_painted = ""
+            self._live_reply_dirty = False
+            self._reply_paint_at = 0.0
+
+        def _paint_live_reply_ui(self) -> None:
+            """UI-thread: rewrite the open agent reply from the latest stream buffer."""
+            self._live_reply_dirty = False
+            if getattr(self, "_reply_flushed", False):
+                return
+            text = getattr(self, "_stream_buf", None) or ""
+            if not text:
+                return
+            # Throttle full rewrites on Windows CMD (long replies thrash the console)
+            now = time.monotonic()
+            last = float(getattr(self, "_reply_paint_at", 0.0) or 0.0)
+            if text == getattr(self, "_live_reply_painted", None):
+                return
+            if last and (now - last) < 0.08:
+                if not getattr(self, "_live_reply_dirty", False):
+                    self._live_reply_dirty = True
+                    delay = max(0.01, 0.08 - (now - last))
+                    try:
+                        self.set_timer(delay, self._paint_live_reply_ui)
+                    except Exception:
+                        pass
+                return
+            self._reply_paint_at = now
+            self._live_reply_painted = text
+            items = self._live_reply_items(text)
+            try:
+                meta = getattr(self, "_live_reply", None)
+                if meta and int(meta.get("strips", 0) or 0) > 0:
+                    self._live_reply = self._chat_replace_markups(meta, items, follow=True)
+                else:
+                    self._live_reply = self._chat_write_markups(items, follow=True)
+            except Exception:
+                return
+            # More tokens arrived while painting — schedule another frame
+            latest = getattr(self, "_stream_buf", None) or ""
+            if latest != text and not getattr(self, "_reply_flushed", False):
+                if not getattr(self, "_live_reply_dirty", False):
+                    self._live_reply_dirty = True
+                    try:
+                        self.set_timer(0.05, self._paint_live_reply_ui)
+                    except Exception:
+                        self._paint_live_reply_ui()
+
+        def _paint_live_reply(self) -> None:
+            """Schedule a coalesced live-reply paint on the UI thread."""
+            if getattr(self, "_reply_flushed", False):
+                return
+            if getattr(self, "_live_reply_dirty", False):
+                return
+            self._live_reply_dirty = True
+            try:
+                self._schedule_ui(self._paint_live_reply_ui)
+            except Exception:
+                try:
+                    self._paint_live_reply_ui()
+                except Exception:
+                    pass
+
+        def _finalize_live_reply(self, text: str) -> None:
+            """Turn the streaming yellow reply into the final green block (+ footer)."""
+            body = (text or "").strip()
+            if not body or self._is_user_echo(body):
+                self._stream_buf = ""
+                self._reset_live_reply_state()
+                return
+            last = (getattr(self, "_last_agent_reply", None) or "").strip()
+            live = getattr(self, "_live_reply", None)
+            if last and _same_reply(body, last) and getattr(self, "_reply_flushed", False) and not live:
+                self._stream_buf = ""
+                return
+            if last and _is_truncated_prefix(body, last) and getattr(self, "_reply_flushed", False) and not live:
+                self._stream_buf = ""
+                return
+            self._last_agent_reply = body
+            self._reply_flushed = True
+            self._stream_buf = ""
+            snap_meta = dict(live) if isinstance(live, dict) else None
+            self._live_reply = None
+            self._live_reply_dirty = False
+            self._live_reply_painted = body
+
+            def _do() -> None:
+                items = self._final_reply_items(body)
+                try:
+                    if snap_meta and int(snap_meta.get("strips", 0) or 0) > 0:
+                        self._chat_replace_markups(snap_meta, items, follow=True)
+                    else:
+                        self._chat_write_markups(items, follow=True)
+                except Exception:
+                    # Fallback: plain log write path already claimed — best-effort
+                    try:
+                        w = self._chat_write
+                        w("")
+                        self._write_agent_body(body, w, lamp="done")
+                        w(self._agent_footer_markup())
+                        w("")
+                    except Exception:
+                        pass
+
+            try:
+                self._schedule_ui(_do)
+            except Exception:
+                try:
+                    _do()
+                except Exception:
+                    pass
+
         def _flush_reply_to_log(self) -> None:
-            """Write buffered streamed reply into the transcript once."""
+            """Commit buffered / live-streamed reply into the transcript once."""
             if self._reply_flushed:
                 return
             buf = (self._stream_buf or "").strip()
@@ -2149,9 +2633,14 @@ def _build_app_class():
                 return
             if self._is_user_echo(buf):
                 self._stream_buf = ""
+                self._reset_live_reply_state()
                 return
             if buf == (getattr(self, "_last_agent_reply", None) or ""):
                 self._reply_flushed = True
+                return
+            # Prefer in-place finalize when stream already painted
+            if getattr(self, "_live_reply", None) or getattr(self, "_live_reply_painted", ""):
+                self._finalize_live_reply(buf)
                 return
             # Do NOT set _last_agent_reply here — log_line claims it; pre-setting
             # made log_line's dedup treat this as a duplicate and drop the write.
@@ -2178,7 +2667,7 @@ def _build_app_class():
             self._schedule_meter_paint()
 
         def log_stream(self, chunk: str) -> None:
-            """Stream tokens: keep thinking in history, preview reply in status."""
+            """Stream reply tokens into the chat log (coalesced in-place rewrite)."""
             if self._think_pending:
                 self._flush_thinking_to_log()
             self._stream_buf += chunk
@@ -2187,15 +2676,8 @@ def _build_app_class():
             # Keep banner short — never mirror stream text (URLs/rest paths flicker at feet)
             if (self._wait_label or "") != t("wait_replying"):
                 self.update_wait(t("wait_replying"))
-            # Throttle sticky-scroll — per-chunk scroll_end thrashes Windows CMD
-            if getattr(self, "_follow_chat", True) and not self._is_selecting():
-                now = time.monotonic()
-                if now - float(getattr(self, "_stream_scroll_at", 0.0) or 0.0) >= 0.25:
-                    self._stream_scroll_at = now
-                    try:
-                        self.call_from_thread(lambda: self.query_one("#chat-log", RichLog).scroll_end(animate=False))
-                    except Exception:
-                        pass
+            # Paint growing reply in chat (not wait-banner)
+            self._paint_live_reply()
 
         def log_thinking(self, buf: str) -> None:
             """Stream thought token-by-token into #live-think (fixed height)."""
@@ -2285,6 +2767,11 @@ def _build_app_class():
 
             # Never paint the user's own turn text as an agent reply
             if self._is_user_echo(final_text):
+                return
+
+            # Live stream open (or buffer painted) → upgrade yellow block in place
+            if getattr(self, "_live_reply", None) or (streamed and not getattr(self, "_reply_flushed", False)):
+                self._finalize_live_reply(final_text)
                 return
 
             # Drop stale incomplete stream so finally/flush cannot overwrite with a short copy
@@ -3605,7 +4092,7 @@ def _build_app_class():
                 self._stream_buf = ""
                 self._think_buf_latest = ""
                 self._think_pending = False
-                self._open_tool = None
+                self._open_tools = {}
                 self._open_tool_keys = set()
                 self._done_tool_keys = set()
                 self._last_tool_result_key = ""
@@ -3614,6 +4101,9 @@ def _build_app_class():
                 self._tool_detail_pending = {}
                 self._tool_args_by_key = {}
                 self._reply_flushed = False
+                self._reset_live_reply_state()
+                self._stop_shimmer_timer()
+                self._stop_turn_meter_timer()
                 self._last_agent_reply = ""
                 self._turn_user_text = ""
                 self._sending = False
@@ -3759,11 +4249,14 @@ def _build_app_class():
                 return
             self._stream_buf = ""
             self._reply_flushed = False
+            self._reset_live_reply_state()
+            self._stop_shimmer_timer()
+            self._stop_turn_meter_timer()
             self._last_agent_reply = ""
             self._turn_user_text = (line or "").strip() or getattr(self, "_turn_user_text", "")
             self._think_buf_latest = ""
             self._think_pending = False
-            self._open_tool = None
+            self._open_tools = {}
             self._last_tool_result_key = ""
             self._think_gen = int(getattr(self, "_think_gen", 0) or 0) + 1
             try:
@@ -3835,6 +4328,9 @@ def _build_app_class():
                 self._sending = False
                 self._stream_buf = ""
                 self._reply_flushed = False
+                self._reset_live_reply_state()
+                self._stop_shimmer_timer()
+                self._stop_turn_meter_timer()
                 # keep _last_agent_reply so a late on_line cannot reprint the same turn
                 self._end_turn_meter()
                 self.end_wait()
@@ -4097,6 +4593,7 @@ def _build_app_class():
                             # Raise target only — display keeps animating toward it
                             if real > int(getattr(self, "_turn_out_target", 0) or 0):
                                 self._turn_out_target = real
+                                self._ensure_turn_meter_timer()
             except (TypeError, ValueError):
                 pass
             m = str(data.get("model") or "").strip()

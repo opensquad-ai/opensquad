@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +46,21 @@ def main() -> None:
     app._detail_expanded = True
     full = app._thinking_markup(long_body, live=False)
     assert long_body[:50] in full.replace("\\", "")
+
+    # Shimmer: soft gray sweep must move across progress titles
+    app._shimmer_tick = 0
+    a = app._shimmer_markup("Thinking")
+    app._shimmer_tick = 4
+    b = app._shimmer_markup("Thinking")
+    assert a != b, "shimmer must animate across ticks"
+    assert "T" in a.replace("[", "").replace("]", "") or "Thinking" in a.replace("\\", "")
+    live_think = app._thinking_markup("partial thought", live=True)
+    assert "partial" in live_think
+    tool_call = app._tool_markup_parts("call", "read_file", "", "progress")
+    assert tool_call is not None
+    # Shimmer wraps each glyph in markup — plain name is not contiguous
+    plain = re.sub(r"\[/?[^\]]*\]", "", tool_call)
+    assert "read_file" in plain
 
     print("PASS")
 

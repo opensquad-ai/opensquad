@@ -69,9 +69,9 @@ async def main() -> None:
 
         assert "OpenSquad" in header_txt or agent in header_txt
         assert "Build" in meta or "Plan" in meta or "group" in meta.lower()
-        # prompt-meta must be INSIDE the bordered frame (2d78e00)
+        # prompt-meta sits under the blue box (outside #prompt-frame)
         frame = app.query_one("#prompt-frame")
-        assert app.query_one("#prompt-meta") in frame.children
+        assert app.query_one("#prompt-meta") not in frame.children
         log.info("SMOKE_OK agent=%s ready=%s", agent, bool(app.bridge and app.bridge.is_open))
         app.exit()
 

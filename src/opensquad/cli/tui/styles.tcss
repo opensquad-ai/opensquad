@@ -105,14 +105,13 @@ Screen > .screen--selection {
     padding: 1 1;
 }
 
-/* OpenCode-style prompt: 1-cell left accent + top/bottom/right outline */
+/* Blue box wraps Input only (status row lives below, outside the border) */
 #prompt-frame {
     height: auto;
-    min-height: 4;
+    min-height: 3;
     width: 100%;
     background: $surface;
     padding: 0 1;
-    /* solid frame; left replaced by tall primary accent (flush, no gap) */
     border-top: solid $primary-muted;
     border-right: solid $primary-muted;
     border-bottom: solid $primary-muted;
@@ -141,11 +140,12 @@ Screen > .screen--selection {
     border: none;
 }
 
+/* Build · model · tokens — under the blue box, not inside it */
 #prompt-meta {
     width: 1fr;
     height: 1;
     color: $text-muted;
-    background: $surface;
+    background: $background;
     padding: 0 1;
     overflow: hidden;
     text-overflow: ellipsis;
