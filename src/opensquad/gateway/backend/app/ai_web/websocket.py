@@ -588,6 +588,19 @@ class UserWebSocketHandler:
                 elif msg_type == "ping":
                     await user_ws.send_json({"type": "pong"})
 
+                elif msg_type == "voice_audio_in":
+                    # Forward PCM16 chunks to agent without saving to history
+                    audio = message.get("audio") or message.get("data") or ""
+                    if audio:
+                        await registry.send_to_agent(
+                            agent_id,
+                            {
+                                "type": "voice_audio_in",
+                                "user_id": user_id,
+                                "audio": audio,
+                            },
+                        )
+
                 else:
                     logger.warning(f"Unknown message type from user: {msg_type}")
 

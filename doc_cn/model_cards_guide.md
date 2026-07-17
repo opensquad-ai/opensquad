@@ -29,8 +29,28 @@
 | `is_audio` | boolean | 否 | 是否支持音频输入，默认 false |
 | `is_video` | boolean | 否 | 是否支持视频输入，默认 false |
 | `is_audio_output` | boolean | 否 | 是否支持音频输出，默认 false |
-| `is_image_output` | boolean | 否 | 是否支持图像输出，默认 false |
+| `is_image_output` | boolean | 否 | 是否支持图像输出，默认 false。对 `openai`/`openai_compat`：会走 `/v1/images/generations` 文生图；对 `google`：解析聊天响应中的图片 |
+| `image_size` | string | 否 | 文生图尺寸（OpenAI Images API），默认 `1024x1024` |
+| `image_steps` | number | 否 | 文生图采样步数（StepFun 等），默认 8 |
+| `image_cfg_scale` | number | 否 | 文生图 CFG（StepFun 等），默认 1.0 |
 | `audio_output_voice` | string | 否 | 音频输出语音角色，默认 "alloy" |
+
+### Agent `voice` 段（StepAudio）
+
+在 Agent `config.json` 中可配置：
+
+```json
+"voice": {
+  "asr_card": "stepaudio-2.5-asr",
+  "tts_card": "stepaudio-2.5-tts",
+  "realtime_card": "stepaudio-2.5-realtime",
+  "realtime_voice": "linjiajiejie"
+}
+```
+
+- `asr_card`：`step_voice.transcribe_audio_file` 使用的 ASR 模型卡
+- `tts_card`：`step_voice.synthesize_speech` 使用的 TTS 模型卡（仅工具主动调用时合成）
+- `realtime_card`：Agent Web 实时通话使用的 Realtime 模型卡
 | `tool_call_mode` | string | 否 | 工具调用模式：`auto`/`native`/`xml`，默认 `auto` |
 | `render_mode` | string | 否 | 渲染模式：`strict`（严格）/`full`（完整），默认 `strict` |
 | `enable_repetition_check` | boolean | 否 | 是否启用重复检测，默认 false |

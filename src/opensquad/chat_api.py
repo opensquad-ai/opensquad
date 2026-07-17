@@ -107,6 +107,10 @@ class ChatAPI:
         enable_repetition_check: bool | None = None,
         is_think: bool | None = None,
         reasoning_effort: str | None = None,
+        is_image_output: bool | None = None,
+        image_size: str | None = None,
+        image_steps: int | None = None,
+        image_cfg_scale: float | None = None,
     ):
         """
         P2-1: Accepts either a ModelConfig dataclass (preferred) or legacy kwargs.
@@ -142,6 +146,7 @@ class ChatAPI:
                 enable_repetition_check=enable_repetition_check if enable_repetition_check is not None else False,
                 is_think=is_think if is_think is not None else False,
                 reasoning_effort=reasoning_effort or "high",
+                is_image_output=is_image_output if is_image_output is not None else False,
             )
         self.config = config
 
@@ -164,6 +169,13 @@ class ChatAPI:
         self.presence_penalty = config.presence_penalty
         self.enable_repetition_check = config.enable_repetition_check
         self.is_think = config.is_think
+        self.is_image_output = config.is_image_output
+        # OpenAI-compatible Images API knobs (StepFun / DALL·E style)
+        self.image_size = image_size or getattr(config, "image_size", None) or "1024x1024"
+        self.image_steps = image_steps if image_steps is not None else int(getattr(config, "image_steps", 8) or 8)
+        self.image_cfg_scale = (
+            image_cfg_scale if image_cfg_scale is not None else float(getattr(config, "image_cfg_scale", 1.0) or 1.0)
+        )
         from opensquad.reasoning_effort import normalize_effort
 
         self.reasoning_effort = normalize_effort(config.reasoning_effort)
@@ -280,6 +292,10 @@ class ChatAPI:
         self.file_api_size_threshold = model_cfg.get("file_api_size_threshold", self.file_api_size_threshold)
         self.is_audio_output = model_cfg.get("is_audio_output", self.is_audio_output)
         self.audio_output_voice = model_cfg.get("audio_output_voice", self.audio_output_voice)
+        self.is_image_output = model_cfg.get("is_image_output", self.is_image_output)
+        self.image_size = model_cfg.get("image_size", self.image_size)
+        self.image_steps = int(model_cfg.get("image_steps", self.image_steps))
+        self.image_cfg_scale = float(model_cfg.get("image_cfg_scale", self.image_cfg_scale))
         self.frequency_penalty = model_cfg.get("frequency_penalty", self.frequency_penalty)
         self.presence_penalty = model_cfg.get("presence_penalty", self.presence_penalty)
         self.is_think = model_cfg.get("is_think", getattr(self, "is_think", False))
@@ -1477,6 +1493,165 @@ class ChatAPI:
         """
         self._cached_token_count = None
 
+    def _force_text_only_modalities(self) -> bool:
+        """Models like stepaudio-2.5-chat accept audio input but only return text."""
+        name = (self.model or "").lower()
+        return "stepaudio-2.5-chat" in name or (name.endswith("-chat") and "stepaudio" in name)
+
+    def _truncate_image_prompt(self, prompt: str, max_chars: int = 512) -> str:
+        text = (prompt or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
+
+    async def _save_generated_image_bytes(self, raw: bytes, mime: str = "image/png") -> dict | None:
+        """Persist generated image bytes into output_media_dir and return output_media item."""
+        if not raw or not self.output_media_dir:
+            logger.warning("[ChatAPI] Cannot save image output: empty bytes or output_media_dir unset")
+            return None
+        try:
+            os.makedirs(self.output_media_dir, exist_ok=True)
+            ext = mime.split("/")[-1].replace("jpeg", "jpg") if mime else "png"
+            if ext not in ("png", "jpg", "jpeg", "webp", "gif"):
+                ext = "png"
+            fname = f"agent_img_{uuid.uuid4().hex[:12]}.{ext}"
+            fpath = os.path.join(self.output_media_dir, fname)
+            with open(fpath, "wb") as f:
+                f.write(raw)
+            item = {"type": "image", "url": f"/uploads/{fname}", "mime": mime or "image/png"}
+            logger.info(f"[ChatAPI] Saved image output: {fname}")
+            return item
+        except Exception as e:
+            logger.error(f"[ChatAPI] Failed to save image output: {e}")
+            return None
+
+    async def _collect_images_api_result(self, result) -> list[dict]:
+        """Convert OpenAI Images API result into output_media list."""
+        output_media: list[dict] = []
+        data = getattr(result, "data", None) or []
+        for item in data:
+            b64 = getattr(item, "b64_json", None)
+            if b64:
+                try:
+                    raw = base64.b64decode(b64)
+                except Exception as e:
+                    logger.error(f"[ChatAPI] Invalid b64_json from images API: {e}")
+                    continue
+                saved = await self._save_generated_image_bytes(raw, "image/png")
+                if saved:
+                    output_media.append(saved)
+                continue
+            url = getattr(item, "url", None)
+            if url:
+                # Remote URL — download when possible so UI can serve via /uploads/
+                try:
+                    import httpx
+
+                    async with httpx.AsyncClient(timeout=60.0) as http:
+                        resp = await http.get(url)
+                        resp.raise_for_status()
+                        ctype = resp.headers.get("content-type", "image/png").split(";")[0].strip()
+                        saved = await self._save_generated_image_bytes(resp.content, ctype or "image/png")
+                        if saved:
+                            output_media.append(saved)
+                            continue
+                except Exception as e:
+                    logger.warning(f"[ChatAPI] Failed to download image url, falling back to remote url: {e}")
+                output_media.append({"type": "image", "url": url, "mime": "image/png"})
+        return output_media
+
+    async def _chat_image_generation(
+        self,
+        user_message: str,
+        image_path: list[str] | None = None,
+    ) -> dict:
+        """Generate an image via OpenAI-compatible /v1/images/generations (or /edits).
+
+        Used when ``is_image_output`` is True on openai / openai_compat models
+        such as StepFun ``step-image-edit-2``.
+        """
+        prompt = self._truncate_image_prompt(user_message)
+        if not prompt:
+            text = "<to_user>请描述你想生成的图片内容。</to_user>"
+            self.add_assistant_message(text)
+            self.save_history()
+            if self.stream_parser:
+                self.stream_parser.clean()
+                self.stream_parser.feed(text)
+                self.stream_parser.finish()
+            return {
+                "text": text,
+                "tool_data": None,
+                "output_media": [],
+                "finish_reason": "stop",
+                "stream_error": False,
+                "timed_out": False,
+            }
+
+        logger.info(
+            "[ChatAPI] Image generation via Images API: model=%s prompt_len=%d has_input_image=%s",
+            self.model,
+            len(prompt),
+            bool(image_path),
+        )
+        self.printer.dynamic_single_callback("正在生成图片…\n")
+
+        output_media: list[dict] = []
+        err_msg = ""
+        try:
+            extra_body = {
+                "cfg_scale": float(self.image_cfg_scale),
+                "steps": int(self.image_steps),
+            }
+            edit_paths = [p for p in (image_path or []) if p and os.path.isfile(p)]
+            if edit_paths and self.is_img_model:
+                # Image editing path (StepFun / OpenAI images.edits)
+                with open(edit_paths[0], "rb") as img_f:
+                    result = await self.client.images.edit(
+                        model=self.model,
+                        image=img_f,
+                        prompt=prompt,
+                        response_format="b64_json",
+                        extra_body=extra_body,
+                    )
+            else:
+                result = await self.client.images.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    size=self.image_size or "1024x1024",
+                    response_format="b64_json",
+                    n=1,
+                    extra_body=extra_body,
+                )
+            output_media = await self._collect_images_api_result(result)
+            self.total_requests += 1
+        except Exception as e:
+            err_msg = str(e)
+            logger.error(f"[ChatAPI] Image generation failed: {e}")
+
+        if output_media:
+            text = "<to_user>已根据你的描述生成图片。</to_user>"
+        else:
+            detail = err_msg or "未返回图片数据"
+            text = f"<to_user>图片生成失败：{detail}</to_user>"
+
+        self.add_assistant_message(text)
+        self.save_history()
+        if self.stream_parser:
+            self.stream_parser.clean()
+            self.stream_parser.feed(text)
+            self.stream_parser.finish()
+        self.printer.dynamic_single_callback("已生成图片\n" if output_media else f"生成失败：{err_msg}\n")
+
+        return {
+            "text": text,
+            "tool_data": None,
+            "output_media": output_media,
+            "finish_reason": "stop",
+            "stream_error": False,
+            "timed_out": False,
+        }
+
     async def chat(
         self,
         user_message: str,
@@ -1537,6 +1712,11 @@ class ChatAPI:
             self.add_user_message(
                 user_message, image_path, image_b64_list=image_b64_list, audio_path=audio_path, video_path=video_path
             )
+
+        # OpenAI-compatible text-to-image / image-edit models (e.g. StepFun step-image-edit-2)
+        if self.is_image_output:
+            return await self._chat_image_generation(user_message, image_path=image_path)
+
         self._last_tools = tools
         messages = self._prepare_messages()
 
@@ -1640,10 +1820,13 @@ class ChatAPI:
             logger.debug(f"[ChatAPI] Using Native Function Calling with {len(tools)} tools")
 
         # Audio output modality
-        if self.is_audio_output:
+        if self.is_audio_output and not self._force_text_only_modalities():
             request_params["modalities"] = ["text", "audio"]
             request_params["audio"] = {"voice": self.audio_output_voice, "format": "wav"}
             logger.debug(f"[ChatAPI] Audio output enabled, voice={self.audio_output_voice}")
+        elif self._force_text_only_modalities():
+            request_params["modalities"] = ["text"]
+            logger.debug("[ChatAPI] Forcing modalities=['text'] for text-only audio chat model")
 
         full_response = []
         collected_reasoning = []

@@ -895,6 +895,40 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           </div>
         </div>
 
+        {/* ── 语音能力（StepAudio） ── */}
+        <div>
+          <div className={sectionTitleCls}><Wrench size={11} /> Voice (StepAudio)</div>
+          <div className="bg-bgLight rounded-lg p-3 space-y-2">
+            <p className="text-[10px] text-textMuted">绑定 ASR / TTS / Realtime 模型卡。TTS 仅在 Agent 调用 synthesize_speech 时合成。</p>
+            <div className="grid grid-cols-1 gap-2">
+              {(['asr_card', 'tts_card', 'realtime_card'] as const).map((key) => (
+                <div key={key}>
+                  <label className="block text-[10px] font-semibold text-textMuted mb-1">{key}</label>
+                  <select
+                    value={cfgGet(['voice', key], '')}
+                    onChange={e => cfgSet(['voice', key], e.target.value)}
+                    className={inputCls}
+                  >
+                    <option value="">(none)</option>
+                    {modelCards.map(card => (
+                      <option key={card.name} value={card.name}>{card.title || card.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+              <div>
+                <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_voice</label>
+                <input
+                  value={cfgGet(['voice', 'realtime_voice'], '')}
+                  onChange={e => cfgSet(['voice', 'realtime_voice'], e.target.value)}
+                  placeholder="linjiajiejie"
+                  className={inputCls}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* ── 系统内置工具（不可关闭） ── */}
         <div>
           <div className={sectionTitleCls}><Shield size={11} /> {t('agentManager.systemBuiltIn')}</div>

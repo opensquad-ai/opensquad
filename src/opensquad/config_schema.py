@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class ModelConfigSchema(BaseModel):
     """Schema for the ``model`` section of config.json."""
 
+    model_config = ConfigDict(extra="allow")
     schema_version: str = Field(default="1.0", pattern=r"^\d+\.\d+$")
     # api_protocol: API 协议类型 (openai / openai_compat / claude / anthropic / google / gemini)
     api_protocol: str = Field(
@@ -55,6 +56,9 @@ class ModelConfigSchema(BaseModel):
     thinking_budget_tokens: int = Field(default=10000, gt=0)
     reasoning_effort: str = Field(default="high")  # low | medium | high (Cursor-style)
     is_image_output: bool = Field(default=False)
+    image_size: str = Field(default="1024x1024")
+    image_steps: int = Field(default=8, ge=1, le=50)
+    image_cfg_scale: float = Field(default=1.0, ge=1.0, le=10.0)
     top_k: int = Field(default=0, ge=0)
 
     @field_validator("model_name")
@@ -103,6 +107,17 @@ class GroupChatConfigSchema(BaseModel):
     base_url: str | None = Field(default=None)
 
 
+class VoiceConfigSchema(BaseModel):
+    """Optional StepAudio / voice capability cards bound to an agent."""
+
+    model_config = ConfigDict(extra="allow")
+    realtime_card: str = Field(default="")
+    tts_card: str = Field(default="")
+    asr_card: str = Field(default="")
+    realtime_voice: str = Field(default="")
+    realtime_instructions: str = Field(default="")
+
+
 class AgentConfigSchema(BaseModel):
     """Top-level schema for config.json."""
 
@@ -121,6 +136,7 @@ class AgentConfigSchema(BaseModel):
     gateway: GatewayConfigSchema = Field(default_factory=GatewayConfigSchema)
     web_server: WebServerConfigSchema = Field(default_factory=WebServerConfigSchema)
     group_chat: GroupChatConfigSchema = Field(default_factory=GroupChatConfigSchema)
+    voice: VoiceConfigSchema = Field(default_factory=VoiceConfigSchema)
     mcp_servers: dict[str, Any] = Field(default_factory=dict)
     system_tools: dict[str, Any] = Field(default_factory=dict)
     state_machine: dict[str, Any] | None = Field(default=None)

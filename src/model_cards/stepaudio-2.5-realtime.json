@@ -1,0 +1,18 @@
+{
+  "name": "stepaudio-2.5-realtime",
+  "title": "StepAudio 2.5 Realtime",
+  "api_protocol": "openai_compat",
+  "provider": "StepFun",
+  "api_key": "YOUR_STEPFUN_API_KEY",
+  "base_url": "https://api.stepfun.com/v1",
+  "model_name": "stepaudio-2.5-realtime",
+  "token_max": 128000,
+  "temperature": 0.7,
+  "is_think": false,
+  "is_image": false,
+  "is_audio": true,
+  "is_video": false,
+  "is_audio_output": true,
+  "is_image_output": false,
+  "audio_output_voice": "linjiajiejie"
+}

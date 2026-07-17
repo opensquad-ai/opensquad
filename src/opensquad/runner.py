@@ -1333,10 +1333,12 @@ class AgentRunner:
                         if not media_type:
                             if att.get("is_video"):
                                 media_type = "video"
-                            elif att.get("is_audio"):
+                            elif att.get("is_audio") or att.get("type") == "voice":
                                 media_type = "audio"
                             else:
                                 media_type = "file"
+                        if media_type == "voice":
+                            media_type = "audio"
                         if path:
                             att_lines.append(f"[{media_type}] {name} (path={path})")
                         else:
@@ -1605,7 +1607,7 @@ class AgentRunner:
                                     media_type = "audio"
                                 else:
                                     media_type = "file"
-                            if media_type == "audio" and path:
+                            if media_type in ("audio", "voice") and path:
                                 _audio_paths.append(path)
                             elif media_type == "video" and path:
                                 _video_paths.append(path)
@@ -1664,9 +1666,21 @@ class AgentRunner:
                         await self._emit("info", f"Received {len(_video_paths)} video file(s)")
 
                 if _audio_paths:
-                    current_input += (
-                        "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
-                    )
+                    try:
+                        from opensquad import agent_runtime_context as _arc
+
+                        _has_asr = bool((_arc.agent_config.get("voice") or {}).get("asr_card"))
+                    except Exception:
+                        _has_asr = False
+                    if _has_asr:
+                        current_input += (
+                            "\n[Tip] To transcribe audio, call step_voice.transcribe_audio_file(audio_path=...)."
+                        )
+                    else:
+                        current_input += (
+                            "\n[Tip] To transcribe audio, call step_voice.transcribe_audio_file(audio_path=...) "
+                            "if configured, otherwise whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                        )
                 if _video_paths:
                     current_input += "\n[Tip] To process video, use system.run_session_job to call ffmpeg to extract audio/keyframes first."
 
@@ -2932,6 +2946,18 @@ class AgentRunner:
                         },
                     )
                     result = _hook_ctx.get("result", result)
+
+                # TTS / media tools may return __output_media__ for chat bubble playback
+                if isinstance(result, dict) and result.get("__output_media__"):
+                    try:
+                        await self._emit("output_media", result["__output_media__"])
+                        tc_log.info(
+                            "[runner] Emitted output_media from tool %r: %d item(s)",
+                            t_name,
+                            len(result["__output_media__"]),
+                        )
+                    except Exception as _om_err:
+                        tc_log.warning("[runner] Failed to emit tool output_media: %s", _om_err)
 
                 # --- Plugin Hook: on_tool_error ---
                 if self._plugin_manager and isinstance(result, str) and result.startswith("Error:"):

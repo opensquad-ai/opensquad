@@ -1,0 +1,53 @@
+{
+  "agent_id": "image_bot-001",
+  "agent_name": "image_bot",
+  "agent_type": "general",
+  "default_wake_mode": "strict",
+  "description": "文生图助手。将用户描述交给 StepFun 图像模型生成图片并展示。",
+  "description_zh": "文生图助手。将用户描述交给 StepFun 图像模型生成图片并展示。",
+  "description_en": "Text-to-image assistant. Generates images from user prompts via StepFun.",
+  "model": {
+    "api_protocol": "openai_compat",
+    "provider": "StepFun",
+    "api_key": "YOUR_STEPFUN_API_KEY",
+    "base_url": "https://api.stepfun.com/v1",
+    "model_name": "step-image-edit-2",
+    "token_max": 4096,
+    "temperature": 0.7,
+    "frequency_penalty": 0,
+    "presence_penalty": 0,
+    "top_k": 0,
+    "is_think": false,
+    "is_image": true,
+    "is_audio": false,
+    "is_video": false,
+    "is_audio_output": false,
+    "is_image_output": true,
+    "image_size": "1024x1024",
+    "image_steps": 8,
+    "image_cfg_scale": 1.0,
+    "tool_call_mode": "auto",
+    "render_mode": "full",
+    "_card": "step-image-edit-2"
+  },
+  "tools": [],
+  "group_chat": {
+    "enabled": false
+  },
+  "web_server": {
+    "enabled": true
+  },
+  "gateway": {
+    "enabled": true
+  },
+  "prompt": {
+    "role": "role.md"
+  },
+  "mcp": {
+    "enabled": false
+  },
+  "skills": {
+    "enabled": false,
+    "active": []
+  }
+}

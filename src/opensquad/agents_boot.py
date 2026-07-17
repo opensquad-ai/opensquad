@@ -188,6 +188,10 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
             enable_repetition_check=model_cfg.get("enable_repetition_check", False),
             is_think=model_cfg.get("is_think", False),
             reasoning_effort=model_cfg.get("reasoning_effort", "high"),
+            is_image_output=model_cfg.get("is_image_output", False),
+            image_size=model_cfg.get("image_size"),
+            image_steps=model_cfg.get("image_steps"),
+            image_cfg_scale=model_cfg.get("image_cfg_scale"),
         )
 
 
@@ -650,6 +654,25 @@ async def main(agent_dir: str, override_port: int | None = None):
     agent_name = config.get("agent_name", "Unknown")
     agent_logger = logging.getLogger(f"Agent[{agent_id}]")
     agent_logger.info(f"[BootPerf] boot_main_start=0ms agent_id={agent_id}")
+
+    # Expose config to plugins/tools (step_voice ASR/TTS card resolution, etc.)
+    try:
+        from opensquad import agent_runtime_context as _arc
+        from plugins.step_voice import step_voice_tools as _sv_tools
+
+        _arc.set_context(config=config, agent_id_value=agent_id, agent_dir_value=agent_dir)
+        _sv_tools.set_agent_config(config)
+    except Exception as e:
+        agent_logger.debug("[Boot] agent_runtime_context / step_voice inject skipped: %s", e)
+
+    # Auto-enable step_voice plugin tools when voice cards are configured
+    voice_cfg = config.get("voice") or {}
+    if any(voice_cfg.get(k) for k in ("asr_card", "tts_card", "realtime_card")):
+        tools_list = list(config.get("tools") or [])
+        if "step_voice" not in tools_list:
+            tools_list.append("step_voice")
+            config["tools"] = tools_list
+            agent_logger.info("[Boot] Auto-enabled step_voice plugin (voice cards present)")
 
     # ── Phase 1b: Create AgentContext ──
     agent_ctx = AgentContext(

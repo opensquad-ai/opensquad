@@ -20,7 +20,7 @@ import {
   Bot, ArrowLeft, Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Clock, AlignLeft, MessageSquare,
+  Loader2, Clock, AlignLeft, MessageSquare, Mic,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -59,6 +59,7 @@ import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
 import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
 import { OptionsApprovalCard, type OptionsProposal, hydrateOptionsProposalsFromEvents } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
+import { VoicePanel } from './ai-chat/VoicePanel';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
@@ -562,6 +563,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
+  const [voiceRealtimeStatus, setVoiceRealtimeStatus] = useState('idle');
+  const [voiceTranscript, setVoiceTranscript] = useState('');
   // Token stats
   const [tokenStats, setTokenStats] = useState<{
     used: number; max: number;
@@ -2229,6 +2233,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
     });
 
+    const unsubVoiceAudioOut = aiWsService.on('voice_audio_out', (msg: AIWSMessage) => {
+      const data: any = msg.content ?? msg.data ?? {};
+      const audio = data?.audio || data?.data?.audio;
+      if (audio) {
+        window.dispatchEvent(new CustomEvent('opensquad-voice-audio-out', { detail: { audio } }));
+      }
+    });
+    const unsubVoiceTranscript = aiWsService.on('voice_transcript', (msg: AIWSMessage) => {
+      const data: any = msg.content ?? msg.data ?? {};
+      const role = data?.role || 'assistant';
+      const text = data?.text || data?.delta || '';
+      if (!text) return;
+      setVoiceTranscript((prev) => {
+        if (data?.final) {
+          return prev ? `${prev}\n${role}: ${text}` : `${role}: ${text}`;
+        }
+        return prev ? `${prev}${text}` : `${role}: ${text}`;
+      });
+    });
+    const unsubVoiceStatus = aiWsService.on('voice_realtime_status', (msg: AIWSMessage) => {
+      const data: any = msg.content ?? msg.data ?? {};
+      const status = data?.status || (typeof data === 'string' ? data : 'idle');
+      setVoiceRealtimeStatus(String(status));
+      if (status === 'error' && data?.error) {
+        console.warn('[AIChatPage] voice realtime error', data.error);
+      }
+    });
+
     const appendFilePushMessage = (entries: TimelineEntry[], assistantMsg: ChatMessage): TimelineEntry[] => {
       const k = _messageIdentityKey(assistantMsg);
       if (k) {
@@ -3051,6 +3083,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubTurnElapsed();
       unsubPromptUpdate();
       unsubOutputMedia();
+      unsubVoiceAudioOut();
+      unsubVoiceTranscript();
+      unsubVoiceStatus();
       unsubConnected();
       unsubHistory();
       unsubCurrentSession();
@@ -3359,7 +3394,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (nonImageAttachments.length > 0) {
       const fileList = nonImageAttachments
         .map(a => {
-          const media = a.is_video ? 'video' : a.is_audio ? 'audio' : 'file';
+          const media = a.is_video ? 'video' : (a.is_audio || a.type === 'voice' || a.type === 'audio') ? 'audio' : 'file';
           return `[File: ${a.original_name} (${_formatFileSize(a.size)}) path=${a.path} type=${media}]`;
         })
         .join('\n');
@@ -4944,11 +4979,76 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 />
               ))}
               <div
-                className={`w-full flex items-center gap-1 rounded-2xl border border-border/80 min-h-[40px] focus-within:ring-1 focus-within:ring-primary/50 shadow-sm ${
+                className={`w-full flex items-center gap-1 rounded-2xl border border-border/80 min-h-[40px] focus-within:ring-1 focus-within:ring-primary/50 shadow-sm relative ${
                   isLoadingSession ? 'bg-border/40' : 'bg-bgLight/80 dark:bg-black/20'
                 }`}
               >
-                <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px]">
+                <VoicePanel
+                  open={voicePanelOpen}
+                  onClose={() => {
+                    setVoicePanelOpen(false);
+                    wsServiceRef.current?.stopVoiceRealtime();
+                    setVoiceRealtimeStatus('idle');
+                  }}
+                  disabled={isLoadingSession}
+                  realtimeStatus={voiceRealtimeStatus}
+                  transcript={voiceTranscript}
+                  onSendVoiceMessage={async (blob, durationSec) => {
+                    try {
+                      setIsUploading(true);
+                      const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+                      const resp = await agentSessionAPI.uploadFile(agentId, file);
+                      const att = {
+                        ...resp,
+                        type: 'voice',
+                        is_audio: true,
+                        duration: durationSec,
+                        original_name: file.name,
+                      };
+                      setAttachments((prev) => [...prev, att]);
+                      setVoicePanelOpen(false);
+                      // Auto-send voice-only turn
+                      const text = inputText.trim();
+                      deliverMessage(
+                        {
+                          text: text || '',
+                          images: [],
+                          attachments: [att as any],
+                        },
+                        { clearInputState: true, salvageStream: true },
+                      );
+                      setInputText('');
+                      setImages([]);
+                      setAttachments([]);
+                    } catch (err) {
+                      console.error('[AIChatPage] voice upload failed', err);
+                    } finally {
+                      setIsUploading(false);
+                    }
+                  }}
+                  onRealtimeStart={() => {
+                    setVoiceTranscript('');
+                    setVoiceRealtimeStatus('connecting');
+                    wsServiceRef.current?.startVoiceRealtime();
+                  }}
+                  onRealtimeStop={() => {
+                    wsServiceRef.current?.stopVoiceRealtime();
+                    setVoiceRealtimeStatus('idle');
+                  }}
+                  onAudioChunk={(b64) => {
+                    wsServiceRef.current?.sendVoiceAudioIn(b64);
+                  }}
+                />
+                <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px] gap-0.5">
+                  <button
+                    type="button"
+                    disabled={isLoadingSession}
+                    onClick={() => setVoicePanelOpen((v) => !v)}
+                    className={`p-1.5 rounded-lg ${voicePanelOpen ? 'bg-primary/20 text-primary' : 'text-textMuted hover:text-textMain hover:bg-border/40'}`}
+                    title="语音消息 / 实时通话"
+                  >
+                    <Mic size={18} />
+                  </button>
                   <SoloAttachMenu
                     disabled={isLoadingSession}
                     skills={availableSkills}

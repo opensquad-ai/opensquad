@@ -1,0 +1,17 @@
+{
+  "name": "stepaudio-2.5-asr",
+  "title": "StepAudio 2.5 ASR",
+  "api_protocol": "openai_compat",
+  "provider": "StepFun",
+  "api_key": "YOUR_STEPFUN_API_KEY",
+  "base_url": "https://api.stepfun.com/v1",
+  "model_name": "stepaudio-2.5-asr",
+  "token_max": 4096,
+  "temperature": 0,
+  "is_think": false,
+  "is_image": false,
+  "is_audio": true,
+  "is_video": false,
+  "is_audio_output": false,
+  "is_image_output": false
+}

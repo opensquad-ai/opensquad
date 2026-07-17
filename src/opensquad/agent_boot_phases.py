@@ -336,6 +336,12 @@ class AgentBootPhases:
             session_manager=session_manager,
             state_manager=state_manager,
         )
+        try:
+            from opensquad.audio import realtime_manager as rtm
+
+            rtm.bind_runner(early_runner)
+        except Exception as exc:
+            agent_logger.debug("[Boot] realtime_manager.bind_runner skipped: %s", exc)
 
         async def _runner_with_crash_handler():
             try:

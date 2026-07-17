@@ -114,6 +114,10 @@ class GatewayAdapter(BaseAgent):
         _sub("prompt_update", self.on_generic_event("prompt_update"))
         # Subscribe to model output media events (audio/image)
         _sub("output_media", self.on_generic_event("output_media"))
+        # Realtime voice events
+        _sub("voice_audio_out", self.on_generic_event("voice_audio_out"))
+        _sub("voice_transcript", self.on_generic_event("voice_transcript"))
+        _sub("voice_realtime_status", self.on_generic_event("voice_realtime_status"))
         # Subscribe to context compression summary stream events
         _sub("summary_stream", self.on_generic_event("summary_stream"))
         _sub("group_member_update", self.on_generic_event("group_member_update"))
@@ -351,6 +355,36 @@ class GatewayAdapter(BaseAgent):
                     logger.warning(f"[Adapter] resolve_proposed_options failed: {e}")
             else:
                 logger.warning("[Adapter] resolve_proposed_options command missing 'id' field")
+            return
+
+        if command == "voice_realtime_start":
+            from opensquad.audio import realtime_manager as rtm
+
+            try:
+                result = await rtm.start_session(
+                    voice=cmd_data.get("voice", ""),
+                    instructions=cmd_data.get("instructions", ""),
+                )
+                await self._send_event(result, "voice_realtime_status")
+            except Exception as e:
+                logger.error("[Adapter] voice_realtime_start failed: %s", e)
+                await self._send_event({"status": "error", "error": str(e)}, "voice_realtime_status")
+            return
+
+        if command == "voice_realtime_stop":
+            from opensquad.audio import realtime_manager as rtm
+
+            try:
+                result = await rtm.stop_session()
+                await self._send_event(result, "voice_realtime_status")
+            except Exception as e:
+                logger.error("[Adapter] voice_realtime_stop failed: %s", e)
+            return
+
+        if command == "voice_audio_commit":
+            from opensquad.audio import realtime_manager as rtm
+
+            await rtm.commit_audio()
             return
 
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")

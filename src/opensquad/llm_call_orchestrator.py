@@ -66,7 +66,8 @@ class LlmCallOrchestrator:
                 current_input += "\n\n[Audio attachment paths]\n" + "\n".join(audio_paths)
                 await self.runner._emit("info", f"Received {len(audio_paths)} audio file(s)")
                 current_input += (
-                    "\n[Tip] To transcribe audio, call whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                    "\n[Tip] To transcribe audio, call step_voice.transcribe_audio_file(audio_path=...) "
+                    "if configured, otherwise whisper_transcribe.transcribe_audio_file(audio_path=...)."
                 )
             if video_paths:
                 current_input += "\n\n[Video attachment paths]\n" + "\n".join(video_paths)

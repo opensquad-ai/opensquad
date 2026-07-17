@@ -65,8 +65,13 @@ class ModelConfig:
     thinking_budget_tokens: int = 10_000
     reasoning_effort: str = "high"  # low | medium | high
 
-    # ── Google-specific ──
+    # ── Image output / generation ──
+    # Google: consume inline_data from chat response.
+    # OpenAI-compat (ChatAPI): call /v1/images/generations when True.
     is_image_output: bool = False
+    image_size: str = "1024x1024"
+    image_steps: int = 8
+    image_cfg_scale: float = 1.0
 
     # ── Shared ──
     top_k: int = 0
@@ -130,8 +135,11 @@ class ModelConfig:
             is_think=is_think,
             thinking_budget_tokens=int(_get("thinking_budget_tokens", 10_000)),
             reasoning_effort=str(_get("reasoning_effort", "high") or "high").strip().lower(),
-            # Google-specific
+            # Image output / generation
             is_image_output=_get("is_image_output", False),
+            image_size=str(_get("image_size", "1024x1024") or "1024x1024"),
+            image_steps=int(_get("image_steps", 8) or 8),
+            image_cfg_scale=float(_get("image_cfg_scale", 1.0) or 1.0),
             # Shared
             top_k=int(_get("top_k", 0)),
             provider=provider,

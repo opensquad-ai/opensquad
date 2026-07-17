@@ -100,6 +100,9 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'error',
   'session_title',
   'summary_stream',
+  'voice_audio_out',
+  'voice_transcript',
+  'voice_realtime_status',
 ]);
 
 class AIWebSocketService {
@@ -252,6 +255,24 @@ class AIWebSocketService {
   /** User ignored the propose_options card. */
   ignoreProposedOptions(requestId: string) {
     this._sendCommand('resolve_proposed_options', { id: requestId, ignored: true });
+  }
+
+  /** Start StepFun realtime voice session (tools integrated on agent side). */
+  startVoiceRealtime(data?: { voice?: string; instructions?: string }) {
+    this._sendCommand('voice_realtime_start', data || {});
+  }
+
+  stopVoiceRealtime() {
+    this._sendCommand('voice_realtime_stop');
+  }
+
+  commitVoiceAudio() {
+    this._sendCommand('voice_audio_commit');
+  }
+
+  /** Send PCM16 base64 audio chunk for realtime call. */
+  sendVoiceAudioIn(pcm16Base64: string) {
+    this._send({ type: 'voice_audio_in', audio: pcm16Base64 });
   }
 
   /**

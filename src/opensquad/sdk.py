@@ -219,6 +219,18 @@ class BaseAgent:
         elif msg_type == "command":
             logger.info(f"Processing command: {data}")
             await self._handle_command(data)
+        elif msg_type == "voice_audio_in":
+            # Low-latency realtime PCM16 chunk from browser (base64)
+            try:
+                from opensquad.audio import realtime_manager as rtm
+
+                audio = data.get("audio") or data.get("data") or ""
+                if isinstance(audio, dict):
+                    audio = audio.get("audio") or ""
+                if audio:
+                    await rtm.append_audio(audio)
+            except Exception as e:
+                logger.error("[SDK] voice_audio_in failed: %s", e)
         elif msg_type == "pong":
             logger.debug("Received pong")
         else:
