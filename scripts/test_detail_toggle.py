@@ -62,6 +62,15 @@ def main() -> None:
     plain = re.sub(r"\[/?[^\]]*\]", "", tool_call)
     assert "read_file" in plain
 
+    # Win: wait-banner alone must not keep shimmer timer "active" (dock stability)
+    app._wait_label = "Thinking…"
+    app._think_pending = False
+    app._open_tools = {}
+    if sys.platform == "win32":
+        assert app._shimmer_active() is False
+    else:
+        assert app._shimmer_active() is True
+
     print("PASS")
 
 

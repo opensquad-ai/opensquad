@@ -401,6 +401,22 @@ def _build_app_class():
                         "No agent selected. /agent list then /start <name>",
                         style="system",
                     )
+            self._maybe_hint_windows_terminal()
+
+        def _maybe_hint_windows_terminal(self) -> None:
+            """One-shot tip: classic conhost ghosts bordered docks under animation."""
+            if sys.platform != "win32":
+                return
+            if getattr(self, "_wt_hint_done", False):
+                return
+            self._wt_hint_done = True
+            # Windows Terminal / VS Code terminal set these; bare cmd.exe usually does not
+            if os.environ.get("WT_SESSION") or os.environ.get("TERM_PROGRAM") == "vscode":
+                return
+            self.log_line(
+                "Tip: Windows Terminal gives a stabler prompt border than classic CMD.",
+                style="system",
+            )
 
         def _ensure_new_session(self) -> bool:
             """Send new_session once before first message (deferred from boot)."""
@@ -1221,10 +1237,16 @@ def _build_app_class():
             if not self._wait_label:
                 self._static_set("#wait-banner", "")
                 return
-            # Soft gray sweep on the progress title (Thinking / tool / Replying…)
-            label_mk = self._shimmer_markup(str(self._wait_label))
-            self._static_set("#wait-banner", f" {label_mk}")
-            self._ensure_shimmer_timer()
+            # Win CMD: static title only — shimmer next to bordered #prompt-frame ghosts the dock
+            if sys.platform == "win32":
+                muted = self._theme_hex("text-muted", "#8b949e")
+                label_mk = f"[dim {muted}]{self._escape_markup(str(self._wait_label))}[/]"
+                self._static_set("#wait-banner", f" {label_mk}")
+            else:
+                label_mk = self._shimmer_markup(str(self._wait_label))
+                self._static_set("#wait-banner", f" {label_mk}")
+            if self._shimmer_active():
+                self._ensure_shimmer_timer()
 
         def _shimmer_markup(self, plain: str, *, base: str | None = None) -> str:
             """Soft light sweep — small steps at high Hz so motion looks fluid.
@@ -1266,11 +1288,13 @@ def _build_app_class():
             return "".join(out)
 
         def _shimmer_active(self) -> bool:
-            return bool(
-                getattr(self, "_wait_label", None)
-                or getattr(self, "_think_pending", False)
-                or (getattr(self, "_open_tools", None) or {})
-            )
+            # Chat-area animation (thinking / open tools)
+            if getattr(self, "_think_pending", False) or (getattr(self, "_open_tools", None) or {}):
+                return True
+            # Wait-banner shimmer only off Win (dock ghosting beside #prompt-frame)
+            if sys.platform != "win32" and getattr(self, "_wait_label", None):
+                return True
+            return False
 
         def _ensure_shimmer_timer(self) -> None:
             if getattr(self, "_shimmer_timer", None) is not None:
@@ -1335,8 +1359,8 @@ def _build_app_class():
                 return
             self._shimmer_tick = int(getattr(self, "_shimmer_tick", 0) or 0) + 1
             tick = self._shimmer_tick
-            # Lightweight Static titles every frame
-            if getattr(self, "_wait_label", None):
+            # Win: never repaint #wait-banner here (static title only in _paint_wait)
+            if getattr(self, "_wait_label", None) and sys.platform != "win32":
                 self._paint_wait()
             if getattr(self, "_think_pending", False):
                 self._paint_cache.pop("live-think", None)
@@ -1360,8 +1384,8 @@ def _build_app_class():
             def _start() -> None:
                 if getattr(self, "_turn_meter_timer", None) is not None:
                     return
-                # ~20Hz: smooth digit climb; #prompt-meta sits outside the blue box
-                interval = 0.05 if sys.platform == "win32" else 0.04
+                # Win CMD: ~12Hz — faster ↓ climb; wait-banner is static so dock stays stable
+                interval = 0.08 if sys.platform == "win32" else 0.04
                 self._turn_meter_timer = self.set_interval(interval, self._tick_turn_meter)
 
             if getattr(self, "_thread_id", None) == threading.get_ident():
@@ -1434,8 +1458,19 @@ def _build_app_class():
             if display >= target:
                 return False
             gap = target - display
-            # Odometer feel: +1 almost always. Tiny accel only when far behind.
-            if gap <= 80:
+            # Odometer feel; Win paints ~12Hz with larger steps so catch-up feels snappy
+            if sys.platform == "win32":
+                if gap <= 8:
+                    step = 1
+                elif gap <= 30:
+                    step = 2
+                elif gap <= 80:
+                    step = 4
+                elif gap <= 200:
+                    step = 6
+                else:
+                    step = 8
+            elif gap <= 80:
                 step = 1
             elif gap <= 200:
                 step = 2
@@ -1812,16 +1847,24 @@ def _build_app_class():
             gw = self._escape_markup(getattr(self.client, "gateway_url", "") or "")
             return f"  [{fg}]OpenSquad[/]  ·  [b]{agent}[/b]  ·  [{muted}]{state}[/]  ·  [{muted}]{gw}[/]"
 
+        def _dock_busy(self) -> bool:
+            """True while a turn/send is in flight (freeze Win Input chrome)."""
+            return bool(getattr(self, "_sending", False) or getattr(self, "_turn_started_at", None) is not None)
+
         def _refresh_chrome(self) -> None:
+            # Win CMD: during a turn, never touch Input.placeholder / footer — both
+            # sit next to the bordered prompt and re-assigning them ghosts the dock.
+            freeze_input = sys.platform == "win32" and self._dock_busy()
             if self._wait_label:
                 self._paint_wait()
                 self._paint_prompt_meta_only()
                 self._static_set("#header-bar", self._header_bar_markup())
-                try:
-                    fpath = self.query_one("#footer-path", Static)
-                    fpath.update(self._footer_path_markup())
-                except Exception:
-                    pass
+                if not freeze_input:
+                    try:
+                        fpath = self.query_one("#footer-path", Static)
+                        fpath.update(self._footer_path_markup())
+                    except Exception:
+                        pass
                 return
             try:
                 inp = self.query_one("#chat-input", Input)
@@ -1844,16 +1887,17 @@ def _build_app_class():
             else:
                 ph = t("placeholder_agent", agent=self.agent or "agent")
             # Never re-assign placeholder unless text changed (Win CMD ghosts bordered dock)
-            if ph != getattr(self, "_placeholder_cache", None):
+            if not freeze_input and ph != getattr(self, "_placeholder_cache", None):
                 self._placeholder_cache = ph
                 inp.placeholder = ph
             self._static_set("#header-bar", self._header_bar_markup())
             self._paint_prompt_meta_only()
-            try:
-                fpath = self.query_one("#footer-path", Static)
-                fpath.update(self._footer_path_markup())
-            except Exception:
-                pass
+            if not freeze_input:
+                try:
+                    fpath = self.query_one("#footer-path", Static)
+                    fpath.update(self._footer_path_markup())
+                except Exception:
+                    pass
 
         def log_line(self, text: str, style: str = "") -> None:
             """Thread-safe append to chat log (OpenCode-style blocks)."""
