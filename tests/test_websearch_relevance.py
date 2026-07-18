@@ -227,3 +227,81 @@ def test_merge_and_rank_weather_query_demotes_off_intent_pages():
     )
     assert results[0]["url"] == "https://www.tianqihoubao.com/weather/fuzhou/20260713.htm"
     assert results[0]["relevance_score"] > results[-1]["relevance_score"]
+
+
+def test_score_empty_title_weather_url_beats_city_only_page():
+    """Bing weather SERP rows often have empty title/summary; URL still has signals."""
+    query = "福州 天气预报 今天 2026-07-18"
+    empty_weather = score_single_result(
+        query,
+        title="",
+        summary="",
+        url="https://www.weather.com.cn/weather/101230101.shtml",
+        rank=0,
+    )
+    empty_tianqi = score_single_result(
+        query,
+        title="",
+        summary="",
+        url="https://www.tianqi.com/fuzhou/today/",
+        rank=1,
+    )
+    tourism = score_single_result(
+        query,
+        title="中国福州——温泉古都 有福之州 - China Daily",
+        summary="福州民风淳朴、文化昌盛，素有海滨邹鲁的美誉",
+        url="https://www.chinadaily.com.cn/m/fuzhou_c/introduction.html",
+        rank=2,
+    )
+    assert empty_weather >= 0.08
+    assert empty_tianqi >= 0.08
+    assert empty_weather > tourism
+    assert empty_tianqi > tourism
+    assert empty_tianqi >= empty_weather  # city pinyin in URL is a boost
+
+
+def test_merge_empty_title_weather_urls_not_replaced_by_fallback():
+    query = "福州 天气预报 今天 2026-07-18"
+    results = merge_and_rank_results(
+        [query],
+        [
+            [
+                {
+                    "title": "",
+                    "url": "https://www.weather.com.cn/weather/101230101.shtml",
+                    "summary": "",
+                    "result_type": "organic",
+                },
+                {
+                    "title": "",
+                    "url": "https://www.tianqi.com/fuzhou/",
+                    "summary": "",
+                    "result_type": "organic",
+                },
+                {
+                    "title": "中国福州——温泉古都 有福之州 - China Daily",
+                    "url": "https://www.chinadaily.com.cn/m/fuzhou_c/introduction.html",
+                    "summary": "福州民风淳朴、文化昌盛",
+                    "result_type": "organic",
+                },
+                {
+                    "title": "福州市人民政府",
+                    "url": "https://www.fuzhou.gov.cn/?from=websitedict.com",
+                    "summary": "中国福州，福建福州",
+                    "result_type": "organic",
+                },
+            ]
+        ],
+    )
+    urls = [item["url"] for item in results]
+    assert "https://www.weather.com.cn/weather/101230101.shtml" in urls
+    assert "https://www.tianqi.com/fuzhou/" in urls
+    assert results[0]["url"] in {
+        "https://www.weather.com.cn/weather/101230101.shtml",
+        "https://www.tianqi.com/fuzhou/",
+    }
+    assert results[0]["relevance_score"] > 0.2
+    assert results[0]["matched_keywords"]
+    # Tourism / gov pages must not occupy the top slot via fallback.
+    assert "chinadaily.com.cn" not in results[0]["url"]
+    assert "fuzhou.gov.cn" not in results[0]["url"]
