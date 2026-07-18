@@ -6,12 +6,12 @@ from playwright.async_api import Browser, BrowserContext, async_playwright
 
 try:
     from .fetch_content import fetch_page_content_async
-    from .relevance import merge_and_rank_results
+    from .relevance import merge_serp_results
     from .wash_content import wash_content
     from .web_crawler import search_with_bing_playwright
 except ImportError:
     from fetch_content import fetch_page_content_async
-    from relevance import merge_and_rank_results
+    from relevance import merge_serp_results
     from wash_content import wash_content
     from web_crawler import search_with_bing_playwright
 
@@ -141,7 +141,7 @@ async def search_links_async(
     search_tasks = [search_with_bing_playwright(browser, query, max_results=max_results_per_query) for query in queries]
     search_results_list = await asyncio.gather(*search_tasks)
 
-    results = merge_and_rank_results(
+    results = merge_serp_results(
         queries,
         search_results_list,
         ad_str_list=ad_str_list,

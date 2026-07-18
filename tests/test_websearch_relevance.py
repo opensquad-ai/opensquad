@@ -1,4 +1,4 @@
-"""Tests for websearch relevance scoring."""
+"""Tests for websearch query parsing, optional scoring helpers, and SERP merge."""
 
 import os
 import sys
@@ -7,7 +7,7 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "plugins", "websearch", "service"))
 )
 
-from relevance import merge_and_rank_results, parse_query_terms, score_single_result, tokenize_query
+from relevance import merge_serp_results, parse_query_terms, score_single_result, tokenize_query
 
 
 def test_tokenize_query_mixed_language():
@@ -47,27 +47,48 @@ def test_score_single_result_prefers_title_match():
     assert high > low
 
 
-def test_score_single_result_prefers_multi_keyword_coverage():
-    query = "量子计算, 硬件架构, 2025 发展趋势"
-    strong = score_single_result(
-        query,
-        title="2025量子计算硬件架构发展趋势报告",
-        summary="覆盖量子计算硬件与架构演进",
-        url="https://research.example.com/quantum-hardware-2025",
-        rank=0,
-    )
-    weak = score_single_result(
-        query,
-        title="2025年科技新闻汇总",
-        summary="仅提到量子一词",
-        url="https://news.example.com/tech-digest",
-        rank=0,
-    )
-    assert strong > weak
+def test_parse_query_terms_keeps_date_as_single_token():
+    terms = parse_query_terms("福州天气 2026-07-13")
+    assert "2026-07-13" in terms.tokens
+    assert "2026" not in terms.tokens
+    assert "天气" in terms.tokens or any("天气" in p for p in terms.phrases)
 
 
-def test_merge_and_rank_results_tracks_query_provenance():
-    results = merge_and_rank_results(
+def test_merge_serp_preserves_bing_order():
+    results = merge_serp_results(
+        ['"关中王来了" 梗'],
+        [
+            [
+                {
+                    "title": "关中地区_百度百科",
+                    "url": "https://baike.baidu.com/item/关中地区/1",
+                    "summary": "地理介绍",
+                },
+                {
+                    "title": "关中王来了是什么梗",
+                    "url": "https://meme.example.com/guanzhongwang",
+                    "summary": "网络梗出处与用法",
+                },
+                {
+                    "title": "关中平原_百度百科",
+                    "url": "https://baike.baidu.com/item/关中平原/2",
+                    "summary": "渭河平原",
+                },
+            ]
+        ],
+    )
+    assert [r["url"] for r in results] == [
+        "https://baike.baidu.com/item/关中地区/1",
+        "https://meme.example.com/guanzhongwang",
+        "https://baike.baidu.com/item/关中平原/2",
+    ]
+    assert "relevance_score" not in results[0]
+    assert "matched_keywords" not in results[0]
+    assert results[0]["snippet"] == results[0]["summary"]
+
+
+def test_merge_serp_dedupes_keeping_first_and_tracks_queries():
+    results = merge_serp_results(
         ["Python asyncio", "async programming Python"],
         [
             [
@@ -91,43 +112,18 @@ def test_merge_and_rank_results_tracks_query_provenance():
             ],
         ],
     )
-
-    assert len(results) >= 1
-    top = results[0]
-    assert top["url"] == "https://docs.python.org/asyncio"
-    assert top["match_count"] == 2
-    assert "Python asyncio" in top["matched_queries"]
-    assert top["relevance_score"] >= 0.2
-    assert top["snippet"] == top["summary"]
-    assert len(top["matched_keywords"]) >= 1
+    assert [r["url"] for r in results] == [
+        "https://docs.python.org/asyncio",
+        "https://news.example.com/weather",
+    ]
+    assert results[0]["match_count"] == 2
+    assert "Python asyncio" in results[0]["matched_queries"]
+    assert "async programming Python" in results[0]["matched_queries"]
 
 
-def test_merge_and_rank_results_comma_keywords_rank_stronger_page():
-    results = merge_and_rank_results(
-        ["福州天气, 福州气温, 福州降雨预报"],
-        [
-            [
-                {
-                    "title": "福州本地生活资讯",
-                    "url": "https://life.example.com/fuzhou",
-                    "summary": "福州美食与旅游推荐",
-                },
-                {
-                    "title": "福州天气预报_气温_降雨",
-                    "url": "https://weather.example.com/fuzhou",
-                    "summary": "提供福州天气、气温和降雨预报",
-                },
-            ]
-        ],
-    )
-
-    assert results[0]["url"] == "https://weather.example.com/fuzhou"
-    assert any("天气" in kw or "气温" in kw or "降雨" in kw for kw in results[0]["matched_keywords"])
-
-
-def test_merge_and_rank_results_filters_low_relevance():
-    results = merge_and_rank_results(
-        ["quantum computing hardware 2025"],
+def test_merge_serp_filters_ad_marker():
+    results = merge_serp_results(
+        ["sneakers"],
         [
             [
                 {
@@ -136,172 +132,12 @@ def test_merge_and_rank_results_filters_low_relevance():
                     "summary": "选购最新款运动鞋",
                 },
                 {
-                    "title": "Quantum computing hardware advances in 2025",
-                    "url": "https://research.example.com/quantum",
-                    "summary": "Overview of quantum hardware progress",
+                    "title": "Running shoe review",
+                    "url": "https://reviews.example.com/shoes",
+                    "summary": "Independent review of trail shoes",
                 },
             ]
         ],
+        ad_str_list=["选购"],
     )
-
-    urls = [item["url"] for item in results]
-    assert "https://shop.example.com/shoes" not in urls
-    assert "https://research.example.com/quantum" in urls
-
-
-def test_merge_and_rank_results_keeps_minimum_when_all_low():
-    results = merge_and_rank_results(
-        ["xyzabc123"],
-        [
-            [
-                {
-                    "title": "Completely unrelated page",
-                    "url": "https://example.com/a",
-                    "summary": "Nothing relevant",
-                }
-            ]
-        ],
-        min_score=0.99,
-    )
-    assert len(results) >= 1
-
-
-def test_parse_query_terms_keeps_date_as_single_token():
-    terms = parse_query_terms("福州天气 2026-07-13")
-    assert "2026-07-13" in terms.tokens
-    assert "2026" not in terms.tokens
-    assert "天气" in terms.tokens or any("天气" in p for p in terms.phrases)
-
-
-def test_score_weather_intent_prefers_weather_page_over_baike():
-    query = "福州天气 2026-07-13"
-    weather = score_single_result(
-        query,
-        title="7月13日福州天气_福州2026年7月13日天气预报_天气后报",
-        summary="查询福州2026年7月13日的历史天气与预报",
-        url="https://www.tianqihoubao.com/weather/fuzhou/20260713.htm",
-        rank=1,
-    )
-    baike = score_single_result(
-        query,
-        title="福州市_百度百科",
-        summary="福州市地貌属典型的河口盆地，属亚热带季风气候，国家历史文化名城",
-        url="https://baike.baidu.com/item/福州市/366603",
-        rank=0,
-    )
-    tourism = score_single_result(
-        query,
-        title="福州10大好玩景点，第一次到福州游玩一定不要错过",
-        summary="福州好玩的景点有：三坊七巷，平潭岛，福州国家森林公园",
-        url="https://www.thepaper.cn/newsDetail_forward_26004317",
-        rank=0,
-    )
-    assert weather > baike
-    assert weather > tourism
-    assert baike <= 0.15
-    assert tourism <= 0.15
-
-
-def test_merge_and_rank_weather_query_demotes_off_intent_pages():
-    results = merge_and_rank_results(
-        ["福州天气 2026-07-13"],
-        [
-            [
-                {
-                    "title": "福州市_百度百科",
-                    "url": "https://baike.baidu.com/item/福州市/366603",
-                    "summary": "福州市地貌属典型的河口盆地，属亚热带季风气候",
-                },
-                {
-                    "title": "福州10大好玩景点",
-                    "url": "https://www.thepaper.cn/newsDetail_forward_26004317",
-                    "summary": "福州好玩的景点有：三坊七巷，平潭岛",
-                },
-                {
-                    "title": "7月13日福州天气_天气预报",
-                    "url": "https://www.tianqihoubao.com/weather/fuzhou/20260713.htm",
-                    "summary": "福州2026年7月13日天气预报与气温",
-                },
-            ]
-        ],
-    )
-    assert results[0]["url"] == "https://www.tianqihoubao.com/weather/fuzhou/20260713.htm"
-    assert results[0]["relevance_score"] > results[-1]["relevance_score"]
-
-
-def test_score_empty_title_weather_url_beats_city_only_page():
-    """Bing weather SERP rows often have empty title/summary; URL still has signals."""
-    query = "福州 天气预报 今天 2026-07-18"
-    empty_weather = score_single_result(
-        query,
-        title="",
-        summary="",
-        url="https://www.weather.com.cn/weather/101230101.shtml",
-        rank=0,
-    )
-    empty_tianqi = score_single_result(
-        query,
-        title="",
-        summary="",
-        url="https://www.tianqi.com/fuzhou/today/",
-        rank=1,
-    )
-    tourism = score_single_result(
-        query,
-        title="中国福州——温泉古都 有福之州 - China Daily",
-        summary="福州民风淳朴、文化昌盛，素有海滨邹鲁的美誉",
-        url="https://www.chinadaily.com.cn/m/fuzhou_c/introduction.html",
-        rank=2,
-    )
-    assert empty_weather >= 0.08
-    assert empty_tianqi >= 0.08
-    assert empty_weather > tourism
-    assert empty_tianqi > tourism
-    assert empty_tianqi >= empty_weather  # city pinyin in URL is a boost
-
-
-def test_merge_empty_title_weather_urls_not_replaced_by_fallback():
-    query = "福州 天气预报 今天 2026-07-18"
-    results = merge_and_rank_results(
-        [query],
-        [
-            [
-                {
-                    "title": "",
-                    "url": "https://www.weather.com.cn/weather/101230101.shtml",
-                    "summary": "",
-                    "result_type": "organic",
-                },
-                {
-                    "title": "",
-                    "url": "https://www.tianqi.com/fuzhou/",
-                    "summary": "",
-                    "result_type": "organic",
-                },
-                {
-                    "title": "中国福州——温泉古都 有福之州 - China Daily",
-                    "url": "https://www.chinadaily.com.cn/m/fuzhou_c/introduction.html",
-                    "summary": "福州民风淳朴、文化昌盛",
-                    "result_type": "organic",
-                },
-                {
-                    "title": "福州市人民政府",
-                    "url": "https://www.fuzhou.gov.cn/?from=websitedict.com",
-                    "summary": "中国福州，福建福州",
-                    "result_type": "organic",
-                },
-            ]
-        ],
-    )
-    urls = [item["url"] for item in results]
-    assert "https://www.weather.com.cn/weather/101230101.shtml" in urls
-    assert "https://www.tianqi.com/fuzhou/" in urls
-    assert results[0]["url"] in {
-        "https://www.weather.com.cn/weather/101230101.shtml",
-        "https://www.tianqi.com/fuzhou/",
-    }
-    assert results[0]["relevance_score"] > 0.2
-    assert results[0]["matched_keywords"]
-    # Tourism / gov pages must not occupy the top slot via fallback.
-    assert "chinadaily.com.cn" not in results[0]["url"]
-    assert "fuzhou.gov.cn" not in results[0]["url"]
+    assert [r["url"] for r in results] == ["https://reviews.example.com/shoes"]

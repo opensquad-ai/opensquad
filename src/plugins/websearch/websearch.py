@@ -122,9 +122,11 @@ def search(
     """
     Call the WebSearch service's /search endpoint to retrieve search results for multiple queries.
 
-    Each result typically includes: title, url, summary/snippet, relevance_score,
-    matched_keywords, matched_queries, and optionally result_type/card_kind
+    Each result typically includes: title, url, summary/snippet, matched_queries,
+    match_count, and optionally result_type/card_kind
     (``answer_card`` for Bing weather/knowledge/AI widgets; ``organic`` for blue links).
+
+    Results keep Bing SERP order (no custom relevance re-ranking).
 
     Usage tips:
     - **Prefer snippets / answer cards before fetch:** For many questions (weather, facts,
@@ -142,20 +144,17 @@ def search(
       multiple related, different-angle queries (the ``queries`` list).
     - **Language-aware search:** Chinese queries automatically use cn.bing.com; English
       queries use www.bing.com. Mixed queries pick the region based on the dominant script.
-    - **Multi-keyword queries:** You can pass comma-separated related keywords in one query
-      string, e.g. ``queries=["福州天气, 福州气温, 福州降雨"]``. Results include
-      ``matched_keywords`` showing which keyword phrases actually hit the page.
-    - **Cross-validation:** Higher ``match_count``, ``relevance_score``, or more
-      ``matched_keywords`` usually means better intent match.
+    - **Multi-keyword / quoted phrases:** Prefer the same phrasing a human would type in
+      Bing (quotes help for memes/slang). Results follow Bing's own ranking.
     - **When to fetch:** After reading summaries, fetch at most 1–3 high-value URLs that
       still need full text (long reports, docs, paywalled-looking snippets that are thin).
       Prefer alternative open sources if a site is known to block scrapers.
     - **High result volume:** If coverage is thin, increase max_results (e.g. 30 → 100)
-      and re-rank by summary — still avoid mass-fetching.
+      and read more snippets — still avoid mass-fetching.
 
     Demo: research "the latest advances in artificial intelligence"
     1. Multi-angle search: ``search(queries=["Latest AI breakthroughs 2024", ...], max_results=30)``
-    2. Read ``title`` / ``summary`` / ``relevance_score`` / ``result_type``; answer from
+    2. Read ``title`` / ``summary`` / ``result_type`` in returned order; answer from
        snippets/answer cards when sufficient.
     3. Only then ``fetch`` the 1–3 URLs that still need full-page detail.
     """

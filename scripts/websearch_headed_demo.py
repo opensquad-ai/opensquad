@@ -10,8 +10,7 @@ Known differences vs everyday browsing (read before comparing):
   - No login / personalization; fixed Chrome UA + playwright-stealth
   - Navigates directly to SERP URL with mkt/setlang/cc (not homepage form)
   - Forces #b_content visible; extracts answer cards + li.b_algo organics
-  - This CLI prints crawler order (raw page scrape), not merge_and_rank_results
-    (ranking merge only runs on the FastAPI /search service path)
+  - This CLI prints crawler order (same as /search after scoring was removed)
 
 Usage:
   python scripts/websearch_headed_demo.py "福州天气"

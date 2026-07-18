@@ -489,30 +489,31 @@ def _collect_matched_keywords(query: str, title: str, summary: str, url: str) ->
     return matched
 
 
-def merge_and_rank_results(
+def merge_serp_results(
     queries: list[str],
     search_results_list: list[list[dict[str, str]]],
     *,
-    min_score: float = 0.08,
     ad_str_list: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """
-    Merge multi-query results, attach query provenance, score, filter, and sort.
+    Merge multi-query Bing SERP rows while preserving engine order.
 
-    Returns results with fields: title, url, summary, snippet, relevance_score,
-    matched_queries, matched_keywords, match_count.
+    No relevance scoring / re-ranking: first-seen URL wins (Bing page order for
+    each query, then query order). Drops Bing chrome links and simple ad markers.
+
+    Returns: title, url, summary, snippet, matched_queries, match_count,
+    result_type, and optional card_kind / bing_region.
     """
     ad_str_list = ad_str_list or []
-    aggregated: dict[str, dict] = {}
+    ordered: list[dict[str, str]] = []
+    by_url: dict[str, dict] = {}
 
     for query, result_list in zip(queries, search_results_list, strict=False):
-        for rank, result in enumerate(result_list):
+        for result in result_list:
             url = (result.get("url") or "").strip()
-            # Drop Bing SERP chrome links; keep synthetic answer-card URLs and externals.
             if not url or (url.startswith("https://cn.bing.com/") and result.get("result_type") != "answer_card"):
                 continue
             if url.startswith("https://cn.bing.com/") and result.get("result_type") == "answer_card":
-                # Prefer synthetic scheme so answer cards are not discarded as chrome links.
                 kind = result.get("card_kind") or "generic"
                 url = f"bing-answer://{kind}/{quote(query.strip() or 'query')}"
 
@@ -521,93 +522,39 @@ def merge_and_rank_results(
             if any(ad in summary for ad in ad_str_list):
                 continue
 
-            result_type = result.get("result_type") or "organic"
-            card_kind = result.get("card_kind")
-            score = score_single_result(query, title, summary, url, rank=rank)
-            if result_type == "answer_card":
-                # Visible SERP widgets are what users see first — prefer them.
-                score = min(1.0, score + (0.22 if card_kind == "weather" else 0.16))
-            matched_keywords = _collect_matched_keywords(query, title, summary, url)
+            if url in by_url:
+                entry = by_url[url]
+                if query not in entry["matched_queries"]:
+                    entry["matched_queries"].append(query)
+                    entry["match_count"] = len(entry["matched_queries"])
+                continue
 
-            if url not in aggregated:
-                aggregated[url] = {
-                    "title": title,
-                    "summary": summary,
-                    "bing_region": result.get("bing_region"),
-                    "result_type": result_type,
-                    "card_kind": card_kind,
-                    "query_scores": {},
-                    "matched_queries": [],
-                    "matched_keywords": [],
-                    "best_rank": rank,
-                }
+            item: dict[str, str] = {
+                "title": title,
+                "url": url,
+                "summary": summary,
+                "snippet": summary,
+                "matched_queries": [query],
+                "match_count": 1,
+                "result_type": result.get("result_type") or "organic",
+            }
+            if result.get("card_kind"):
+                item["card_kind"] = result["card_kind"]
+            if result.get("bing_region"):
+                item["bing_region"] = result["bing_region"]
+            by_url[url] = item
+            ordered.append(item)
 
-            entry = aggregated[url]
-            entry["query_scores"][query] = max(entry["query_scores"].get(query, 0.0), score)
-            entry["matched_queries"].append(query)
-            entry["best_rank"] = min(entry["best_rank"], rank)
-            if result_type == "answer_card":
-                entry["result_type"] = "answer_card"
-                if card_kind:
-                    entry["card_kind"] = card_kind
+    return ordered
 
-            for keyword in matched_keywords:
-                if keyword not in entry["matched_keywords"]:
-                    entry["matched_keywords"].append(keyword)
 
-            if score >= entry.get("_best_single_score", 0.0):
-                entry["_best_single_score"] = score
-                entry["title"] = title
-                entry["summary"] = summary
-                if result.get("bing_region"):
-                    entry["bing_region"] = result["bing_region"]
-
-    ranked: list[dict[str, str]] = []
-    for url, entry in aggregated.items():
-        match_count = len(set(entry["matched_queries"]))
-        best_single = max(entry["query_scores"].values()) if entry["query_scores"] else 0.0
-        cross_bonus = (match_count - 1) * 0.12 if best_single > 0 else 0.0
-        # Do not double-count Bing rank: score_single_result already applied a prior.
-        # Only a tiny merge-time nudge remains for multi-query consensus pages.
-        keyword_bonus = min(0.08, max(0, len(entry["matched_keywords"]) - 1) * 0.02)
-        final_score = min(1.0, best_single + cross_bonus + keyword_bonus)
-
-        matched = list(dict.fromkeys(entry["matched_queries"]))
-        summary = entry["summary"]
-        item: dict[str, str] = {
-            "title": entry["title"],
-            "url": url,
-            "summary": summary,
-            "snippet": summary,
-            "relevance_score": round(final_score, 3),
-            "matched_queries": matched,
-            "matched_keywords": entry["matched_keywords"],
-            "match_count": match_count,
-            "result_type": entry.get("result_type") or "organic",
-        }
-        if entry.get("card_kind"):
-            item["card_kind"] = entry["card_kind"]
-        if entry.get("bing_region"):
-            item["bing_region"] = entry["bing_region"]
-        ranked.append(item)
-
-    ranked.sort(
-        key=lambda item: (
-            -item["relevance_score"],
-            0 if item.get("result_type") == "answer_card" else 1,
-            -len(item["matched_keywords"]),
-            -item["match_count"],
-            item["url"],
-        )
-    )
-
-    filtered = [
-        item
-        for item in ranked
-        if (item["relevance_score"] >= min_score and item["matched_keywords"]) or item["match_count"] >= 2
-    ]
-    if not filtered and ranked:
-        keep = max(3, len(queries))
-        filtered = ranked[:keep]
-
-    return filtered
+def merge_and_rank_results(
+    queries: list[str],
+    search_results_list: list[list[dict[str, str]]],
+    *,
+    min_score: float = 0.08,  # retained for call-site compat; ignored
+    ad_str_list: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Backward-compatible alias: preserves Bing SERP order (no scoring)."""
+    del min_score  # scoring removed
+    return merge_serp_results(queries, search_results_list, ad_str_list=ad_str_list)
