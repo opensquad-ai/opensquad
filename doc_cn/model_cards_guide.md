@@ -48,8 +48,8 @@
 }
 ```
 
-- `asr_card`：`step_voice.transcribe_audio_file` 使用的 ASR 模型卡
-- `tts_card`：`step_voice.synthesize_speech` 使用的 TTS 模型卡（仅工具主动调用时合成）
+- `asr_card`：`asr_tts.transcribe_audio_file` 使用的 ASR 模型卡
+- `tts_card`：`asr_tts.synthesize_speech` 使用的 TTS 模型卡（仅工具主动调用时合成）
 - `realtime_card`：Agent Web 实时通话使用的 Realtime 模型卡
 | `tool_call_mode` | string | 否 | 工具调用模式：`auto`/`native`/`xml`，默认 `auto` |
 | `render_mode` | string | 否 | 渲染模式：`strict`（严格）/`full`（完整），默认 `strict` |

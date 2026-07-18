@@ -12,6 +12,8 @@ interface SoloMessageProps {
   senderAvatar?: string | null;
   /** DOM id fragment for user-message nav jump targets */
   anchorId?: string;
+  /** Agent id for message TTS */
+  agentId?: string;
 }
 
 export const SoloMessage: React.FC<SoloMessageProps> = (props) => (

@@ -23,9 +23,11 @@ def test_openai_tools_to_stepfun_limit():
 
 
 def test_ws_realtime_url():
-    card = {"base_url": "https://api.stepfun.com/v1", "model_name": "stepaudio-2.5-realtime"}
-    assert ws_realtime_url(card) == "wss://api.stepfun.com/v1/realtime?model=stepaudio-2.5-realtime"
-    assert http_base_url(card) == "https://api.stepfun.com/v1"
+    card = {"base_url": "https://api.stepfun.com/step_plan/v1", "model_name": "stepaudio-2.5-realtime"}
+    assert ws_realtime_url(card) == "wss://api.stepfun.com/step_plan/v1/realtime?model=stepaudio-2.5-realtime"
+    assert http_base_url(card) == "https://api.stepfun.com/step_plan/v1"
+    legacy = {"base_url": "https://api.stepfun.com/v1", "model_name": "stepaudio-2.5-realtime"}
+    assert ws_realtime_url(legacy) == "wss://api.stepfun.com/v1/realtime?model=stepaudio-2.5-realtime"
 
 
 def test_force_text_only_modalities():

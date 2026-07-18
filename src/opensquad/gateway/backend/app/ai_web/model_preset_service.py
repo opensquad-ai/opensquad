@@ -128,7 +128,7 @@ VENDOR_META: dict[str, dict] = {
     },
     "stepfun": {
         "label": "Stepfun Step",
-        "base_url": "https://api.stepfun.com/v1",
+        "base_url": "https://api.stepfun.com/step_plan/v1",
         "api_protocol": "openai_compat",
         "icon_url": _gf("stepfun.com"),
     },

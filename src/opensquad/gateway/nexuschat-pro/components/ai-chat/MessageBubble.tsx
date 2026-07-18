@@ -7,10 +7,11 @@
  * Supports file attachments displayed as cards (structured or parsed from text).
  */
 import React, { useMemo } from 'react';
-import { User, Bot, Copy, Check, FileText } from 'lucide-react';
-import { SERVER_BASE_URL } from '../../services/api';
+import { User, Bot, Copy, Check, FileText, Volume2, Loader2, Square } from 'lucide-react';
+import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { VoicePlayer } from './VoicePlayer';
 
 /** Structured file attachment on a ChatMessage */
 export interface FileAttachment {
@@ -18,7 +19,9 @@ export interface FileAttachment {
   size: string;
   path?: string;
   url?: string;          // model output audio playback URL
-  type?: 'file' | 'audio' | 'video';
+  type?: 'file' | 'audio' | 'video' | 'voice';
+  /** Voice message duration in seconds */
+  duration?: number;
 }
 
 export interface ChatMessage {
@@ -50,6 +53,8 @@ interface MessageBubbleProps {
   variant?: 'classic' | 'solo';
   /** DOM id for Solo user-message nav jump targets */
   anchorId?: string;
+  /** Agent id for TTS (voice.tts_card). When set, speak button appears next to copy. */
+  agentId?: string;
 }
 
 /** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
@@ -73,9 +78,10 @@ function resolveAvatarUrl(avatar: string): string {
 
 
 // Pattern to match:
-// [File: filename (size) path=... type=audio|video|file]
-// [File: filename (size) type=file](/uploads/xxx)
-const FILE_PATTERN = /\[File:\s*(.+?)\s*\(([^)]+)\)(?:\s*path=([^\]\n]+))?(?:\s*type=(audio|video|voice|file))?\](?:\(([^)\n]+)\))?/g;
+// [File: filename (size) path=... type=audio|video|voice|file]
+// [File: filename (size) type=voice](/uploads/xxx)
+// path must not include whitespace so " type=audio" is not swallowed into path.
+const FILE_PATTERN = /\[File:\s*(.+?)\s*\(([^)]+)\)(?:\s*path=([^\s\]]+))?(?:\s*type=(audio|video|voice|file))?\](?:\(([^)\n]+)\))?/g;
 // Markdown file link: [name.ext](/uploads/xxx.ext)
 const MARKDOWN_UPLOAD_LINK_PATTERN = /\[([^\]]+?)\]\((\/uploads\/[^)\s]+)\)/g;
 // Pattern to match assistant plain text style:
@@ -108,10 +114,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   senderAvatar,
   variant = 'classic',
   anchorId,
+  agentId,
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
   const [avatarError, setAvatarError] = React.useState(false);
+  const [ttsState, setTtsState] = React.useState<'idle' | 'loading' | 'playing'>('idle');
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const isUser = message.role === 'user';
   const isSolo = variant === 'solo';
 
@@ -125,8 +134,13 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     // for BOTH user and assistant messages (important for session replay fallback).
     const normalizeUrl = (raw: string): string => {
       if (!raw) return '';
-      if (raw.startsWith('http')) return raw;
-      return raw.startsWith('/') ? raw : `/uploads/${raw.split(/[/\\]/).pop()}`;
+      // Drop trailing junk accidentally captured after the path (e.g. " type=audio").
+      const cleaned = raw.trim().split(/\s+/)[0] || '';
+      if (!cleaned) return '';
+      if (cleaned.startsWith('http')) return cleaned;
+      if (cleaned.startsWith('/')) return cleaned;
+      const leaf = cleaned.split(/[/\\]/).pop() || cleaned;
+      return `/uploads/${leaf}`;
     };
 
     const matches = [...content.matchAll(FILE_PATTERN)];
@@ -136,8 +150,17 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         if (!isPlausibleFileAttachmentName(name)) continue;
         const size = (m[2] || '').trim();
         const rawPathOrUrl = (m[3] || m[5] || '').trim();
-        const kind = (m[4] as 'audio' | 'video' | 'file' | undefined) || 'file';
-        const normalizedUrl = rawPathOrUrl ? normalizeUrl(rawPathOrUrl) : undefined;
+        const mdUrl = (m[5] || '').trim();
+        let kind = (m[4] as 'audio' | 'video' | 'voice' | 'file' | undefined) || undefined;
+        if (!kind) {
+          const lower = name.toLowerCase();
+          if (/^voice_/i.test(name) || /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(lower)) kind = 'voice';
+          else if (/\.(mp4|mov|avi|mkv)$/i.test(lower)) kind = 'video';
+          else kind = 'file';
+        }
+        // Prefer markdown (/uploads/...) URL when present; fall back to path.
+        const preferred = mdUrl || rawPathOrUrl;
+        const normalizedUrl = preferred ? normalizeUrl(preferred) : undefined;
         atts.push({ name, size, type: kind, url: normalizedUrl, path: rawPathOrUrl || undefined });
       }
     }
@@ -151,8 +174,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       const exists = atts.some(a => (a.url && a.url === url) || a.name === name);
       if (!exists) {
         const lower = name.toLowerCase();
-        const isVideo = /\.(mp4|webm|mov|avi|mkv)$/.test(lower);
-        const isAudio = /\.(mp3|wav|ogg|m4a|flac|aac)$/.test(lower);
+        const isAudio = /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/.test(lower) || /^voice_/i.test(name);
+        const isVideo = !isAudio && /\.(mp4|webm|mov|avi|mkv)$/.test(lower);
         atts.push({ name, size: '', url, type: isVideo ? 'video' : isAudio ? 'audio' : 'file' });
       }
     }
@@ -169,8 +192,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         const exists = atts.some(a => (url && a.url && a.url === url) || a.name === name);
         if (!exists) {
           const lower = name.toLowerCase();
-          const isVideo = /\.(mp4|webm|mov|avi|mkv)$/.test(lower);
-          const isAudio = /\.(mp3|wav|ogg|m4a|flac|aac)$/.test(lower);
+          const isAudio = /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/.test(lower) || /^voice_/i.test(name);
+          const isVideo = !isAudio && /\.(mp4|webm|mov|avi|mkv)$/.test(lower);
           atts.push({
             name,
             size: '',
@@ -238,6 +261,19 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     // Drop nameless / table-junk attachments (e.g. name="|" from "| 文件 |" headers).
     const cleanedAtts = atts.filter((a) => isPlausibleFileAttachmentName(a.name));
 
+    // Deduplicate voice/file cards that arrive from both attachments[] and files[]
+    // (or from content marker re-parse) so one bubble never shows two players.
+    const dedupedAtts: FileAttachment[] = [];
+    for (const a of cleanedAtts) {
+      const urlKey = (a.url || a.path || '').replace(/\\/g, '/').split('/').pop()?.split(/\s+/)[0] || '';
+      const dup = dedupedAtts.some((b) => {
+        if (a.name && b.name && a.name === b.name) return true;
+        const bKey = (b.url || b.path || '').replace(/\\/g, '/').split('/').pop()?.split(/\s+/)[0] || '';
+        return !!urlKey && !!bKey && urlKey === bKey;
+      });
+      if (!dup) dedupedAtts.push(a);
+    }
+
     // Remove parsed file lines from display text
     content = content
       .replace(FILE_PATTERN, '')
@@ -249,7 +285,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       .replace(/\n{2,}$/g, '')
       .trim();
 
-    return { displayContent: content, fileAttachments: cleanedAtts };
+    return { displayContent: content, fileAttachments: dedupedAtts };
   }, [message.content, message.attachments]);
 
   const renderedHtml = useMemo(() => {
@@ -270,6 +306,43 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* ignore */ }
+  };
+
+  const stopTts = React.useCallback(() => {
+    const a = audioRef.current;
+    if (a) {
+      a.pause();
+      a.src = '';
+      audioRef.current = null;
+    }
+    setTtsState('idle');
+  }, []);
+
+  React.useEffect(() => () => stopTts(), [stopTts]);
+
+  const handleSpeak = async () => {
+    if (!agentId || !message.content?.trim()) return;
+    if (ttsState === 'playing' || ttsState === 'loading') {
+      stopTts();
+      return;
+    }
+    setTtsState('loading');
+    try {
+      const res = await agentSessionAPI.synthesize(agentId, message.content);
+      const url = res.url?.startsWith('http')
+        ? res.url
+        : `${SERVER_BASE_URL}${res.url?.startsWith('/') ? res.url : `/${res.url}`}`;
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => setTtsState('idle');
+      audio.onerror = () => setTtsState('idle');
+      setTtsState('playing');
+      await audio.play();
+    } catch (e) {
+      setTtsState('idle');
+      const msg = e instanceof Error ? e.message : String(e);
+      window.alert(msg || 'TTS failed');
+    }
   };
 
   const handleCopyPath = async (text: string) => {
@@ -311,6 +384,42 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       a.click();
       a.remove();
     }
+  };
+
+  const resolveMediaUrl = (raw?: string): string => {
+    if (!raw) return '';
+    if (raw.startsWith('http')) return raw;
+    if (raw.startsWith('/')) return `${SERVER_BASE_URL}${raw}`;
+    return `${SERVER_BASE_URL}/uploads/${raw.split(/[/\\]/).pop()}`;
+  };
+
+  const isVoiceLike = (att: FileAttachment) =>
+    att.type === 'voice' || att.type === 'audio'
+    || /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(att.name || '');
+
+  const renderAttachment = (att: FileAttachment, key: string) => {
+    const mediaUrl = resolveMediaUrl(att.url || att.path);
+    if (att.type === 'video' && mediaUrl && !/\bvoice_/i.test(att.name || '')) {
+      return (
+        <div key={key} className="rounded-lg overflow-hidden max-w-[280px]">
+          <video
+            src={mediaUrl}
+            controls
+            className="max-w-full max-h-48 rounded-lg"
+            preload="metadata"
+          />
+          <p className="text-xs text-textMuted truncate mt-0.5 px-0.5">{att.name}</p>
+        </div>
+      );
+    }
+    if (isVoiceLike(att) && mediaUrl) {
+      return (
+        <div key={key}>
+          <VoicePlayer url={mediaUrl} duration={att.duration || 0} />
+        </div>
+      );
+    }
+    return renderFileCard(att, key);
   };
 
   const renderFileCard = (att: FileAttachment, key: string) => {
@@ -416,7 +525,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           )}
           {fileAttachments.length > 0 && (
             <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
-              {fileAttachments.map((att, i) => renderFileCard(att, `u-att-${i}`))}
+              {fileAttachments.map((att, i) => renderAttachment(att, `u-att-${i}`))}
             </div>
           )}
         </>
@@ -428,47 +537,15 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
           />
           {fileAttachments.length > 0 && (
             <div className={`flex flex-wrap gap-2 ${displayContent ? 'mt-2' : ''}`}>
-              {fileAttachments.map((att, i) => {
-                if (att.type === 'video' && att.url) {
-                  const videoSrc = att.url.startsWith('http') ? att.url : att.url.startsWith('/') ? att.url : `/uploads/${att.url.split(/[/\\]/).pop()}`;
-                  return (
-                    <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[280px]">
-                      <video
-                        src={`${SERVER_BASE_URL}${videoSrc.startsWith('/') ? videoSrc : `/${videoSrc}`}`}
-                        controls
-                        className="max-w-full max-h-48 rounded-lg"
-                        preload="metadata"
-                      />
-                      <p className="text-xs text-textMuted truncate mt-0.5 px-0.5">{att.name}</p>
-                    </div>
-                  );
-                }
-                if ((att.type === 'audio' || att.type === 'voice') && att.url) {
-                  const audioSrc = att.url.startsWith('http') ? att.url : `${SERVER_BASE_URL}${att.url.startsWith('/') ? att.url : `/${att.url}`}`;
-                  return (
-                    <div key={`att-${i}`} className="rounded-lg overflow-hidden max-w-[260px] border border-border bg-bgLight">
-                      <audio
-                        src={audioSrc}
-                        controls
-                        className="w-full h-9"
-                        preload="metadata"
-                      />
-                      <p className="text-xs text-textMuted truncate px-2 pb-1.5">{att.name}</p>
-                    </div>
-                  );
-                }
-                return renderFileCard(att, `att-${i}`);
-              })}
+              {fileAttachments.map((att, i) => renderAttachment(att, `att-${i}`))}
             </div>
           )}
           {message.output_audio && message.output_audio.length > 0 && (
             <div className="mt-2 flex flex-col gap-2">
               {message.output_audio.map((a, i) => (
-                <audio
+                <VoicePlayer
                   key={i}
-                  controls
-                  src={`${SERVER_BASE_URL}${a.url}`}
-                  className="w-full max-w-xs h-8"
+                  url={`${SERVER_BASE_URL}${a.url}`}
                 />
               ))}
             </div>
@@ -508,13 +585,35 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
             {label}
           </span>
           {!isStreaming && message.content && (
-            <button
-              onClick={handleCopy}
-              className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
-              title="Copy"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-            </button>
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={handleCopy}
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
+                title="Copy"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+              </button>
+              {agentId && (
+                <button
+                  onClick={() => void handleSpeak()}
+                  disabled={ttsState === 'loading'}
+                  className={`transition-opacity p-0.5 ${
+                    ttsState !== 'idle'
+                      ? 'opacity-100 text-primary'
+                      : 'opacity-0 group-hover:opacity-100 text-textMuted hover:text-primary'
+                  }`}
+                  title={ttsState === 'playing' ? 'Stop' : 'Speak'}
+                >
+                  {ttsState === 'loading' ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : ttsState === 'playing' ? (
+                    <Square size={12} />
+                  ) : (
+                    <Volume2 size={12} />
+                  )}
+                </button>
+              )}
+            </div>
           )}
         </div>
         {isUser ? (
@@ -574,13 +673,37 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
         </div>
 
         {!isStreaming && message.content && (
-          <button
-            onClick={handleCopy}
-            className={`absolute -bottom-5 opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5 ${isUser ? 'left-1' : 'right-1'}`}
-            title="Copy"
+          <div
+            className={`absolute -bottom-5 flex items-center gap-0.5 transition-opacity ${
+              ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            } ${isUser ? 'left-1' : 'right-1'}`}
           >
-            {copied ? <Check size={12} /> : <Copy size={12} />}
-          </button>
+            <button
+              onClick={handleCopy}
+              className="text-textMuted hover:text-primary p-0.5"
+              title="Copy"
+            >
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+            {agentId && (
+              <button
+                onClick={() => void handleSpeak()}
+                disabled={ttsState === 'loading'}
+                className={`p-0.5 ${
+                  ttsState !== 'idle' ? 'text-primary' : 'text-textMuted hover:text-primary'
+                }`}
+                title={ttsState === 'playing' ? 'Stop' : 'Speak'}
+              >
+                {ttsState === 'loading' ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : ttsState === 'playing' ? (
+                  <Square size={12} />
+                ) : (
+                  <Volume2 size={12} />
+                )}
+              </button>
+            )}
+          </div>
         )}
 
         {message.timestamp && (

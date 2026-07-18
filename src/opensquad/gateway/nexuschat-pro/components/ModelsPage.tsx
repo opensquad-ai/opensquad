@@ -80,6 +80,56 @@ function domainOf(url: string): string {
   try { return new URL(url).hostname; } catch { return url; }
 }
 
+/** Voice capability of a model card (null = chat / LLM card). */
+type VoiceRole = 'asr' | 'tts' | 'realtime';
+
+function voiceRoleOf(card: {
+  is_audio?: boolean;
+  is_audio_output?: boolean;
+  model_name?: string;
+}): VoiceRole | null {
+  const audioIn = !!card.is_audio;
+  const audioOut = !!card.is_audio_output;
+  const mn = (card.model_name || '').toLowerCase();
+  const looksVoice = /realtime|tts|asr|stepaudio|whisper|speech|audio-/.test(mn);
+
+  // Dual audio flags ⇒ realtime voice card (StepAudio realtime preset).
+  if (audioIn && audioOut) return 'realtime';
+  // Output-only ⇒ TTS.
+  if (audioOut && !audioIn) return 'tts';
+  // Input-only: only treat as ASR when the model id looks like a voice model,
+  // so multimodal chat cards with is_audio stay LLM cards.
+  if (audioIn && !audioOut) return looksVoice ? 'asr' : null;
+  if (looksVoice) {
+    if (mn.includes('realtime')) return 'realtime';
+    if (mn.includes('tts')) return 'tts';
+    if (mn.includes('asr')) return 'asr';
+  }
+  return null;
+}
+
+function voiceCardKey(role: VoiceRole): 'asr_card' | 'tts_card' | 'realtime_card' {
+  if (role === 'asr') return 'asr_card';
+  if (role === 'tts') return 'tts_card';
+  return 'realtime_card';
+}
+
+/** Agent row enriched with voice card bindings from config.json. */
+type AgentWithVoice = AdminAgent & {
+  asr_card?: string;
+  tts_card?: string;
+  realtime_card?: string;
+};
+
+function agentUsesCard(agent: AgentWithVoice, cardName: string, role: VoiceRole | null): boolean {
+  if (!cardName) return false;
+  if (role) {
+    const key = voiceCardKey(role);
+    return (agent[key] || '') === cardName;
+  }
+  return (agent.model_card || '') === cardName;
+}
+
 const EMPTY: ModelCardDetail = {
   name: '', title: '', api_protocol: 'openai_compat', provider: '',
   api_key: '', base_url: '', model_name: '',
@@ -87,6 +137,8 @@ const EMPTY: ModelCardDetail = {
   frequency_penalty: 0, presence_penalty: 0, top_k: 0,
   is_think: false, is_image: false, is_audio: false, is_video: false,
   is_audio_output: false, is_image_output: false, audio_output_voice: 'alloy',
+  auto_asr: false,
+  group_asr: false,
   enable_repetition_check: false,
 };
 
@@ -127,7 +179,7 @@ async function fetchIconAsDataUrl(iconUrl: string): Promise<string | null> {
  */
 async function preloadVendorIcons(presets: ProviderPreset[]): Promise<void> {
   const toLoad: string[] = [];
-  
+
   // 1. 检查哪些图标还没缓存
   for (const p of presets) {
     if (!p.icon_url) continue;
@@ -244,7 +296,7 @@ function clearPresetsCache(): void {
 const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const { t } = useTranslation();
   const [cards, setCards]     = useState<ModelCardInfo[]>([]);
-  const [agents, setAgents]   = useState<AdminAgent[]>([]);
+  const [agents, setAgents]   = useState<AgentWithVoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites() as Set<string>);
@@ -295,7 +347,20 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const loadAgents = useCallback(async () => {
     try {
       const res = await adminAPI.getAgents();
-      setAgents(res.agents ?? []);
+      const list: AgentWithVoice[] = (res.agents ?? []).map(a => ({ ...a }));
+      // Enrich with voice.*_card so voice model cards can show real assignments.
+      await Promise.all(list.map(async (agent) => {
+        const key = agent.dir_name || agent.agent_id;
+        if (!key) return;
+        try {
+          const cfg = await adminAPI.getConfig(key);
+          const voice = (cfg.config?.voice || {}) as Record<string, string>;
+          agent.asr_card = String(voice.asr_card || '');
+          agent.tts_card = String(voice.tts_card || '');
+          agent.realtime_card = String(voice.realtime_card || '');
+        } catch { /* ignore */ }
+      }));
+      setAgents(list);
     } catch { setAgents([]); }
   }, []);
 
@@ -334,10 +399,10 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
   const refreshPresets = useCallback(async () => {
     setPresetsRefreshing(true);
-    
+
     // 手动刷新时先清除缓存
     clearPresetsCache();
-    
+
     try {
       const postRes = await fetch('/api/ai-web/model-presets/refresh', { method: 'POST' });
       const postData = postRes.ok ? await postRes.json() : null;
@@ -345,17 +410,17 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       const data = await res.json();
       const presets = data.providers ?? [];
       setProviderPresets(presets);
-      
+
       // 缓存新数据
       savePresetsToCache(presets);
-      
+
       // 预加载新增/更新的厂商图标
       if (presets.length > 0) {
         preloadVendorIcons(presets).catch(e =>
           console.warn('[VendorIcon] 刷新后预加载失败:', e)
         );
       }
-      
+
       if (postData) {
         const src = postData.source === 'live' ? t('modelsPage.presetLive') : t('modelsPage.presetStatic');
         const msg = postData.errors?.length
@@ -434,6 +499,25 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     }
   };
 
+  /** Only toggle capability flags — url / model / key come from the model card itself. */
+  const applyVoiceRoleFlags = (role: 'asr' | 'tts' | 'realtime') => {
+    const flags = {
+      asr: { is_audio: true, is_audio_output: false },
+      tts: { is_audio: false, is_audio_output: true },
+      realtime: { is_audio: true, is_audio_output: true },
+    } as const;
+    const f = flags[role];
+    setForm(prev => ({
+      ...prev,
+      is_audio: f.is_audio,
+      is_audio_output: f.is_audio_output,
+      is_think: false,
+      is_image: false,
+      is_video: false,
+      is_image_output: false,
+    }));
+  };
+
   // ── Favorites ─────────────────────────────────────────────────────────────
 
   const toggleFav = useCallback((name: string, e: React.MouseEvent) => {
@@ -495,6 +579,16 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         if (clash) saveName = clash.name;
       }
       await modelCardAPI.saveCard(saveName, { ...form, name: saveName });
+      // Only one workspace card should be the group-chat ASR.
+      if (form.group_asr) {
+        for (const c of cards) {
+          if (c.name === saveName || !c.group_asr) continue;
+          try {
+            const full = await modelCardAPI.getCard(c.name);
+            await modelCardAPI.saveCard(c.name, { ...full.card, group_asr: false });
+          } catch { /* skip */ }
+        }
+      }
       showToast(t('modelsPage.saveSuccess'));
       await loadCards();
       if (isNew) { setDrawerCard(saveName); setNewName(saveName); }
@@ -513,12 +607,39 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     } catch { showToast(t('modelsPage.deleteFailed'), false); }
   };
 
+  const drawerVoiceRole = useMemo(
+    () => (drawerCard && !isNew ? voiceRoleOf(form) : null),
+    [drawerCard, isNew, form.is_audio, form.is_audio_output, form.model_name],
+  );
+
   const handleAssign = async (agentDir: string) => {
     if (!drawerCard || isNew) return;
     setAssigning(agentDir);
     try {
-      const res = await modelCardAPI.getCard(drawerCard);
-      await modelCardAPI.assignToAgent(agentDir, drawerCard, res.card);
+      const role = voiceRoleOf(form);
+      if (role) {
+        const cfg = await adminAPI.getConfig(agentDir);
+        const next = { ...(cfg.config || {}) };
+        if (!next.voice || typeof next.voice !== 'object') next.voice = {};
+        next.voice = { ...next.voice, [voiceCardKey(role)]: drawerCard };
+        // Prefer card credentials when agent has none yet (runtime resolve also reads the card).
+        try {
+          const cardRes = await modelCardAPI.getCard(drawerCard);
+          const c = cardRes.card;
+          if (c?.base_url && !next.voice.base_url) next.voice.base_url = c.base_url;
+          if (c?.api_key && !next.voice.api_key) next.voice.api_key = c.api_key;
+          if (role === 'asr' && c?.model_name) next.voice.asr_model = c.model_name;
+          if (role === 'tts' && c?.model_name) next.voice.tts_model = c.model_name;
+          if (role === 'realtime' && c?.model_name) next.voice.realtime_model = c.model_name;
+          if (c?.audio_output_voice && !next.voice.realtime_voice) {
+            next.voice.realtime_voice = c.audio_output_voice;
+          }
+        } catch { /* card optional */ }
+        await adminAPI.updateConfig(agentDir, next);
+      } else {
+        const res = await modelCardAPI.getCard(drawerCard);
+        await modelCardAPI.assignToAgent(agentDir, drawerCard, res.card);
+      }
       showToast(`${t('modelsPage.assignedAgents')}: ${agentDir}`);
       await loadAgents();
     } catch { showToast(t('modelsPage.saveFailed'), false); }
@@ -528,7 +649,19 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const handleUnassign = async (agentDir: string) => {
     setAssigning(agentDir);
     try {
-      await modelCardAPI.unassignFromAgent(agentDir);
+      const role = voiceRoleOf(form);
+      if (role) {
+        const cfg = await adminAPI.getConfig(agentDir);
+        const next = { ...(cfg.config || {}) };
+        if (!next.voice || typeof next.voice !== 'object') next.voice = {};
+        const key = voiceCardKey(role);
+        if ((next.voice[key] || '') === drawerCard) {
+          next.voice = { ...next.voice, [key]: '' };
+          await adminAPI.updateConfig(agentDir, next);
+        }
+      } else {
+        await modelCardAPI.unassignFromAgent(agentDir);
+      }
       showToast(`${agentDir}`);
       await loadAgents();
     } catch { showToast(t('modelsPage.saveFailed'), false); }
@@ -721,7 +854,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 starred={favorites.has(card.name)}
                 onToggleStar={e => toggleFav(card.name, e)}
                 onClick={() => openCard(card.name)}
-                assignedAgents={agents.filter(a => a.model_card === card.name)}
+                assignedAgents={agents.filter(a => agentUsesCard(a, card.name, voiceRoleOf(card)))}
                 iconUrl={getCardIconUrl(card)}
               />
             ))}
@@ -752,7 +885,16 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                     className="w-full text-base font-semibold bg-transparent border-b border-border focus:outline-none focus:border-primary pb-0.5"
                   />
                 ) : (
-                  <h2 className="text-base font-semibold text-textMain truncate">{drawerCard}</h2>
+                  <>
+                    <h2 className="text-base font-semibold text-textMain truncate">
+                      {form.title?.trim() || drawerCard}
+                    </h2>
+                    {drawerCard && form.title?.trim() && form.title.trim() !== drawerCard && (
+                      <p className="text-[11px] text-textMuted font-mono truncate mt-0.5" title={drawerCard}>
+                        {drawerCard}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
@@ -783,6 +925,32 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
             <div className="flex-1 overflow-y-auto min-w-0">
               {/* Form */}
               <div className="p-4 md:p-5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 border-b border-border">
+
+                {/* ── Voice capability flags (no hardcoded vendor url/model) ── */}
+                <div className="col-span-2 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-3 py-3 flex flex-col gap-2">
+                  <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                    Voice card flags
+                  </span>
+                  <p className="text-[11px] text-textMuted leading-tight">
+                    仅标记能力类型。<b>base_url / api_key / model_name</b> 请在下方按模型卡填写（或从厂商预设选卡），不要写死在前端。
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {([
+                      { role: 'asr' as const, label: 'ASR 语音输入' },
+                      { role: 'tts' as const, label: 'TTS 语音输出' },
+                      { role: 'realtime' as const, label: 'Realtime 双向' },
+                    ]).map(({ role, label }) => (
+                      <button
+                        key={role}
+                        type="button"
+                        onClick={() => applyVoiceRoleFlags(role)}
+                        className="text-[11px] px-2.5 py-1 rounded-lg border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-500/15 transition-colors bg-transparent cursor-pointer"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
                 {/* ── Preset Quick-Pick ── */}
                 <div className="col-span-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 flex flex-col gap-2">
@@ -934,9 +1102,9 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 {/* Tool Call Mode */}
                 <div>
                   <label className={labelCls}>Tool Call Mode</label>
-                  <select 
-                    className={inputCls} 
-                    value={form.tool_call_mode ?? 'auto'} 
+                  <select
+                    className={inputCls}
+                    value={form.tool_call_mode ?? 'auto'}
                     onChange={e => setField('tool_call_mode', e.target.value)}
                     title={t('modelsPage.toolCallModeTitle')}
                   >
@@ -1042,6 +1210,29 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                     />
                   </button>
                 </div>
+                {/* Group-chat ASR — for speech-to-text (input) cards */}
+                {form.is_audio && !form.is_audio_output && (
+                  <div className="col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-bgLight mt-1">
+                    <span className="text-sm text-textMain">
+                      设为群聊语音转文本 <span className="text-textMuted text-xs">(group_asr)</span>
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={!!form.group_asr}
+                      onClick={() => setField('group_asr', !form.group_asr)}
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 ${
+                        form.group_asr ? 'bg-primary' : 'bg-gray-400'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                          form.group_asr ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                )}
                 {/* Is Video - Toggle Switch */}
                 <div className="col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-bgLight mt-1">
                   <span className="text-sm text-textMain">
@@ -1131,19 +1322,31 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                     <Users size={14} className="text-textMuted" />
                     <span className="text-xs font-bold text-textMuted uppercase tracking-wider">{t('modelsPage.assignedAgents')}</span>
                   </div>
+                  {drawerVoiceRole && (
+                    <p className="px-5 py-2 text-[11px] text-textMuted border-b border-border/50 leading-relaxed">
+                      {t('modelsPage.voiceAssignHint', {
+                        role: drawerVoiceRole.toUpperCase(),
+                      })}
+                    </p>
+                  )}
                   {agents.length === 0 ? (
                     <div className="text-xs text-textMuted text-center py-6">{t('agentManager.noAgents')}</div>
                   ) : (
                     agents.map(agent => {
-                      const assigned = agent.model_card === drawerCard;
+                      const assigned = agentUsesCard(agent, drawerCard!, drawerVoiceRole);
                       const isLoading = assigning === agent.dir_name;
+                      const otherBinding = drawerVoiceRole
+                        ? (agent[voiceCardKey(drawerVoiceRole)] || '')
+                        : (agent.model_card || '');
                       return (
                         <div key={agent.dir_name} className="flex items-center justify-between px-5 py-2.5 border-b border-border/50 hover:bg-hover/50 transition-colors">
                           <div className="min-w-0">
                             <div className="text-sm font-medium truncate">{agent.agent_name}</div>
-                              {agent.model_card && (
+                            {otherBinding && (
                               <div className="text-xs text-textMuted truncate">
-                                {assigned ? `✓ ${t('common.enabled')}` : `${agent.model_card}`}
+                                {assigned
+                                  ? `✓ ${t('common.enabled')}`
+                                  : otherBinding}
                               </div>
                             )}
                           </div>
@@ -1323,7 +1526,7 @@ interface ModelCardProps {
   starred: boolean;
   onToggleStar: (e: React.MouseEvent) => void;
   onClick: () => void;
-  assignedAgents: AdminAgent[];
+  assignedAgents: AgentWithVoice[];
   iconUrl?: string;
 }
 
@@ -1359,6 +1562,11 @@ const ModelCard: React.FC<ModelCardProps> = ({ card, starred, onToggleStar, onCl
           {card.title || card.name}
         </h3>
         <p className="text-xs text-textMuted font-mono truncate mt-0.5">{card.model_name}</p>
+        {card.name && card.name !== card.model_name && card.name !== (card.title || '') && (
+          <p className="text-[11px] text-textMuted/80 font-mono truncate mt-0.5" title={card.name}>
+            id: {card.name}
+          </p>
+        )}
         {card.provider && (
           <p className="text-[11px] text-textMuted truncate mt-0.5 flex items-center gap-1">
             <VendorIcon iconUrl={iconUrl} label={card.provider} size={12} />
@@ -1397,7 +1605,7 @@ const ModelCard: React.FC<ModelCardProps> = ({ card, starred, onToggleStar, onCl
         {card.is_audio && (
           <span className="flex items-center gap-1 text-emerald-500">
             <Mic size={11} />
-            audio
+            audio{card.group_asr ? '·群聊' : ''}
           </span>
         )}
       </div>

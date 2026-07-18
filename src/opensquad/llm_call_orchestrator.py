@@ -65,10 +65,26 @@ class LlmCallOrchestrator:
             if audio_paths:
                 current_input += "\n\n[Audio attachment paths]\n" + "\n".join(audio_paths)
                 await self.runner._emit("info", f"Received {len(audio_paths)} audio file(s)")
-                current_input += (
-                    "\n[Tip] To transcribe audio, call step_voice.transcribe_audio_file(audio_path=...) "
-                    "if configured, otherwise whisper_transcribe.transcribe_audio_file(audio_path=...)."
-                )
+                _auto_text = None
+                try:
+                    from opensquad import agent_runtime_context as _arc
+                    from opensquad.audio import auto_transcribe_audio_paths
+
+                    _auto_text = await auto_transcribe_audio_paths(
+                        getattr(_arc, "agent_config", None),
+                        audio_paths,
+                    )
+                except Exception:
+                    _auto_text = None
+                if _auto_text is not None:
+                    if _auto_text.strip():
+                        current_input += "\n\n[Auto speech-to-text transcript]\n" + _auto_text.strip()
+                        await self.runner._emit("info", "Auto ASR transcribed audio attachment(s)")
+                else:
+                    current_input += (
+                        "\n[Tip] To transcribe audio, call asr_tts.transcribe_audio_file(audio_path=...) "
+                        "if configured, otherwise whisper_transcribe.transcribe_audio_file(audio_path=...)."
+                    )
             if video_paths:
                 current_input += "\n\n[Video attachment paths]\n" + "\n".join(video_paths)
                 await self.runner._emit("info", f"Received {len(video_paths)} video file(s)")

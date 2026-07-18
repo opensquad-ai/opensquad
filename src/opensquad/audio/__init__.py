@@ -1,4 +1,4 @@
-"""StepFun / OpenSquad audio helpers."""
+"""OpenSquad audio helpers (TTS OpenAI-compat; ASR/Realtime may be provider-specific)."""
 
 from __future__ import annotations
 
@@ -35,29 +35,118 @@ def load_model_card(card_name: str) -> dict[str, Any]:
 
 
 def resolve_voice_card(agent_config: dict[str, Any] | None, kind: str) -> dict[str, Any] | None:
-    """Resolve voice.asr_card / voice.tts_card / voice.realtime_card from agent config."""
+    """Resolve ASR / TTS / Realtime credentials for an agent.
+
+    Priority:
+      1. voice.{kind}_card → load model card JSON
+      2. voice.base_url + api_key + {kind}_model → synthesize inline card dict
+    """
     voice = (agent_config or {}).get("voice") or {}
+    if not isinstance(voice, dict):
+        return None
+
     key = f"{kind}_card"
-    card_name = voice.get(key) or ""
-    if not card_name:
+    card_name = (voice.get(key) or "").strip()
+    if card_name:
+        try:
+            return load_model_card(card_name)
+        except Exception as e:
+            logger.warning("[audio] Failed to load voice.%s=%s: %s", key, card_name, e)
+            return None
+
+    model_key = f"{kind}_model"
+    model_name = (voice.get(model_key) or "").strip()
+    api_key = (voice.get("api_key") or "").strip()
+    base_url = (voice.get("base_url") or "").strip()
+    if not model_name or not api_key or not base_url:
         return None
+
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model_name": model_name,
+        "audio_output_voice": (voice.get("realtime_voice") or "").strip(),
+        "provider": voice.get("provider") or "inline",
+        "api_protocol": voice.get("api_protocol") or "openai_compat",
+        "_card": f"inline-{kind}",
+    }
+
+
+async def auto_transcribe_audio_paths(
+    agent_config: dict[str, Any] | None,
+    audio_paths: list[str],
+    *,
+    language: str = "zh",
+) -> str | None:
+    """If ASR is configured, transcribe paths and return text.
+
+    Returns None when ASR is unavailable (caller should keep Tip).
+    Returns empty string when enabled but all transcripts were empty.
+    """
+    if not audio_paths:
+        return None
+    card = resolve_voice_card(agent_config, "asr")
+    if not card:
+        return None
+
+    from opensquad.audio.stepfun_asr import transcribe_with_card
+
+    parts: list[str] = []
+    for path in audio_paths:
+        try:
+            result = await transcribe_with_card(card, path, language=language)
+        except Exception as e:
+            logger.warning("[audio] auto_asr failed for %s: %s", path, e)
+            continue
+        if not result.get("success"):
+            logger.warning("[audio] auto_asr error for %s: %s", path, result.get("error"))
+            continue
+        text = (result.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def resolve_group_asr_card() -> dict[str, Any] | None:
+    """Load the workspace model card marked ``group_asr: true`` (ASR for group chat)."""
+    cards_dir = syscfg.workspace_model_cards_dir()
+    if not os.path.isdir(cards_dir):
+        return None
+
     try:
-        return load_model_card(card_name)
-    except Exception as e:
-        logger.warning("[audio] Failed to load voice.%s=%s: %s", key, card_name, e)
+        names = sorted(os.listdir(cards_dir))
+    except OSError:
         return None
+
+    for fname in names:
+        if not fname.endswith(".json"):
+            continue
+        name = fname[:-5]
+        try:
+            card = load_model_card(name)
+        except Exception:
+            continue
+        if card.get("group_asr"):
+            return card
+    return None
 
 
 def http_base_url(card: dict[str, Any]) -> str:
-    base = (card.get("base_url") or "https://api.stepfun.com/v1").rstrip("/")
-    return base
+    """Return the card's HTTP API base URL (no provider-specific default)."""
+    return (card.get("base_url") or "").strip().rstrip("/")
 
 
 def ws_realtime_url(card: dict[str, Any]) -> str:
-    """Build StepFun realtime websocket URL from card base_url + model_name."""
+    """Build realtime websocket URL from card base_url + model_name.
+
+    Examples:
+      https://api.stepfun.com/step_plan/v1
+        -> wss://api.stepfun.com/step_plan/v1/realtime?model=...
+      https://api.stepfun.com/v1
+        -> wss://api.stepfun.com/v1/realtime?model=...
+    """
     model = card.get("model_name") or "stepaudio-2.5-realtime"
     base = http_base_url(card)
-    # https://api.stepfun.com/v1 -> wss://api.stepfun.com/v1/realtime
     if base.startswith("https://"):
         ws = "wss://" + base[len("https://") :]
     elif base.startswith("http://"):

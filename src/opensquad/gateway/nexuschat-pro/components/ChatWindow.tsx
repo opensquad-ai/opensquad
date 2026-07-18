@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { MoreHorizontal, Paperclip, Pin, Reply, Trash2, Copy, MessageSquare, Download, Folder, File as FileIcon, X, AtSign, ArrowLeft, Edit2, Check, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ZoomIn, Image as ImageIcon, RotateCcw, Play, Pause, Film, Mic } from 'lucide-react';
 import { Message, User, Group, MessageType, Attachment } from '../types';
 import { MessageInput } from './MessageInput';
-import { uploadAPI, SERVER_BASE_URL, messageAPI } from '../services/api';
+import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../services/api';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
 import {
@@ -15,6 +15,7 @@ import {
   ProposeOptionsCard,
   parseProposeOptions,
 } from './ProposeOptionsCard';
+import { useMobileChatSwipe } from '../hooks/useMobileChatSwipe';
 
 // 全局消息位置记忆缓存：groupId -> { messageId, scrollTop }
 // 使用模块级变量，确保组件重新挂载后缓存仍然有效
@@ -72,6 +73,8 @@ interface ChatWindowProps {
   onPrependMessages: (groupId: string, beforeTimestamp: number) => Promise<number>;
   onConsumeMention: (groupId: string) => void;
   toggleRightPanel: () => void;
+  /** Mobile: open group settings (RightPanel). Used by left-swipe gesture. */
+  onOpenGroupSettings?: () => void;
   filter: { text: string; userId: string | null; dateFrom: string | null; dateTo: string | null; };
   onBack: () => void;
   shouldJumpToMention?: boolean;
@@ -166,10 +169,11 @@ const VoicePlayer: React.FC<VoicePlayerProps> = ({ url, duration }) => {
 };
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
-  group, groups, messages, users, currentUser, onSendMessage, onDeleteMessage, onUndoRecall, onPermanentDelete, onEditMessage, onPinMessage, onPrependMessages, onConsumeMention, toggleRightPanel, filter, onBack, shouldJumpToMention, onReplaceMessages, onLoadMessagesAround, isMessagesLoading
+  group, groups, messages, users, currentUser, onSendMessage, onDeleteMessage, onUndoRecall, onPermanentDelete, onEditMessage, onPinMessage, onPrependMessages, onConsumeMention, toggleRightPanel, onOpenGroupSettings, filter, onBack, shouldJumpToMention, onReplaceMessages, onLoadMessagesAround, isMessagesLoading
 }) => {
   const { t } = useTranslation();
   const [inputText, setInputText] = useState('');
+  const [sttDictating, setSttDictating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -1523,9 +1527,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     playSendSound();
   };
 
+  // ---- Mobile horizontal swipe navigation (full screen) ----
+  const {
+    swipeOffset,
+    swipeTransition,
+    handleNavSwipeStart,
+    handleNavSwipeMove,
+    handleNavSwipeEnd,
+    resetNavSwipe,
+    isNavSwipeHorizontal,
+    springBackNavSwipe,
+  } = useMobileChatSwipe({
+    groupId: group.id,
+    onSwipeRight: onBack,
+    onSwipeLeft: () => (onOpenGroupSettings ?? toggleRightPanel)(),
+    onHorizontalLock: () => {
+      setIsPulling(false);
+      setPullDistance(0);
+      setPullTriggered(false);
+    },
+  });
+
   // Pull to load more handlers
   const handleTouchStart = (e: React.TouchEvent) => {
+    handleNavSwipeStart(e);
     if (!scrollContainerRef.current || isLoadingHistoryRef.current) return;
+    // Horizontal nav swipe owns the gesture — don't start pull
+    if (isNavSwipeHorizontal()) return;
 
     // Only allow pull when at top of scroll
     if (scrollContainerRef.current.scrollTop <= 0) {
@@ -1536,6 +1564,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
+    handleNavSwipeMove(e);
+    if (isNavSwipeHorizontal()) return;
     if (!isPulling || !scrollContainerRef.current) return;
 
     const currentY = e.touches[0].clientY;
@@ -1563,6 +1593,10 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   const handleTouchEnd = async () => {
+    const wasHorizontal = isNavSwipeHorizontal();
+    handleNavSwipeEnd();
+    if (wasHorizontal) return;
+
     if (!isPulling) {
       console.log('TouchEnd: not pulling, returning');
       return;
@@ -1840,30 +1874,33 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
-  // 处理语音录制
-  const handleVoiceRecord = async (audioBlob: Blob, duration: number) => {
+  // 语音录制 → ASR 填入发送框（与 Agent 聊听写一致，不再发语音附件）
+  const handleVoiceRecord = async (audioBlob: Blob, _duration: number) => {
     try {
-      // 创建 File 对象
-      const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
-
-      // 上传音频文件
-      const result = await uploadAPI.uploadFile(audioFile);
-
-      // 创建语音附件
-      const attachment: Attachment = {
-        id: `att_${Date.now()}`,
-        name: t('chat.voiceMessage', { duration }),
-        size: formatFileSize(audioBlob.size),
-        type: 'voice',
-        url: result.url,
-        duration: duration // 附加时长信息
-      };
-
-      // 发送语音消息
-      onSendMessage("", MessageType.VOICE, [attachment]);
+      setSttDictating(true);
+      const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, {
+        type: audioBlob.type || 'audio/webm',
+      });
+      const res = await agentSessionAPI.groupTranscribe(audioFile, {
+        filename: audioFile.name,
+        language: 'zh',
+      });
+      const text = (res.text || '').trim();
+      if (!text) {
+        alert(t('chat.sendVoiceFailed') || '语音转写结果为空');
+        return;
+      }
+      setInputText((prev) => {
+        if (!prev.trimEnd()) return text;
+        const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
+        return `${prev}${joiner}${text}`;
+      });
     } catch (error) {
-      console.error('Failed to upload voice:', error);
-      alert(t('chat.sendVoiceFailed'));
+      console.error('Failed to transcribe voice:', error);
+      const msg = error instanceof Error ? error.message : String(error || '');
+      alert(msg || t('chat.sendVoiceFailed'));
+    } finally {
+      setSttDictating(false);
     }
   };
 
@@ -2074,7 +2111,28 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   return (
     <div
-        className="flex-1 flex flex-col h-full relative bg-bgLight w-full min-w-0"
+        data-testid="chat-window"
+        className="flex-1 flex flex-col h-full relative bg-bgLight w-full min-w-0 md:touch-auto"
+        style={{
+          touchAction: 'pan-y',
+          transform: swipeOffset ? `translateX(${swipeOffset}px)` : undefined,
+          transition: swipeTransition ? 'transform 180ms ease-out' : undefined,
+          willChange: swipeOffset ? 'transform' : undefined,
+          boxShadow: swipeOffset > 8 ? '-8px 0 24px rgba(0,0,0,0.18)' : undefined,
+        }}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onTouchCancel={() => {
+          if (isNavSwipeHorizontal()) {
+            springBackNavSwipe();
+          } else {
+            setIsPulling(false);
+            setPullDistance(0);
+            setPullTriggered(false);
+            resetNavSwipe();
+          }
+        }}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={async (e) => {
@@ -2175,6 +2233,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         {/* Left: Back Button (Mobile Only) */}
         <button
             onClick={onBack}
+            data-testid="chat-back"
             className="md:hidden absolute top-2 left-2 w-10 h-10 flex items-center justify-center text-textMain bg-panel/90 backdrop-blur-sm rounded-full shadow-sm active:scale-95 transition-transform pointer-events-auto relative"
         >
             <ArrowLeft size={20} />
@@ -2370,9 +2429,6 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         style={{ contain: 'layout style', willChange: 'scroll-position' }}
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
       >
         <div className="min-h-full flex flex-col">
           {/* Spacer to push messages to bottom when few messages */}
@@ -3005,6 +3061,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             onFolderSelect={() => folderInputRef.current?.click()}
             onImageSelect={() => imageInputRef.current?.click()}
             onVoiceRecord={handleVoiceRecord}
+            voiceDictating={sttDictating}
             onPasteFiles={handleStageFiles}
             hasAttachments={stagedItems.length > 0}
             placeholder=""

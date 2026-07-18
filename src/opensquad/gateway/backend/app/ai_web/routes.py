@@ -128,22 +128,37 @@ def _normalize_session_message(msg: dict) -> dict:
     # Parse text markers and lift them to structured files/images for frontend rendering.
     content_text = out.get("content") or ""
     parsed_files = []
-    for m in re.finditer(r"\[File:\s*(.*?)\]\((.*?)\)", content_text):
+    # Markdown link form: [File: name (size) ...](/uploads/xxx)
+    # Also path= form used by Agent Web voice/file sends.
+    file_marker_re = re.compile(
+        r"\[File:\s*(.+?)\s*\(([^)]*)\)(?:\s*path=([^\s\]]+))?(?:\s*type=(audio|video|voice|file))?\](?:\(([^)]+)\))?"
+    )
+    for m in file_marker_re.finditer(content_text):
         name = (m.group(1) or "file").strip()
-        url = (m.group(2) or "").strip()
+        path_raw = (m.group(3) or "").strip()
+        kind = (m.group(4) or "").strip().lower()
+        url = (m.group(5) or "").strip() or path_raw
         if not url:
             continue
-        lower = url.lower()
+        # Prefer web-relative /uploads leaf when given an absolute disk path
+        if not url.startswith("/") and not url.startswith("http"):
+            url = "/uploads/" + url.replace("\\", "/").split("/")[-1]
+        lower = (name + " " + url).lower()
+        is_voice = kind in ("audio", "voice") or name.lower().startswith("voice_")
         is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
-        is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
-        is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+        is_audio = is_voice or lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".webm"))
+        is_video = (not is_audio) and lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
         parsed_files.append(
             {
                 "original_name": name,
                 "url": url,
+                "path": path_raw or None,
                 "is_image": is_image,
-                "is_audio": is_audio,
-                "is_video": is_video,
+                "is_audio": is_audio and not is_image,
+                "is_video": is_video and not is_image,
+                "type": "voice"
+                if kind == "voice" or name.lower().startswith("voice_")
+                else ("audio" if is_audio else ("video" if is_video else "file")),
             }
         )
 
@@ -181,16 +196,23 @@ def _normalize_session_message(msg: dict) -> dict:
             {
                 "name": f.get("original_name") or f.get("filename") or "file",
                 "url": f.get("url"),
-                "type": "video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"),
+                "type": (
+                    "voice"
+                    if f.get("type") == "voice" or str(f.get("original_name") or "").lower().startswith("voice_")
+                    else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+                ),
             }
             for f in out["files"]
             if isinstance(f, dict) and f.get("url") and not f.get("is_image")
         ]
 
-    # Remove legacy [File:...](...) markers from visible text to avoid
-    # "instruction + many file lines squeezed together" on refresh.
+    # Remove legacy [File:...] markers (markdown and path= forms) from visible text.
     if isinstance(out.get("content"), str) and "[File:" in out["content"]:
-        cleaned = re.sub(r"\n?\s*\[File:\s*.*?\]\(.*?\)", "", out["content"]).strip()
+        cleaned = re.sub(
+            r"\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)]+\))?",
+            "",
+            out["content"],
+        ).strip()
         out["content"] = cleaned
 
     return out
@@ -1589,6 +1611,107 @@ async def agent_current_session(
 
 # ---- Upload routes MUST be defined BEFORE the {session_id} catch-all ----
 # Otherwise {session_id} matches "upload-file" etc. and returns 405.
+
+
+class SynthesizeSpeechRequest(BaseModel):
+    """Text-to-speech for Agent Web message bubble (uses agent voice.tts_card)."""
+
+    text: str
+
+
+@router.post("/agent-sessions/{agent_id}/synthesize")
+async def agent_synthesize_speech(
+    agent_id: str,
+    body: SynthesizeSpeechRequest,
+    current_user: User = Depends(get_current_user_dep),
+):
+    """
+    Synthesize speech from message text using the agent's configured voice.tts_card.
+    Returns an /uploads/... URL the frontend can play.
+    """
+    import time
+
+    from opensquad.audio import resolve_voice_card
+    from opensquad.audio.openai_tts import synthesize_with_card
+    from opensquad.audio.realtime_manager import sanitize_for_tts
+
+    from .agent_sessions import _build_agent_id_map
+
+    text = sanitize_for_tts((body.text or "").strip())
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    # Short-lived cache: auto-speech sends many sentence chunks for the same agent.
+    cache = getattr(agent_synthesize_speech, "_tts_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        agent_synthesize_speech._tts_cfg_cache = cache
+    now = time.monotonic()
+    cached = cache.get(agent_id)
+    if cached and now - cached["ts"] < 30:
+        card = cached["card"]
+        voice = cached["voice"]
+        instruction = cached["instruction"]
+    else:
+        id_map = _build_agent_id_map()
+        agent_dir = id_map.get(agent_id)
+        if not agent_dir:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+
+        cfg_path = os.path.join(agent_dir, "config.json")
+        if not os.path.isfile(cfg_path):
+            raise HTTPException(404, f"Agent config not found: {agent_id}")
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                agent_config = json.load(f)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to read agent config: {e}") from e
+
+        card = resolve_voice_card(agent_config, "tts")
+        if not card:
+            raise HTTPException(
+                400,
+                "Agent has no TTS configured. Set voice.tts_model (+ base_url/api_key) or voice.tts_card.",
+            )
+
+        voice_cfg = agent_config.get("voice") or {}
+        voice = (voice_cfg.get("tts_voice") or "").strip()
+        instruction = (voice_cfg.get("tts_instruction") or "").strip()
+        cache[agent_id] = {
+            "ts": now,
+            "card": card,
+            "voice": voice,
+            "instruction": instruction,
+        }
+
+    try:
+        result = await synthesize_with_card(
+            card,
+            text,
+            voice=voice,
+            instruction=instruction,
+            output_dir=_UPLOAD_DIR,
+        )
+    except Exception as e:
+        logger.exception("TTS synthesize failed for %s", agent_id)
+        raise HTTPException(502, f"TTS failed: {e}") from e
+
+    if not result.get("success"):
+        raise HTTPException(502, result.get("error") or "TTS synthesis failed")
+
+    logger.info(
+        "TTS synthesized for %s by %s: %s (%s chars)",
+        agent_id,
+        getattr(current_user, "id", "?"),
+        result.get("url"),
+        len(text),
+    )
+    return {
+        "url": result.get("url"),
+        "path": result.get("path"),
+        "mime": result.get("mime") or "audio/mpeg",
+        "filename": os.path.basename(result.get("path") or "") or None,
+    }
 
 
 @router.post("/agent-sessions/{agent_id}/upload-image")

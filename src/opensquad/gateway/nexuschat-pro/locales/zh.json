@@ -593,6 +593,7 @@
     "provider": "服务商",
     "title_field": "标题",
     "assignedAgents": "已分配助手",
+    "voiceAssignHint": "将该 {{role}} 语音模型卡应用到助手（写入 voice 配置）。未分配的助手无法使用对应语音能力。",
     "showKey": "显示密钥",
     "hideKey": "隐藏密钥",
     "providerCompat": "OpenAI 兼容",

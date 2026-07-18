@@ -189,6 +189,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   const [availablePlugins, setAvailablePlugins] = useState<PluginInfo[]>([]);
   const [modelCards, setModelCards] = useState<ModelCardInfo[]>([]);
   const [modelCardLoading, setModelCardLoading] = useState(false);
+  const [voiceAdvancedOpen, setVoiceAdvancedOpen] = useState(false);
+  const voiceHydratedRef = useRef<string | null>(null);
 
   // 后台预取缓存：key → config（避免触发不必要重渲染，用 ref）
   const configCacheRef = useRef<Record<string, any>>({});
@@ -221,6 +223,62 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       return clone;
     });
   }, []);
+
+  // When config only has legacy *_card bindings, hydrate inline url/key/model from those cards.
+  useEffect(() => {
+    if (!detailAgent || detailTab !== 'config' || detailLoading) return;
+    const agentKey = getAgentKey(detailAgent);
+    if (voiceHydratedRef.current === agentKey) return;
+    const voice = (configObj && configObj.voice) || {};
+    const hasInline = !!(
+      voice.base_url || voice.api_key || voice.asr_model || voice.tts_model || voice.realtime_model
+    );
+    if (hasInline) {
+      voiceHydratedRef.current = agentKey;
+      return;
+    }
+    const cardNames = [voice.asr_card, voice.tts_card, voice.realtime_card].filter(Boolean) as string[];
+    if (cardNames.length === 0) {
+      voiceHydratedRef.current = agentKey;
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const pairs: Array<['asr' | 'tts' | 'realtime', string]> = [];
+        if (voice.asr_card) pairs.push(['asr', voice.asr_card]);
+        if (voice.tts_card) pairs.push(['tts', voice.tts_card]);
+        if (voice.realtime_card) pairs.push(['realtime', voice.realtime_card]);
+        const updates: Record<string, string> = {};
+        for (const [kind, name] of pairs) {
+          try {
+            const res = await modelCardAPI.getCard(name);
+            const c = res.card || (res as any);
+            if (!updates.base_url && c.base_url) updates.base_url = String(c.base_url);
+            if (!updates.api_key && c.api_key) updates.api_key = String(c.api_key);
+            if (kind === 'asr' && c.model_name) updates.asr_model = String(c.model_name);
+            if (kind === 'tts' && c.model_name) updates.tts_model = String(c.model_name);
+            if (kind === 'realtime' && c.model_name) updates.realtime_model = String(c.model_name);
+            if (!updates.realtime_voice && c.audio_output_voice) {
+              updates.realtime_voice = String(c.audio_output_voice);
+            }
+          } catch { /* skip missing card */ }
+        }
+        if (cancelled || Object.keys(updates).length === 0) return;
+        setConfigObj((prev: any) => {
+          const clone = JSON.parse(JSON.stringify(prev || {}));
+          if (!clone.voice || typeof clone.voice !== 'object') clone.voice = {};
+          for (const [k, v] of Object.entries(updates)) {
+            if (!clone.voice[k]) clone.voice[k] = v;
+          }
+          return clone;
+        });
+      } finally {
+        if (!cancelled) voiceHydratedRef.current = agentKey;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [detailAgent, detailTab, detailLoading, configObj]);
 
   // 渲染 Role Prompt markdown
   const renderedRole = useMemo(() => {
@@ -321,6 +379,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
     setDetailTab(tab);
     setRoleEditing(false);
     setShowApiKey(false);
+    setVoiceAdvancedOpen(false);
+    voiceHydratedRef.current = null;
 
     if (tab === 'config') {
       const cached = configCacheRef.current[key];
@@ -895,37 +955,110 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           </div>
         </div>
 
-        {/* ── 语音能力（StepAudio） ── */}
+        {/* ── 语音能力：三项各自选模型卡 ── */}
         <div>
-          <div className={sectionTitleCls}><Wrench size={11} /> Voice (StepAudio)</div>
+          <div className={sectionTitleCls}><Wrench size={11} /> Voice</div>
           <div className="bg-bgLight rounded-lg p-3 space-y-2">
-            <p className="text-[10px] text-textMuted">绑定 ASR / TTS / Realtime 模型卡。TTS 仅在 Agent 调用 synthesize_speech 时合成。</p>
+            <p className="text-[10px] text-textMuted">
+              ASR（语音输入）/ TTS（语音输出）/ Realtime（双向）各自独立选择模型卡。
+              先在「模型」面板创建卡（只需 url / api_key / model），再在此绑定。
+            </p>
             <div className="grid grid-cols-1 gap-2">
-              {(['asr_card', 'tts_card', 'realtime_card'] as const).map((key) => (
+              {([
+                { key: 'asr_card' as const, label: 'ASR 模型卡（语音输入）', hint: 'is_audio' },
+                { key: 'tts_card' as const, label: 'TTS 模型卡（语音输出）', hint: 'is_audio_output' },
+                { key: 'realtime_card' as const, label: 'Realtime 模型卡（双向）', hint: 'audio in+out' },
+              ]).map(({ key, label, hint }) => (
                 <div key={key}>
-                  <label className="block text-[10px] font-semibold text-textMuted mb-1">{key}</label>
+                  <label className="block text-[10px] font-semibold text-textMuted mb-1">
+                    {label} <span className="font-normal opacity-60">({hint})</span>
+                  </label>
                   <select
                     value={cfgGet(['voice', key], '')}
-                    onChange={e => cfgSet(['voice', key], e.target.value)}
+                    onChange={(e) => cfgSet(['voice', key], e.target.value)}
                     className={inputCls}
                   >
                     <option value="">(none)</option>
                     {modelCards.map(card => (
-                      <option key={card.name} value={card.name}>{card.title || card.name}</option>
+                      <option key={card.name} value={card.name}>
+                        {card.title || card.name}
+                        {card.model_name ? ` · ${card.model_name}` : ''}
+                      </option>
                     ))}
                   </select>
                 </div>
               ))}
               <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_voice</label>
+                <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_voice（音色，可选）</label>
                 <input
                   value={cfgGet(['voice', 'realtime_voice'], '')}
                   onChange={e => cfgSet(['voice', 'realtime_voice'], e.target.value)}
-                  placeholder="linjiajiejie"
+                  placeholder={t('common.optional') || 'optional'}
                   className={inputCls}
                 />
               </div>
             </div>
+
+            <button
+              type="button"
+              onClick={() => setVoiceAdvancedOpen(v => !v)}
+              className="flex items-center gap-1 text-[10px] text-textMuted hover:text-primary border-0 bg-transparent cursor-pointer px-0 py-1"
+            >
+              {voiceAdvancedOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              高级：内联 url / api_key / model（无模型卡时的兜底）
+            </button>
+            {voiceAdvancedOpen && (
+              <div className="grid grid-cols-1 gap-2 pt-1 border-t border-border/50">
+                <p className="text-[10px] text-textMuted">
+                  若上方未选模型卡，则使用这里的共享凭证 + 各 model。有模型卡时以卡为准（url / key / model 均来自模型卡，勿在前端写死）。
+                </p>
+                <div>
+                  <label className="block text-[10px] font-semibold text-textMuted mb-1">base_url</label>
+                  <input
+                    value={cfgGet(['voice', 'base_url'], '')}
+                    onChange={e => cfgSet(['voice', 'base_url'], e.target.value)}
+                    placeholder="https://..."
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold text-textMuted mb-1">api_key</label>
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    value={cfgGet(['voice', 'api_key'], '')}
+                    onChange={e => cfgSet(['voice', 'api_key'], e.target.value)}
+                    placeholder="sk-..."
+                    className={inputCls}
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-textMuted mb-1">asr_model</label>
+                    <input
+                      value={cfgGet(['voice', 'asr_model'], '')}
+                      onChange={e => cfgSet(['voice', 'asr_model'], e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-textMuted mb-1">tts_model</label>
+                    <input
+                      value={cfgGet(['voice', 'tts_model'], '')}
+                      onChange={e => cfgSet(['voice', 'tts_model'], e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_model</label>
+                    <input
+                      value={cfgGet(['voice', 'realtime_model'], '')}
+                      onChange={e => cfgSet(['voice', 'realtime_model'], e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

@@ -208,6 +208,19 @@ class AIWebSocketService {
     this._sendCommand('switch_model', { card: cardName });
   }
 
+  /**
+   * Update Agent voice model-card bindings at runtime (ASR / TTS / Realtime).
+   * Persists to config.json and refreshes in-memory agent_config.
+   */
+  setVoiceConfig(voice: {
+    asr_card?: string;
+    tts_card?: string;
+    realtime_card?: string;
+    realtime_voice?: string;
+  }) {
+    this._sendCommand('set_voice_config', { ...voice });
+  }
+
   /** Set Cursor-style reasoning effort (low | medium | high) on the running agent. */
   setReasoningEffort(effort: 'low' | 'medium' | 'high') {
     this._sendCommand('set_reasoning_effort', { effort });
@@ -258,8 +271,17 @@ class AIWebSocketService {
   }
 
   /** Start StepFun realtime voice session (tools integrated on agent side). */
-  startVoiceRealtime(data?: { voice?: string; instructions?: string }) {
+  startVoiceRealtime(data?: {
+    voice?: string;
+    instructions?: string;
+    force_ask_agent?: boolean;
+  }) {
     this._sendCommand('voice_realtime_start', data || {});
+  }
+
+  /** Update live realtime options (e.g. force_ask_agent) without reconnecting. */
+  setVoiceRealtimeOptions(data: { force_ask_agent?: boolean }) {
+    this._sendCommand('voice_realtime_options', data || {});
   }
 
   stopVoiceRealtime() {
@@ -273,6 +295,15 @@ class AIWebSocketService {
   /** Send PCM16 base64 audio chunk for realtime call. */
   sendVoiceAudioIn(pcm16Base64: string) {
     this._send({ type: 'voice_audio_in', audio: pcm16Base64 });
+  }
+
+  /** Force/mouthpiece mode: one whole utterance (PCM16 base64) for ASR→Agent→TTS. */
+  sendMouthpieceUtterance(pcm16Base64: string, sampleRate: number = 24000) {
+    this._send({
+      type: 'voice_mouthpiece_utterance',
+      audio: pcm16Base64,
+      sample_rate: sampleRate,
+    });
   }
 
   /**

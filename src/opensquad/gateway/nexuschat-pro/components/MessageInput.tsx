@@ -5,6 +5,7 @@ import { Bold, Italic, Link, List, Code, Smile, Folder, Paperclip, Send, X, Imag
 import { User } from '../types';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
+import { getUserMediaSafe } from '../utils/mediaDevices';
 
 interface MessageInputProps {
   value: string;
@@ -14,7 +15,9 @@ interface MessageInputProps {
   onFileSelect: () => void;
   onFolderSelect: () => void;
   onImageSelect?: () => void; // 专门用于选择图片
-  onVoiceRecord?: (blob: Blob, duration: number) => void; // 语音录制回调
+  onVoiceRecord?: (blob: Blob, duration: number) => void | Promise<void>; // 语音录制 → STT
+  /** Parent is calling group ASR; show loading on mic. */
+  voiceDictating?: boolean;
   placeholder?: string;
   groupMembers?: User[];
   onUploadFile?: (file: File) => void;
@@ -131,6 +134,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   onFolderSelect,
   onImageSelect,
   onVoiceRecord,
+  voiceDictating = false,
   placeholder,
   groupMembers = [],
   onPasteFiles,
@@ -226,7 +230,7 @@ export const MessageInput: React.FC<MessageInputProps> = ({
   // 开始录音
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await getUserMediaSafe({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -241,12 +245,17 @@ export const MessageInput: React.FC<MessageInputProps> = ({
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const duration = recordingDurationRef.current;
 
-        if (onVoiceRecordRef.current) {
-          onVoiceRecordRef.current(audioBlob, duration);
-        }
-
-        // 停止所有轨道
-        stream.getTracks().forEach(track => track.stop());
+        void (async () => {
+          try {
+            if (onVoiceRecordRef.current) {
+              await onVoiceRecordRef.current(audioBlob, duration);
+            }
+          } catch (e) {
+            console.error('voice record callback failed', e);
+          } finally {
+            stream.getTracks().forEach(track => track.stop());
+          }
+        })();
       };
 
       mediaRecorder.start();
@@ -264,6 +273,11 @@ export const MessageInput: React.FC<MessageInputProps> = ({
       }, 1000);
     } catch (err) {
       console.error('无法访问麦克风:', err);
+      const detail = err instanceof Error ? err.message : String(err || '');
+      if (detail.includes('HTTPS') || detail.includes('安全上下文') || detail.includes('不支持')) {
+        alert(detail);
+        return;
+      }
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       const message = isMobile
         ? t('chat.microphoneErrorMobile')
@@ -567,27 +581,40 @@ export const MessageInput: React.FC<MessageInputProps> = ({
           <Send size={16} className="md:w-5 md:h-5" />
         </button>
 
-        {/* 语音录制按钮 - 仅桌面端显示 */}
+        {/* 语音录制按钮 - 仅桌面端显示；松手后 ASR 写入发送框 */}
         <button
-          onMouseDown={() => startRecording()}
+          onMouseDown={() => !voiceDictating && startRecording()}
           onMouseUp={() => stopRecording()}
           onMouseLeave={() => isRecording && stopRecording()}
+          disabled={voiceDictating}
           className={`hidden md:flex items-center justify-center w-[32px] h-[32px] md:w-[44px] md:h-[44px] rounded-md md:rounded-xl transition-all flex-shrink-0 ${
-            isRecording
+            voiceDictating
+              ? 'bg-primary/20 text-primary cursor-wait'
+              : isRecording
               ? 'bg-red-500 text-white animate-pulse'
               : 'bg-red-100 text-red-600 hover:bg-red-200'
           }`}
-          title={isRecording ? t('chat.recording', { duration: recordingDuration }) : t('chat.holdToRecord')}
+          title={
+            voiceDictating
+              ? '转写中…'
+              : isRecording
+                ? t('chat.recording', { duration: recordingDuration })
+                : '按住录音，松手后转文字填入发送框'
+          }
         >
           <Mic size={16} className="md:w-5 md:h-5" />
         </button>
       </div>
 
-      {/* 录制状态指示器 */}
-      {isRecording && (
-        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-red-500 text-white px-3 py-1.5 rounded-full text-xs md:text-sm font-medium flex items-center gap-2 shadow-lg whitespace-nowrap z-50">
+      {/* 录制 / 转写状态指示器 */}
+      {(isRecording || voiceDictating) && (
+        <div className={`absolute bottom-full mb-2 left-1/2 -translate-x-1/2 text-white px-3 py-1.5 rounded-full text-xs md:text-sm font-medium flex items-center gap-2 shadow-lg whitespace-nowrap z-50 ${
+          voiceDictating ? 'bg-primary' : 'bg-red-500'
+        }`}>
           <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
-          {t('chat.recordingStatus', { duration: recordingDuration })}
+          {voiceDictating
+            ? '转写中…'
+            : t('chat.recordingStatus', { duration: recordingDuration })}
         </div>
       )}
     </div>

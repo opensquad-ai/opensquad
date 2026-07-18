@@ -593,6 +593,7 @@
     "provider": "Provider",
     "title_field": "Title",
     "assignedAgents": "Assigned Agents",
+    "voiceAssignHint": "Apply this {{role}} voice card to an agent (writes voice config). Agents without it cannot use the matching voice capability.",
     "showKey": "Show Key",
     "hideKey": "Hide Key",
     "providerCompat": "OpenAI Compatible",

@@ -108,12 +108,21 @@ class GroupChatConfigSchema(BaseModel):
 
 
 class VoiceConfigSchema(BaseModel):
-    """Optional StepAudio / voice capability cards bound to an agent."""
+    """Optional voice capability: inline url/key/model and/or legacy model cards."""
 
     model_config = ConfigDict(extra="allow")
+    # Shared inline credentials (ASR / TTS / Realtime)
+    base_url: str = Field(default="")
+    api_key: str = Field(default="")
+    asr_model: str = Field(default="")
+    tts_model: str = Field(default="")
+    realtime_model: str = Field(default="")
+    # Legacy model-card bindings (override inline when set)
     realtime_card: str = Field(default="")
     tts_card: str = Field(default="")
     asr_card: str = Field(default="")
+    # When true (synced from ASR model card), voice attachments may be auto-transcribed.
+    auto_asr: bool = Field(default=False)
     realtime_voice: str = Field(default="")
     realtime_instructions: str = Field(default="")
 

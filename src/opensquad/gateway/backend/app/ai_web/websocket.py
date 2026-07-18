@@ -174,6 +174,10 @@ class AgentWebSocketHandler:
                     "compression_progress",
                     "job_stdout",
                     "job_status",
+                    # StepAudio realtime voice (browser <-> agent bridge)
+                    "voice_realtime_status",
+                    "voice_audio_out",
+                    "voice_transcript",
                 ]:
                     # Agent's response message, forward to user
                     user_id = message.get("user_id")
@@ -492,6 +496,17 @@ class UserWebSocketHandler:
                                 "message": f"Agent {agent_id} is not connected; command {command!r} not delivered",
                             }
                         )
+                        if command in ("voice_realtime_start", "voice_realtime_stop"):
+                            await user_ws.send_json(
+                                {
+                                    "type": "voice_realtime_status",
+                                    "content": {
+                                        "ok": False,
+                                        "status": "error",
+                                        "error": f"Agent {agent_id} is not connected",
+                                    },
+                                }
+                            )
                     continue
 
                 if msg_type == "chat":
@@ -598,6 +613,20 @@ class UserWebSocketHandler:
                                 "type": "voice_audio_in",
                                 "user_id": user_id,
                                 "audio": audio,
+                            },
+                        )
+
+                elif msg_type == "voice_mouthpiece_utterance":
+                    audio = message.get("audio") or ""
+                    sample_rate = message.get("sample_rate") or 24000
+                    if audio:
+                        await registry.send_to_agent(
+                            agent_id,
+                            {
+                                "type": "voice_mouthpiece_utterance",
+                                "user_id": user_id,
+                                "audio": audio,
+                                "sample_rate": sample_rate,
                             },
                         )
 

@@ -470,7 +470,32 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
         system_prompt = system_prompt.replace("{{MCP_GUIDE}}", "(MCP service is not enabled.)")
         system_prompt = system_prompt.replace("{{MCP_CURRENT_STATE}}", "(MCP service is not enabled.)")
 
+    # Realtime / mouthpiece voice: rules once in system prompt; user turns only carry <realtime_voice>.
+    voice_cfg = config.get("voice") or {}
+    if isinstance(voice_cfg, dict) and (
+        any(voice_cfg.get(k) for k in ("asr_card", "tts_card", "realtime_card"))
+        or (
+            voice_cfg.get("base_url")
+            and voice_cfg.get("api_key")
+            and any(voice_cfg.get(k) for k in ("asr_model", "tts_model", "realtime_model"))
+        )
+    ):
+        system_prompt = system_prompt.rstrip() + "\n\n" + _VOICE_REALTIME_PROMPT_SECTION
+        logger.info("[Boot] Realtime voice prompt section injected")
+
     return system_prompt
+
+
+_VOICE_REALTIME_PROMPT_SECTION = """## Realtime voice mode
+
+When a user message is wrapped in `<realtime_voice id="...">...</realtime_voice>` (or `<realtime_voice>...</realtime_voice>`), it is a live voice utterance from the Agent Web voice UI. Your reply will be spoken aloud by TTS.
+
+Rules for these turns:
+1. Answer normally: use tools if needed, reply in the user's language, keep it speakable and reasonably concise.
+2. Plain speech only: no emoji, emoticons, markdown, or decorative symbols (no *, **, #, backticks, _, ~, |, decorative brackets, ★, •, →, etc.). TTS would read them aloud. Use plain sentences and commas/periods only.
+3. If you deliberately choose not to speak this turn, reply with ONLY `[VOICE_NO_REPLY]` and nothing else.
+4. Do not mention the realtime_voice tag, VoiceAsk, or mouthpiece in a normal answer.
+"""
 
 
 def _build_mcp_guide() -> str:
@@ -655,7 +680,7 @@ async def main(agent_dir: str, override_port: int | None = None):
     agent_logger = logging.getLogger(f"Agent[{agent_id}]")
     agent_logger.info(f"[BootPerf] boot_main_start=0ms agent_id={agent_id}")
 
-    # Expose config to plugins/tools (step_voice ASR/TTS card resolution, etc.)
+    # Expose config to plugins/tools (ASR/TTS Translate card resolution, etc.)
     try:
         from opensquad import agent_runtime_context as _arc
         from plugins.step_voice import step_voice_tools as _sv_tools
@@ -663,16 +688,32 @@ async def main(agent_dir: str, override_port: int | None = None):
         _arc.set_context(config=config, agent_id_value=agent_id, agent_dir_value=agent_dir)
         _sv_tools.set_agent_config(config)
     except Exception as e:
-        agent_logger.debug("[Boot] agent_runtime_context / step_voice inject skipped: %s", e)
+        agent_logger.debug("[Boot] agent_runtime_context / asr_tts inject skipped: %s", e)
 
-    # Auto-enable step_voice plugin tools when voice cards are configured
+    # Auto-enable ASR/TTS Translate plugin when voice is configured (cards or inline)
     voice_cfg = config.get("voice") or {}
-    if any(voice_cfg.get(k) for k in ("asr_card", "tts_card", "realtime_card")):
+    if isinstance(voice_cfg, dict) and (
+        any(voice_cfg.get(k) for k in ("asr_card", "tts_card", "realtime_card"))
+        or (
+            voice_cfg.get("base_url")
+            and voice_cfg.get("api_key")
+            and any(voice_cfg.get(k) for k in ("asr_model", "tts_model", "realtime_model"))
+        )
+    ):
         tools_list = list(config.get("tools") or [])
-        if "step_voice" not in tools_list:
-            tools_list.append("step_voice")
+        changed = False
+        if "asr_tts" not in tools_list:
+            tools_list.append("asr_tts")
+            changed = True
+        # Migrate legacy plugin id → generic name
+        if "step_voice" in tools_list:
+            tools_list = [t for t in tools_list if t != "step_voice"]
+            if "asr_tts" not in tools_list:
+                tools_list.append("asr_tts")
+            changed = True
+        if changed:
             config["tools"] = tools_list
-            agent_logger.info("[Boot] Auto-enabled step_voice plugin (voice cards present)")
+            agent_logger.info("[Boot] Auto-enabled asr_tts plugin (voice config present)")
 
     # ── Phase 1b: Create AgentContext ──
     agent_ctx = AgentContext(

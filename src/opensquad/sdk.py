@@ -231,6 +231,20 @@ class BaseAgent:
                     await rtm.append_audio(audio)
             except Exception as e:
                 logger.error("[SDK] voice_audio_in failed: %s", e)
+        elif msg_type == "voice_mouthpiece_utterance":
+            try:
+                from opensquad.audio import realtime_manager as rtm
+
+                audio = data.get("audio") or ""
+                if isinstance(audio, dict):
+                    sample_rate = int(audio.get("sample_rate") or 24000)
+                    audio = audio.get("audio") or ""
+                else:
+                    sample_rate = int(data.get("sample_rate") or 24000)
+                if audio:
+                    await rtm.handle_mouthpiece_utterance(audio, sample_rate=sample_rate)
+            except Exception as e:
+                logger.error("[SDK] voice_mouthpiece_utterance failed: %s", e)
         elif msg_type == "pong":
             logger.debug("Received pong")
         else:

@@ -15,7 +15,7 @@ import time
 import uuid
 
 import httpx
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -118,22 +118,37 @@ def _normalize_session_message(msg: dict) -> dict:
     # Parse text markers and lift them to structured files/images for frontend rendering.
     content_text = out.get("content") or ""
     parsed_files = []
-    for m in re.finditer(r"\[File:\s*(.*?)\]\((.*?)\)", content_text):
+    # Markdown link form: [File: name (size) ...](/uploads/xxx)
+    # Also path= form used by Agent Web voice/file sends.
+    file_marker_re = re.compile(
+        r"\[File:\s*(.+?)\s*\(([^)]*)\)(?:\s*path=([^\s\]]+))?(?:\s*type=(audio|video|voice|file))?\](?:\(([^)]+)\))?"
+    )
+    for m in file_marker_re.finditer(content_text):
         name = (m.group(1) or "file").strip()
-        url = (m.group(2) or "").strip()
+        path_raw = (m.group(3) or "").strip()
+        kind = (m.group(4) or "").strip().lower()
+        url = (m.group(5) or "").strip() or path_raw
         if not url:
             continue
-        lower = url.lower()
+        # Prefer web-relative /uploads leaf when given an absolute disk path
+        if not url.startswith("/") and not url.startswith("http"):
+            url = "/uploads/" + url.replace("\\", "/").split("/")[-1]
+        lower = (name + " " + url).lower()
+        is_voice = kind in ("audio", "voice") or name.lower().startswith("voice_")
         is_image = lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"))
-        is_audio = lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"))
-        is_video = lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+        is_audio = is_voice or lower.endswith((".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".webm"))
+        is_video = (not is_audio) and lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
         parsed_files.append(
             {
                 "original_name": name,
                 "url": url,
+                "path": path_raw or None,
                 "is_image": is_image,
-                "is_audio": is_audio,
-                "is_video": is_video,
+                "is_audio": is_audio and not is_image,
+                "is_video": is_video and not is_image,
+                "type": "voice"
+                if kind == "voice" or name.lower().startswith("voice_")
+                else ("audio" if is_audio else ("video" if is_video else "file")),
             }
         )
 
@@ -171,16 +186,23 @@ def _normalize_session_message(msg: dict) -> dict:
             {
                 "name": f.get("original_name") or f.get("filename") or "file",
                 "url": f.get("url"),
-                "type": "video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"),
+                "type": (
+                    "voice"
+                    if f.get("type") == "voice" or str(f.get("original_name") or "").lower().startswith("voice_")
+                    else ("video" if f.get("is_video") else ("audio" if f.get("is_audio") else "file"))
+                ),
             }
             for f in out["files"]
             if isinstance(f, dict) and f.get("url") and not f.get("is_image")
         ]
 
-    # Remove legacy [File:...](...) markers from visible text to avoid
-    # "instruction + many file lines squeezed together" on refresh.
+    # Remove legacy [File:...] markers (markdown and path= forms) from visible text.
     if isinstance(out.get("content"), str) and "[File:" in out["content"]:
-        cleaned = re.sub(r"\n?\s*\[File:\s*.*?\]\(.*?\)", "", out["content"]).strip()
+        cleaned = re.sub(
+            r"\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)]+\))?",
+            "",
+            out["content"],
+        ).strip()
         out["content"] = cleaned
 
     return out
@@ -622,6 +644,276 @@ async def agent_current_session(
 
 # ---- Upload routes MUST be defined BEFORE the {session_id} catch-all ----
 # Otherwise {session_id} matches "upload-file" etc. and returns 405.
+
+
+class SynthesizeSpeechRequest(BaseModel):
+    """Text-to-speech for Agent Web message bubble (uses agent voice.tts_card)."""
+
+    text: str
+
+
+@router.post("/agent-sessions/{agent_id}/synthesize")
+async def agent_synthesize_speech(
+    agent_id: str,
+    body: SynthesizeSpeechRequest,
+    current_user: User = Depends(get_current_user_dep),
+):
+    """
+    Synthesize speech from message text using the agent's configured voice.tts_card.
+    Returns an /uploads/... URL the frontend can play.
+    """
+    import time
+
+    from opensquad.audio import resolve_voice_card
+    from opensquad.audio.openai_tts import synthesize_with_card
+    from opensquad.audio.realtime_manager import sanitize_for_tts
+
+    from ..agent_sessions import _build_agent_id_map
+
+    text = sanitize_for_tts((body.text or "").strip())
+    if not text:
+        raise HTTPException(400, "text is required")
+
+    # Short-lived cache: auto-speech sends many sentence chunks for the same agent.
+    cache = getattr(agent_synthesize_speech, "_tts_cfg_cache", None)
+    if cache is None:
+        cache = {}
+        agent_synthesize_speech._tts_cfg_cache = cache
+    now = time.monotonic()
+    cached = cache.get(agent_id)
+    if cached and now - cached["ts"] < 30:
+        card = cached["card"]
+        voice = cached["voice"]
+        instruction = cached["instruction"]
+    else:
+        id_map = _build_agent_id_map()
+        agent_dir = id_map.get(agent_id)
+        if not agent_dir:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+
+        cfg_path = os.path.join(agent_dir, "config.json")
+        if not os.path.isfile(cfg_path):
+            raise HTTPException(404, f"Agent config not found: {agent_id}")
+        try:
+            import json
+
+            with open(cfg_path, encoding="utf-8") as f:
+                agent_config = json.load(f)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to read agent config: {e}") from e
+
+        card = resolve_voice_card(agent_config, "tts")
+        if not card:
+            raise HTTPException(
+                400,
+                "Agent has no TTS configured. Set voice.tts_model (+ base_url/api_key) or voice.tts_card.",
+            )
+
+        voice_cfg = agent_config.get("voice") or {}
+        voice = (voice_cfg.get("tts_voice") or "").strip()
+        instruction = (voice_cfg.get("tts_instruction") or "").strip()
+        cache[agent_id] = {
+            "ts": now,
+            "card": card,
+            "voice": voice,
+            "instruction": instruction,
+        }
+
+    try:
+        result = await synthesize_with_card(
+            card,
+            text,
+            voice=voice,
+            instruction=instruction,
+            output_dir=_UPLOAD_DIR,
+        )
+    except Exception as e:
+        logger.exception("TTS synthesize failed for %s", agent_id)
+        raise HTTPException(502, f"TTS failed: {e}") from e
+
+    if not result.get("success"):
+        raise HTTPException(502, result.get("error") or "TTS synthesis failed")
+
+    logger.info(
+        "TTS synthesized for %s by %s: %s (%s chars)",
+        agent_id,
+        getattr(current_user, "id", "?"),
+        result.get("url"),
+        len(text),
+    )
+    return {
+        "url": result.get("url"),
+        "path": result.get("path"),
+        "mime": result.get("mime") or "audio/mpeg",
+        "filename": os.path.basename(result.get("path") or "") or None,
+    }
+
+
+@router.post("/agent-sessions/{agent_id}/transcribe")
+async def agent_transcribe_audio(
+    agent_id: str,
+    current_user: User = Depends(get_current_user_dep),
+    file: UploadFile | None = File(None),
+    path: str | None = Form(None),
+    language: str = Form("zh"),
+):
+    """
+    Speech-to-text using the agent's voice.asr_card / inline ASR.
+    Accepts multipart audio ``file`` and/or an already-uploaded ``path`` under uploads.
+    """
+    from opensquad.audio import resolve_voice_card
+    from opensquad.audio.stepfun_asr import transcribe_with_card
+
+    from ..agent_sessions import _build_agent_id_map
+
+    id_map = _build_agent_id_map()
+    agent_dir = id_map.get(agent_id)
+    if not agent_dir:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+
+    cfg_path = os.path.join(agent_dir, "config.json")
+    if not os.path.isfile(cfg_path):
+        raise HTTPException(404, f"Agent config not found: {agent_id}")
+    try:
+        import json as _json
+
+        with open(cfg_path, encoding="utf-8") as f:
+            agent_config = _json.load(f)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read agent config: {e}") from e
+
+    card = resolve_voice_card(agent_config, "asr")
+    if not card:
+        raise HTTPException(
+            400,
+            "Agent has no ASR configured. Set voice.asr_model (+ base_url/api_key) or voice.asr_card.",
+        )
+
+    audio_path: str | None = None
+    cleanup = False
+    if file is not None and getattr(file, "filename", None):
+        ext = os.path.splitext(file.filename or "")[1] or ".webm"
+        filename = f"asr_{uuid.uuid4().hex[:10]}{ext}"
+        audio_path = os.path.join(_UPLOAD_DIR, filename)
+        content = await file.read()
+        if not content:
+            raise HTTPException(400, "empty audio file")
+        with open(audio_path, "wb") as fw:
+            fw.write(content)
+        cleanup = True
+    elif path:
+        # Allow relative upload names or absolute paths under _UPLOAD_DIR
+        candidate = path.strip()
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(_UPLOAD_DIR, os.path.basename(candidate))
+        real_upload = os.path.realpath(_UPLOAD_DIR)
+        real_cand = os.path.realpath(candidate)
+        if not real_cand.startswith(real_upload + os.sep) and real_cand != real_upload:
+            raise HTTPException(400, "path must be under uploads directory")
+        if not os.path.isfile(real_cand):
+            raise HTTPException(404, f"audio file not found: {os.path.basename(real_cand)}")
+        audio_path = real_cand
+    else:
+        raise HTTPException(400, "file or path is required")
+
+    try:
+        result = await transcribe_with_card(card, audio_path, language=language or "zh")
+    except Exception as e:
+        logger.exception("ASR transcribe failed for %s", agent_id)
+        raise HTTPException(502, f"ASR failed: {e}") from e
+    finally:
+        if cleanup and audio_path and os.path.isfile(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+    if not result.get("success"):
+        raise HTTPException(502, result.get("error") or "ASR transcription failed")
+
+    text = (result.get("text") or "").strip()
+    logger.info(
+        "ASR transcribed for %s by %s: %s chars",
+        agent_id,
+        getattr(current_user, "id", "?"),
+        len(text),
+    )
+    return {"text": text, "language": language or "zh"}
+
+
+@router.post("/group-transcribe")
+async def group_transcribe_audio(
+    current_user: User = Depends(get_current_user_dep),
+    file: UploadFile | None = File(None),
+    path: str | None = Form(None),
+    language: str = Form("zh"),
+):
+    """
+    Speech-to-text for group chat using the model card marked ``group_asr: true``.
+    """
+    from opensquad.audio import resolve_group_asr_card
+    from opensquad.audio.stepfun_asr import transcribe_with_card
+
+    card = resolve_group_asr_card()
+    if not card:
+        raise HTTPException(
+            400,
+            "No group ASR model card. Open Models → ASR card → enable「设为群聊语音转文本」(group_asr).",
+        )
+
+    audio_path: str | None = None
+    cleanup = False
+    if file is not None and getattr(file, "filename", None):
+        ext = os.path.splitext(file.filename or "")[1] or ".webm"
+        filename = f"group_asr_{uuid.uuid4().hex[:10]}{ext}"
+        audio_path = os.path.join(_UPLOAD_DIR, filename)
+        content = await file.read()
+        if not content:
+            raise HTTPException(400, "empty audio file")
+        with open(audio_path, "wb") as fw:
+            fw.write(content)
+        cleanup = True
+    elif path:
+        candidate = path.strip()
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(_UPLOAD_DIR, os.path.basename(candidate))
+        real_upload = os.path.realpath(_UPLOAD_DIR)
+        real_cand = os.path.realpath(candidate)
+        if not real_cand.startswith(real_upload + os.sep) and real_cand != real_upload:
+            raise HTTPException(400, "path must be under uploads directory")
+        if not os.path.isfile(real_cand):
+            raise HTTPException(404, f"audio file not found: {os.path.basename(real_cand)}")
+        audio_path = real_cand
+    else:
+        raise HTTPException(400, "file or path is required")
+
+    try:
+        result = await transcribe_with_card(card, audio_path, language=language or "zh")
+    except Exception as e:
+        logger.exception("Group ASR transcribe failed")
+        raise HTTPException(502, f"ASR failed: {e}") from e
+    finally:
+        if cleanup and audio_path and os.path.isfile(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+    if not result.get("success"):
+        raise HTTPException(502, result.get("error") or "ASR transcription failed")
+
+    text = (result.get("text") or "").strip()
+    logger.info(
+        "Group ASR transcribed by %s via card %s: %s chars",
+        getattr(current_user, "id", "?"),
+        card.get("_card") or card.get("name"),
+        len(text),
+    )
+    return {
+        "text": text,
+        "language": language or "zh",
+        "card": card.get("_card") or card.get("name"),
+    }
 
 
 @router.post("/agent-sessions/{agent_id}/upload-image")

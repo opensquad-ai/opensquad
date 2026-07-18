@@ -425,7 +425,7 @@
     {
       "id": "stepfun",
       "label": "阶跃星辰 Step",
-      "base_url": "https://api.stepfun.com/v1",
+      "base_url": "https://api.stepfun.com/step_plan/v1",
       "provider": "openai_compat",
       "models": [
         {

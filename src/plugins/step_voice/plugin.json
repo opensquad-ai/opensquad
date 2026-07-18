@@ -1,11 +1,11 @@
 {
-  "name": "step_voice",
-  "display_name": "Step Voice (ASR/TTS)",
+  "name": "asr_tts",
+  "display_name": "ASR/TTS Translate",
   "version": "1.0.0",
   "type": "tool",
   "enabled": true,
   "node_scope": "all",
-  "description": "StepFun cloud ASR/TTS tools. Transcribe audio and synthesize speech via model cards.",
+  "description": "Cloud ASR/TTS tools. Transcribe audio and synthesize speech using the agent's voice model-card configuration (any OpenAI-compatible provider).",
   "author": "OpenSquad",
   "tags": [
     "audio",
@@ -13,6 +13,13 @@
     "tts"
   ],
   "tools": [
+    {
+      "name": "asr_tts",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    },
     {
       "name": "step_voice",
       "module": "proxy",

@@ -296,6 +296,64 @@ class GatewayAdapter(BaseAgent):
                 logger.warning("[Adapter] switch_model command missing 'card' field")
             return
 
+        if command == "set_voice_config":
+            # Update voice.*_card (and optional realtime_voice) in memory + config.json.
+            try:
+                from opensquad import agent_runtime_context as arc
+                from plugins.step_voice import step_voice_tools as _sv_tools
+
+                voice_patch = {}
+                for key in ("asr_card", "tts_card", "realtime_card", "realtime_voice"):
+                    if key in cmd_data:
+                        voice_patch[key] = cmd_data.get(key) or ""
+                if not voice_patch:
+                    logger.warning("[Adapter] set_voice_config missing voice fields")
+                    return
+
+                cfg = dict(arc.agent_config or {})
+                voice = dict(cfg.get("voice") or {})
+                voice.update(voice_patch)
+                cfg["voice"] = voice
+                arc.set_context(config=cfg)
+                try:
+                    _sv_tools.set_agent_config(cfg)
+                except Exception:
+                    pass
+
+                # Persist to agent config.json when agent_dir is known
+                agent_dir = (arc.agent_dir or "").strip()
+                if agent_dir:
+                    import json
+                    import os
+
+                    cfg_path = os.path.join(agent_dir, "config.json")
+                    if os.path.isfile(cfg_path):
+                        with open(cfg_path, encoding="utf-8") as f:
+                            disk = json.load(f)
+                        disk_voice = dict(disk.get("voice") or {})
+                        disk_voice.update(voice_patch)
+                        disk["voice"] = disk_voice
+                        with open(cfg_path, "w", encoding="utf-8") as f:
+                            json.dump(disk, f, ensure_ascii=False, indent=2)
+                            f.write("\n")
+
+                await self._send_event(
+                    {
+                        "event": "voice_config_updated",
+                        "voice": {
+                            "asr_card": voice.get("asr_card") or "",
+                            "tts_card": voice.get("tts_card") or "",
+                            "realtime_card": voice.get("realtime_card") or "",
+                            "realtime_voice": voice.get("realtime_voice") or "",
+                        },
+                    },
+                    msg_type="info",
+                )
+                logger.info("[Adapter] set_voice_config applied: %s", voice_patch)
+            except Exception as e:
+                logger.warning("[Adapter] set_voice_config failed: %s", e)
+            return
+
         if command == "set_reasoning_effort":
             effort = cmd_data.get("effort", "") or cmd_data.get("reasoning_effort", "")
             if effort:
@@ -361,14 +419,31 @@ class GatewayAdapter(BaseAgent):
             from opensquad.audio import realtime_manager as rtm
 
             try:
-                result = await rtm.start_session(
-                    voice=cmd_data.get("voice", ""),
-                    instructions=cmd_data.get("instructions", ""),
+                logger.info("[Adapter] voice_realtime_start begin user=%s", user_id)
+                result = await asyncio.wait_for(
+                    rtm.start_session(
+                        voice=cmd_data.get("voice", ""),
+                        instructions=cmd_data.get("instructions", ""),
+                        force_ask_agent=cmd_data.get("force_ask_agent", True),
+                    ),
+                    timeout=25.0,
                 )
+                if isinstance(result, dict) and not result.get("status"):
+                    result = {
+                        **result,
+                        "status": "connected" if result.get("ok") else "error",
+                    }
+                logger.info("[Adapter] voice_realtime_start done: %s", result)
                 await self._send_event(result, "voice_realtime_status")
+            except TimeoutError:
+                logger.error("[Adapter] voice_realtime_start timed out")
+                await self._send_event(
+                    {"ok": False, "status": "error", "error": "Realtime connect timed out"},
+                    "voice_realtime_status",
+                )
             except Exception as e:
                 logger.error("[Adapter] voice_realtime_start failed: %s", e)
-                await self._send_event({"status": "error", "error": str(e)}, "voice_realtime_status")
+                await self._send_event({"ok": False, "status": "error", "error": str(e)}, "voice_realtime_status")
             return
 
         if command == "voice_realtime_stop":
@@ -381,10 +456,50 @@ class GatewayAdapter(BaseAgent):
                 logger.error("[Adapter] voice_realtime_stop failed: %s", e)
             return
 
+        if command == "voice_realtime_options":
+            from opensquad.audio import realtime_manager as rtm
+
+            try:
+                result = rtm.set_session_options(
+                    force_ask_agent=cmd_data.get("force_ask_agent"),
+                )
+                await self._send_event(result, "voice_realtime_status")
+            except Exception as e:
+                logger.error("[Adapter] voice_realtime_options failed: %s", e)
+            return
+
         if command == "voice_audio_commit":
             from opensquad.audio import realtime_manager as rtm
 
             await rtm.commit_audio()
+            return
+
+        if command == "voice_mouthpiece_utterance":
+            from opensquad.audio import realtime_manager as rtm
+
+            try:
+                audio = cmd_data.get("audio") or ""
+                sample_rate = int(cmd_data.get("sample_rate") or 24000)
+                result = await rtm.handle_mouthpiece_utterance(
+                    audio,
+                    sample_rate=sample_rate,
+                )
+                if isinstance(result, dict) and not result.get("ok", True):
+                    await self._send_event(
+                        {
+                            "ok": False,
+                            "status": "error",
+                            "error": result.get("error") or "mouthpiece utterance failed",
+                            "mode": "mouthpiece",
+                        },
+                        "voice_realtime_status",
+                    )
+            except Exception as e:
+                logger.error("[Adapter] voice_mouthpiece_utterance failed: %s", e)
+                await self._send_event(
+                    {"ok": False, "status": "error", "error": str(e), "mode": "mouthpiece"},
+                    "voice_realtime_status",
+                )
             return
 
         logger.warning(f"[Adapter] Unknown command: {command}, falling back to base handler")

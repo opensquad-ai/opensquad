@@ -1,8 +1,10 @@
 """
-Step Voice tools: ASR transcription + TTS synthesis via StepFun model cards.
+ASR/TTS Translate tools: transcription + speech synthesis via voice model cards.
 
-Agent config:
-  "voice": { "asr_card": "stepaudio-2.5-asr", "tts_card": "stepaudio-2.5-tts" }
+Agent config (model cards = credentials / endpoint / model id):
+  "voice": { "asr_card": "...", "tts_card": "..." }
+
+This module is the callable tool layer; cards only supply configuration.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import logging
 import os
 from typing import Any
 
-logger = logging.getLogger("tool_step_voice")
+logger = logging.getLogger("tool_asr_tts")
 
 # Injected at agent boot (optional). Falls back to reading agent config from cwd.
 _AGENT_CONFIG: dict[str, Any] | None = None
@@ -52,7 +54,7 @@ def _run_async(coro):
 
 def transcribe_audio_file(audio_path: str, language: str = "zh") -> dict[str, Any]:
     """
-    Transcribe an audio file using StepFun ASR (voice.asr_card).
+    Transcribe an audio file using the agent's ASR model card (voice.asr_card).
 
     Args:
         audio_path: Absolute path to the audio file
@@ -71,7 +73,7 @@ def transcribe_audio_file(audio_path: str, language: str = "zh") -> dict[str, An
     if not card:
         return {
             "success": False,
-            "error": "No voice.asr_card configured. Set agent voice.asr_card to a StepFun ASR model card.",
+            "error": "No ASR configured. Set agent voice.asr_card to an ASR model card (or inline voice.asr_model + base_url + api_key).",
         }
     if not card.get("api_key") or card.get("api_key", "").startswith("YOUR_"):
         return {"success": False, "error": "ASR model card api_key is missing"}
@@ -79,7 +81,7 @@ def transcribe_audio_file(audio_path: str, language: str = "zh") -> dict[str, An
     try:
         return _run_async(transcribe_with_card(card, audio_path, language=language or "zh"))
     except Exception as e:
-        logger.error("[step_voice] ASR failed: %s", e)
+        logger.error("[asr_tts] ASR failed: %s", e)
         return {"success": False, "error": str(e)}
 
 
@@ -89,7 +91,7 @@ def synthesize_speech(
     instruction: str = "",
 ) -> dict[str, Any]:
     """
-    Synthesize speech with StepFun TTS (voice.tts_card).
+    Synthesize speech with the agent's TTS model card (voice.tts_card).
 
     Only call this when you intentionally want to send a voice reply to the user.
     The runtime will attach the generated audio to the chat bubble via output_media.
@@ -97,7 +99,7 @@ def synthesize_speech(
     Args:
         text: Text to speak (may include parenthetical inline TTS instructions)
         voice: Optional voice id (defaults to card audio_output_voice)
-        instruction: Optional global style instruction for stepaudio-2.5-tts
+        instruction: Optional global style instruction for the TTS model
 
     Returns:
         {"success": True, "url": "/uploads/...", "path": "...", "__output_media__": [...]}
@@ -106,13 +108,13 @@ def synthesize_speech(
         return {"success": False, "error": "text is required"}
 
     from opensquad.audio import resolve_voice_card
-    from opensquad.audio.stepfun_tts import synthesize_with_card
+    from opensquad.audio.openai_tts import synthesize_with_card
 
     card = resolve_voice_card(_get_agent_config(), "tts")
     if not card:
         return {
             "success": False,
-            "error": "No voice.tts_card configured. Set agent voice.tts_card to a StepFun TTS model card.",
+            "error": "No TTS configured. Set agent voice.tts_card to a TTS model card (or inline voice.tts_model + base_url + api_key).",
         }
     if not card.get("api_key") or card.get("api_key", "").startswith("YOUR_"):
         return {"success": False, "error": "TTS model card api_key is missing"}
@@ -120,5 +122,5 @@ def synthesize_speech(
     try:
         return _run_async(synthesize_with_card(card, text=text, voice=voice or "", instruction=instruction or ""))
     except Exception as e:
-        logger.error("[step_voice] TTS failed: %s", e)
+        logger.error("[asr_tts] TTS failed: %s", e)
         return {"success": False, "error": str(e)}

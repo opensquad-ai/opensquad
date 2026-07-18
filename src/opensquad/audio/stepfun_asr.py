@@ -1,12 +1,18 @@
-"""StepFun ASR client — POST /v1/audio/asr/sse."""
+"""StepFun ASR client — POST /v1/audio/asr/sse.
+
+This is NOT the OpenAI Whisper API (``POST /v1/audio/transcriptions``).
+StepFun uses a proprietary SSE JSON protocol with base64 audio payloads.
+Keep this module named ``stepfun_asr`` until a separate OpenAI-compatible
+transcriptions client exists.
+"""
 
 from __future__ import annotations
 
 import base64
 import json
 import logging
-import mimetypes
 import os
+import struct
 from typing import Any
 
 import httpx
@@ -25,42 +31,60 @@ def _guess_format(path: str) -> dict[str, Any]:
     if ext in ("ogg", "opus"):
         return {"type": "ogg"}
     if ext in ("webm",):
-        return {"type": "ogg"}  # many browsers record opus-in-webm; StepFun accepts ogg family best-effort
+        # browsers often record opus-in-webm; StepFun accepts ogg family best-effort
+        return {"type": "ogg"}
     if ext in ("pcm", "raw"):
         return {"type": "pcm", "codec": "pcm_s16le", "rate": 16000, "bits": 16, "channel": 1}
     return {"type": "mp3"}
 
 
-async def transcribe_file(
+def pcm16le_to_wav_bytes(pcm: bytes, *, sample_rate: int = 24000, channels: int = 1) -> bytes:
+    """Wrap raw PCM s16le mono/stereo into a WAV container."""
+    bits = 16
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    data_size = len(pcm)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits,
+        b"data",
+        data_size,
+    )
+    return header + pcm
+
+
+async def _transcribe_b64(
     *,
     api_key: str,
     base_url: str,
     model: str,
-    audio_path: str,
+    audio_b64: str,
+    fmt: dict[str, Any],
     language: str = "zh",
     enable_itn: bool = True,
     timeout: float = 180.0,
+    label: str = "audio",
 ) -> dict[str, Any]:
-    """Transcribe a local audio file via StepFun ASR SSE API."""
-    if not os.path.isfile(audio_path):
-        return {"success": False, "error": f"File not found: {audio_path}"}
-    try:
-        with open(audio_path, "rb") as f:
-            raw = f.read()
-    except Exception as e:
-        return {"success": False, "error": f"Failed to read audio: {e}"}
-
-    b64 = base64.b64encode(raw).decode("ascii")
     payload = {
         "audio": {
-            "data": b64,
+            "data": audio_b64,
             "input": {
                 "transcription": {
                     "model": model or "stepaudio-2.5-asr",
                     "language": language or "zh",
                     "enable_itn": bool(enable_itn),
                 },
-                "format": _guess_format(audio_path),
+                "format": fmt,
             },
         }
     }
@@ -115,7 +139,6 @@ async def transcribe_file(
                         elif isinstance(obj.get("text"), str) and obj.get("text"):
                             final_text = obj["text"]
                         event_name = "message"
-                # Flush trailing buffer
                 if data_buf:
                     try:
                         obj = json.loads("\n".join(data_buf))
@@ -123,7 +146,7 @@ async def transcribe_file(
                     except json.JSONDecodeError:
                         pass
     except Exception as e:
-        logger.error("[StepFunASR] request failed: %s", e)
+        logger.error("[stepfun_asr] request failed: %s", e)
         return {"success": False, "error": str(e)}
 
     text = (final_text or "".join(text_parts)).strip()
@@ -133,9 +156,95 @@ async def transcribe_file(
         "success": True,
         "text": text,
         "language": language,
-        "file": os.path.basename(audio_path),
-        "mime": mimetypes.guess_type(audio_path)[0],
+        "file": label,
+        "mime": "audio/wav" if fmt.get("type") == "wav" else f"audio/{fmt.get('type') or 'bin'}",
     }
+
+
+async def transcribe_file(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    audio_path: str,
+    language: str = "zh",
+    enable_itn: bool = True,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    """Transcribe a local audio file via StepFun ASR SSE API."""
+    if not os.path.isfile(audio_path):
+        return {"success": False, "error": f"File not found: {audio_path}"}
+    try:
+        with open(audio_path, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return {"success": False, "error": f"Failed to read audio: {e}"}
+
+    b64 = base64.b64encode(raw).decode("ascii")
+    return await _transcribe_b64(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        audio_b64=b64,
+        fmt=_guess_format(audio_path),
+        language=language,
+        enable_itn=enable_itn,
+        timeout=timeout,
+        label=os.path.basename(audio_path),
+    )
+
+
+async def transcribe_bytes(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    audio: bytes,
+    fmt: dict[str, Any] | None = None,
+    language: str = "zh",
+    enable_itn: bool = True,
+    timeout: float = 180.0,
+    label: str = "utterance.wav",
+) -> dict[str, Any]:
+    """Transcribe in-memory audio bytes (wav/pcm/mp3 payload as-is)."""
+    if not audio:
+        return {"success": False, "error": "empty audio"}
+    b64 = base64.b64encode(audio).decode("ascii")
+    return await _transcribe_b64(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        audio_b64=b64,
+        fmt=fmt or {"type": "wav"},
+        language=language,
+        enable_itn=enable_itn,
+        timeout=timeout,
+        label=label,
+    )
+
+
+async def transcribe_pcm16le(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    pcm: bytes,
+    sample_rate: int = 24000,
+    language: str = "zh",
+) -> dict[str, Any]:
+    """Transcribe raw PCM16LE by wrapping as WAV."""
+    if not pcm or len(pcm) < 320:
+        return {"success": False, "error": "PCM too short"}
+    wav = pcm16le_to_wav_bytes(pcm, sample_rate=int(sample_rate) or 24000)
+    return await transcribe_bytes(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        audio=wav,
+        fmt={"type": "wav"},
+        language=language,
+        label="utterance.wav",
+    )
 
 
 async def transcribe_with_card(
@@ -148,5 +257,22 @@ async def transcribe_with_card(
         base_url=http_base_url(card),
         model=card.get("model_name") or "stepaudio-2.5-asr",
         audio_path=audio_path,
+        language=language,
+    )
+
+
+async def transcribe_pcm_with_card(
+    card: dict[str, Any],
+    pcm: bytes,
+    *,
+    sample_rate: int = 24000,
+    language: str = "zh",
+) -> dict[str, Any]:
+    return await transcribe_pcm16le(
+        api_key=card.get("api_key") or "",
+        base_url=http_base_url(card),
+        model=card.get("model_name") or "stepaudio-2.5-asr",
+        pcm=pcm,
+        sample_rate=sample_rate,
         language=language,
     )

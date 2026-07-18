@@ -102,6 +102,8 @@ interface UploadedFile {
   is_image: boolean;
   is_audio?: boolean;
   is_video?: boolean;
+  type?: string;
+  duration?: number;
 }
 
 // ---- Agent Working Indicator (shown when workflow is hidden and agent is active) ----
@@ -566,6 +568,328 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [voicePanelOpen, setVoicePanelOpen] = useState(false);
   const [voiceRealtimeStatus, setVoiceRealtimeStatus] = useState('idle');
   const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [voiceRealtimeError, setVoiceRealtimeError] = useState('');
+  /** Auto-speak each final agent reply via TTS (persisted per agent). */
+  const [autoSpeechEnabled, setAutoSpeechEnabled] = useState(false);
+  const autoSpeechEnabledRef = useRef(false);
+  /** Voice-panel record → ASR into composer. */
+  const [sttDictating, setSttDictating] = useState(false);
+  const voiceRealtimeStatusRef = useRef('idle');
+  const autoTtsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const lastAutoSpokenRef = useRef('');
+  /** Pipeline: cancel token + text already queued from the live stream. */
+  const autoTtsGenRef = useRef(0);
+  const autoTtsStreamOffsetRef = useRef(0);
+  const autoTtsTextQueueRef = useRef<string[]>([]);
+  const autoTtsUrlQueueRef = useRef<string[]>([]);
+  /** Parallel synth results keyed by sequence — drained in order into the play queue. */
+  const autoTtsOrderedUrlsRef = useRef<Map<number, string>>(new Map());
+  const autoTtsNextSynthSeqRef = useRef(0);
+  const autoTtsNextPlaySeqRef = useRef(0);
+  const autoTtsSynthActiveRef = useRef(0);
+  const autoTtsPlayingRef = useRef(false);
+  const enqueueAutoTtsChunksRef = useRef<(chunks: string[]) => void>(() => {});
+  const feedAutoTtsFromStreamRef = useRef<(fullText: string) => void>(() => {});
+  /** Structured realtime captions — avoids user/assistant role mixing on streaming deltas. */
+  const voiceCaptionRef = useRef<{ role: string; text: string }[]>([]);
+  const voiceConnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearVoiceConnectTimer = useCallback(() => {
+    if (voiceConnectTimerRef.current) {
+      clearTimeout(voiceConnectTimerRef.current);
+      voiceConnectTimerRef.current = null;
+    }
+  }, []);
+  const armVoiceConnectTimeout = useCallback(() => {
+    clearVoiceConnectTimer();
+    voiceConnectTimerRef.current = setTimeout(() => {
+      setVoiceRealtimeStatus((prev) => {
+        if (prev === 'connecting') {
+          setVoiceRealtimeError('Realtime connect timed out (Agent 未在 20s 内返回状态，请重启 Agent 后再试)');
+          return 'error';
+        }
+        return prev;
+      });
+    }, 20000);
+  }, [clearVoiceConnectTimer]);
+
+  useEffect(() => {
+    autoSpeechEnabledRef.current = autoSpeechEnabled;
+  }, [autoSpeechEnabled]);
+
+  useEffect(() => {
+    voiceRealtimeStatusRef.current = voiceRealtimeStatus;
+  }, [voiceRealtimeStatus]);
+
+  useEffect(() => {
+    if (!agentId) {
+      setAutoSpeechEnabled(false);
+      return;
+    }
+    try {
+      setAutoSpeechEnabled(localStorage.getItem(`ai_chat_auto_tts:${agentId}`) === 'true');
+    } catch {
+      setAutoSpeechEnabled(false);
+    }
+  }, [agentId]);
+
+  const stopAutoTts = useCallback(() => {
+    autoTtsGenRef.current += 1;
+    autoTtsTextQueueRef.current = [];
+    autoTtsUrlQueueRef.current = [];
+    autoTtsOrderedUrlsRef.current.clear();
+    autoTtsNextSynthSeqRef.current = 0;
+    autoTtsNextPlaySeqRef.current = 0;
+    autoTtsSynthActiveRef.current = 0;
+    autoTtsPlayingRef.current = false;
+    autoTtsStreamOffsetRef.current = 0;
+    const a = autoTtsAudioRef.current;
+    if (a) {
+      a.pause();
+      a.removeAttribute('src');
+      a.load();
+    }
+  }, []);
+
+  /** Unlock autoplay during a user gesture (toggle Auto speech on). */
+  const unlockAutoTtsAudio = useCallback(() => {
+    try {
+      // Tiny silent wav — browsers require a play() inside a click handler once.
+      const silent =
+        'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      const a = new Audio(silent);
+      a.volume = 0.01;
+      void a.play().then(() => {
+        a.pause();
+        a.currentTime = 0;
+      }).catch(() => { /* ignore */ });
+      // Keep a dedicated element for subsequent auto-plays after unlock.
+      if (!autoTtsAudioRef.current) {
+        autoTtsAudioRef.current = new Audio();
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  /** Split reply into short sentences so first audio can start before full TTS finishes. */
+  const splitAutoTtsChunks = useCallback((text: string, maxLen = 100): string[] => {
+    const cleaned = (text || '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) return [];
+    const rawParts = cleaned.split(/(?<=[。！？!?；;…\n])/);
+    const chunks: string[] = [];
+    for (const part of rawParts) {
+      const s = part.trim();
+      if (!s) continue;
+      if (s.length <= maxLen) {
+        chunks.push(s);
+        continue;
+      }
+      for (let i = 0; i < s.length; i += maxLen) {
+        const piece = s.slice(i, i + maxLen).trim();
+        if (piece) chunks.push(piece);
+      }
+    }
+    return chunks;
+  }, []);
+
+  const resolveAutoTtsUrl = useCallback((url: string) => {
+    if (!url) return '';
+    if (url.startsWith('http')) return url;
+    return `${SERVER_BASE_URL}${url.startsWith('/') ? url : `/${url}`}`;
+  }, []);
+
+  const pumpAutoTtsPlay = useCallback(async (gen: number) => {
+    if (autoTtsPlayingRef.current) return;
+    autoTtsPlayingRef.current = true;
+    try {
+      while (gen === autoTtsGenRef.current) {
+        const url = autoTtsUrlQueueRef.current.shift();
+        if (!url) break;
+        if (!autoSpeechEnabledRef.current) break;
+        const audio = autoTtsAudioRef.current || new Audio();
+        autoTtsAudioRef.current = audio;
+        audio.src = url;
+        try {
+          await audio.play();
+        } catch (playErr) {
+          console.warn('[AIChatPage] Auto TTS play() blocked:', playErr);
+          unlockAutoTtsAudio();
+          await new Promise((r) => setTimeout(r, 40));
+          try {
+            await audio.play();
+          } catch {
+            continue;
+          }
+        }
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            audio.removeEventListener('ended', done);
+            audio.removeEventListener('error', done);
+            resolve();
+          };
+          audio.addEventListener('ended', done);
+          audio.addEventListener('error', done);
+        });
+      }
+    } finally {
+      autoTtsPlayingRef.current = false;
+      if (
+        gen === autoTtsGenRef.current &&
+        autoTtsUrlQueueRef.current.length > 0 &&
+        autoSpeechEnabledRef.current
+      ) {
+        void pumpAutoTtsPlay(gen);
+      }
+    }
+  }, [unlockAutoTtsAudio]);
+
+  const pumpAutoTtsSynth = useCallback(async (gen: number) => {
+    const CONCURRENCY = 2;
+    const flushOrdered = () => {
+      while (autoTtsOrderedUrlsRef.current.has(autoTtsNextPlaySeqRef.current)) {
+        const url = autoTtsOrderedUrlsRef.current.get(autoTtsNextPlaySeqRef.current)!;
+        autoTtsOrderedUrlsRef.current.delete(autoTtsNextPlaySeqRef.current);
+        autoTtsNextPlaySeqRef.current += 1;
+        if (url) autoTtsUrlQueueRef.current.push(url);
+      }
+      if (autoTtsUrlQueueRef.current.length > 0) {
+        void pumpAutoTtsPlay(gen);
+      }
+    };
+    while (
+      gen === autoTtsGenRef.current &&
+      autoSpeechEnabledRef.current &&
+      agentId &&
+      autoTtsTextQueueRef.current.length > 0 &&
+      autoTtsSynthActiveRef.current < CONCURRENCY
+    ) {
+      const chunk = autoTtsTextQueueRef.current.shift();
+      if (!chunk) break;
+      const seq = autoTtsNextSynthSeqRef.current;
+      autoTtsNextSynthSeqRef.current += 1;
+      autoTtsSynthActiveRef.current += 1;
+      void (async () => {
+        try {
+          console.log('[AIChatPage] Auto TTS chunk…', chunk.slice(0, 60));
+          const t0 = performance.now();
+          const res = await agentSessionAPI.synthesize(agentId, chunk);
+          console.log('[AIChatPage] Auto TTS chunk ready', Math.round(performance.now() - t0), 'ms');
+          if (gen !== autoTtsGenRef.current || !autoSpeechEnabledRef.current) return;
+          const url = resolveAutoTtsUrl(res.url || '');
+          autoTtsOrderedUrlsRef.current.set(seq, url || '');
+          flushOrdered();
+        } catch (err) {
+          console.warn('[AIChatPage] Auto TTS chunk failed:', err);
+          if (gen === autoTtsGenRef.current) {
+            autoTtsOrderedUrlsRef.current.set(seq, '');
+            flushOrdered();
+          }
+        } finally {
+          autoTtsSynthActiveRef.current = Math.max(0, autoTtsSynthActiveRef.current - 1);
+          if (gen === autoTtsGenRef.current) {
+            void pumpAutoTtsSynth(gen);
+          }
+        }
+      })();
+    }
+  }, [agentId, pumpAutoTtsPlay, resolveAutoTtsUrl]);
+
+  const enqueueAutoTtsChunks = useCallback((chunks: string[]) => {
+    const cleaned = chunks.map((c) => c.trim()).filter(Boolean);
+    if (!cleaned.length || !agentId) return;
+    if (!autoSpeechEnabledRef.current) return;
+    const vs = voiceRealtimeStatusRef.current;
+    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') {
+      console.log('[AIChatPage] Auto TTS skipped: realtime busy =', vs);
+      return;
+    }
+    autoTtsTextQueueRef.current.push(...cleaned);
+    void pumpAutoTtsSynth(autoTtsGenRef.current);
+  }, [agentId, pumpAutoTtsSynth]);
+
+  /** While the reply is still streaming, synthesize completed sentences early. */
+  const feedAutoTtsFromStream = useCallback((fullText: string) => {
+    if (!autoSpeechEnabledRef.current || !agentId) return;
+    const vs = voiceRealtimeStatusRef.current;
+    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') return;
+
+    const full = fullText || '';
+    let offset = autoTtsStreamOffsetRef.current;
+    if (offset > full.length) offset = 0;
+    const pending = full.slice(offset);
+    if (!pending.trim()) return;
+
+    const chunks: string[] = [];
+    let consumed = 0;
+    const re = /[\s\S]*?[。！？!?\n]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(pending)) !== null) {
+      const piece = m[0].trim();
+      if (piece) chunks.push(...splitAutoTtsChunks(piece));
+      consumed = m.index + m[0].length;
+    }
+    // No punctuation yet — hard-cut once the buffer is long enough.
+    if (!chunks.length && pending.trim().length >= 100) {
+      const cut = pending.slice(0, 100);
+      chunks.push(...splitAutoTtsChunks(cut));
+      consumed = cut.length;
+    }
+    if (!chunks.length || consumed <= 0) return;
+    autoTtsStreamOffsetRef.current = offset + consumed;
+    enqueueAutoTtsChunks(chunks);
+  }, [agentId, enqueueAutoTtsChunks, splitAutoTtsChunks]);
+
+  const speakFinalReply = useCallback(async (text: string) => {
+    const prompt = (text || '').trim();
+    if (!agentId || !prompt) return;
+    if (!autoSpeechEnabledRef.current) {
+      console.log('[AIChatPage] Auto TTS skipped: disabled');
+      return;
+    }
+    const vs = voiceRealtimeStatusRef.current;
+    if (vs === 'connected' || vs === 'connecting' || vs === 'tool_running') {
+      console.log('[AIChatPage] Auto TTS skipped: realtime busy =', vs);
+      return;
+    }
+    if (lastAutoSpokenRef.current === prompt) {
+      console.log('[AIChatPage] Auto TTS skipped: already spoken this text');
+      return;
+    }
+    lastAutoSpokenRef.current = prompt;
+
+    // Prefer remainder after stream-prefetch; fall back to full text.
+    const offset = Math.min(autoTtsStreamOffsetRef.current, prompt.length);
+    const rest = prompt.slice(offset).trim();
+    autoTtsStreamOffsetRef.current = prompt.length;
+    if (rest) {
+      enqueueAutoTtsChunks(splitAutoTtsChunks(rest));
+    } else if (autoTtsTextQueueRef.current.length === 0 && autoTtsUrlQueueRef.current.length === 0 && !autoTtsPlayingRef.current) {
+      // Stream already covered everything but nothing queued (edge) — speak full.
+      enqueueAutoTtsChunks(splitAutoTtsChunks(prompt));
+    }
+  }, [agentId, enqueueAutoTtsChunks, splitAutoTtsChunks]);
+
+  const toggleAutoSpeech = useCallback((enabled: boolean) => {
+    setAutoSpeechEnabled(enabled);
+    autoSpeechEnabledRef.current = enabled;
+    if (agentId) {
+      try {
+        localStorage.setItem(`ai_chat_auto_tts:${agentId}`, String(enabled));
+      } catch { /* ignore */ }
+    }
+    if (enabled) {
+      // Critical: unlock browser autoplay during this click gesture.
+      unlockAutoTtsAudio();
+    } else {
+      stopAutoTts();
+    }
+  }, [agentId, stopAutoTts, unlockAutoTtsAudio]);
+
+  useEffect(() => () => stopAutoTts(), [stopAutoTts]);
+
+  enqueueAutoTtsChunksRef.current = enqueueAutoTtsChunks;
+  feedAutoTtsFromStreamRef.current = feedAutoTtsFromStream;
+
+  const speakFinalReplyRef = useRef(speakFinalReply);
+  speakFinalReplyRef.current = speakFinalReply;
   // Token stats
   const [tokenStats, setTokenStats] = useState<{
     used: number; max: number;
@@ -672,6 +996,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // the selected <option> even when two cards from different vendors share the
   // same model_name (model_name alone is not a unique identity).
   const [currentCardName, setCurrentCardName] = useState<string | null>(null);
+  const [voiceBindings, setVoiceBindings] = useState({
+    asr_card: '',
+    tts_card: '',
+    realtime_card: '',
+    realtime_voice: '',
+  });
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
   const [agentMode, setAgentMode] = useState<AgentMode>('build');
   const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
@@ -1043,6 +1373,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             setDefaultCwd(runtimeWd);
             setAgentCwd((prev) => prev || runtimeWd);
           }
+          const voice = cfg?.config?.voice || {};
+          setVoiceBindings({
+            asr_card: String(voice.asr_card || ''),
+            tts_card: String(voice.tts_card || ''),
+            realtime_card: String(voice.realtime_card || ''),
+            realtime_voice: String(voice.realtime_voice || ''),
+          });
         });
       })
       .catch(err => console.warn("[AIChatPage] Failed to load agent profile:", err.message));
@@ -1286,6 +1623,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setStreamingText(streamingTextRef.current);
         setIsStreaming(true);
         setAgentStatus('thinking');
+        // Start TTS on completed sentences while the reply is still streaming.
+        feedAutoTtsFromStreamRef.current(streamingTextRef.current);
       }
     });
 
@@ -1358,6 +1697,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
           return next;
         });
+        // IMPORTANT: do NOT gate TTS on a flag mutated inside setTimeline —
+        // React may defer the updater, leaving the flag false and silently skipping speech.
+        // Dedup is handled inside speakFinalReply via lastAutoSpokenRef.
+        if (role === 'assistant') {
+          void speakFinalReplyRef.current(finalText);
+        }
       }
 
       // Clear streaming
@@ -1468,6 +1813,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
           return foldTaskProcessSinceLastUser(next);
         });
+        void speakFinalReplyRef.current(finalText);
       }
 
       streamingTextRef.current = '';
@@ -1898,6 +2244,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           setSwitchingModel(false);
         }
 
+        if (evt === 'voice_config_updated') {
+          const v = (detailed as any).voice || {};
+          setVoiceBindings({
+            asr_card: String(v.asr_card || ''),
+            tts_card: String(v.tts_card || ''),
+            realtime_card: String(v.realtime_card || ''),
+            realtime_voice: String(v.realtime_voice || ''),
+          });
+          return;
+        }
+
         if (evt === 'model_card_switch_failed') {
           setSwitchingModel(false);
           // Fall through so the failure shows in the timeline / system info
@@ -2096,6 +2453,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           setTimeline(prev => finalizeWorkflowAndAddMessage(prev, salvagedMsg));
         }
       }
+      if (isFirstTurn) {
+        lastAutoSpokenRef.current = '';
+        // Cancel any leftover auto-TTS from the previous turn.
+        autoTtsGenRef.current += 1;
+        autoTtsTextQueueRef.current = [];
+        autoTtsUrlQueueRef.current = [];
+        autoTtsOrderedUrlsRef.current.clear();
+        autoTtsNextSynthSeqRef.current = 0;
+        autoTtsNextPlaySeqRef.current = 0;
+        autoTtsSynthActiveRef.current = 0;
+        autoTtsPlayingRef.current = false;
+        autoTtsStreamOffsetRef.current = 0;
+        const a = autoTtsAudioRef.current;
+        if (a) {
+          a.pause();
+          a.removeAttribute('src');
+          a.load();
+        }
+      }
       streamingTextRef.current = '';
       setStreamingText('');
       setIsStreaming(false);
@@ -2236,28 +2612,60 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const unsubVoiceAudioOut = aiWsService.on('voice_audio_out', (msg: AIWSMessage) => {
       const data: any = msg.content ?? msg.data ?? {};
       const audio = data?.audio || data?.data?.audio;
+      const url = data?.url || data?.data?.url;
+      const format = data?.format || data?.mime || '';
       if (audio) {
         window.dispatchEvent(new CustomEvent('opensquad-voice-audio-out', { detail: { audio } }));
+      } else if (url) {
+        window.dispatchEvent(
+          new CustomEvent('opensquad-voice-audio-out', {
+            detail: { url, format, mime: data?.mime },
+          }),
+        );
       }
     });
     const unsubVoiceTranscript = aiWsService.on('voice_transcript', (msg: AIWSMessage) => {
       const data: any = msg.content ?? msg.data ?? {};
-      const role = data?.role || 'assistant';
-      const text = data?.text || data?.delta || '';
-      if (!text) return;
-      setVoiceTranscript((prev) => {
-        if (data?.final) {
-          return prev ? `${prev}\n${role}: ${text}` : `${role}: ${text}`;
+      const role = (data?.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant';
+      const chunk = String(data?.text || data?.delta || '');
+      if (!chunk) return;
+      const caps = voiceCaptionRef.current;
+      const last = caps.length ? caps[caps.length - 1] : null;
+      if (data?.final) {
+        // Prefer replacing an in-progress same-role line with the authoritative final text.
+        if (last && last.role === role) {
+          last.text = chunk;
+        } else {
+          caps.push({ role, text: chunk });
         }
-        return prev ? `${prev}${text}` : `${role}: ${text}`;
-      });
+      } else if (last && last.role === role) {
+        last.text += chunk;
+      } else {
+        caps.push({ role, text: chunk });
+      }
+      // Cap length so the panel stays readable
+      if (caps.length > 40) {
+        voiceCaptionRef.current = caps.slice(-40);
+      }
+      setVoiceTranscript(
+        voiceCaptionRef.current.map((c) => `${c.role}: ${c.text}`).join('\n'),
+      );
     });
     const unsubVoiceStatus = aiWsService.on('voice_realtime_status', (msg: AIWSMessage) => {
       const data: any = msg.content ?? msg.data ?? {};
       const status = data?.status || (typeof data === 'string' ? data : 'idle');
+      clearVoiceConnectTimer();
+      // Ignore option-ack / idle noise when not in a call attempt.
+      if (status === 'options_updated' || (status === 'idle' && data?.note)) {
+        return;
+      }
       setVoiceRealtimeStatus(String(status));
-      if (status === 'error' && data?.error) {
-        console.warn('[AIChatPage] voice realtime error', data.error);
+      if (status === 'error') {
+        const errText = data?.error ? String(data.error) : 'Realtime connection failed';
+        setVoiceRealtimeError(errText);
+        console.warn('[AIChatPage] voice realtime error', errText);
+      } else if (status === 'connected' || status === 'disconnected' || status === 'idle') {
+        setVoiceRealtimeError('');
       }
     });
 
@@ -2771,11 +3179,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               return `${(b / (1024 * 1024)).toFixed(1)} MB`;
             };
             const rawUrl = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
+            const name = f.original_name || f.filename || 'file';
+            const isVoice =
+              f.type === 'voice' || f.type === 'audio' || !!f.is_audio
+              || (typeof f.content_type === 'string' && f.content_type.startsWith('audio/'))
+              || /^voice_.*\.webm$/i.test(name);
             return {
-              name: f.original_name || f.filename || 'file',
+              name,
               size: sz(f.size),
               url: rawUrl || undefined,
-              type: f.is_video ? 'video' as const : f.is_audio ? 'audio' as const : 'file' as const,
+              type: f.is_video && !isVoice ? 'video' as const : isVoice ? (f.type === 'voice' ? 'voice' as const : 'audio' as const) : 'file' as const,
+              duration: typeof f.duration === 'number' ? f.duration : undefined,
             };
           });
         const attachmentsHyd = [
@@ -2879,11 +3293,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             return `${(b / (1024 * 1024)).toFixed(1)} MB`;
           };
           const rawUrl = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
+          const name = f.original_name || f.filename || 'file';
+          const isVoice =
+            f.type === 'voice' || f.type === 'audio' || !!f.is_audio
+            || (typeof f.content_type === 'string' && f.content_type.startsWith('audio/'))
+            || /^voice_.*\.webm$/i.test(name);
           return {
-            name: f.original_name || f.filename || 'file',
+            name,
             size: sz(f.size),
             url: rawUrl || undefined,
-            type: f.is_video ? 'video' as const : f.is_audio ? 'audio' as const : 'file' as const,
+            type: f.is_video && !isVoice ? 'video' as const : isVoice ? (f.type === 'voice' ? 'voice' as const : 'audio' as const) : 'file' as const,
+            duration: typeof f.duration === 'number' ? f.duration : undefined,
           };
         });
       const attachments = [
@@ -3086,6 +3506,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubVoiceAudioOut();
       unsubVoiceTranscript();
       unsubVoiceStatus();
+      clearVoiceConnectTimer();
+      // Leaving this agent chat: end any background realtime session.
+      aiWsService.stopVoiceRealtime();
+      setVoiceRealtimeStatus('idle');
+      setVoiceRealtimeError('');
+      setVoicePanelOpen(false);
       unsubConnected();
       unsubHistory();
       unsubCurrentSession();
@@ -3394,8 +3820,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (nonImageAttachments.length > 0) {
       const fileList = nonImageAttachments
         .map(a => {
-          const media = a.is_video ? 'video' : (a.is_audio || a.type === 'voice' || a.type === 'audio') ? 'audio' : 'file';
-          return `[File: ${a.original_name} (${_formatFileSize(a.size)}) path=${a.path} type=${media}]`;
+          const media = a.is_video
+            ? 'video'
+            : (a.is_audio || a.type === 'voice' || a.type === 'audio')
+              ? (a.type === 'voice' ? 'voice' : 'audio')
+              : 'file';
+          const webUrl = toWebMediaUrl(a.url || a.path || '');
+          // Prefer /uploads/... link for refresh; keep disk path for agent tools.
+          const base = `[File: ${a.original_name} (${_formatFileSize(a.size)}) path=${a.path} type=${media}]`;
+          return webUrl ? `${base}(${webUrl})` : base;
         })
         .join('\n');
       if (fileList) {
@@ -3417,13 +3850,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
 
     // Build structured file attachments for display
-    const fileAtts: FileAttachment[] = nonImageAttachments.map(a => ({
-      name: a.original_name,
-      size: _formatFileSize(a.size),
-      path: a.path,
-      url: a.url,
-      type: a.is_video ? 'video' : a.is_audio ? 'audio' : 'file',
-    }));
+    const fileAtts: FileAttachment[] = nonImageAttachments.map(a => {
+      const isVoice = a.type === 'voice' || a.type === 'audio' || !!a.is_audio;
+      return {
+        name: a.original_name,
+        size: _formatFileSize(a.size),
+        path: a.path,
+        url: a.url,
+        type: a.is_video && !isVoice ? 'video' : isVoice ? (a.type === 'voice' ? 'voice' : 'audio') : 'file',
+        duration: typeof a.duration === 'number' ? a.duration : undefined,
+      };
+    });
 
     // Display: show /skill chip text + user text (not the XML tag)
     const displayText = skillId
@@ -3578,6 +4015,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const skillDir = pendingSkill?.dir || '';
     if (!text && images.length === 0 && attachments.length === 0 && !skillDir) return;
 
+    // If Auto speech was restored from localStorage (no toggle click this session),
+    // unlock autoplay on this send click so the final reply can play.
+    if (autoSpeechEnabledRef.current) {
+      unlockAutoTtsAudio();
+    }
+
     // Park when agent is busy, OR an outbound turn is still being acknowledged, OR
     // there are already queued messages (keep FIFO order).
     const shouldQueue =
@@ -3594,13 +4037,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         attachments: attachments.map(a => ({ ...a })),
         fileAtts: attachments
           .filter(a => !a.is_image)
-          .map(a => ({
-            name: a.original_name,
-            size: _formatFileSize(a.size),
-            path: a.path,
-            url: a.url,
-            type: a.is_video ? 'video' : a.is_audio ? 'audio' : 'file',
-          })),
+          .map(a => {
+            const isVoice = a.type === 'voice' || a.type === 'audio' || !!a.is_audio;
+            return {
+              name: a.original_name,
+              size: _formatFileSize(a.size),
+              path: a.path,
+              url: a.url,
+              type: a.is_video && !isVoice ? 'video' : isVoice ? (a.type === 'voice' ? 'voice' : 'audio') : 'file',
+              duration: typeof a.duration === 'number' ? a.duration : undefined,
+            };
+          }),
         skillDir: pendingSkill?.dir,
         skillName: pendingSkill?.name,
       };
@@ -4475,6 +4922,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   entry.data.role === 'user'
                     ? (currentUser?.avatar || null)
                     : (resolveChatAvatar(agentProfile?.chat_profile) || null),
+                agentId,
               };
               return isSolo
                 ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
@@ -4586,6 +5034,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           nested.data.role === 'user'
                             ? (currentUser?.avatar || null)
                             : (resolveChatAvatar(agentProfile?.chat_profile) || null),
+                        agentId,
                       };
                       return isSolo
                         ? <SoloMessage key={nestedKey} {...msgProps} anchorId={nestedKey} />
@@ -4758,7 +5207,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                    <div className="min-w-0 flex-1">
                      <p className="text-xs text-textMain truncate">{att.original_name}</p>
                      <p className="text-[10px] text-textMuted">
-                       {att.is_audio ? 'AUDIO' : 'FILE'} • {_formatFileSize(att.size)}
+                       {att.type === 'voice' || att.is_audio ? 'VOICE' : 'FILE'} • {_formatFileSize(att.size)}
+                       {typeof att.duration === 'number' && att.duration > 0 ? ` · ${att.duration}s` : ''}
                      </p>
                    </div>
                    <button
@@ -4986,57 +5436,92 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <VoicePanel
                   open={voicePanelOpen}
                   onClose={() => {
+                    // Collapse UI only — active realtime call keeps running in background.
                     setVoicePanelOpen(false);
-                    wsServiceRef.current?.stopVoiceRealtime();
-                    setVoiceRealtimeStatus('idle');
                   }}
+                  onOpen={() => setVoicePanelOpen(true)}
                   disabled={isLoadingSession}
                   realtimeStatus={voiceRealtimeStatus}
+                  realtimeError={voiceRealtimeError}
                   transcript={voiceTranscript}
-                  onSendVoiceMessage={async (blob, durationSec) => {
-                    try {
-                      setIsUploading(true);
-                      const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
-                      const resp = await agentSessionAPI.uploadFile(agentId, file);
-                      const att = {
-                        ...resp,
-                        type: 'voice',
-                        is_audio: true,
-                        duration: durationSec,
-                        original_name: file.name,
-                      };
-                      setAttachments((prev) => [...prev, att]);
-                      setVoicePanelOpen(false);
-                      // Auto-send voice-only turn
-                      const text = inputText.trim();
-                      deliverMessage(
-                        {
-                          text: text || '',
-                          images: [],
-                          attachments: [att as any],
-                        },
-                        { clearInputState: true, salvageStream: true },
-                      );
-                      setInputText('');
-                      setImages([]);
-                      setAttachments([]);
-                    } catch (err) {
-                      console.error('[AIChatPage] voice upload failed', err);
-                    } finally {
-                      setIsUploading(false);
+                  dictating={sttDictating}
+                  modelCards={modelCards}
+                  voiceBindings={voiceBindings}
+                  onVoiceBindingsChange={async (next) => {
+                    setVoiceBindings(next);
+                    wsServiceRef.current?.setVoiceConfig(next);
+                    // Also persist via admin config so Agent Manager stays in sync
+                    const dir = agentProfile?.dir_name || agentId;
+                    if (dir) {
+                      try {
+                        const cfg = await adminAPI.getConfig(dir);
+                        const full = { ...(cfg.config || {}) };
+                        full.voice = { ...(full.voice || {}), ...next };
+                        await adminAPI.updateConfig(dir, full);
+                      } catch (e) {
+                        console.warn('[AIChatPage] persist voice config failed', e);
+                      }
                     }
                   }}
-                  onRealtimeStart={() => {
+                  onSendVoiceMessage={async (blob, _durationSec) => {
+                    // Always STT into composer; user presses Send as normal text.
+                    try {
+                      setSttDictating(true);
+                      const file = new File([blob], `voice_${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
+                      const res = await agentSessionAPI.transcribe(agentId, file, {
+                        filename: file.name,
+                        language: 'zh',
+                      });
+                      const text = (res.text || '').trim();
+                      if (!text) {
+                        console.warn('[AIChatPage] STT returned empty text');
+                        return;
+                      }
+                      setInputText((prev) => {
+                        const cur = prev.trimEnd();
+                        if (!cur) return text;
+                        const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
+                        return `${prev}${joiner}${text}`;
+                      });
+                      setVoicePanelOpen(false);
+                      requestAnimationFrame(() => {
+                        inputRef.current?.focus();
+                        if (inputRef.current) {
+                          inputRef.current.style.height = 'auto';
+                          inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 200)}px`;
+                        }
+                      });
+                    } catch (err) {
+                      console.error('[AIChatPage] STT failed', err);
+                      throw err instanceof Error ? err : new Error(String(err));
+                    } finally {
+                      setSttDictating(false);
+                    }
+                  }}
+                  onRealtimeStart={(opts) => {
                     setVoiceTranscript('');
+                    voiceCaptionRef.current = [];
+                    setVoiceRealtimeError('');
                     setVoiceRealtimeStatus('connecting');
-                    wsServiceRef.current?.startVoiceRealtime();
+                    armVoiceConnectTimeout();
+                    wsServiceRef.current?.startVoiceRealtime({
+                      force_ask_agent: opts?.forceAskAgent !== false,
+                    });
                   }}
                   onRealtimeStop={() => {
+                    clearVoiceConnectTimer();
                     wsServiceRef.current?.stopVoiceRealtime();
                     setVoiceRealtimeStatus('idle');
+                    setVoiceRealtimeError('');
+                  }}
+                  onForceAskAgentChange={(force) => {
+                    wsServiceRef.current?.setVoiceRealtimeOptions({ force_ask_agent: force });
                   }}
                   onAudioChunk={(b64) => {
                     wsServiceRef.current?.sendVoiceAudioIn(b64);
+                  }}
+                  onMouthpieceUtterance={(b64, sampleRate) => {
+                    wsServiceRef.current?.sendMouthpieceUtterance(b64, sampleRate);
                   }}
                 />
                 <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px] gap-0.5">
@@ -5044,16 +5529,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     type="button"
                     disabled={isLoadingSession}
                     onClick={() => setVoicePanelOpen((v) => !v)}
-                    className={`p-1.5 rounded-lg ${voicePanelOpen ? 'bg-primary/20 text-primary' : 'text-textMuted hover:text-textMain hover:bg-border/40'}`}
-                    title="语音消息 / 实时通话"
+                    className={`p-1.5 rounded-lg relative ${
+                      voicePanelOpen
+                        ? 'bg-primary/20 text-primary'
+                        : voiceRealtimeStatus === 'connected' ||
+                            voiceRealtimeStatus === 'tool_running' ||
+                            voiceRealtimeStatus === 'connecting'
+                          ? 'bg-emerald-500/20 text-emerald-500'
+                          : 'text-textMuted hover:text-textMain hover:bg-border/40'
+                    }`}
+                    title={
+                      voiceRealtimeStatus === 'connected' ||
+                      voiceRealtimeStatus === 'tool_running' ||
+                      voiceRealtimeStatus === 'connecting'
+                        ? '实时通话进行中（点击展开/折叠）'
+                        : '语音消息 / 实时通话'
+                    }
                   >
                     <Mic size={18} />
+                    {(voiceRealtimeStatus === 'connected' ||
+                      voiceRealtimeStatus === 'tool_running' ||
+                      voiceRealtimeStatus === 'connecting') && (
+                      <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    )}
                   </button>
                   <SoloAttachMenu
                     disabled={isLoadingSession}
                     skills={availableSkills}
                     skillsLoading={skillsLoading}
                     onOpenSkills={loadSkillsIfNeeded}
+                    autoSpeechEnabled={autoSpeechEnabled}
+                    onToggleAutoSpeech={toggleAutoSpeech}
                     onSelectSkill={(skill) => {
                       const dir = (skill.dir || skill.name || '').trim();
                       if (!dir) return;

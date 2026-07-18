@@ -23,6 +23,20 @@ export function genTimelineUID(): string {
 export function formatUserSkillDisplayContent(content: string): string {
   if (!content || typeof content !== 'string') return content;
 
+  // Live voice turns: unwrap <realtime_voice> for chat display (agent still sees the tag).
+  const voiceRe = /<realtime_voice(?:\s[^>]*)?>\s*([\s\S]*?)\s*<\/realtime_voice>/i;
+  const voiceMatch = content.match(voiceRe);
+  if (voiceMatch) {
+    content = (voiceMatch[1] || '').trim() || content;
+  }
+  // Legacy VoiceAsk preamble (older sessions)
+  const legacyAsk = content.match(
+    /^\[VoiceAsk:[^\]]+\][\s\S]*?\nUser said:\n([\s\S]+)$/i,
+  );
+  if (legacyAsk) {
+    content = (legacyAsk[1] || '').trim() || content;
+  }
+
   const tagRe = /<user_send_skill>\s*([^<]+?)\s*<\/user_send_skill>/i;
   const tagMatch = content.match(tagRe);
   if (tagMatch) {
@@ -1407,15 +1421,66 @@ export function buildTimelineFromSession(
           return `${(b / (1024 * 1024)).toFixed(1)} MB`;
         };
         const rawUrl = f.url || f.path || f.src || (f.filename ? `/uploads/${f.filename}` : '');
+        const name = f.original_name || f.filename || 'file';
+        const isVoice =
+          f.type === 'voice' || !!f.is_audio || /^voice_/i.test(name)
+          || /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(name);
         return {
-          name: f.original_name || f.filename || 'file',
+          name,
           size: sz(f.size),
-          url: rawUrl || undefined,
-          type: f.is_video ? 'video' as const : f.is_audio ? 'audio' as const : 'file' as const,
+          url: toWebMediaUrl(rawUrl) || rawUrl || undefined,
+          type: f.is_video && !isVoice
+            ? 'video' as const
+            : isVoice
+              ? (f.type === 'voice' ? 'voice' as const : 'audio' as const)
+              : 'file' as const,
         };
       });
     if (filesAsAttachments.length > 0) {
-      rawAttachments = [...rawAttachments, ...filesAsAttachments];
+      for (const fa of filesAsAttachments) {
+        const faKey = (fa.url || '').replace(/\\/g, '/').split('/').pop() || '';
+        const exists = (rawAttachments as any[]).some((a) => {
+          if (fa.name && a?.name && String(a.name) === String(fa.name)) return true;
+          const aKey = String(a?.url || a?.path || '').replace(/\\/g, '/').split('/').pop() || '';
+          return !!faKey && !!aKey && faKey === aKey;
+        });
+        if (!exists) rawAttachments = [...rawAttachments, fa];
+      }
+    }
+
+    // Lift [File: name (size) path=... type=...](/uploads/...) into attachments so
+    // voice bubbles survive refresh when structured attachments are absent on disk.
+    if (typeof m.content === 'string' && m.content.includes('[File:')) {
+      const fileMarkerRe =
+        /\[File:\s*(.+?)\s*\(([^)]*)\)(?:\s*path=([^\s\]]+))?(?:\s*type=(audio|video|voice|file))?\](?:\(([^)\n]+)\))?/g;
+      let fm: RegExpExecArray | null;
+      while ((fm = fileMarkerRe.exec(m.content)) !== null) {
+        const name = (fm[1] || '').trim();
+        if (!name) continue;
+        const size = (fm[2] || '').trim();
+        const pathRaw = (fm[3] || '').trim();
+        const kindRaw = (fm[4] || '').trim();
+        const mdUrl = (fm[5] || '').trim();
+        const preferred = mdUrl || pathRaw;
+        if (!preferred) continue;
+        const url = toWebMediaUrl(preferred.split(/\s+/)[0]);
+        if (!url) continue;
+        const exists = (rawAttachments as any[]).some(
+          (a) => (a?.url && a.url === url) || (a?.name && a.name === name),
+        );
+        if (exists) continue;
+        let kind: FileAttachment['type'] =
+          (kindRaw as FileAttachment['type']) || undefined;
+        if (!kind) {
+          if (/^voice_/i.test(name) || /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(name)) kind = 'voice';
+          else if (/\.(mp4|mov|avi|mkv)$/i.test(name)) kind = 'video';
+          else kind = 'file';
+        }
+        rawAttachments = [
+          ...rawAttachments,
+          { name, size, url, path: pathRaw || undefined, type: kind },
+        ];
+      }
     }
     const fileImages = rawFiles
       .filter((f: any) => !!f && (f.is_image || (typeof f.content_type === 'string' && f.content_type.startsWith('image/'))))
@@ -1460,7 +1525,8 @@ export function buildTimelineFromSession(
       ? formatUserSkillDisplayContent(
           m.content
             .replace(/\n?\s*<image>.*?<\/image>/gis, '')
-            .replace(/\n?\s*\[File:\s*.*?\]\(.*?\)/g, '')
+            // Strip both markdown-link and path=/type= forms of [File: ...]
+            .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
             .trim(),
         )
       : m.content;

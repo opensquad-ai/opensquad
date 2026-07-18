@@ -19,6 +19,9 @@ const getConfigUrl = (url: string) => {
 const BACKEND_HOST = (import.meta as any).env?.VITE_BACKEND_HOST || config.backend?.host || 'localhost';
 const BACKEND_PORT = Number((import.meta as any).env?.VITE_BACKEND_PORT) || config.backend?.port || 9555;
 
+const isPageHttps = () =>
+  typeof window !== 'undefined' && window.location.protocol === 'https:';
+
 // 后端主机解析：当页面通过局域网 IP 访问时，避免把后端固定到 localhost/127.0.0.1
 // 导致浏览器去“客户端本机”而不是服务端主机。
 const getBackendHost = () => {
@@ -36,9 +39,27 @@ const getBackendHost = () => {
   return BACKEND_HOST;
 };
 
-export const SERVER_BASE_URL = `http://${getBackendHost()}:${BACKEND_PORT}`;
+// HTTPS 页面（含反向代理）必须用同协议；否则 Safari 会拦混合内容 / 麦克风。
+// 仅在 HTTPS 下跟 window.location.host（便于 :9443→:9555 反代）。
+// HTTP 的 Vite :5173 不能跟页面端口——Vite 未代理 /ai-web/ws，否则会一直 Disconnected。
+const getBackendAuthority = () => {
+  if (typeof window !== 'undefined' && isPageHttps()) {
+    const pageHost = window.location.hostname;
+    const pagePort = window.location.port;
+    const backendHost = getBackendHost();
+    if (pageHost === backendHost && pagePort) {
+      return `${pageHost}:${pagePort}`;
+    }
+  }
+  return `${getBackendHost()}:${BACKEND_PORT}`;
+};
+
+const httpScheme = () => (isPageHttps() ? 'https' : 'http');
+const wsScheme = () => (isPageHttps() ? 'wss' : 'ws');
+
+export const SERVER_BASE_URL = `${httpScheme()}://${getBackendAuthority()}`;
 const API_BASE_URL = '/api';
-export const WS_BASE_URL = `ws://${getBackendHost()}:${BACKEND_PORT}`;
+export const WS_BASE_URL = `${wsScheme()}://${getBackendAuthority()}`;
 
 // 安全地访问 localStorage
 const safeGetStorage = (key: string): string | null => {
@@ -1609,6 +1630,10 @@ export interface ModelCardInfo {
   is_audio_output: boolean;
   is_image_output: boolean;
   audio_output_voice?: string;
+  /** When true on an ASR card, Agent Web Auto STT / Runner fallback may use this card. */
+  auto_asr?: boolean;
+  /** When true, this ASR card is used for group-chat speech-to-text. */
+  group_asr?: boolean;
   tool_call_mode?: 'auto' | 'native' | 'xml';
   render_mode?: 'full' | 'strict'; // full=显示全部, strict=仅显示<to_user>
   enable_repetition_check?: boolean;
@@ -1778,6 +1803,69 @@ export const agentSessionAPI = {
       filename: string;
       url: string;
     }>;
+  },
+
+  /** Text-to-speech via agent's voice.tts_card */
+  synthesize: async (agentId: string, text: string) => {
+    return apiRequest<{
+      url: string;
+      path?: string;
+      mime?: string;
+      filename?: string;
+    }>(`/ai-web/agent-sessions/${agentId}/synthesize`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    });
+  },
+
+  /** Speech-to-text via agent's voice.asr_card. */
+  transcribe: async (agentId: string, file: Blob | File, opts?: { language?: string; filename?: string }) => {
+    const formData = new FormData();
+    const name =
+      opts?.filename ||
+      (file instanceof File && file.name) ||
+      `voice_${Date.now()}.webm`;
+    formData.append('file', file, name);
+    if (opts?.language) formData.append('language', opts.language);
+
+    const url = `${API_BASE_URL}/ai-web/agent-sessions/${agentId}/transcribe?token=${authToken}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Transcribe failed: ${response.status} ${errorText}`);
+    }
+
+    return response.json() as Promise<{ text: string; language?: string }>;
+  },
+
+  /** Group-chat speech-to-text via the model card with group_asr=true. */
+  groupTranscribe: async (file: Blob | File, opts?: { language?: string; filename?: string }) => {
+    const formData = new FormData();
+    const name =
+      opts?.filename ||
+      (file instanceof File && file.name) ||
+      `voice_${Date.now()}.webm`;
+    formData.append('file', file, name);
+    if (opts?.language) formData.append('language', opts.language);
+
+    const url = `${API_BASE_URL}/ai-web/group-transcribe?token=${authToken}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Group transcribe failed: ${response.status} ${errorText}`);
+    }
+
+    return response.json() as Promise<{ text: string; language?: string; card?: string }>;
   },
 
   /** Upload any file (image, document, etc.) for chat */
