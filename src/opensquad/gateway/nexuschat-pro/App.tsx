@@ -977,14 +977,14 @@ const App: React.FC = () => {
 
       {/* Mobile: sidebar drawer overlay */}
       {isMobileSidebarOpen && (
-        <div className="fixed inset-0 z-[55] md:hidden flex">
+        <div className="fixed inset-0 z-[55] md:hidden flex mobile-safe-fixed">
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
             onClick={() => setIsMobileSidebarOpen(false)}
           />
           {/* Sidebar panel */}
-          <div className="relative z-10 w-[220px] max-w-[85vw]">
+          <div className="relative z-10 w-[220px] max-w-[85vw] h-full">
             <Sidebar
               currentUser={currentUser}
 
@@ -1163,8 +1163,9 @@ const App: React.FC = () => {
                    }
                  }}
                 toggleRightPanel={() => setState(p => ({ ...p, isRightPanelOpen: !p.isRightPanelOpen }))}
+                onOpenGroupSettings={() => setState(p => ({ ...p, isRightPanelOpen: true }))}
                 filter={{ text: '', userId: null, dateFrom: null, dateTo: null }}
-                 onBack={() => { localStorage.removeItem('nexus_active_group'); setState(prev => ({ ...prev, activeGroupId: null })); }}
+                 onBack={() => { localStorage.removeItem('nexus_active_group'); setState(prev => ({ ...prev, activeGroupId: null, isRightPanelOpen: false })); }}
                 shouldJumpToMention={shouldJumpToMention}
                 onReplaceMessages={(groupId, newMessages) => {
                   setState(prev => ({
@@ -1239,7 +1240,7 @@ const App: React.FC = () => {
           )}
           {/* Mobile: full-screen overlay */}
           {state.isRightPanelOpen && activeGroup && (
-              <div className="fixed inset-0 z-50 bg-panel lg:hidden">
+              <div className="fixed inset-0 z-50 bg-panel lg:hidden mobile-safe-fixed">
                   <RightPanel
                     isOpen={true}
                     onClose={() => setState(p => ({ ...p, isRightPanelOpen: false }))}

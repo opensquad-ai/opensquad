@@ -428,6 +428,27 @@
         }
       }
 
+      /* iOS: content draws under status bar (viewport-fit=cover + black-translucent).
+         Push the whole mobile UI down by safe-area + a small extra gap. */
+      @media (max-width: 767px) {
+        :root {
+          --mobile-top-inset: calc(env(safe-area-inset-top, 0px) + 10px);
+          --mobile-bottom-inset: env(safe-area-inset-bottom, 0px);
+        }
+        .mobile-safe-shell {
+          padding-top: var(--mobile-top-inset);
+          padding-bottom: var(--mobile-bottom-inset);
+          padding-left: env(safe-area-inset-left, 0px);
+          padding-right: env(safe-area-inset-right, 0px);
+          box-sizing: border-box;
+        }
+        .mobile-safe-fixed {
+          padding-top: var(--mobile-top-inset);
+          padding-bottom: var(--mobile-bottom-inset);
+          box-sizing: border-box;
+        }
+      }
+
       /* Prevent pull-to-refresh on mobile */
       body {
         overscroll-behavior: none;

@@ -407,7 +407,7 @@ export const ChatList: React.FC<ChatListProps> = ({
   };
 
   return (
-    <div className="w-full h-full bg-bgLight border-r border-border flex flex-col z-20 relative overflow-hidden">
+    <div data-testid="chat-list" className="w-full h-full bg-bgLight border-r border-border flex flex-col z-20 relative overflow-hidden">
       <div className="p-5">
         <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-3">
@@ -731,6 +731,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 </button>
                 <button
                     onClick={() => setShowCreateInput(!showCreateInput)}
+                    data-testid="chat-list-create"
                     className="p-2 bg-bgLight rounded-full text-textMuted hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
                     title={t('chatList.createGroup')}
                 >
@@ -745,6 +746,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <div className="flex gap-2">
                     <input
                         type="text"
+                        data-testid="chat-list-create-name"
                         value={newGroupName}
                         onChange={(e) => setNewGroupName(e.target.value)}
                         placeholder={t('chatList.newGroupName')}
@@ -754,6 +756,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                     />
                     <button
                         onClick={handleCreate}
+                        data-testid="chat-list-create-submit"
                         className="px-3 py-2 bg-primary text-white rounded-lg text-sm font-semibold hover:bg-primary/90"
                     >
                         {t('chatList.add')}
@@ -800,6 +803,8 @@ export const ChatList: React.FC<ChatListProps> = ({
         {groups.map(group => (
           <div
             key={group.id}
+            data-testid="chat-list-item"
+            data-group-id={group.id}
             onClick={() => onSelectGroup(group.id, false)}
             // Hover/touch prefetch: load the group's messages in the background
             // so the eventual click renders with no flash. The callback in App

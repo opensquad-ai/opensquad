@@ -78,7 +78,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   };
 
   return (
-    <div className="h-[100dvh] w-screen bg-bgLight flex items-center justify-center font-sans overflow-hidden safe-area-x safe-area-top safe-area-bottom relative">
+    <div className="h-full w-full bg-bgLight flex items-center justify-center font-sans overflow-hidden relative">
       {/* Language Switch — bottom-left corner */}
       <button
         onClick={() => setLanguage(i18n.language === 'zh' ? 'en' : 'zh')}
@@ -128,6 +128,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               <Mail className="absolute left-3 top-3 text-textMuted" size={18} />
               <input
                 type="email"
+                data-testid="auth-email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 bg-bgLight border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all text-sm text-textMain placeholder:text-textMuted/50"
@@ -144,6 +145,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               <Lock className="absolute left-3 top-3 text-textMuted" size={18} />
               <input
                 type="password"
+                data-testid="auth-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full pl-10 pr-4 py-2.5 bg-bgLight border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all text-sm text-textMain placeholder:text-textMuted/50"
@@ -156,6 +158,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
           <button
             type="submit"
+            data-testid="auth-submit"
             disabled={isSubmitting}
             className="w-full py-3 bg-primary hover:bg-primary/90 text-white rounded-xl font-semibold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 mt-2 disabled:opacity-70 disabled:cursor-not-allowed"
           >

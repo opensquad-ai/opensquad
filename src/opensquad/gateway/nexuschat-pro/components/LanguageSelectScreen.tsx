@@ -30,7 +30,7 @@ export const LanguageSelectScreen: React.FC<LanguageSelectScreenProps> = ({ onSe
   };
 
   return (
-    <div className="h-[100dvh] w-screen bg-bgLight flex items-center justify-center font-sans overflow-hidden safe-area-x safe-area-top safe-area-bottom relative">
+    <div className="h-full w-full bg-bgLight flex items-center justify-center font-sans overflow-hidden relative">
       <div className="bg-panel p-6 sm:p-10 rounded-2xl shadow-xl w-full max-w-md mx-4 border border-border animate-in fade-in slide-in-from-bottom-4 duration-500">
         <div className="flex flex-col items-center mb-6">
           <img
