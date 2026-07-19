@@ -347,6 +347,54 @@ async def clear_session(agent_id: str, current_user: User = Depends(get_current_
     return {"message": "Session cleared"}
 
 
+@router.post("/sessions/{agent_id}/withdraw")
+async def withdraw_turn(agent_id: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Withdraw a user turn: revert session file changes + truncate conversation.
+
+    Body: { message_id, timestamp, root? }
+    File revert goes through Launcher; session truncate is sent as agent command.
+    """
+    from urllib.parse import quote
+
+    message_id = str(body.get("message_id") or "").strip()
+    timestamp = str(body.get("timestamp") or "").strip()
+    root = str(body.get("root") or "").strip()
+    if not message_id and not timestamp:
+        raise HTTPException(400, "message_id or timestamp required")
+
+    # 1) Revert files to checkpoint (via admin proxy → launcher)
+    revert_payload: dict = {"message_id": message_id, "root": root}
+    try:
+        # Prefer agent directory name if agent_id is a UUID-style id — admin uses agent folder name.
+        # Frontend typically passes the same agentId used for fs APIs.
+        from app.ai_web.routes._admin import _proxy_post
+
+        await _proxy_post(
+            f"/api/agents/{quote(agent_id, safe='')}/fs/session-changes/revert",
+            revert_payload,
+            timeout=60.0,
+        )
+    except Exception as e:
+        # File revert failure should not block chat truncate — surface warning
+        logger = __import__("logging").getLogger(__name__)
+        logger.warning(f"[withdraw] file revert failed for {agent_id}: {e}")
+
+    # 2) Truncate agent session via command
+    sent = await registry.send_to_agent(
+        agent_id,
+        {
+            "type": "command",
+            "user_id": current_user.id,
+            "command": "withdraw_turn",
+            "data": {"message_id": message_id, "timestamp": timestamp},
+        },
+    )
+    if not sent:
+        raise HTTPException(503, f"Agent {agent_id} is not connected; withdraw not delivered")
+
+    return {"ok": True, "message_id": message_id, "timestamp": timestamp}
+
+
 @router.post("/agents/{agent_id}/config")
 async def update_agent_config(
     agent_id: str, config: ConfigUpdateRequest, current_user: User = Depends(get_current_user_dep)
@@ -829,7 +877,10 @@ async def agent_transcribe_audio(
                 pass
 
     if not result.get("success"):
-        raise HTTPException(502, result.get("error") or "ASR transcription failed")
+        err = result.get("error") or "ASR transcription failed"
+        # Empty / format issues are client-recoverable; avoid opaque 502.
+        code = 422 if "empty transcript" in str(err).lower() else 502
+        raise HTTPException(code, err)
 
     text = (result.get("text") or "").strip()
     logger.info(
@@ -900,7 +951,10 @@ async def group_transcribe_audio(
                 pass
 
     if not result.get("success"):
-        raise HTTPException(502, result.get("error") or "ASR transcription failed")
+        err = result.get("error") or "ASR transcription failed"
+        # Empty / format issues are client-recoverable; avoid opaque 502.
+        code = 422 if "empty transcript" in str(err).lower() else 502
+        raise HTTPException(code, err)
 
     text = (result.get("text") or "").strip()
     logger.info(

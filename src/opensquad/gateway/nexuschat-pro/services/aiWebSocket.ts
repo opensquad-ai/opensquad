@@ -192,6 +192,11 @@ class AIWebSocketService {
     this._sendCommand('stop_task');
   }
 
+  /** Withdraw a user turn (truncate session from timestamp) after file revert. */
+  withdrawTurn(data: { message_id?: string; timestamp?: string }) {
+    this._sendCommand('withdraw_turn', data || {});
+  }
+
   /** Manually compress current conversation context */
   compressContext() {
     this._sendCommand('compress_context');
@@ -286,6 +291,11 @@ class AIWebSocketService {
 
   stopVoiceRealtime() {
     this._sendCommand('voice_realtime_stop');
+  }
+
+  /** Ask agent whether a voice call session is still active (after refresh). */
+  queryVoiceRealtime() {
+    this._sendCommand('voice_realtime_query');
   }
 
   commitVoiceAudio() {

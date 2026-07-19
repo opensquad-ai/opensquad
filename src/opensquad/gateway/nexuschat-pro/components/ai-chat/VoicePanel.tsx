@@ -6,9 +6,10 @@
  * mic uplink + playback keep running in the background until Hangup.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronsDown, Mic, Phone, PhoneOff, Settings2, Square, X } from 'lucide-react';
+import { ChevronsDown, Mic, Phone, PhoneOff, Settings2, X } from 'lucide-react';
 import { getUserMediaSafe } from '../../utils/mediaDevices';
 import type { ModelCardInfo } from '../../services/api';
+import { VoiceRecordPill } from './VoiceRecordPill';
 
 export type VoiceMode = 'record' | 'realtime';
 
@@ -44,6 +45,14 @@ export interface VoicePanelProps {
   modelCards?: ModelCardInfo[];
   voiceBindings?: VoiceCardBindings;
   onVoiceBindingsChange?: (next: VoiceCardBindings) => void | Promise<void>;
+  /** Notify composer when record-message capture state changes (for input-bar pill). */
+  onCaptureStateChange?: (state: {
+    recording: boolean;
+    durationSec: number;
+    level: number;
+  }) => void;
+  /** Parent can call stopRecord() from the composer pill. */
+  captureApiRef?: React.MutableRefObject<{ stopRecord: () => void } | null>;
 }
 
 const FORCE_ASK_STORAGE_KEY = 'opensquad_voice_force_ask_agent';
@@ -107,10 +116,13 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   modelCards = [],
   voiceBindings,
   onVoiceBindingsChange,
+  onCaptureStateChange,
+  captureApiRef,
 }) => {
   const [mode, setMode] = useState<VoiceMode>('record');
   const [isRecording, setIsRecording] = useState(false);
   const [duration, setDuration] = useState(0);
+  const [recordLevel, setRecordLevel] = useState(0);
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState('');
   const [forceAskAgent, setForceAskAgent] = useState(readForceAskDefault);
@@ -146,6 +158,9 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const recordAnalyserRef = useRef<AnalyserNode | null>(null);
+  const recordMeterRafRef = useRef<number | null>(null);
+  const recordMeterCtxRef = useRef<AudioContext | null>(null);
   const playCtxRef = useRef<AudioContext | null>(null);
   const playTimeRef = useRef(0);
   const forceAskRef = useRef(forceAskAgent);
@@ -154,6 +169,8 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   const vadSilentFramesRef = useRef(0);
   const vadChunksRef = useRef<Int16Array[]>([]);
   const mp3AudioRef = useRef<HTMLAudioElement | null>(null);
+  const mp3QueueRef = useRef<string[]>([]);
+  const mp3PlayingRef = useRef(false);
 
   const inCall = mode === 'realtime' && isRealtimeActive(realtimeStatus);
   const isError = realtimeStatus === 'error';
@@ -186,7 +203,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       if (speakTimer) clearTimeout(speakTimer);
       speakTimer = setTimeout(() => {
         syncUplinkPause();
-      }, 600);
+      }, 220);
     };
     window.addEventListener('opensquad-voice-audio-out', handler as EventListener);
     return () => {
@@ -202,6 +219,68 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
     }
   };
 
+  const stopRecordMeter = useCallback(() => {
+    if (recordMeterRafRef.current != null) {
+      cancelAnimationFrame(recordMeterRafRef.current);
+      recordMeterRafRef.current = null;
+    }
+    recordAnalyserRef.current = null;
+    if (recordMeterCtxRef.current) {
+      void recordMeterCtxRef.current.close().catch(() => undefined);
+      recordMeterCtxRef.current = null;
+    }
+    setRecordLevel(0);
+  }, []);
+
+  const startRecordMeter = useCallback(
+    (stream: MediaStream) => {
+      stopRecordMeter();
+      try {
+        const ctx = new AudioContext();
+        recordMeterCtxRef.current = ctx;
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.7;
+        source.connect(analyser);
+        recordAnalyserRef.current = analyser;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        let lastEmit = 0;
+        const tick = () => {
+          const a = recordAnalyserRef.current;
+          if (!a) return;
+          a.getByteTimeDomainData(data);
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) {
+            const v = (data[i] - 128) / 128;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / data.length);
+          const level = Math.min(1, rms * 4.2);
+          const now = performance.now();
+          // ~12 fps to parent — enough for bars, avoids thrashing React
+          if (now - lastEmit > 80) {
+            lastEmit = now;
+            setRecordLevel(level);
+          }
+          recordMeterRafRef.current = requestAnimationFrame(tick);
+        };
+        recordMeterRafRef.current = requestAnimationFrame(tick);
+      } catch {
+        /* meter is optional */
+      }
+    },
+    [stopRecordMeter],
+  );
+
+  useEffect(() => {
+    onCaptureStateChange?.({
+      recording: isRecording,
+      durationSec: duration,
+      level: recordLevel,
+    });
+  }, [isRecording, duration, recordLevel, onCaptureStateChange]);
+
   const cleanupRealtimeCapture = useCallback(() => {
     processorRef.current?.disconnect();
     processorRef.current = null;
@@ -213,46 +292,38 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
     }
   }, []);
 
-  // Collapse: abort unfinished record-message only. Keep realtime mic/session alive.
-  useEffect(() => {
-    if (!open) {
-      stopTimer();
-      if (modeRef.current === 'record') {
-        setIsRecording(false);
-        if (mediaRecorderRef.current) {
-          mediaRecorderRef.current.ondataavailable = null;
-          mediaRecorderRef.current.onstop = null;
-          if (mediaRecorderRef.current.state === 'recording') {
-            try {
-              mediaRecorderRef.current.stop();
-            } catch {
-              /* ignore */
-            }
-          }
-          mediaRecorderRef.current = null;
-        }
-        if (!isRealtimeActive(realtimeStatus)) {
-          streamRef.current?.getTracks().forEach((t) => t.stop());
-          streamRef.current = null;
-        }
-      }
-    }
-  }, [open, realtimeStatus]);
+  // Collapse no longer aborts record-message — composer pill keeps control.
 
   // Unmount: release local audio. Hangup is explicit (挂断) — avoid StrictMode remount killing the call.
   useEffect(
     () => () => {
       stopTimer();
+      stopRecordMeter();
       cleanupRealtimeCapture();
     },
-    [cleanupRealtimeCapture],
+    [cleanupRealtimeCapture, stopRecordMeter],
   );
+
+  const stopRecord = useCallback(() => {
+    stopTimer();
+    stopRecordMeter();
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state === 'recording') {
+      try {
+        rec.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    setIsRecording(false);
+  }, [stopRecordMeter]);
 
   const startRecord = async () => {
     setError('');
     try {
       const stream = await getUserMediaSafe({ audio: true });
       streamRef.current = stream;
+      startRecordMeter(stream);
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
@@ -260,10 +331,12 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = () => {
+        stopRecordMeter();
         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
         const sec = durationRef.current;
         stream.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
+        mediaRecorderRef.current = null;
         void (async () => {
           try {
             await onSendVoiceMessage(blob, sec);
@@ -282,21 +355,27 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
         if (durationRef.current >= 60) stopRecord();
       }, 1000);
     } catch (e: any) {
+      stopRecordMeter();
       setError(e?.message || 'Microphone permission denied');
     }
   };
 
-  const stopRecord = () => {
-    stopTimer();
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-  };
+  useEffect(() => {
+    if (!captureApiRef) return;
+    captureApiRef.current = { stopRecord };
+    return () => {
+      captureApiRef.current = null;
+    };
+  }, [captureApiRef, stopRecord]);
 
-  const startRealtime = async () => {
+  const startRealtime = async (opts?: { notifyStart?: boolean }) => {
     setError('');
+    const notifyStart = opts?.notifyStart !== false;
     try {
+      if (streamRef.current) {
+        if (notifyStart) onRealtimeStart({ forceAskAgent });
+        return;
+      }
       const stream = await getUserMediaSafe({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
@@ -304,7 +383,10 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       const ctx = new AudioContext({ sampleRate: 24000 });
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      // Mouthpiece keeps 4096 (~171ms) for 2s end-silence math; Realtime needs
+      // smaller chunks so server VAD reacts in tens of ms, not ~171ms steps.
+      const bufferSize = forceAskRef.current ? 4096 : 1024;
+      const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
       vadSpeechRef.current = false;
       vadSilentFramesRef.current = 0;
@@ -347,8 +429,10 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
           } else if (vadSpeechRef.current) {
             vadChunksRef.current.push(pcmView.slice());
             vadSilentFramesRef.current += 1;
-            // ~4 frames * 4096 / 24000 ≈ 0.68s silence
-            if (vadSilentFramesRef.current >= 4) {
+            // End-of-utterance silence ≈ 2s (depends on ScriptProcessor buffer).
+            // 4096@24k → ~171ms/frame → 12 frames; 1024@24k → ~43ms → 47 frames.
+            const silenceFramesNeeded = bufferSize >= 4096 ? 12 : Math.ceil(2.0 / (bufferSize / 24000));
+            if (vadSilentFramesRef.current >= silenceFramesNeeded) {
               flushMouthpieceUtterance();
             }
           }
@@ -363,11 +447,25 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       silent.gain.value = 0;
       processor.connect(silent);
       silent.connect(ctx.destination);
-      onRealtimeStart({ forceAskAgent });
+      setMode('realtime');
+      if (notifyStart) onRealtimeStart({ forceAskAgent });
     } catch (e: any) {
       setError(e?.message || 'Microphone permission denied');
     }
   };
+
+  // After page refresh: parent restores connected status; re-attach mic without restarting agent session.
+  const resumeCaptureRef = useRef(false);
+  useEffect(() => {
+    if (!isRealtimeActive(realtimeStatus) || realtimeStatus === 'connecting') {
+      if (!isRealtimeActive(realtimeStatus)) resumeCaptureRef.current = false;
+      return;
+    }
+    if (streamRef.current || resumeCaptureRef.current) return;
+    resumeCaptureRef.current = true;
+    void startRealtime({ notifyStart: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-attach when status becomes active
+  }, [realtimeStatus]);
 
   const stopRealtime = () => {
     vadChunksRef.current = [];
@@ -381,6 +479,9 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       }
       mp3AudioRef.current = null;
     }
+    mp3QueueRef.current = [];
+    mp3PlayingRef.current = false;
+    ttsPlayingRef.current = false;
     cleanupRealtimeCapture();
     onRealtimeStop();
   };
@@ -404,38 +505,58 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
     }
   };
 
-  // Play helper: PCM16 base64 (Realtime) or mp3 url (mouthpiece TTS)
+  // Play helper: PCM16 base64 (Realtime) or queued mp3 urls (mouthpiece TTS)
   useEffect(() => {
     const resumeAfterTts = () => {
       ttsPlayingRef.current = false;
+      mp3PlayingRef.current = false;
       syncUplinkPause();
     };
+
+    const playNextMp3 = () => {
+      const next = mp3QueueRef.current.shift();
+      if (!next) {
+        resumeAfterTts();
+        return;
+      }
+      try {
+        if (mp3AudioRef.current) {
+          try {
+            mp3AudioRef.current.pause();
+          } catch {
+            /* ignore */
+          }
+        }
+        const el = new Audio(next);
+        mp3AudioRef.current = el;
+        ttsPlayingRef.current = true;
+        mp3PlayingRef.current = true;
+        uplinkPausedRef.current = true;
+        el.onended = () => playNextMp3();
+        el.onerror = () => playNextMp3();
+        void el.play().then(undefined, () => playNextMp3());
+      } catch {
+        playNextMp3();
+      }
+    };
+
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent).detail as {
         audio?: string;
         url?: string;
         format?: string;
         mime?: string;
+        queued?: boolean;
       };
       if (detail?.url) {
         try {
           const src = detail.url.startsWith('http')
             ? detail.url
             : `${window.location.origin}${detail.url.startsWith('/') ? '' : '/'}${detail.url}`;
-          if (mp3AudioRef.current) {
-            try {
-              mp3AudioRef.current.pause();
-            } catch {
-              /* ignore */
-            }
+          mp3QueueRef.current.push(src);
+          if (!mp3PlayingRef.current) {
+            playNextMp3();
           }
-          const el = new Audio(src);
-          mp3AudioRef.current = el;
-          ttsPlayingRef.current = true;
-          uplinkPausedRef.current = true;
-          el.onended = resumeAfterTts;
-          el.onerror = resumeAfterTts;
-          void el.play().then(undefined, () => resumeAfterTts());
         } catch {
           resumeAfterTts();
         }
@@ -604,19 +725,14 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
               >
                 <Mic size={16} /> 录音转文字
               </button>
-            ) : dictating ? (
-              <span className="flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/15 text-primary text-sm">
-                转写中…
-              </span>
             ) : (
-              <button
-                type="button"
-                onClick={stopRecord}
-                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500 text-white text-sm"
-              >
-                <Square size={14} />
-                停止并转写 ({duration}s)
-              </button>
+              <VoiceRecordPill
+                durationSec={duration}
+                level={recordLevel}
+                dictating={dictating}
+                onClick={dictating ? undefined : stopRecord}
+                title={dictating ? '正在转写…' : '点击停止并转写'}
+              />
             )}
             <span className="text-xs text-textMuted">
               最长 60 秒，转写后写入发送框（需点发送）

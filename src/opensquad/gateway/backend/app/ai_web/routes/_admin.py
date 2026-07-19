@@ -345,6 +345,25 @@ async def admin_fs_list(
     return await _proxy_get(f"/api/agents/{name}/fs/list?path={q}{r}", http_only=True)
 
 
+@admin_router.get("/admin/agents/{name}/fs/tree")
+async def admin_fs_tree(
+    name: str,
+    root: str = "",
+    max: int = 10000,
+    current_user: User = Depends(get_current_user_dep),
+):
+    """List full project tree (metadata only, capped)."""
+    from urllib.parse import quote
+
+    r = (
+        f"?root={quote(root, safe='')}&max={int(max) if max else 10000}"
+        if root
+        else f"?max={int(max) if max else 10000}"
+    )
+    # Full tree walk can take a few seconds on large projects.
+    return await _proxy_get(f"/api/agents/{name}/fs/tree{r}", http_only=True, timeout=60.0)
+
+
 @admin_router.get("/admin/agents/{name}/fs/read")
 async def admin_fs_read(
     name: str,
@@ -359,6 +378,98 @@ async def admin_fs_read(
     r = f"&root={quote(root, safe='')}" if root else ""
     # Images may be several MB as base64 — allow a longer proxy window.
     return await _proxy_get(f"/api/agents/{name}/fs/read?path={q}{r}", http_only=True, timeout=30.0)
+
+
+@admin_router.get("/admin/agents/{name}/fs/changed")
+async def admin_fs_changed(
+    name: str,
+    root: str = "",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """List git-changed files under the project root."""
+    from urllib.parse import quote
+
+    r = f"?root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/fs/changed{r}", http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/fs/session-changes")
+async def admin_fs_session_changes(
+    name: str,
+    root: str = "",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Session-scoped dirty files + line stats (since last Accept/Commit)."""
+    from urllib.parse import quote
+
+    r = f"?root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/fs/session-changes{r}", http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/fs/session-diff")
+async def admin_fs_session_diff(
+    name: str,
+    path: str = "",
+    root: str = "",
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Unified diff for one session-changed file."""
+    from urllib.parse import quote
+
+    q = quote(path or "", safe="")
+    r = f"&root={quote(root, safe='')}" if root else ""
+    return await _proxy_get(f"/api/agents/{name}/fs/session-diff?path={q}{r}", http_only=True)
+
+
+@admin_router.post("/admin/agents/{name}/fs/session-changes/commit")
+async def admin_fs_session_commit(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/fs/session-changes/commit", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/session-changes/checkpoint")
+async def admin_fs_session_checkpoint(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/fs/session-changes/checkpoint", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/session-changes/revert")
+async def admin_fs_session_revert(
+    name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
+):
+    return await _proxy_post(f"/api/agents/{name}/fs/session-changes/revert", body or {}, timeout=60.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/write")
+async def admin_fs_write(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/write", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/mkdir")
+async def admin_fs_mkdir(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/mkdir", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/delete")
+async def admin_fs_delete(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/delete", body or {}, timeout=30.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/rename")
+async def admin_fs_rename(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/rename", body or {}, timeout=15.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/reveal")
+async def admin_fs_reveal(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/reveal", body or {}, timeout=10.0)
+
+
+@admin_router.post("/admin/agents/{name}/fs/open-terminal")
+async def admin_fs_open_terminal(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    return await _proxy_post(f"/api/agents/{name}/fs/open-terminal", body or {}, timeout=10.0)
 
 
 @admin_router.put("/admin/agents/{name}/config")

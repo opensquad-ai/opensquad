@@ -12,6 +12,20 @@
 - After modifying code/files, **just stop** — do not summarize or explain what you changed, unless the logic change is complex or user explicitly asks.
 - When citing code locations, use `file_path:line_number` format (e.g., `opensquad/runner.py:88`) for quick navigation.
 - **Never add code comments** unless explicitly asked.
+- **Mermaid diagrams (Agent Web)**: When a user-facing reply (`<to_user>` / final answer) explains architecture, data flow, sequences, state machines, relationships, or multi-step processes, prefer a fenced Mermaid code block (language tag `mermaid`) so the UI can render it as a diagram. Example shape:
+
+  - Start a fence with ` ```mermaid `
+  - Use diagram types such as `flowchart`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, `erDiagram`, `gantt`, or `mindmap`
+  - Keep one focused idea per diagram
+  - Do **not** use Mermaid for trivial one-line answers
+  - Put Mermaid only in user-visible replies, not inside internal `<thought>` / tool chatter
+
+- **Commit & Push (Agent Web)**: If the user message is exactly `Commit & Push` (or clearly equivalent, e.g. Chinese「提交并推送」with the same intent from the Changes bar), treat it as an explicit request to **git commit all current project changes and push** to the remote:
+  1. Inspect status with `git status` / `git diff` (short).
+  2. Stage relevant project files (`git add`); do **not** commit secrets (`.env`, credentials, API keys).
+  3. Create a concise commit message summarizing the session changes.
+  4. `git commit` then `git push` (use the repo's current branch; never force-push unless the user explicitly asks).
+  5. Reply briefly with the commit summary and push result. Do not ask for confirmation — the button click **is** the confirmation.
 
 **Comparison Example**:
 

@@ -1,21 +1,29 @@
 /**
- * ProjectFilesPanel — Cursor-like project file browser on the right of Agent Web.
+ * ProjectFilesPanel — Cursor/Trae-like workspace file explorer on the right of Agent Web.
  *
- * Enter-directory navigation + breadcrumb + search + highlighted code preview.
- * Root = agent project cwd. Width is drag-resizable (left edge).
+ * Full project tree loads once (metadata only, ≤10000). Folder expand is local;
+ * file contents load only when the user clicks a file.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ChevronDown,
   ChevronRight,
+  Copy,
+  Eye,
+  EyeOff,
   File as FileIcon,
   FileCode2,
   FileJson,
   FileText,
   FileType2,
   Folder,
+  FolderPlus,
   Image as ImageIcon,
   Loader2,
+  MoreHorizontal,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings2,
   Terminal,
@@ -24,6 +32,7 @@ import {
 import { adminAPI } from '../../services/api';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 
 export type ProjectFileOpenRequest = {
   /** Path relative to project root, or absolute under root */
@@ -31,7 +40,107 @@ export type ProjectFileOpenRequest = {
   nonce: number;
 };
 
-type FsEntry = { name: string; type: 'file' | 'dir'; size?: number | null };
+type TreeEntry = {
+  path: string;
+  name: string;
+  type: 'file' | 'dir';
+  size?: number | null;
+  skipped?: boolean;
+};
+
+type ChangedEntry = {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  status?: string;
+  additions?: number;
+  deletions?: number;
+  oversized?: boolean;
+};
+
+type ListTab = 'changed' | 'all';
+
+type CtxTarget = {
+  /** Relative path; empty string = browse root */
+  path: string;
+  type: 'file' | 'dir' | 'root';
+  name: string;
+};
+
+type CtxMenuState = {
+  x: number;
+  y: number;
+  target: CtxTarget;
+};
+
+type InlineCreate = { kind: 'file' | 'dir' };
+
+type VisibleRow = TreeEntry & { depth: number };
+
+function buildChildrenMap(entries: TreeEntry[]): Map<string, TreeEntry[]> {
+  const map = new Map<string, TreeEntry[]>();
+  for (const e of entries) {
+    const parent = parentRel(e.path);
+    const list = map.get(parent);
+    if (list) list.push(e);
+    else map.set(parent, [e]);
+  }
+  for (const [, list] of map) {
+    list.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+  }
+  return map;
+}
+
+function collectVisibleRows(
+  childrenMap: Map<string, TreeEntry[]>,
+  expanded: Set<string>,
+  searchQ: string,
+): VisibleRow[] {
+  const q = searchQ.trim().toLowerCase();
+  if (q) {
+    // Flat search hits with depth from path segments
+    const out: VisibleRow[] = [];
+    for (const list of childrenMap.values()) {
+      for (const e of list) {
+        if (
+          e.name.toLowerCase().includes(q) ||
+          e.path.toLowerCase().includes(q)
+        ) {
+          out.push({ ...e, depth: e.path.split('/').filter(Boolean).length - 1 });
+        }
+      }
+    }
+    out.sort((a, b) => a.path.localeCompare(b.path));
+    return out;
+  }
+
+  const out: VisibleRow[] = [];
+  const walk = (parent: string, depth: number) => {
+    const kids = childrenMap.get(parent) || [];
+    for (const e of kids) {
+      out.push({ ...e, depth });
+      if (e.type === 'dir' && !e.skipped && expanded.has(e.path)) {
+        walk(e.path, depth + 1);
+      }
+    }
+  };
+  walk('', 0);
+  return out;
+}
+
+function ancestorPaths(relPath: string): string[] {
+  const parts = relPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const out: string[] = [];
+  let acc = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    acc = acc ? `${acc}/${parts[i]}` : parts[i];
+    out.push(acc);
+  }
+  return out;
+}
 
 interface ProjectFilesPanelProps {
   isOpen: boolean;
@@ -42,6 +151,14 @@ interface ProjectFilesPanelProps {
   openRequest?: ProjectFileOpenRequest | null;
   width: number;
   onWidthChange: (w: number) => void;
+  /** Force switch to changed tab + refresh (from Changes bar). */
+  focusChangedNonce?: number;
+  /** Notify parent when session change list refreshes. */
+  onSessionChanges?: (summary: {
+    additions: number;
+    deletions: number;
+    count: number;
+  }) => void;
 }
 
 const WIDTH_MIN = 320;
@@ -157,9 +274,9 @@ const EXT_STYLE: Record<string, ExtStyle> = {
   conf: { Icon: Settings2, color: 'text-slate-400', label: 'CFG' },
   env: { Icon: Settings2, color: 'text-lime-500', label: 'ENV' },
   // Docs
-  md: { Icon: FileText, color: 'text-sky-400', label: 'MD' },
-  mdx: { Icon: FileText, color: 'text-sky-400', label: 'MDX' },
-  markdown: { Icon: FileText, color: 'text-sky-400', label: 'MD' },
+  md: { Icon: FileText, color: 'text-sky-500', label: 'MD' },
+  mdx: { Icon: FileText, color: 'text-sky-500', label: 'MDX' },
+  markdown: { Icon: FileText, color: 'text-sky-500', label: 'MD' },
   txt: { Icon: FileText, color: 'text-textMuted', label: 'TXT' },
   csv: { Icon: FileText, color: 'text-emerald-400', label: 'CSV' },
   log: { Icon: FileText, color: 'text-textMuted', label: 'LOG' },
@@ -186,19 +303,34 @@ const EXT_STYLE: Record<string, ExtStyle> = {
 
 const FileTypeIcon: React.FC<{ name: string; type: 'file' | 'dir' }> = ({ name, type }) => {
   if (type === 'dir') {
-    return <Folder size={12} className="text-amber-500/80 shrink-0" />;
+    return <Folder size={14} className="text-amber-500 shrink-0" strokeWidth={1.75} />;
   }
   const ext = fileExt(name);
+  // HTML: orange badge (reference style)
+  if (ext === 'html' || ext === 'htm') {
+    return (
+      <span
+        className="shrink-0 inline-flex items-center justify-center min-w-[26px] h-[14px] px-0.5 rounded-[3px] text-[8px] font-bold leading-none tracking-tight text-orange-500"
+        style={{ backgroundColor: 'color-mix(in srgb, #f97316 16%, transparent)' }}
+        title={ext}
+      >
+        HTML
+      </span>
+    );
+  }
+  // MD: blue FileText
+  if (ext === 'md' || ext === 'mdx' || ext === 'markdown') {
+    return <FileText size={14} className="text-sky-500 shrink-0" strokeWidth={1.75} />;
+  }
   const style = EXT_STYLE[ext] || EXT_STYLE[name.toLowerCase()];
   if (!style) {
-    return <FileIcon size={12} className="text-sky-500/70 shrink-0" />;
+    return <FileIcon size={14} className="text-sky-500/70 shrink-0" strokeWidth={1.75} />;
   }
   const { Icon, color, label } = style;
-  // Prefer a compact extension badge when we have a short label (more "后缀" readable).
   if (label && label.length <= 4) {
     return (
       <span
-        className={`shrink-0 inline-flex items-center justify-center min-w-[22px] h-[12px] px-0.5 rounded-[2px] text-[8px] font-bold leading-none tracking-tight ${color}`}
+        className={`shrink-0 inline-flex items-center justify-center min-w-[22px] h-[13px] px-0.5 rounded-[2px] text-[8px] font-bold leading-none tracking-tight ${color}`}
         style={{ backgroundColor: 'color-mix(in srgb, currentColor 14%, transparent)' }}
         title={ext || name}
       >
@@ -206,7 +338,7 @@ const FileTypeIcon: React.FC<{ name: string; type: 'file' | 'dir' }> = ({ name, 
       </span>
     );
   }
-  return <Icon size={12} className={`${color} shrink-0`} />;
+  return <Icon size={14} className={`${color} shrink-0`} />;
 };
 
 const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName, content }) => {
@@ -267,12 +399,42 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   openRequest,
   width,
   onWidthChange,
+  focusChangedNonce,
+  onSessionChanges,
 }) => {
   const [browsePath, setBrowsePath] = useState('');
-  const [entries, setEntries] = useState<FsEntry[]>([]);
+  const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([]);
+  const [treeTruncated, setTreeTruncated] = useState(false);
+  const [treeCount, setTreeCount] = useState(0);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [showSearch, setShowSearch] = useState(false);
+
+  const [tab, setTab] = useState<ListTab>('all');
+  const [changedEntries, setChangedEntries] = useState<ChangedEntry[]>([]);
+  const [changedLoading, setChangedLoading] = useState(false);
+  const [changedError, setChangedError] = useState<string | null>(null);
+  /** Accordion: which changed files have inline diff expanded */
+  const [expandedChanged, setExpandedChanged] = useState<Set<string>>(() => new Set());
+  const [inlineDiffByPath, setInlineDiffByPath] = useState<
+    Record<string, { lines: DiffLine[]; additions: number; deletions: number; oversized?: boolean }>
+  >({});
+  const [inlineDiffLoading, setInlineDiffLoading] = useState<string | null>(null);
+  const [revertingPath, setRevertingPath] = useState<string | null>(null);
+  const onSessionChangesRef = useRef(onSessionChanges);
+  useEffect(() => {
+    onSessionChangesRef.current = onSessionChanges;
+  }, [onSessionChanges]);
+  const inlineDiffByPathRef = useRef(inlineDiffByPath);
+  useEffect(() => {
+    inlineDiffByPathRef.current = inlineDiffByPath;
+  }, [inlineDiffByPath]);
+  const expandedChangedRef = useRef(expandedChanged);
+  useEffect(() => {
+    expandedChangedRef.current = expandedChanged;
+  }, [expandedChanged]);
 
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -282,47 +444,202 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [fileError, setFileError] = useState<string | null>(null);
   /** For .md: rendered preview vs raw source */
   const [mdRaw, setMdRaw] = useState(false);
+  const [showPreview, setShowPreview] = useState(true);
+  const [diffLines, setDiffLines] = useState<DiffLine[] | null>(null);
+  const [diffMeta, setDiffMeta] = useState<{
+    additions: number;
+    deletions: number;
+    oversized?: boolean;
+    status?: string;
+  } | null>(null);
+
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [inlineCreate, setInlineCreate] = useState<InlineCreate | null>(null);
+  /** Directory (rel) where inline create commits; defaults to browsePath */
+  const [createUnder, setCreateUnder] = useState<string>('');
+  const [createName, setCreateName] = useState('');
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
 
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const lastOpenNonce = useRef<number>(-1);
+  const createInputRef = useRef<HTMLInputElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const skipCreateBlurRef = useRef(false);
+  const skipRenameBlurRef = useRef(false);
+  const newMenuRef = useRef<HTMLDivElement | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   const projectLabel = useMemo(() => {
-    if (!rootPath) return '';
+    if (!rootPath) return '默认工作区';
     const parts = rootPath.replace(/\\/g, '/').split('/').filter(Boolean);
     return parts[parts.length - 1] || rootPath;
   }, [rootPath]);
 
-  const crumbs = useMemo(() => {
-    const parts = browsePath ? browsePath.split('/').filter(Boolean) : [];
-    const out: { label: string; path: string }[] = [{ label: projectLabel || 'Project', path: '' }];
-    let acc = '';
-    for (const part of parts) {
-      acc = acc ? `${acc}/${part}` : part;
-      out.push({ label: part, path: acc });
-    }
-    return out;
-  }, [browsePath, projectLabel]);
+  const childrenMap = useMemo(() => buildChildrenMap(treeEntries), [treeEntries]);
 
-  const filtered = useMemo(() => {
+  const visibleRows = useMemo(
+    () => collectVisibleRows(childrenMap, expanded, search),
+    [childrenMap, expanded, search],
+  );
+
+  const filteredChanged = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((e) => e.name.toLowerCase().includes(q));
-  }, [entries, search]);
+    if (!q) return changedEntries;
+    return changedEntries.filter(
+      (e) => e.name.toLowerCase().includes(q) || e.path.toLowerCase().includes(q),
+    );
+  }, [changedEntries, search]);
 
-  const loadList = useCallback(
-    async (dir: string) => {
-      if (!agentId || !rootPath) return;
-      setListLoading(true);
-      setListError(null);
+  const closeMenus = useCallback(() => {
+    setCtxMenu(null);
+    setNewMenuOpen(false);
+  }, []);
+
+  const loadTree = useCallback(async () => {
+    if (!agentId || !rootPath) return;
+    setListLoading(true);
+    setListError(null);
+    try {
+      const resp = await adminAPI.listProjectTree(agentId, rootPath, 10000);
+      const entries = (resp.entries || []).map((e) => ({
+        path: (e.path || '').replace(/\\/g, '/'),
+        name: e.name,
+        type: e.type,
+        size: e.size,
+        skipped: e.skipped,
+      }));
+      setTreeEntries(entries);
+      setTreeTruncated(!!resp.truncated);
+      setTreeCount(resp.count ?? entries.length);
+      // Expand top-level dirs by default for a useful first glance
+      const topDirs = entries.filter((e) => e.type === 'dir' && !e.path.includes('/')).map((e) => e.path);
+      setExpanded(new Set(topDirs.slice(0, 12)));
+    } catch (err: any) {
+      setTreeEntries([]);
+      setTreeTruncated(false);
+      setTreeCount(0);
+      setListError(err?.message || '无法加载项目文件树');
+    } finally {
+      setListLoading(false);
+    }
+  }, [agentId, rootPath]);
+
+  const toggleExpand = useCallback((dirPath: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(dirPath)) next.delete(dirPath);
+      else next.add(dirPath);
+      return next;
+    });
+  }, []);
+
+  const expandToPath = useCallback((relPath: string) => {
+    const ancestors = ancestorPaths(relPath);
+    if (ancestors.length === 0) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const a of ancestors) next.add(a);
+      return next;
+    });
+  }, []);
+
+  const loadChanged = useCallback(async () => {
+    if (!agentId || !rootPath) return;
+    setChangedLoading(true);
+    setChangedError(null);
+    // Drop cached diffs so refresh always reflects disk (e.g. after CMD edits)
+    setInlineDiffByPath({});
+    inlineDiffByPathRef.current = {};
+    try {
+      const resp = await adminAPI.listSessionChanges(agentId, rootPath);
+      const files = (resp.files || resp.entries || []).map((e) => ({
+        name: e.name,
+        path: e.path,
+        type: e.type,
+        status: e.status,
+        additions: e.additions,
+        deletions: e.deletions,
+        oversized: e.oversized,
+      }));
+      setChangedEntries(files);
+      onSessionChangesRef.current?.({
+        additions: resp.additions || 0,
+        deletions: resp.deletions || 0,
+        count: resp.count ?? files.length,
+      });
+      if (files.length === 0) {
+        setChangedError(null);
+      }
+      // Re-fetch diffs for rows that are still expanded
+      const stillExpanded = [...expandedChangedRef.current].filter((p) =>
+        files.some((f) => f.path === p),
+      );
+      for (const p of stillExpanded) {
+        void (async () => {
+          setInlineDiffLoading(p);
+          try {
+            const d = await adminAPI.getSessionDiff(agentId, p, rootPath);
+            setInlineDiffByPath((prev) => ({
+              ...prev,
+              [p]: {
+                lines: d.lines || [],
+                additions: d.additions || 0,
+                deletions: d.deletions || 0,
+                oversized: d.oversized,
+              },
+            }));
+          } catch {
+            /* keep empty until user re-expands */
+          } finally {
+            setInlineDiffLoading((cur) => (cur === p ? null : cur));
+          }
+        })();
+      }
+    } catch (err: any) {
+      setChangedEntries([]);
+      setChangedError(err?.message || '无法加载变动文件');
+      onSessionChangesRef.current?.({ additions: 0, deletions: 0, count: 0 });
+    } finally {
+      setChangedLoading(false);
+    }
+  }, [agentId, rootPath]);
+
+  const refreshCurrent = useCallback(() => {
+    if (tab === 'changed') void loadChanged();
+    else void loadTree();
+  }, [tab, loadChanged, loadTree]);
+
+  const openDiff = useCallback(
+    async (relPath: string) => {
+      if (!agentId || !relPath || !rootPath) return;
+      setActiveFile(relPath);
+      setShowPreview(true);
+      setFileLoading(true);
+      setFileError(null);
+      setFileContent('');
+      setImageSrc(null);
+      setFileMeta(null);
+      setDiffLines(null);
+      setDiffMeta(null);
+      setMdRaw(false);
       try {
-        const resp = await adminAPI.listProjectDir(agentId, dir, rootPath);
-        setEntries(resp.entries || []);
-        setBrowsePath((resp.path || '').replace(/\\/g, '/'));
+        const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath);
+        setDiffLines(resp.lines || []);
+        setDiffMeta({
+          additions: resp.additions || 0,
+          deletions: resp.deletions || 0,
+          oversized: resp.oversized,
+          status: resp.status,
+        });
+        setActiveFile(resp.path || relPath);
       } catch (err: any) {
-        setEntries([]);
-        setListError(err?.message || 'Failed to list directory');
+        setFileError(err?.message || '无法加载 diff');
       } finally {
-        setListLoading(false);
+        setFileLoading(false);
       }
     },
     [agentId, rootPath],
@@ -331,7 +648,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const openFile = useCallback(
     async (relPath: string) => {
       if (!agentId || !relPath || !rootPath) return;
+      setShowPreview(true);
+      setDiffLines(null);
+      setDiffMeta(null);
       setActiveFile(relPath);
+      setBrowsePath(parentRel(relPath));
+      expandToPath(relPath);
       setFileLoading(true);
       setFileError(null);
       setFileContent('');
@@ -356,36 +678,41 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           size: resp.size,
           kind,
         });
-        setActiveFile(resp.path || relPath);
-        // Keep list on the parent folder of this file
-        const parent = parentRel(resp.path || relPath);
-        if (parent !== browsePath) {
-          void loadList(parent);
-        }
+        const finalPath = resp.path || relPath;
+        setActiveFile(finalPath);
+        setBrowsePath(parentRel(finalPath));
+        expandToPath(finalPath);
       } catch (err: any) {
-        setFileError(err?.message || 'Failed to read file');
+        setFileError(err?.message || '无法读取文件');
       } finally {
         setFileLoading(false);
       }
     },
-    [agentId, browsePath, loadList, rootPath],
+    [agentId, rootPath, expandToPath],
   );
 
-  // Reset when root / open changes
+  // Reset when root / open changes — load full tree once
   useEffect(() => {
     if (!isOpen) return;
     setSearch('');
+    setShowSearch(false);
     setActiveFile(null);
     setFileContent('');
     setImageSrc(null);
     setFileError(null);
+    setDiffLines(null);
+    setDiffMeta(null);
     setBrowsePath('');
-    // If an external open is pending, skip root list — openFile will list the parent.
-    const pendingOpen = !!(openRequest && openRequest.nonce !== lastOpenNonce.current);
-    if (rootPath && !pendingOpen) void loadList('');
-    else if (!rootPath) {
-      setEntries([]);
+    setInlineCreate(null);
+    setRenamingPath(null);
+    closeMenus();
+    if (rootPath) {
+      void loadTree();
+      if (tab === 'changed') void loadChanged();
+    } else {
+      setTreeEntries([]);
       setListError(null);
+      setChangedEntries([]);
     }
   }, [isOpen, rootPath, agentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -396,8 +723,133 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     lastOpenNonce.current = openRequest.nonce;
     const rel = toProjectRelative(rootPath, openRequest.path);
     if (!rel) return;
+    setTab('all');
     void openFile(rel);
   }, [isOpen, openRequest, rootPath, openFile]);
+
+  // Load changed when switching to that tab
+  useEffect(() => {
+    if (!isOpen || !rootPath || tab !== 'changed') return;
+    void loadChanged();
+  }, [isOpen, rootPath, tab, loadChanged]);
+
+  // Changes bar → force changed tab + refresh
+  useEffect(() => {
+    if (!focusChangedNonce || !isOpen) return;
+    setTab('changed');
+    setShowPreview(false);
+    void loadChanged();
+  }, [focusChangedNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleChangedExpand = useCallback(
+    async (relPath: string) => {
+      const wasOpen = expandedChangedRef.current.has(relPath);
+      setExpandedChanged((prev) => {
+        const next = new Set(prev);
+        if (wasOpen) next.delete(relPath);
+        else next.add(relPath);
+        return next;
+      });
+      if (wasOpen || !agentId || !rootPath) return;
+      // Always fetch fresh disk diff on expand (CMD/external edits)
+      setInlineDiffLoading(relPath);
+      try {
+        const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath);
+        setInlineDiffByPath((prev) => ({
+          ...prev,
+          [relPath]: {
+            lines: resp.lines || [],
+            additions: resp.additions || 0,
+            deletions: resp.deletions || 0,
+            oversized: resp.oversized,
+          },
+        }));
+      } catch {
+        setInlineDiffByPath((prev) => ({
+          ...prev,
+          [relPath]: { lines: [], additions: 0, deletions: 0 },
+        }));
+      } finally {
+        setInlineDiffLoading((cur) => (cur === relPath ? null : cur));
+      }
+    },
+    [agentId, rootPath],
+  );
+
+  const revertChangedFile = useCallback(
+    async (relPath: string) => {
+      if (!agentId || !rootPath || !relPath) return;
+      setRevertingPath(relPath);
+      try {
+        const resp = await adminAPI.revertSessionFile(agentId, relPath, rootPath);
+        setExpandedChanged((prev) => {
+          const next = new Set(prev);
+          next.delete(relPath);
+          return next;
+        });
+        setInlineDiffByPath((prev) => {
+          const next = { ...prev };
+          delete next[relPath];
+          return next;
+        });
+        if (activeFile === relPath) {
+          setActiveFile(null);
+          setDiffLines(null);
+          setDiffMeta(null);
+        }
+        onSessionChangesRef.current?.({
+          additions: resp.additions || 0,
+          deletions: resp.deletions || 0,
+          count: resp.count ?? 0,
+        });
+        await loadChanged();
+      } catch (err: any) {
+        setChangedError(err?.message || '撤回失败');
+      } finally {
+        setRevertingPath(null);
+      }
+    },
+    [agentId, rootPath, activeFile, loadChanged],
+  );
+
+  // Focus inline create / rename inputs
+  useEffect(() => {
+    if (inlineCreate) {
+      createInputRef.current?.focus();
+      createInputRef.current?.select();
+    }
+  }, [inlineCreate]);
+
+  useEffect(() => {
+    if (renamingPath) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renamingPath]);
+
+  // Close menus on outside click / Escape
+  useEffect(() => {
+    if (!ctxMenu && !newMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (ctxMenuRef.current?.contains(t)) return;
+      if (newMenuRef.current?.contains(t)) return;
+      closeMenus();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeMenus();
+        setInlineCreate(null);
+        setRenamingPath(null);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [ctxMenu, newMenuOpen, closeMenus]);
 
   const onResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -446,64 +898,614 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     };
   }, []);
 
+  const openContextMenu = useCallback((e: React.MouseEvent, target: CtxTarget) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setNewMenuOpen(false);
+    const panel = panelRef.current;
+    const rect = panel?.getBoundingClientRect();
+    let x = e.clientX;
+    let y = e.clientY;
+    // Keep menu inside panel roughly
+    if (rect) {
+      x = Math.min(x, rect.right - 180);
+      y = Math.min(y, rect.bottom - 220);
+      x = Math.max(x, rect.left + 4);
+      y = Math.max(y, rect.top + 4);
+    }
+    setCtxMenu({ x, y, target });
+  }, []);
+
+  const startCreate = useCallback(async (kind: 'file' | 'dir', underDir?: string) => {
+    closeMenus();
+    setTab('all');
+    skipCreateBlurRef.current = false;
+    setRenamingPath(null);
+    const parent = underDir != null ? underDir : browsePath;
+    setCreateUnder(parent);
+    if (parent) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.add(parent);
+        for (const a of ancestorPaths(parent)) next.add(a);
+        return next;
+      });
+    }
+    setInlineCreate({ kind });
+    setCreateName(kind === 'file' ? '未命名文档.md' : '新建文件夹');
+  }, [closeMenus, browsePath]);
+
+  const commitCreate = useCallback(async () => {
+    if (!inlineCreate || !agentId || !rootPath || actionBusy) return;
+    const name = createName.trim();
+    if (!name || /[/\\]/.test(name)) {
+      setInlineCreate(null);
+      return;
+    }
+    const parent = createUnder || browsePath;
+    const rel = joinRel(parent, name);
+    setActionBusy(true);
+    try {
+      if (inlineCreate.kind === 'file') {
+        await adminAPI.writeProjectFile(agentId, rel, '', rootPath);
+        setInlineCreate(null);
+        await loadTree();
+        void openFile(rel);
+      } else {
+        await adminAPI.mkdirProject(agentId, rel, rootPath);
+        setInlineCreate(null);
+        await loadTree();
+        setExpanded((prev) => new Set(prev).add(parent || rel));
+      }
+    } catch (err: any) {
+      setListError(err?.message || '创建失败');
+      setInlineCreate(null);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [inlineCreate, agentId, rootPath, actionBusy, createName, createUnder, browsePath, loadTree, openFile]);
+
+  const startRename = useCallback((relPath: string) => {
+    closeMenus();
+    skipRenameBlurRef.current = false;
+    setRenamingPath(relPath);
+    setRenameValue(basename(relPath));
+    setInlineCreate(null);
+  }, [closeMenus]);
+
+  const commitRename = useCallback(async () => {
+    if (!renamingPath || !agentId || !rootPath || actionBusy) return;
+    const newName = renameValue.trim();
+    if (!newName || /[/\\]/.test(newName)) {
+      setRenamingPath(null);
+      return;
+    }
+    const to = joinRel(parentRel(renamingPath), newName);
+    if (to === renamingPath) {
+      setRenamingPath(null);
+      return;
+    }
+    setActionBusy(true);
+    try {
+      await adminAPI.renameProjectPath(agentId, renamingPath, to, rootPath);
+      if (activeFile === renamingPath) {
+        setActiveFile(to);
+      }
+      setRenamingPath(null);
+      if (tab === 'changed') await loadChanged();
+      else await loadTree();
+    } catch (err: any) {
+      setListError(err?.message || '重命名失败');
+      setRenamingPath(null);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [
+    renamingPath,
+    agentId,
+    rootPath,
+    actionBusy,
+    renameValue,
+    activeFile,
+    tab,
+    loadChanged,
+    loadTree,
+  ]);
+
+  const doDelete = useCallback(async (relPath: string) => {
+    closeMenus();
+    if (!agentId || !rootPath || !relPath) return;
+    const label = basename(relPath);
+    if (!window.confirm(`确定删除「${label}」？此操作不可撤销。`)) return;
+    setActionBusy(true);
+    try {
+      await adminAPI.deleteProjectPath(agentId, relPath, rootPath);
+      if (activeFile === relPath) {
+        setActiveFile(null);
+        setFileContent('');
+        setImageSrc(null);
+      }
+      if (tab === 'changed') await loadChanged();
+      else await loadTree();
+    } catch (err: any) {
+      setListError(err?.message || '删除失败');
+    } finally {
+      setActionBusy(false);
+    }
+  }, [closeMenus, agentId, rootPath, activeFile, tab, loadChanged, loadTree]);
+
+  const doReveal = useCallback(async (relPath: string) => {
+    closeMenus();
+    if (!agentId || !rootPath) return;
+    try {
+      await adminAPI.revealProjectPath(agentId, relPath, rootPath);
+    } catch (err: any) {
+      setListError(err?.message || '无法打开所在目录');
+    }
+  }, [closeMenus, agentId, rootPath]);
+
+  const doTerminal = useCallback(async (target: CtxTarget) => {
+    closeMenus();
+    if (!agentId || !rootPath) return;
+    const dir =
+      target.type === 'file' ? parentRel(target.path) : target.path;
+    try {
+      await adminAPI.openProjectTerminal(agentId, dir, rootPath);
+    } catch (err: any) {
+      setListError(err?.message || '无法在终端中打开');
+    }
+  }, [closeMenus, agentId, rootPath]);
+
+  const doCopyPath = useCallback(async (relPath: string) => {
+    closeMenus();
+    try {
+      await navigator.clipboard.writeText(relPath || '.');
+    } catch {
+      /* ignore */
+    }
+  }, [closeMenus]);
+
   if (!isOpen) return null;
 
-  const listPane = (
-    <div className="flex flex-col min-h-0 border-r border-border w-[42%] min-w-[120px] max-w-[220px] flex-shrink-0">
-      <div className="px-2 py-1.5 border-b border-border flex-shrink-0">
-        <div className="relative">
-          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-textMuted" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search…"
-            className="w-full pl-7 pr-2 py-1 text-[11px] rounded-md bg-black/5 dark:bg-white/5 border border-border/60 text-textMain placeholder:text-textMuted/50 outline-none focus:border-primary/40"
-          />
-        </div>
+  const canCreateHere = tab === 'all';
+
+  const renderCtxMenu = () => {
+    if (!ctxMenu) return null;
+    const { target } = ctxMenu;
+    const isRoot = target.type === 'root';
+    const showNew = isRoot || target.type === 'dir';
+    return (
+      <div
+        ref={ctxMenuRef}
+        className="fixed z-[80] min-w-[168px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] text-textMain"
+        style={{ left: ctxMenu.x, top: ctxMenu.y }}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        {showNew ? (
+          <>
+            <button
+              type="button"
+              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              onClick={() => void startCreate('file', isRoot ? browsePath : target.path)}
+            >
+              新建文档
+            </button>
+            <button
+              type="button"
+              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              onClick={() => void startCreate('dir', isRoot ? browsePath : target.path)}
+            >
+              新建文件夹
+            </button>
+            <div className="my-1 h-px bg-black/8 dark:bg-white/10" />
+          </>
+        ) : null}
+        <button
+          type="button"
+          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          onClick={() => void doReveal(target.path)}
+        >
+          打开所在目录
+        </button>
+        <button
+          type="button"
+          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          onClick={() => void doTerminal(target)}
+        >
+          在终端中打开
+        </button>
+        <button
+          type="button"
+          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          onClick={() => void doCopyPath(target.path)}
+        >
+          复制路径
+        </button>
+        {!isRoot ? (
+          <>
+            <div className="my-1 h-px bg-black/8 dark:bg-white/10" />
+            <button
+              type="button"
+              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              onClick={() => startRename(target.path)}
+            >
+              重命名
+            </button>
+            <button
+              type="button"
+              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10 text-red-500"
+              onClick={() => void doDelete(target.path)}
+            >
+              删除
+            </button>
+          </>
+        ) : null}
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto py-1">
-        {!rootPath ? (
-          <div className="px-3 py-4 text-[11px] text-textMuted leading-relaxed">
-            Choose a project folder in the chat footer to browse files.
+    );
+  };
+
+  const useSplitPreview = showPreview && tab !== 'changed';
+
+  const listPane = (
+    <div
+      className={`flex flex-col min-h-0 border-r border-border flex-shrink-0 ${
+        useSplitPreview ? 'w-[42%] min-w-[140px] max-w-[240px]' : 'flex-1 min-w-0'
+      }`}
+      onContextMenu={(e) => {
+        // Empty area / background → root context
+        if (e.target === e.currentTarget || (e.target as HTMLElement).dataset?.fsEmpty === '1') {
+          openContextMenu(e, { path: browsePath, type: 'root', name: '' });
+        }
+      }}
+    >
+      {showSearch ? (
+        <div className="px-2 py-1.5 border-b border-border flex-shrink-0">
+          <div className="relative">
+            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-textMuted" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索文件…"
+              autoFocus
+              className="w-full pl-7 pr-2 py-1 text-[11px] rounded-md bg-black/[0.03] dark:bg-white/5 border border-border/60 text-textMain placeholder:text-textMuted/50 outline-none focus:border-primary/40"
+            />
           </div>
+        </div>
+      ) : null}
+
+      {/* Tabs */}
+      <div className="flex items-center gap-0 px-1.5 pt-1.5 pb-0 border-b border-border flex-shrink-0">
+        {([
+          { id: 'changed' as const, label: '变动文件' },
+          { id: 'all' as const, label: '所有文件' },
+        ]).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => {
+              setTab(t.id);
+              setInlineCreate(null);
+              setRenamingPath(null);
+              closeMenus();
+              if (t.id === 'changed') setShowPreview(false);
+              else setShowPreview(true);
+            }}
+            className={`px-2.5 py-1.5 text-[11px] relative transition-colors ${
+              tab === t.id
+                ? 'text-textMain font-medium'
+                : 'text-textMuted hover:text-textMain'
+            }`}
+          >
+            {t.label}
+            {tab === t.id ? (
+              <span className="absolute left-2 right-2 bottom-0 h-[2px] rounded-full bg-primary" />
+            ) : null}
+          </button>
+        ))}
+      </div>
+
+      {/* Tree status — all-files only */}
+      {tab === 'all' && rootPath && !listLoading ? (
+        <div className="px-2.5 py-1 border-b border-border/50 text-[10px] text-textMuted/70 flex-shrink-0 flex items-center gap-2">
+          <span>
+            已加载 {treeCount.toLocaleString()} 项
+            {treeTruncated ? '（已达上限 10000）' : ''}
+          </span>
+          {search.trim() ? (
+            <span className="truncate">· 搜索 {visibleRows.length} 条</span>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div
+        className="flex-1 min-h-0 overflow-y-auto py-0.5"
+        data-fs-empty="1"
+        onContextMenu={(e) => {
+          if ((e.target as HTMLElement).dataset?.fsEmpty === '1') {
+            openContextMenu(e, {
+              path: '',
+              type: 'root',
+              name: '',
+            });
+          }
+        }}
+      >
+        {!rootPath ? (
+          <div className="px-3 py-4 text-[11px] text-textMuted leading-relaxed" data-fs-empty="1">
+            请在聊天栏底部选择项目文件夹后再浏览文件。
+          </div>
+        ) : tab === 'changed' ? (
+          changedLoading && filteredChanged.length === 0 ? (
+            <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
+              <Loader2 size={12} className="animate-spin" /> 加载中…
+            </div>
+          ) : changedError && filteredChanged.length === 0 ? (
+            <div className="px-3 py-3 text-[11px] text-textMuted">{changedError}</div>
+          ) : filteredChanged.length === 0 ? (
+            <div className="px-3 py-3 text-[11px] text-textMuted/60" data-fs-empty="1">
+              暂无变动文件
+            </div>
+          ) : (
+            <div className="flex flex-col min-h-0">
+              {changedLoading ? (
+                <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-textMuted border-b border-border/50">
+                  <Loader2 size={10} className="animate-spin" /> 刷新中…
+                </div>
+              ) : null}
+              {filteredChanged.map((e) => {
+                const isOpenRow = expandedChanged.has(e.path);
+                const inline = inlineDiffByPath[e.path];
+                const isDiffLoading = inlineDiffLoading === e.path;
+                const isReverting = revertingPath === e.path;
+                return (
+                  <div key={`ch:${e.path}`} className="border-b border-border/40 last:border-b-0">
+                    <div
+                      className={`group flex items-center gap-1 px-1.5 py-[5px] text-[11px] ${
+                        isOpenRow
+                          ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
+                          : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+                      }`}
+                      onContextMenu={(ev) =>
+                        openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
+                      }
+                    >
+                      <button
+                        type="button"
+                        className="p-0.5 rounded shrink-0 text-textMuted hover:text-textMain"
+                        title={isOpenRow ? '折叠' : '展开 diff'}
+                        onClick={() => void toggleChangedExpand(e.path)}
+                      >
+                        {isOpenRow ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      </button>
+                      <FileTypeIcon name={e.name} type={e.type === 'dir' ? 'dir' : 'file'} />
+                      <button
+                        type="button"
+                        className="flex-1 min-w-0 text-left truncate font-mono text-[11px]"
+                        title={e.path}
+                        onClick={() => void toggleChangedExpand(e.path)}
+                      >
+                        <span
+                          className={
+                            e.status === 'A' || e.status === 'U'
+                              ? 'text-emerald-600 dark:text-emerald-400'
+                              : e.status === 'D'
+                                ? 'text-rose-500/90'
+                                : 'text-textMain'
+                          }
+                        >
+                          {e.path}
+                        </span>
+                      </button>
+                      <span className="flex items-center gap-1 shrink-0 text-[10px] tabular-nums font-mono">
+                        {(e.additions || 0) > 0 ? (
+                          <span className="text-emerald-500">+{e.additions}</span>
+                        ) : null}
+                        {(e.deletions || 0) > 0 ? (
+                          <span className="text-rose-400">-{e.deletions}</span>
+                        ) : (
+                          (e.additions || 0) === 0 ? (
+                            <span className="text-textMuted/50">+0</span>
+                          ) : null
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0 disabled:opacity-40"
+                        title="撤回此文件"
+                        disabled={isReverting}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          void revertChangedFile(e.path);
+                        }}
+                      >
+                        {isReverting ? (
+                          <Loader2 size={12} className="animate-spin text-textMuted" />
+                        ) : (
+                          <RotateCcw size={12} className="text-textMuted" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
+                        title="Copy Path"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          void doCopyPath(e.path);
+                        }}
+                      >
+                        <Copy size={12} className="text-textMuted" />
+                      </button>
+                    </div>
+                    {isOpenRow ? (
+                      <div className="max-h-[280px] overflow-auto border-t border-border/30 bg-bgLight/80">
+                        {isDiffLoading ? (
+                          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
+                            <Loader2 size={12} className="animate-spin" /> 加载 diff…
+                          </div>
+                        ) : inline ? (
+                          <UnifiedDiffView
+                            fileName={e.name}
+                            lines={inline.lines}
+                            additions={inline.additions}
+                            deletions={inline.deletions}
+                            oversized={inline.oversized}
+                          />
+                        ) : (
+                          <div className="px-3 py-2 text-[11px] text-textMuted">无 diff</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )
         ) : listLoading ? (
           <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-            <Loader2 size={12} className="animate-spin" /> Loading…
+            <Loader2 size={12} className="animate-spin" /> 正在加载文件树…
           </div>
         ) : listError ? (
           <div className="px-3 py-3 text-[11px] text-red-400">{listError}</div>
-        ) : filtered.length === 0 ? (
-          <div className="px-3 py-3 text-[11px] text-textMuted/60">Empty</div>
         ) : (
-          filtered.map((e) => {
-            const rel = joinRel(browsePath, e.name);
-            const selected = e.type === 'file' && activeFile === rel;
-            return (
-              <button
-                key={`${e.type}:${e.name}`}
-                type="button"
-                onClick={() => {
-                  if (e.type === 'dir') {
-                    setSearch('');
-                    void loadList(rel);
-                  } else {
-                    void openFile(rel);
-                  }
-                }}
-                className={`w-full flex items-center gap-1.5 px-2 py-1 text-left text-[11px] truncate hover:bg-primary/10 transition-colors ${
-                  selected ? 'bg-primary/15 text-textMain' : 'text-textMuted'
-                }`}
-                title={e.name}
+          <>
+            {inlineCreate && canCreateHere ? (
+              <div
+                className="flex items-center gap-1.5 px-2 py-[5px]"
+                style={{ paddingLeft: 8 + ((createUnder || '').split('/').filter(Boolean).length) * 12 }}
               >
-                {e.type === 'dir' ? (
-                  <Folder size={12} className="text-amber-500/80 shrink-0" />
+                {inlineCreate.kind === 'dir' ? (
+                  <Folder size={14} className="text-amber-500 shrink-0" strokeWidth={1.75} />
                 ) : (
-                  <FileTypeIcon name={e.name} type="file" />
+                  <FileText size={14} className="text-sky-500 shrink-0" strokeWidth={1.75} />
                 )}
-                <span className="truncate font-mono">{e.name}</span>
-              </button>
-            );
-          })
+                <input
+                  ref={createInputRef}
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void commitCreate();
+                    } else if (e.key === 'Escape') {
+                      skipCreateBlurRef.current = true;
+                      setInlineCreate(null);
+                    }
+                  }}
+                  onBlur={() => {
+                    if (skipCreateBlurRef.current) {
+                      skipCreateBlurRef.current = false;
+                      return;
+                    }
+                    if (createName.trim()) void commitCreate();
+                    else setInlineCreate(null);
+                  }}
+                  className="flex-1 min-w-0 px-1 py-0.5 text-[11px] rounded border border-primary/40 bg-bgLight outline-none font-mono"
+                  placeholder={inlineCreate.kind === 'dir' ? '文件夹名称' : '文件名'}
+                />
+              </div>
+            ) : null}
+            {visibleRows.length === 0 && !inlineCreate ? (
+              <div className="px-3 py-3 text-[11px] text-textMuted/60" data-fs-empty="1">
+                {search.trim() ? '无匹配文件' : '空工作区'}
+              </div>
+            ) : (
+              visibleRows.map((e) => {
+                const selected = e.type === 'file' && activeFile === e.path;
+                const isRenaming = renamingPath === e.path;
+                const isOpenDir = e.type === 'dir' && expanded.has(e.path);
+                const hasKids =
+                  e.type === 'dir' &&
+                  !e.skipped &&
+                  (childrenMap.get(e.path)?.length ?? 0) > 0;
+                return (
+                  <div
+                    key={`${e.type}:${e.path}`}
+                    className={`group relative flex items-center gap-0.5 pr-1 py-[4px] text-[11px] ${
+                      selected
+                        ? 'bg-black/[0.06] dark:bg-white/10 text-textMain'
+                        : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+                    }`}
+                    style={{ paddingLeft: 6 + e.depth * 12 }}
+                    onContextMenu={(ev) =>
+                      openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
+                    }
+                  >
+                    {e.type === 'dir' ? (
+                      <button
+                        type="button"
+                        className="w-4 h-4 flex items-center justify-center shrink-0 border-0 bg-transparent p-0 cursor-pointer text-textMuted/70"
+                        onClick={() => {
+                          if (e.skipped) return;
+                          toggleExpand(e.path);
+                          setBrowsePath(e.path);
+                        }}
+                        title={e.skipped ? '已跳过深层内容' : isOpenDir ? '折叠' : '展开'}
+                      >
+                        {e.skipped || !hasKids ? (
+                          <span className="w-3" />
+                        ) : isOpenDir ? (
+                          <ChevronDown size={12} />
+                        ) : (
+                          <ChevronRight size={12} />
+                        )}
+                      </button>
+                    ) : (
+                      <span className="w-4 shrink-0" />
+                    )}
+                    <FileTypeIcon name={e.name} type={e.type} />
+                    {isRenaming ? (
+                      <input
+                        ref={renameInputRef}
+                        value={renameValue}
+                        onChange={(ev) => setRenameValue(ev.target.value)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter') {
+                            ev.preventDefault();
+                            void commitRename();
+                          } else if (ev.key === 'Escape') {
+                            setRenamingPath(null);
+                          }
+                        }}
+                        onBlur={() => void commitRename()}
+                        className="flex-1 min-w-0 ml-1 px-1 py-0.5 text-[11px] rounded border border-primary/40 bg-bgLight outline-none font-mono"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex-1 min-w-0 ml-1 text-left truncate font-mono border-0 bg-transparent p-0 cursor-pointer text-inherit"
+                        title={e.path + (e.skipped ? '（未展开深层）' : '')}
+                        onClick={() => {
+                          if (e.type === 'dir') {
+                            setBrowsePath(e.path);
+                            if (!e.skipped) toggleExpand(e.path);
+                          } else {
+                            void openFile(e.path);
+                          }
+                        }}
+                      >
+                        {e.name}
+                        {e.skipped ? (
+                          <span className="ml-1 text-[9px] opacity-50">…</span>
+                        ) : null}
+                      </button>
+                    )}
+                    {!isRenaming ? (
+                      <button
+                        type="button"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0 border-0 bg-transparent cursor-pointer"
+                        title="更多"
+                        onClick={(ev) =>
+                          openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
+                        }
+                      >
+                        <MoreHorizontal size={13} className="text-textMuted" />
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })
+            )}
+          </>
         )}
       </div>
     </div>
@@ -511,7 +1513,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
 
   return (
     <div
-      className="relative h-full border-l border-border bg-bgLight flex flex-col flex-shrink-0"
+      ref={panelRef}
+      className="relative h-full border-l border-border bg-[#f8f8f8] dark:bg-bgLight flex flex-col flex-shrink-0"
       style={{ width }}
     >
       {/* Left drag handle (widen by dragging left) */}
@@ -524,95 +1527,168 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-primary/30"
       />
 
-      <div className="h-11 px-2 border-b border-border box-border flex items-center gap-1 flex-shrink-0">
-        <div className="flex-1 min-w-0 flex items-center gap-0.5 overflow-x-auto text-[11px]">
-          {crumbs.map((c, i) => (
-            <React.Fragment key={c.path || 'root'}>
-              {i > 0 ? <ChevronRight size={10} className="text-textMuted/50 shrink-0" /> : null}
+      {/* Header */}
+      <div className="px-2.5 pt-2.5 pb-1.5 border-b border-border box-border flex-shrink-0">
+        <div className="flex items-start gap-1">
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-semibold text-textMain leading-tight">工作区文件</div>
+            <div className="text-[10px] text-textMuted truncate mt-0.5" title={rootPath || undefined}>
+              {projectLabel}
+            </div>
+          </div>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowSearch((v) => !v)}
+              className={`p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+                showSearch ? 'bg-black/[0.06] dark:bg-white/10' : ''
+              }`}
+              title="搜索"
+            >
+              <Search size={13} className="text-textMuted" />
+            </button>
+            <div className="relative" ref={newMenuRef}>
               <button
                 type="button"
-                className={`shrink-0 px-1 py-0.5 rounded hover:bg-primary/10 truncate max-w-[100px] ${
-                  i === crumbs.length - 1 ? 'text-textMain font-medium' : 'text-textMuted'
-                }`}
                 onClick={() => {
-                  setSearch('');
-                  void loadList(c.path);
+                  setCtxMenu(null);
+                  setNewMenuOpen((v) => !v);
                 }}
-                title={c.path || rootPath}
+                disabled={!rootPath}
+                className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
+                title="新建"
               >
-                {c.label}
+                <Plus size={13} className="text-textMuted" />
               </button>
-            </React.Fragment>
-          ))}
+              {newMenuOpen ? (
+                <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px]">
+                  <button
+                    type="button"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                    onClick={() => void startCreate('file')}
+                  >
+                    <FileText size={12} className="text-sky-500" />
+                    新建文档
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                    onClick={() => void startCreate('dir')}
+                  >
+                    <FolderPlus size={12} className="text-amber-500" />
+                    新建文件夹
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPreview((v) => !v)}
+              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+              title={showPreview ? '隐藏预览' : '显示预览'}
+            >
+              {showPreview ? (
+                <Eye size={13} className="text-textMuted" />
+              ) : (
+                <EyeOff size={13} className="text-textMuted" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => refreshCurrent()}
+              disabled={listLoading || changedLoading || !rootPath}
+              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
+              title="刷新"
+            >
+              <RefreshCw
+                size={13}
+                className={`text-textMuted ${listLoading || changedLoading ? 'animate-spin' : ''}`}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+              title="关闭"
+            >
+              <X size={13} className="text-textMuted" />
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void loadList(browsePath)}
-          disabled={listLoading || !rootPath}
-          className="p-1.5 hover:bg-primary/10 rounded-md"
-          title="Refresh"
-        >
-          <RefreshCw size={13} className={`text-textMuted ${listLoading ? 'animate-spin' : ''}`} />
-        </button>
-        <button type="button" onClick={onClose} className="p-1.5 hover:bg-primary/10 rounded-md" title="Close">
-          <X size={13} className="text-textMuted" />
-        </button>
       </div>
 
       <div className="flex-1 min-h-0 flex">
         {listPane}
-        <div className="flex-1 min-w-0 flex flex-col">
-          {activeFile ? (
-            <>
-              <div className="px-2 py-1.5 border-b border-border flex-shrink-0 flex items-start gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[11px] font-medium text-textMain font-mono truncate flex items-center gap-1.5">
-                    <FileTypeIcon name={basename(activeFile)} type="file" />
-                    <span className="truncate">{basename(activeFile)}</span>
+        {useSplitPreview ? (
+          <div className="flex-1 min-w-0 flex flex-col bg-bgLight">
+            {activeFile ? (
+              <>
+                <div className="px-2 py-1.5 border-b border-border flex-shrink-0 flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-medium text-textMain font-mono truncate flex items-center gap-1.5">
+                      <FileTypeIcon name={basename(activeFile)} type="file" />
+                      <span className="truncate">{basename(activeFile)}</span>
+                      {diffMeta ? (
+                        <span className="text-[10px] font-normal tabular-nums shrink-0">
+                          <span className="text-emerald-500">+{diffMeta.additions}</span>{' '}
+                          <span className="text-rose-400">-{diffMeta.deletions}</span>
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="text-[10px] text-textMuted font-mono truncate" title={activeFile}>
+                      {activeFile}
+                      {fileMeta?.truncated ? ' · 已截断' : ''}
+                    </div>
                   </div>
-                  <div className="text-[10px] text-textMuted font-mono truncate" title={activeFile}>
-                    {activeFile}
-                    {fileMeta?.truncated ? ' · truncated' : ''}
-                  </div>
+                  {isMarkdownFile(activeFile) && !imageSrc && !fileLoading && !fileError && !diffLines ? (
+                    <button
+                      type="button"
+                      onClick={() => setMdRaw((v) => !v)}
+                      className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-border/70 text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/10 hover:text-textMain"
+                      title={mdRaw ? '渲染预览' : '原始源码'}
+                    >
+                      {mdRaw ? '预览' : '源码'}
+                    </button>
+                  ) : null}
                 </div>
-                {isMarkdownFile(activeFile) && !imageSrc && !fileLoading && !fileError ? (
-                  <button
-                    type="button"
-                    onClick={() => setMdRaw((v) => !v)}
-                    className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-border/70 text-textMuted hover:bg-primary/10 hover:text-textMain"
-                    title={mdRaw ? 'Rendered preview' : 'Raw source'}
-                  >
-                    {mdRaw ? 'Preview' : 'Raw'}
-                  </button>
-                ) : null}
+                {fileLoading ? (
+                  <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
+                    <Loader2 size={14} className="animate-spin" /> 加载中…
+                  </div>
+                ) : fileError ? (
+                  <div className="px-3 py-4 text-[11px] text-red-400">{fileError}</div>
+                ) : diffLines ? (
+                  <UnifiedDiffView
+                    fileName={basename(activeFile)}
+                    lines={diffLines}
+                    additions={diffMeta?.additions}
+                    deletions={diffMeta?.deletions}
+                    oversized={diffMeta?.oversized}
+                  />
+                ) : imageSrc ? (
+                  <ImagePreview
+                    src={imageSrc}
+                    fileName={basename(activeFile)}
+                    size={fileMeta?.size}
+                  />
+                ) : isImageFile(activeFile) && !fileContent ? (
+                  <div className="px-3 py-4 text-[11px] text-textMuted">无图片数据</div>
+                ) : isMarkdownFile(activeFile) && !mdRaw ? (
+                  <MarkdownPreview content={fileContent} />
+                ) : (
+                  <CodePreview fileName={activeFile} content={fileContent} />
+                )}
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center px-4 text-center text-[11px] text-textMuted/60">
+                选择文件以预览
               </div>
-              {fileLoading ? (
-                <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-                  <Loader2 size={14} className="animate-spin" /> Loading…
-                </div>
-              ) : fileError ? (
-                <div className="px-3 py-4 text-[11px] text-red-400">{fileError}</div>
-              ) : imageSrc ? (
-                <ImagePreview
-                  src={imageSrc}
-                  fileName={basename(activeFile)}
-                  size={fileMeta?.size}
-                />
-              ) : isImageFile(activeFile) && !fileContent ? (
-                <div className="px-3 py-4 text-[11px] text-textMuted">No image data</div>
-              ) : isMarkdownFile(activeFile) && !mdRaw ? (
-                <MarkdownPreview content={fileContent} />
-              ) : (
-                <CodePreview fileName={activeFile} content={fileContent} />
-              )}
-            </>
-          ) : (
-            <div className="flex-1 flex items-center justify-center px-4 text-center text-[11px] text-textMuted/60">
-              Select a file to preview
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        ) : null}
       </div>
+
+      {renderCtxMenu()}
     </div>
   );
 };

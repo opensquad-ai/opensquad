@@ -881,6 +881,31 @@ export const adminAPI = {
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/list?path=${q}${r}`);
   },
 
+  /** 一次性加载完整项目文件树（仅元数据，上限 10000） */
+  listProjectTree: async (name: string, root?: string, maxEntries: number = 10000) => {
+    const params = new URLSearchParams();
+    if (root) params.set('root', root);
+    params.set('max', String(maxEntries || 10000));
+    const q = params.toString();
+    return apiRequest<{
+      agent: string;
+      cwd: string;
+      path: string;
+      absolute: string;
+      entries: Array<{
+        path: string;
+        name: string;
+        type: 'file' | 'dir';
+        size?: number | null;
+        skipped?: boolean;
+      }>;
+      count: number;
+      truncated: boolean;
+      max_entries: number;
+      skipped?: string[];
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/tree?${q}`);
+  },
+
   /** 读取项目内文本 / 图片预览 */
   readProjectFile: async (name: string, path: string, root?: string) => {
     const q = encodeURIComponent(path || '');
@@ -898,6 +923,156 @@ export const adminAPI = {
       truncated: boolean;
       language: string;
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/read?path=${q}${r}`);
+  },
+
+  /** git 变动文件列表 */
+  listProjectChanged: async (name: string, root?: string) => {
+    const r = root ? `?root=${encodeURIComponent(root)}` : '';
+    return apiRequest<{
+      agent: string;
+      cwd: string;
+      git: boolean;
+      entries: Array<{ name: string; path: string; type: 'file' | 'dir'; status?: string }>;
+      error?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/changed${r}`);
+  },
+
+  /** 会话级变动摘要（自上次 Commit 起） */
+  listSessionChanges: async (name: string, root?: string) => {
+    const r = root ? `?root=${encodeURIComponent(root)}` : '';
+    return apiRequest<{
+      agent: string;
+      cwd: string;
+      additions: number;
+      deletions: number;
+      count: number;
+      files: Array<{
+        path: string;
+        name: string;
+        type: 'file' | 'dir';
+        status: string;
+        additions: number;
+        deletions: number;
+        oversized?: boolean;
+      }>;
+      entries: Array<{
+        path: string;
+        name: string;
+        type: 'file' | 'dir';
+        status: string;
+        additions: number;
+        deletions: number;
+        oversized?: boolean;
+      }>;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes${r}`);
+  },
+
+  /** 单文件 baseline vs 磁盘 unified diff */
+  getSessionDiff: async (name: string, path: string, root?: string) => {
+    const q = encodeURIComponent(path || '');
+    const r = root ? `&root=${encodeURIComponent(root)}` : '';
+    return apiRequest<{
+      agent: string;
+      path: string;
+      status: string;
+      additions: number;
+      deletions: number;
+      oversized?: boolean;
+      lines: Array<{
+        type: 'context' | 'insert' | 'delete' | 'collapse';
+        old_lineno?: number | null;
+        new_lineno?: number | null;
+        text: string;
+        count?: number;
+      }>;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diff?path=${q}${r}`);
+  },
+
+  commitSessionChanges: async (name: string, root?: string) => {
+    return apiRequest<{ ok: boolean; additions: number; deletions: number; files: unknown[] }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/commit`,
+      { method: 'POST', body: JSON.stringify({ root }) },
+    );
+  },
+
+  checkpointSessionChanges: async (name: string, messageId: string, root?: string) => {
+    return apiRequest<{ ok: boolean; message_id: string; files: number }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/checkpoint`,
+      { method: 'POST', body: JSON.stringify({ message_id: messageId, root }) },
+    );
+  },
+
+  revertSessionChanges: async (name: string, messageId?: string, root?: string) => {
+    return apiRequest<{
+      ok: boolean;
+      message_id?: string;
+      restored?: string[];
+      skipped?: string[];
+      additions?: number;
+      deletions?: number;
+      files?: unknown[];
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/revert`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId || '', root }),
+    });
+  },
+
+  /** 撤回单个会话变动文件到 baseline */
+  revertSessionFile: async (name: string, path: string, root?: string) => {
+    return apiRequest<{
+      ok: boolean;
+      path?: string;
+      additions?: number;
+      deletions?: number;
+      count?: number;
+      files?: unknown[];
+      error?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/revert`, {
+      method: 'POST',
+      body: JSON.stringify({ path, root }),
+    });
+  },
+
+  writeProjectFile: async (name: string, path: string, content: string = '', root?: string) => {
+    return apiRequest<{ ok: boolean; path: string; absolute?: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/write`,
+      { method: 'POST', body: JSON.stringify({ path, content, root }) },
+    );
+  },
+
+  mkdirProject: async (name: string, path: string, root?: string) => {
+    return apiRequest<{ ok: boolean; path: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/mkdir`,
+      { method: 'POST', body: JSON.stringify({ path, root }) },
+    );
+  },
+
+  deleteProjectPath: async (name: string, path: string, root?: string) => {
+    return apiRequest<{ ok: boolean; path: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/delete`,
+      { method: 'POST', body: JSON.stringify({ path, root }) },
+    );
+  },
+
+  renameProjectPath: async (name: string, from: string, to: string, root?: string) => {
+    return apiRequest<{ ok: boolean; from: string; to: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/rename`,
+      { method: 'POST', body: JSON.stringify({ from, to, root }) },
+    );
+  },
+
+  revealProjectPath: async (name: string, path: string = '', root?: string) => {
+    return apiRequest<{ ok: boolean }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/reveal`,
+      { method: 'POST', body: JSON.stringify({ path, root }) },
+    );
+  },
+
+  openProjectTerminal: async (name: string, path: string = '', root?: string) => {
+    return apiRequest<{ ok: boolean }>(
+      `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/open-terminal`,
+      { method: 'POST', body: JSON.stringify({ path, root }) },
+    );
   },
 
   /** 获取 Agent 的 role.md */

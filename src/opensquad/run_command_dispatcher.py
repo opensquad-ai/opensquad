@@ -51,6 +51,11 @@ class RunCommandDispatcher:
             await self._handle_new_session()
             return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
 
+        if initial_query and initial_query.startswith("__WITHDRAW_TURN__:"):
+            ts = initial_query.split(":", 1)[1].strip()
+            await self._handle_withdraw_turn(ts)
+            return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
+
         if initial_query and initial_query.startswith("__LOAD_SESSION__:"):
             sid = initial_query.split(":", 1)[1]
             if not _validate_session_id(sid):
@@ -78,6 +83,14 @@ class RunCommandDispatcher:
                 ]
             )
         self.runner._session_manager.start_new_session()
+        # Drop short-lived session file-change checkpoints (Cursor-style safety net)
+        try:
+            from opensquad.utils.path_utils import get_workspace_root
+            from opensquad.utils.session_changeset import clear_for_new_session
+
+            clear_for_new_session(get_workspace_root())
+        except Exception:
+            logger.debug("[RunCommandDispatcher] session changeset clear skipped", exc_info=True)
         new_sid = self.runner._session_manager.get_current_session_id()
         logger.warning(
             "[RunCommandDispatcher] New session started: sid=%s file=%s",
@@ -94,6 +107,31 @@ class RunCommandDispatcher:
         )
         await self.runner._broadcast_token_stats()
         await self.runner._emit("info", "New session started")
+        now_ms = int(datetime.now().timestamp() * 1000)
+        await self.runner._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
+
+    async def _handle_withdraw_turn(self, timestamp: str) -> None:
+        """Truncate session messages/events from *timestamp* and reload LLM context."""
+        self.runner._input_hub.clear_stop_request()
+        result = self.runner._session_manager.truncate_from_timestamp(timestamp, inclusive=True)
+        logger.warning(
+            "[RunCommandDispatcher] withdraw_turn ts=%s ok=%s messages=%s events=%s",
+            timestamp,
+            result.get("ok"),
+            result.get("messages"),
+            result.get("events"),
+        )
+        self.runner._load_history()
+        sid = self.runner._session_manager.get_current_session_id()
+        history_data = {
+            "messages": self.runner._session_manager.get_messages(),
+            "events": self.runner._session_manager.get_events(),
+            "session_id": sid,
+            "is_working_session": True,
+        }
+        await self.runner._bus.emit_async("history_sync", history_data)
+        await self.runner._broadcast_token_stats()
+        await self.runner._emit("info", "Turn withdrawn")
         now_ms = int(datetime.now().timestamp() * 1000)
         await self.runner._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
 

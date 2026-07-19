@@ -1000,6 +1000,45 @@ class SessionManager:
         # clear() is user-initiated; sync flush to guarantee immediate persistence
         self._save_session()
 
+    def truncate_from_timestamp(self, timestamp: str, *, inclusive: bool = True) -> dict[str, Any]:
+        """Remove messages/events at or after *timestamp* (ISO). Used by withdraw.
+
+        Matching is string-compare on ISO timestamps (UTC lexicographic order).
+        """
+        ts = (timestamp or "").strip()
+        if not ts:
+            return {"ok": False, "error": "timestamp required"}
+
+        def _keep(item_ts: Any) -> bool:
+            raw = str(item_ts or "").strip()
+            if not raw:
+                return True
+            if inclusive:
+                return raw < ts
+            return raw <= ts
+
+        def _mutate():
+            messages = list(self.session_data.get("messages") or [])
+            events = list(self.session_data.get("events") or [])
+            kept_m = [m for m in messages if _keep(m.get("timestamp"))]
+            kept_e = [e for e in events if _keep(e.get("timestamp"))]
+            self.session_data["messages"] = kept_m
+            self.session_data["events"] = kept_e
+            self.session_data["last_updated"] = utc_now_iso()
+
+        self._enqueue_mutation(_mutate)
+        # Sync flush so UI reload sees truncated history immediately
+        try:
+            self._save_session()
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "timestamp": ts,
+            "messages": len(self.session_data.get("messages") or []),
+            "events": len(self.session_data.get("events") or []),
+        }
+
     def get_stats(self) -> dict[str, Any]:
         return {
             "total_messages": len(self.session_data["messages"]),

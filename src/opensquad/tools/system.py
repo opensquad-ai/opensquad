@@ -160,6 +160,9 @@ class Job:
         ctx = get_tool_call_context()
         self.ui_call_id = ctx.get("call_id", "")
         self.ui_sid = ctx.get("sid", "")
+        # Session changeset: capture shell/CMD file mutations via git porcelain
+        self._shell_watch_root: str | None = None
+        self._shell_watch_done = False
 
     def start(self):
         self.start_time = datetime.now()
@@ -307,6 +310,7 @@ class Job:
         # Wait for process to fully exit
         self.return_code = self.process.wait()
         self.end_time = datetime.now()
+        _finish_job_shell_watch(self)
         call_id, sid = self._ui_ids()
         if call_id:
             state = "done" if (self.return_code or 0) == 0 else "error"
@@ -384,6 +388,41 @@ class Job:
 
 # Global job store
 _JOBS: dict[str, Job] = {}
+
+
+def _shell_watch_begin() -> str | None:
+    """Snapshot dirty baselines before a shell/CMD mutation."""
+    try:
+        from opensquad.utils.path_utils import get_workspace_root
+        from opensquad.utils.session_changeset import prepare_shell_watch
+
+        root = get_workspace_root()
+        prepare_shell_watch(root)
+        return root
+    except Exception:
+        return None
+
+
+def _shell_watch_end(root: str | None) -> None:
+    if not root:
+        return
+    try:
+        from opensquad.utils.session_changeset import finish_shell_watch
+
+        finish_shell_watch(root)
+    except Exception:
+        pass
+
+
+def _finish_job_shell_watch(job: "Job") -> None:
+    if getattr(job, "_shell_watch_done", False):
+        return
+    root = getattr(job, "_shell_watch_root", None)
+    if not root:
+        return
+    job._shell_watch_done = True
+    _shell_watch_end(root)
+
 
 # --- Persistent shell session (to unify api_process into system namespace) ---
 _DEFAULT_SESSION_ID = "default"
@@ -662,11 +701,14 @@ def run_session_job(command: str, timeout: float = 120.0, session_id: str = _DEF
     (e.g. npm run dev, python server.py), this call will BLOCK until that process
     exits, then time out. For long-running services, use start_job instead.
     """
+    watch_root = _shell_watch_begin()
     try:
         sess = _get_or_create_session(session_id=session_id)
         return sess.execute(command=command, timeout=timeout)
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        _shell_watch_end(watch_root)
 
 
 def get_shell_session_status(session_id: str = _DEFAULT_SESSION_ID) -> dict[str, Any]:
@@ -901,9 +943,13 @@ def start_job(
         command=command,
     )
 
+    watch_root = _shell_watch_begin()
+    job._shell_watch_root = watch_root
+
     success, msg = job.start()
 
     if not success:
+        _finish_job_shell_watch(job)
         _pop_job_ui_meta(job_id)
         _JOBS.pop(job_id, None)
         return {"status": "error", "message": f"Failed to start job: {msg}"}

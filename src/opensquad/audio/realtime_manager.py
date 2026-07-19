@@ -84,6 +84,21 @@ def get_runner():
     return _runner
 
 
+def get_session_status() -> dict[str, Any]:
+    """Return whether a voice realtime/mouthpiece session is currently active."""
+    if _bridge is None:
+        return {"ok": True, "status": "idle", "active": False}
+    force = bool(getattr(_bridge, "force_ask_agent", False))
+    mode = getattr(_bridge, "mode", "realtime" if not force else "mouthpiece")
+    return {
+        "ok": True,
+        "status": "connected",
+        "active": True,
+        "force_ask_agent": force,
+        "mode": mode,
+    }
+
+
 def _unwrap_bus_payload(data: Any) -> str:
     """Runner._emit wraps as {sid, data}; content may be str or {text: ...}."""
     if isinstance(data, dict) and "sid" in data and "data" in data:
@@ -178,7 +193,8 @@ async def ask_main_agent(
 
     # Serialize waiters only — pushes already happened above without the lock.
     async with _ask_lock:
-        for evt in ("to_user_final", "to_user_end_task"):
+        # Prefer early to_user_reply so voice can speak mid-workflow (not only final).
+        for evt in ("to_user_reply", "to_user_final", "to_user_end_task"):
             sub_ids.append(bus.subscribe(evt, _on_final, owner=f"voice_ask_{req_id}"))
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
@@ -220,14 +236,21 @@ async def start_session(
     from opensquad.audio import resolve_voice_card
     from opensquad.events import bus
 
-    if _bridge is not None:
-        await stop_session()
-
     voice_cfg = (arc.agent_config or {}).get("voice") or {}
     if force_ask_agent is None:
         force_ask_agent = bool(voice_cfg.get("force_ask_agent", True))
     else:
         force_ask_agent = bool(force_ask_agent)
+
+    # Resume / double-start: keep the existing session when mode matches
+    # (page refresh reconnect must not tear down a live mouthpiece call).
+    if _bridge is not None:
+        current_force = bool(getattr(_bridge, "force_ask_agent", False))
+        if bool(force_ask_agent) == current_force:
+            st = get_session_status()
+            st["resumed"] = True
+            return st
+        await stop_session()
 
     async def _emit(event_type: str, data: Any) -> None:
         await bus.emit_async(event_type, data)
@@ -353,13 +376,18 @@ def set_session_options(*, force_ask_agent: bool | None = None) -> dict[str, Any
 
 
 async def _local_tool_handler(name: str, args: dict[str, Any]) -> str | None:
-    """Handle realtime-only tools not in ToolRegistry. Return None to fall through."""
+    """Handle realtime-only tools not in ToolRegistry. Return None to fall through.
+
+    ask_agent is non-blocking: push to InputHub and return immediately. The active
+    RealtimeSessionBridge bus subscription speaks each to_user_* as it arrives —
+    waiting for to_user_final here used to freeze duplex for 10–180s.
+    """
     n = (name or "").lower().replace(".", "__")
     if n in ("ask_agent", "ask_main_agent", "delegate_to_agent"):
         question = str(args.get("question") or args.get("query") or args.get("prompt") or "").strip()
-        timeout = float(args.get("timeout") or 180)
-        timeout = max(30.0, min(timeout, 300.0))
-        return await ask_main_agent(question, timeout=timeout)
+        await ask_main_agent(question, wait_reply=False)
+        # Signal execute path to skip model follow-up; bus TTS/speech will cover it.
+        return "[VOICE_NO_REPLY] Delegated to main agent; spoken replies follow on the bus."
     return None
 
 

@@ -90,6 +90,13 @@ class InputHandler:
             runner._reset_session_stats()
             sm = get_session_manager()
             sm.start_new_session()
+            try:
+                from opensquad.utils.path_utils import get_workspace_root
+                from opensquad.utils.session_changeset import clear_for_new_session
+
+                clear_for_new_session(get_workspace_root())
+            except Exception:
+                pass
             runner._turn_sid = sm.get_current_session_id()
             runner._load_history()
             await emit("turn_start", 0)
@@ -180,6 +187,13 @@ class InputHandler:
             runner._reset_session_stats()
             sm = get_session_manager()
             sm.start_new_session()
+            try:
+                from opensquad.utils.path_utils import get_workspace_root
+                from opensquad.utils.session_changeset import clear_for_new_session
+
+                clear_for_new_session(get_workspace_root())
+            except Exception:
+                pass
             runner._turn_sid = sm.get_current_session_id()
             runner._load_history()
             await emit("turn_start", 0)

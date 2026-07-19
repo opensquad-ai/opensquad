@@ -266,6 +266,21 @@ class GatewayAdapter(BaseAgent):
             await self._try_wake_agent("urgent-command")
             return
 
+        if command == "withdraw_turn":
+            # Stop any in-flight turn, then truncate session from the user message timestamp.
+            input_hub.request_stop()
+            ts = str(cmd_data.get("timestamp") or "").strip()
+            mid = str(cmd_data.get("message_id") or "").strip()
+            # Encode timestamp (ISO has no spaces); message_id is optional metadata for logs.
+            payload = ts or mid
+            if payload:
+                input_hub.push_urgent(f"__WITHDRAW_TURN__:{payload}", source="gateway")
+                logger.info(f"[Adapter] withdraw_turn queued ts={ts!r} message_id={mid!r}")
+                await self._try_wake_agent("urgent-command")
+            else:
+                logger.warning("[Adapter] withdraw_turn missing timestamp/message_id")
+            return
+
         if command == "compress_context":
             input_hub.push_urgent("__COMPRESS_CONTEXT__", source="gateway")
             logger.info("[Adapter] Compress context command sent via urgent queue")
@@ -454,6 +469,20 @@ class GatewayAdapter(BaseAgent):
                 await self._send_event(result, "voice_realtime_status")
             except Exception as e:
                 logger.error("[Adapter] voice_realtime_stop failed: %s", e)
+            return
+
+        if command == "voice_realtime_query":
+            from opensquad.audio import realtime_manager as rtm
+
+            try:
+                result = rtm.get_session_status()
+                await self._send_event(result, "voice_realtime_status")
+            except Exception as e:
+                logger.error("[Adapter] voice_realtime_query failed: %s", e)
+                await self._send_event(
+                    {"ok": False, "status": "error", "error": str(e)},
+                    "voice_realtime_status",
+                )
             return
 
         if command == "voice_realtime_options":

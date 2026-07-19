@@ -633,12 +633,34 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 rel = (qs.get("path") or [""])[0]
                 root = (qs.get("root") or [""])[0]
                 return self._handle_fs_list(name, rel, root)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/tree"):
+                # GET /api/agents/{name}/fs/tree?root=&max=
+                name = path.split("/")[3]
+                root = (qs.get("root") or [""])[0]
+                max_e = (qs.get("max") or [""])[0]
+                return self._handle_fs_tree(name, root, max_e)
             elif path.startswith("/api/agents/") and path.endswith("/fs/read"):
                 # GET /api/agents/{name}/fs/read?path=&root=
                 name = path.split("/")[3]
                 rel = (qs.get("path") or [""])[0]
                 root = (qs.get("root") or [""])[0]
                 return self._handle_fs_read(name, rel, root)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/changed"):
+                # GET /api/agents/{name}/fs/changed?root=
+                name = path.split("/")[3]
+                root = (qs.get("root") or [""])[0]
+                return self._handle_fs_changed(name, root)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes"):
+                # GET /api/agents/{name}/fs/session-changes?root=
+                name = path.split("/")[3]
+                root = (qs.get("root") or [""])[0]
+                return self._handle_fs_session_changes(name, root)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-diff"):
+                # GET /api/agents/{name}/fs/session-diff?path=&root=
+                name = path.split("/")[3]
+                rel = (qs.get("path") or [""])[0]
+                root = (qs.get("root") or [""])[0]
+                return self._handle_fs_session_diff(name, rel, root)
             elif path.startswith("/api/agents/") and path.endswith("/role"):
                 name = path.split("/")[3]
                 return self._handle_get_role(name)
@@ -770,6 +792,42 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/agents/") and path.endswith("/restart"):
                 name = path.split("/")[3]
                 return self._handle_restart(name)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/write"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_write(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/mkdir"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_mkdir(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/delete"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_delete(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/rename"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_rename(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/reveal"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_reveal(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/open-terminal"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_open_terminal(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/commit"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_commit(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/checkpoint"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_checkpoint(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/revert"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_revert(name, body)
             elif path == "/api/agents/create":
                 body = self._read_body()
                 return self._handle_create(body)
@@ -1263,6 +1321,23 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             result["agent"] = name
             return self._send_json(result)
 
+        def _handle_fs_tree(self, name: str, root_override: str = "", max_entries: str = ""):
+            """GET /api/agents/{name}/fs/tree?root=&max= — full project tree (capped)."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import list_tree
+
+            try:
+                mx = int(max_entries) if str(max_entries).strip() else 10000
+            except ValueError:
+                mx = 10000
+            result = list_tree(root, max_entries=mx)
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
         def _handle_fs_read(self, name: str, rel_path: str = "", root_override: str = ""):
             """GET /api/agents/{name}/fs/read?path=&root= — text file preview."""
             root, err = self._agent_fs_root(name, root_override)
@@ -1271,6 +1346,158 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             from opensquad.utils.project_fs import read_file
 
             result = read_file(root, rel_path)
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_changed(self, name: str, root_override: str = ""):
+            """GET /api/agents/{name}/fs/changed?root= — git porcelain changes."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import list_changed
+
+            result = list_changed(root)
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_changes(self, name: str, root_override: str = ""):
+            """GET /api/agents/{name}/fs/session-changes?root= — session dirty summary."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import summary
+
+            result = summary(root)
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_diff(self, name: str, rel_path: str = "", root_override: str = ""):
+            """GET /api/agents/{name}/fs/session-diff?path=&root= — baseline vs disk diff."""
+            root, err = self._agent_fs_root(name, root_override)
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import diff_file
+
+            result = diff_file(root, rel_path)
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_commit(self, name: str, body: dict):
+            """POST — accept current disk state; clear session change stats."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import accept_reset
+
+            result = accept_reset(root)
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_checkpoint(self, name: str, body: dict):
+            """POST — snapshot dirty files at user-send time."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import checkpoint
+
+            mid = str(body.get("message_id") or "").strip()
+            result = checkpoint(root, mid)
+            result["agent"] = name
+            if not result.get("ok"):
+                return self._send_json({"error": result.get("error") or "checkpoint failed"}, 400)
+            return self._send_json(result)
+
+        def _handle_fs_session_revert(self, name: str, body: dict):
+            """POST — restore one path, a checkpoint, or all files to baseline."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import revert_all, revert_file, revert_to_checkpoint
+
+            path = str(body.get("path") or "").strip()
+            mid = str(body.get("message_id") or "").strip()
+            if path:
+                result = revert_file(root, path)
+            elif mid:
+                result = revert_to_checkpoint(root, mid)
+            else:
+                result = revert_all(root)
+            result["agent"] = name
+            if not result.get("ok"):
+                return self._send_json({"error": result.get("error") or "revert failed"}, 400)
+            return self._send_json(result)
+
+        def _handle_fs_write(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import write_file
+
+            result = write_file(root, body.get("path"), body.get("content") or "")
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_mkdir(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import mkdir
+
+            result = mkdir(root, body.get("path"))
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_delete(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import delete_path
+
+            result = delete_path(root, body.get("path"))
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_rename(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import rename_path
+
+            result = rename_path(root, body.get("from") or body.get("path"), body.get("to"))
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_reveal(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import reveal_in_os
+
+            result = reveal_in_os(root, body.get("path"))
+            if "error" in result:
+                return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_open_terminal(self, name: str, body: dict):
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.project_fs import open_in_terminal
+
+            result = open_in_terminal(root, body.get("path"))
             if "error" in result:
                 return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
             result["agent"] = name

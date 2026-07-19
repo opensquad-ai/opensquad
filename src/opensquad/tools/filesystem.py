@@ -573,6 +573,30 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
 glob = find_files
 
 
+def _track_mutation(path: str, *, deleting: bool = False) -> None:
+    """Record session changeset baseline before mutating a project file."""
+    try:
+        from opensquad.utils.session_changeset import ensure_baseline_before_write, note_deleted
+
+        root = _get_workspace_root()
+        if deleting:
+            note_deleted(root, path)
+        else:
+            ensure_baseline_before_write(root, path)
+    except Exception:
+        logger.debug("[filesystem] session changeset track failed", exc_info=True)
+
+
+def _track_mutation_done(path: str) -> None:
+    """Refresh incremental +/- after a successful mutation."""
+    try:
+        from opensquad.utils.session_changeset import note_after_mutation
+
+        note_after_mutation(_get_workspace_root(), path)
+    except Exception:
+        logger.debug("[filesystem] session changeset note_after failed", exc_info=True)
+
+
 def write_file(path: str, content: str) -> dict[str, Any]:
     """
     Write file (overwrite).
@@ -583,6 +607,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     resolved = _resolve_path(path)
 
     try:
+        _track_mutation(resolved)
         os.makedirs(os.path.dirname(resolved), exist_ok=True)
         # Use plain utf-8 (no BOM). The earlier utf-8-sig writer was used to
         # handle Windows BOMs from external editors, but writing with utf-8-sig
@@ -593,6 +618,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         # should stay BOM-free so freshly produced files round-trip cleanly.
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
+        _track_mutation_done(resolved)
         return {"status": "success", "message": f"File '{resolved}' written successfully."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -693,12 +719,14 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
             new_content = content.replace(old_str, new_str, 1)
             replaced = 1
 
+        _track_mutation(resolved)
         # See write_file() for why we use plain utf-8 here: we must not add a
         # BOM on write, otherwise subsequent json.load() calls (which read with
         # utf-8-sig but still treat the BOM as content) will see corrupted data.
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(new_content)
 
+        _track_mutation_done(resolved)
         msg = f"Replaced {replaced} of {count} occurrences in '{resolved}'."
         if count > 1 and not replace_all:
             msg += f" WARNING: {count - 1} more occurrences remain. Set replace_all=True to replace all."
@@ -730,7 +758,9 @@ def delete_file(path: str) -> dict[str, Any]:
 
     try:
         if os.path.isfile(resolved):
+            _track_mutation(resolved, deleting=True)
             os.remove(resolved)
+            _track_mutation_done(resolved)
             return {"status": "success", "message": f"Deleted file '{resolved}'."}
         return {"status": "error", "message": "Not a file or file not found."}
     except Exception as e:

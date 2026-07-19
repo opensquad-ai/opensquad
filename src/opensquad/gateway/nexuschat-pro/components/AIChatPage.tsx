@@ -18,7 +18,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Bot, ArrowLeft, Send, Square,
-  PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, Upload,
+  PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
   ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
   Loader2, Clock, AlignLeft, MessageSquare, Mic,
 } from 'lucide-react';
@@ -26,6 +26,14 @@ import {
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
 import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
+import { blobToWavFile } from '../utils/mediaDevices';
+import {
+  cancelPendingVoiceHangup,
+  clearVoiceCallPersist,
+  readVoiceCallPersist,
+  schedulePendingVoiceHangup,
+  writeVoiceCallPersist,
+} from '../utils/voiceCallPersist';
 import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import {
   appendWorkflowEvent,
@@ -51,6 +59,7 @@ import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
+import { SessionChangesBar, COMMIT_PUSH_MESSAGE, type SessionChangesSummary } from './ai-chat/SessionChangesBar';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -60,6 +69,7 @@ import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeS
 import { OptionsApprovalCard, type OptionsProposal, hydrateOptionsProposalsFromEvents } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
 import { VoicePanel } from './ai-chat/VoicePanel';
+import { VoiceRecordPill } from './ai-chat/VoiceRecordPill';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
 import { WorkflowContainer } from './ai-chat/WorkflowContainer';
 import { ThoughtBlock } from './ai-chat/ThoughtBlock';
@@ -568,6 +578,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [voicePanelOpen, setVoicePanelOpen] = useState(false);
   const [voiceRealtimeStatus, setVoiceRealtimeStatus] = useState('idle');
   const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [voiceCapture, setVoiceCapture] = useState({
+    recording: false,
+    durationSec: 0,
+    level: 0,
+  });
+  const voiceCaptureApiRef = useRef<{ stopRecord: () => void } | null>(null);
   const [voiceRealtimeError, setVoiceRealtimeError] = useState('');
   /** Auto-speak each final agent reply via TTS (persisted per agent). */
   const [autoSpeechEnabled, setAutoSpeechEnabled] = useState(false);
@@ -593,6 +609,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** Structured realtime captions — avoids user/assistant role mixing on streaming deltas. */
   const voiceCaptionRef = useRef<{ role: string; text: string }[]>([]);
   const voiceConnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** True while probing agent for an in-progress call after refresh. */
+  const voiceResumeProbeRef = useRef(false);
+  /** Set on pagehide so refresh/tab-close does not hang up the agent-side session. */
+  const voicePageHideRef = useRef(false);
   const clearVoiceConnectTimer = useCallback(() => {
     if (voiceConnectTimerRef.current) {
       clearTimeout(voiceConnectTimerRef.current);
@@ -934,6 +954,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   });
   const [fileOpenRequest, setFileOpenRequest] = useState<ProjectFileOpenRequest | null>(null);
+  const [sessionChanges, setSessionChanges] = useState<SessionChangesSummary | null>(null);
+  const [focusChangedNonce, setFocusChangedNonce] = useState(0);
+  const [changesBusy, setChangesBusy] = useState(false);
+  const onSessionChangesStable = useCallback((summary: SessionChangesSummary) => {
+    setSessionChanges(summary);
+  }, []);
   const openProjectFile = useCallback((path: string) => {
     const p = (path || '').trim();
     if (!p) return;
@@ -1181,7 +1207,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** Live stdout for system.start_job / run_session_job (keyed by tool call_id) */
   const [shellStreams, setShellStreams] = useState<Record<string, ShellStreamState>>({});
 
-  // UI render mode: classic (chat bubbles) | solo (document stream). Global preference.
+  // UI render mode: classic (user bubble + agent document) | solo (document stream). Global preference.
   type AiChatUiMode = 'classic' | 'solo';
   const [uiMode, setUiMode] = useState<AiChatUiMode>(() => {
     try {
@@ -1197,7 +1223,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     try { localStorage.setItem('ai_chat_ui_mode', mode); } catch {}
   }, []);
 
-  const soloColumnClass = isSolo ? 'max-w-3xl mx-auto w-full' : '';
+  // Document column for both classic + solo (classic: user bubble + agent doc stream)
+  const soloColumnClass = 'max-w-3xl mx-auto w-full';
 
   const soloUserNavNodes = useMemo(() => {
     if (!isSolo) return [];
@@ -1422,6 +1449,35 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [agentId, currentSessionId]);
 
+  const fsAgentName = agentProfile?.dir_name || agentId;
+  const projectRoot = (agentCwd || defaultCwd || '').trim();
+
+  const refreshSessionChanges = useCallback(async () => {
+    if (!fsAgentName || !projectRoot) {
+      setSessionChanges(null);
+      return;
+    }
+    try {
+      const resp = await adminAPI.listSessionChanges(fsAgentName, projectRoot);
+      setSessionChanges({
+        additions: resp.additions || 0,
+        deletions: resp.deletions || 0,
+        count: resp.count ?? (resp.files?.length || 0),
+      });
+    } catch {
+      /* ignore — Launcher may be restarting */
+    }
+  }, [fsAgentName, projectRoot]);
+
+  const refreshSessionChangesRef = useRef(refreshSessionChanges);
+  useEffect(() => {
+    refreshSessionChangesRef.current = refreshSessionChanges;
+  }, [refreshSessionChanges]);
+
+  useEffect(() => {
+    void refreshSessionChanges();
+  }, [refreshSessionChanges]);
+
   // Load available model cards once, to populate the runtime model-switch dropdown.
   useEffect(() => {
     let cancelled = false;
@@ -1586,9 +1642,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   useEffect(() => {
     if (!agentId) return;
 
+    cancelPendingVoiceHangup(agentId);
+    voicePageHideRef.current = false;
+    const onPageHide = () => {
+      // Refresh / tab close: do not hang up agent-side realtime; sessionStorage resumes UI.
+      voicePageHideRef.current = true;
+      cancelPendingVoiceHangup(agentId);
+    };
+    window.addEventListener('pagehide', onPageHide);
+
     const aiWsService = getAiWsService(agentId);
     aiWsService.connect(agentId);
     wsServiceRef.current = aiWsService;
+
+    const tryResumeVoiceCall = () => {
+      if (!readVoiceCallPersist(agentId)) return;
+      voiceResumeProbeRef.current = true;
+      aiWsService.queryVoiceRealtime();
+    };
 
     // Auth expiry detection — prompt re-login when token is invalid/expired
     const unsubAuthExpired = aiWsService.onAuthExpired(() => {
@@ -1599,6 +1670,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setWsStatus(status);
       if (status === 'connected') {
         setAgentStatus('connected');
+        tryResumeVoiceCall();
       } else if (status === 'disconnected') {
         setAgentStatus('disconnected');
       } else if (status === 'connecting') {
@@ -1958,6 +2030,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         return;
       }
       setTimeline(prev => appendWorkflowEvent(prev, event, `${toolName} completed`));
+      // Refresh session change stats after filesystem mutations
+      const tn = String(toolName || '').toLowerCase();
+      if (
+        tn.includes('write') ||
+        tn.includes('replace') ||
+        tn.includes('delete') ||
+        tn.includes('edit_file') ||
+        tn.includes('filesystem')
+      ) {
+        void refreshSessionChangesRef.current?.();
+      }
     });
 
     // Live shell / background job stdout for CMD panel
@@ -2549,6 +2632,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
       // Clear live start timestamp (turn is over)
       setTurnStartedMs(undefined);
+      void refreshSessionChangesRef.current?.();
     });
 
     // Prompt update — insert/update prompt entry in timeline (first item = first prompt)
@@ -2659,6 +2743,49 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (status === 'options_updated' || (status === 'idle' && data?.note)) {
         return;
       }
+
+      const active =
+        status === 'connected' ||
+        status === 'tool_running' ||
+        status === 'connecting' ||
+        status === 'session.created' ||
+        status === 'session.updated';
+
+      // Resume probe after refresh: keep live session, or restart if agent lost it.
+      if (voiceResumeProbeRef.current) {
+        voiceResumeProbeRef.current = false;
+        if (active) {
+          const force =
+            data?.force_ask_agent != null
+              ? Boolean(data.force_ask_agent)
+              : (readVoiceCallPersist(agentId)?.forceAskAgent ?? true);
+          writeVoiceCallPersist(agentId, force);
+          setVoiceRealtimeStatus(String(status));
+          setVoiceRealtimeError('');
+          setVoicePanelOpen(true);
+          return;
+        }
+        const persist = readVoiceCallPersist(agentId);
+        if (persist) {
+          setVoiceRealtimeStatus('connecting');
+          setVoiceRealtimeError('');
+          setVoicePanelOpen(true);
+          armVoiceConnectTimeout();
+          aiWsService.startVoiceRealtime({ force_ask_agent: persist.forceAskAgent });
+          return;
+        }
+      }
+
+      if (active) {
+        const force =
+          data?.force_ask_agent != null
+            ? Boolean(data.force_ask_agent)
+            : (readVoiceCallPersist(agentId)?.forceAskAgent ?? true);
+        writeVoiceCallPersist(agentId, force);
+      } else if (status === 'disconnected' || status === 'idle' || status === 'error') {
+        clearVoiceCallPersist(agentId);
+      }
+
       setVoiceRealtimeStatus(String(status));
       if (status === 'error') {
         const errText = data?.error ? String(data.error) : 'Realtime connection failed';
@@ -3507,8 +3634,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubVoiceTranscript();
       unsubVoiceStatus();
       clearVoiceConnectTimer();
-      // Leaving this agent chat: end any background realtime session.
-      aiWsService.stopVoiceRealtime();
+      window.removeEventListener('pagehide', onPageHide);
       setVoiceRealtimeStatus('idle');
       setVoiceRealtimeError('');
       setVoicePanelOpen(false);
@@ -3522,7 +3648,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         clearTimeout(sessionReloadTimerRef.current);
         sessionReloadTimerRef.current = null;
       }
-      releaseAiWsService(agentId);
+      if (voicePageHideRef.current) {
+        // Page refresh / tab close: keep agent mouthpiece/realtime session for resume.
+        releaseAiWsService(agentId);
+      } else {
+        // In-app navigate away (or StrictMode remount): delay hangup so remount can cancel.
+        schedulePendingVoiceHangup(agentId, () => {
+          try {
+            getAiWsService(agentId).stopVoiceRealtime();
+          } catch {
+            /* ignore */
+          }
+          clearVoiceCallPersist(agentId);
+          releaseAiWsService(agentId);
+        });
+      }
     };
   }, [agentId]);
 
@@ -3786,6 +3926,57 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [skillsLoading]);
 
+  const handleWithdrawUserMessage = useCallback(
+    async (entryUid: string, message: ChatMessage) => {
+      if (!entryUid || message.role !== 'user') return;
+      if (isStreaming || agentStatus === 'working' || agentStatus === 'thinking') {
+        // Still allow withdraw — stop first
+        wsServiceRef.current?.stopTask();
+      }
+      if (!window.confirm('恢复检查点？将还原该消息之后的文件改动，并删除之后的对话。')) {
+        return;
+      }
+      const root = (agentCwd || defaultCwd || '').trim();
+      const dirName = agentProfile?.dir_name || agentId;
+      setChangesBusy(true);
+      try {
+        if (dirName && root) {
+          await adminAPI.revertSessionChanges(dirName, entryUid, root);
+        }
+        wsServiceRef.current?.withdrawTurn({
+          message_id: entryUid,
+          timestamp: message.timestamp || '',
+        });
+        setTimeline((prev) => {
+          const idx = prev.findIndex((e) => e._uid === entryUid);
+          if (idx < 0) return prev;
+          return prev.slice(0, idx);
+        });
+        setStreamingText('');
+        streamingTextRef.current = '';
+        setIsStreaming(false);
+        setAgentStatus('idle');
+        setTurnStartedMs(undefined);
+        await refreshSessionChanges();
+        setFocusChangedNonce(Date.now());
+      } catch (err) {
+        console.warn('[withdraw] failed', err);
+        window.alert('恢复检查点失败，请稍后重试');
+      } finally {
+        setChangesBusy(false);
+      }
+    },
+    [
+      isStreaming,
+      agentStatus,
+      agentCwd,
+      defaultCwd,
+      agentProfile?.dir_name,
+      agentId,
+      refreshSessionChanges,
+    ],
+  );
+
   const deliverMessage = useCallback((
     payload: {
       text: string;
@@ -3869,6 +4060,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Add user message to timeline (display text without [File: ...],
     // attachments stored separately for card rendering)
+    const userUid = genUID();
     const userMsg: ChatMessage = {
       role: 'user',
       content: displayText,
@@ -3888,11 +4080,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         {
           kind: 'message',
           data: userMsg,
-          _uid: genUID(),
+          _uid: userUid,
         },
       ];
     });
     setTurnStartedMs(undefined);
+
+    // Checkpoint dirty files at send time (for per-message withdraw).
+    {
+      const root = (agentCwd || defaultCwd || '').trim();
+      const dirName = agentProfile?.dir_name || agentId;
+      if (root && dirName) {
+        void adminAPI.checkpointSessionChanges(dirName, userUid, root).catch(() => {});
+      }
+    }
 
     // Lock project path for this session on first user message (Solo archive grouping).
     {
@@ -3988,7 +4189,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setStreamingText('');
       setIsStreaming(false);
     }
-  }, [viewingHistorySession, currentSessionId, agentCwd, defaultCwd, agentId]);
+  }, [viewingHistorySession, currentSessionId, agentCwd, defaultCwd, agentId, agentProfile?.dir_name]);
 
   // When session id arrives after first send, persist pending project path / provisional title.
   useEffect(() => {
@@ -4245,6 +4446,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setShellStreams({});
     setOptionsProposals([]);
     setModeApprovals([]);
+    setSessionChanges(null);
+    setFocusChangedNonce(Date.now());
     streamingTextRef.current = '';
     setStreamingText('');
     finalizingRef.current = false;
@@ -4852,6 +5055,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </div>
           </div>
         )}
+        {/* Solo: scroll buttons on outer panel edge (unchanged) */}
         {isSolo && (showScrollTop || showScrollBottom) && (
           <div
             className="pointer-events-none absolute right-1 bottom-4 z-20 transition-opacity duration-300"
@@ -4923,6 +5127,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     ? (currentUser?.avatar || null)
                     : (resolveChatAvatar(agentProfile?.chat_profile) || null),
                 agentId,
+                canWithdraw:
+                  entry.data.role === 'user' &&
+                  !viewingHistorySession &&
+                  !changesBusy,
+                onWithdraw:
+                  entry.data.role === 'user'
+                    ? () => void handleWithdrawUserMessage(entryKey, entry.data)
+                    : undefined,
               };
               return isSolo
                 ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
@@ -4935,55 +5147,43 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 return -1;
               })();
-              if (isSolo) {
-                // Only merge consecutive *incomplete* workflow fragments (live turn).
-                // Merging all adjacent completed blocks collapses separate turns after
-                // compression and makes tool calls appear in the wrong order.
-                const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
-                if (
-                  i > 0 &&
-                  displayTimeline[i - 1].kind === 'workflow' &&
-                  !(displayTimeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
-                  !curBlock.completed
-                ) {
-                  return null;
-                }
-                const blocks: WorkflowBlock[] = [curBlock];
-                if (!curBlock.completed) {
-                  let j = i + 1;
-                  while (
-                    j < displayTimeline.length &&
-                    displayTimeline[j].kind === 'workflow' &&
-                    !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
-                  ) {
-                    blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
-                    j += 1;
-                  }
-                }
-                const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
-                const groupHasIncomplete = !merged.completed;
-                const turnMs = groupHasIncomplete ? turnStartedMs : undefined;
-                return (
-                  <SoloActivityRow
-                    key={entryKey}
-                    block={merged}
-                    expandDetails={soloExpandDetails}
-                    turnStartedMs={turnMs}
-                    shellStreams={shellStreams}
-                    onOpenFile={openProjectFile}
-                  />
-                );
+              // Classic + Solo: document-style activity rows (thinking / tools)
+              if (!isSolo && !showWorkflow) return null;
+              const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
+              if (
+                i > 0 &&
+                displayTimeline[i - 1].kind === 'workflow' &&
+                !(displayTimeline[i - 1] as { kind: 'workflow'; data: WorkflowBlock }).data.completed &&
+                !curBlock.completed
+              ) {
+                return null;
               }
-              if (!showWorkflow) return null;
-              const turnMs = i === lastIncompleteIdx ? turnStartedMs : undefined;
+              const blocks: WorkflowBlock[] = [curBlock];
+              if (!curBlock.completed) {
+                let j = i + 1;
+                while (
+                  j < displayTimeline.length &&
+                  displayTimeline[j].kind === 'workflow' &&
+                  !(displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data.completed
+                ) {
+                  blocks.push((displayTimeline[j] as { kind: 'workflow'; data: WorkflowBlock }).data);
+                  j += 1;
+                }
+              }
+              const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
+              const groupHasIncomplete = !merged.completed;
+              const turnMs = groupHasIncomplete
+                ? turnStartedMs
+                : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
-                <WorkflowBlockView
+                <SoloActivityRow
                   key={entryKey}
-                  block={entry.data}
-                  blockKey={i}
+                  block={merged}
+                  expandDetails={isSolo ? soloExpandDetails : showWorkflow}
                   turnStartedMs={turnMs}
                   shellStreams={shellStreams}
                   onOpenFile={openProjectFile}
+                  embedVisualizations={!isSolo}
                 />
               );
             }
@@ -5002,7 +5202,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 label = t('aiChat.stateLabel', { content: hint.content });
               }
               return (
-                <div key={entryKey} className={`flex items-center gap-1.5 py-0.5 my-0.5 ${isSolo ? 'mx-0' : 'mx-2 sm:mx-9'}`}>
+                <div key={entryKey} className="flex items-center gap-1.5 py-0.5 my-0.5 mx-0">
                   <div className="flex-1 h-px bg-border/25" />
                   {icon}
                   <span className="text-[10px] text-textMuted/45 font-mono shrink-0">{label}</span>
@@ -5035,33 +5235,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                             ? (currentUser?.avatar || null)
                             : (resolveChatAvatar(agentProfile?.chat_profile) || null),
                         agentId,
+                        canWithdraw:
+                          nested.data.role === 'user' &&
+                          !viewingHistorySession &&
+                          !changesBusy,
+                        onWithdraw:
+                          nested.data.role === 'user'
+                            ? () => void handleWithdrawUserMessage(nestedKey, nested.data)
+                            : undefined,
                       };
                       return isSolo
                         ? <SoloMessage key={nestedKey} {...msgProps} anchorId={nestedKey} />
                         : <MessageBubble key={nestedKey} {...msgProps} />;
                     }
                     if (nested.kind === 'workflow') {
-                      if (isSolo) {
-                        return (
-                          <SoloActivityRow
-                            key={nestedKey}
-                            block={nested.data}
-                            expandDetails={soloExpandDetails}
-                            turnStartedMs={undefined}
-                            shellStreams={shellStreams}
-                            onOpenFile={openProjectFile}
-                          />
-                        );
-                      }
-                      if (!showWorkflow) return null;
+                      if (!isSolo && !showWorkflow) return null;
                       return (
-                        <WorkflowBlockView
+                        <SoloActivityRow
                           key={nestedKey}
                           block={nested.data}
-                          blockKey={ni}
+                          expandDetails={isSolo ? soloExpandDetails : showWorkflow}
                           turnStartedMs={undefined}
                           shellStreams={shellStreams}
                           onOpenFile={openProjectFile}
+                          embedVisualizations={!isSolo}
                         />
                       );
                     }
@@ -5123,35 +5320,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
           <div ref={chatEndRef} />
           </div>
-
-          {/* Classic: scroll-to-top / scroll-to-bottom (solo buttons are on the outer panel edge) */}
-          {!isSolo && (showScrollTop || showScrollBottom) && (
-            <div
-              className="sticky bottom-4 z-10 pointer-events-none flex justify-end pr-1 transition-opacity duration-300"
-              style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
-            >
-              <div className="flex flex-col gap-2 pointer-events-auto">
-                {showScrollTop && (
-                  <button
-                    onClick={scrollToTop}
-                    className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
-                    title="Scroll to top"
-                  >
-                    <ChevronUp size={18} className="text-gray-500" />
-                  </button>
-                )}
-                {showScrollBottom && (
-                  <button
-                    onClick={scrollToBottom}
-                    className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
-                    title="Scroll to bottom"
-                  >
-                    <ChevronDown size={18} className="text-gray-500" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
         </div>
         </div>
 
@@ -5367,10 +5535,69 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
+        {/* Classic only: scroll-to-bottom centered above composer */}
+        {!isSolo && showScrollBottom && (
+          <div className="relative flex-shrink-0 z-20 pointer-events-none h-0">
+            <div className={`${soloColumnClass} relative`}>
+              <button
+                type="button"
+                onClick={scrollToBottom}
+                className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-gray-50 dark:hover:bg-[#333] transition-opacity duration-300 cursor-pointer"
+                style={{ opacity: scrollActive ? 1 : 0.55 }}
+                title="滚动到底部"
+              >
+                <ChevronDown size={18} className="text-gray-500" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Session file-change stats above composer */}
+        {sessionChanges && (sessionChanges.count > 0 || sessionChanges.additions > 0 || sessionChanges.deletions > 0) ? (
+          <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
+            <div className={soloColumnClass}>
+              <SessionChangesBar
+                summary={sessionChanges}
+                busy={changesBusy}
+                onOpenChanges={() => {
+                  setFilesPanelOpen(true);
+                  try {
+                    localStorage.setItem('opensquad.filesPanel.open', 'true');
+                  } catch {
+                    /* ignore */
+                  }
+                  setFocusChangedNonce(Date.now());
+                }}
+                onCommitPush={async () => {
+                  const root = projectRoot;
+                  const dirName = fsAgentName;
+                  setChangesBusy(true);
+                  try {
+                    // Clear session change stats (accepted locally); agent performs real git commit+push.
+                    if (dirName && root) {
+                      await adminAPI.commitSessionChanges(dirName, root).catch(() => {});
+                    }
+                    setSessionChanges({ additions: 0, deletions: 0, count: 0 });
+                    setFocusChangedNonce(Date.now());
+                    deliverMessage(
+                      { text: COMMIT_PUSH_MESSAGE, images: [], attachments: [] },
+                      { clearInputState: false, salvageStream: true },
+                    );
+                  } catch (err) {
+                    console.warn('[SessionChanges] Commit & Push failed', err);
+                  } finally {
+                    setChangesBusy(false);
+                  }
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
+
         {/* Input Area — shared Solo-style composer for classic + solo */}
         <div
-          className={`flex-shrink-0 overflow-visible px-2 sm:px-4 py-2 sm:py-3 ${
-            isSolo ? 'bg-transparent' : 'bg-transparent border-t border-border/30'
+          className={`flex-shrink-0 overflow-visible px-2 sm:px-4 py-3 sm:py-4 ${
+            isSolo ? 'bg-transparent' : 'bg-transparent border-t border-border/20'
           }`}
         >
           <div className={`${soloColumnClass}${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
@@ -5429,8 +5656,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 />
               ))}
               <div
-                className={`w-full flex items-center gap-1 rounded-2xl border border-border/80 min-h-[40px] focus-within:ring-1 focus-within:ring-primary/50 shadow-sm relative ${
-                  isLoadingSession ? 'bg-border/40' : 'bg-bgLight/80 dark:bg-black/20'
+                className={`w-full flex flex-col rounded-[22px] border border-border/60 focus-within:ring-1 focus-within:ring-primary/40 shadow-[0_4px_24px_rgba(0,0,0,0.06)] relative ${
+                  isLoadingSession ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'
                 }`}
               >
                 <VoicePanel
@@ -5467,7 +5694,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     // Always STT into composer; user presses Send as normal text.
                     try {
                       setSttDictating(true);
-                      const file = new File([blob], `voice_${Date.now()}.webm`, { type: blob.type || 'audio/webm' });
+                      const file = await blobToWavFile(blob, `voice_${Date.now()}.wav`);
                       const res = await agentSessionAPI.transcribe(agentId, file, {
                         filename: file.name,
                         language: 'zh',
@@ -5503,6 +5730,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     voiceCaptionRef.current = [];
                     setVoiceRealtimeError('');
                     setVoiceRealtimeStatus('connecting');
+                    writeVoiceCallPersist(agentId, opts?.forceAskAgent !== false);
                     armVoiceConnectTimeout();
                     wsServiceRef.current?.startVoiceRealtime({
                       force_ask_agent: opts?.forceAskAgent !== false,
@@ -5510,6 +5738,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   }}
                   onRealtimeStop={() => {
                     clearVoiceConnectTimer();
+                    clearVoiceCallPersist(agentId);
                     wsServiceRef.current?.stopVoiceRealtime();
                     setVoiceRealtimeStatus('idle');
                     setVoiceRealtimeError('');
@@ -5523,121 +5752,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   onMouthpieceUtterance={(b64, sampleRate) => {
                     wsServiceRef.current?.sendMouthpieceUtterance(b64, sampleRate);
                   }}
+                  onCaptureStateChange={setVoiceCapture}
+                  captureApiRef={voiceCaptureApiRef}
                 />
-                <div className="pl-1.5 shrink-0 flex items-center self-end min-h-[38px] gap-0.5">
-                  <button
-                    type="button"
-                    disabled={isLoadingSession}
-                    onClick={() => setVoicePanelOpen((v) => !v)}
-                    className={`p-1.5 rounded-lg relative ${
-                      voicePanelOpen
-                        ? 'bg-primary/20 text-primary'
-                        : voiceRealtimeStatus === 'connected' ||
-                            voiceRealtimeStatus === 'tool_running' ||
-                            voiceRealtimeStatus === 'connecting'
-                          ? 'bg-emerald-500/20 text-emerald-500'
-                          : 'text-textMuted hover:text-textMain hover:bg-border/40'
-                    }`}
-                    title={
-                      voiceRealtimeStatus === 'connected' ||
-                      voiceRealtimeStatus === 'tool_running' ||
-                      voiceRealtimeStatus === 'connecting'
-                        ? '实时通话进行中（点击展开/折叠）'
-                        : '语音消息 / 实时通话'
-                    }
-                  >
-                    <Mic size={18} />
-                    {(voiceRealtimeStatus === 'connected' ||
-                      voiceRealtimeStatus === 'tool_running' ||
-                      voiceRealtimeStatus === 'connecting') && (
-                      <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                    )}
-                  </button>
-                  <SoloAttachMenu
-                    disabled={isLoadingSession}
-                    skills={availableSkills}
-                    skillsLoading={skillsLoading}
-                    onOpenSkills={loadSkillsIfNeeded}
-                    autoSpeechEnabled={autoSpeechEnabled}
-                    onToggleAutoSpeech={toggleAutoSpeech}
-                    onSelectSkill={(skill) => {
-                      const dir = (skill.dir || skill.name || '').trim();
-                      if (!dir) return;
-                      setPendingSkill({
-                        dir,
-                        name: skill.display_name || skill.name || dir,
-                      });
-                      // Focus composer so user can add follow-up text.
-                      requestAnimationFrame(() => inputRef.current?.focus());
-                    }}
-                    onUploadFiles={() => {
-                      const input = document.createElement('input');
-                      input.type = 'file';
-                      input.multiple = true;
-                      input.onchange = async (e) => {
-                        const files = (e.target as HTMLInputElement).files;
-                        if (!files) return;
-                        setIsUploading(true);
-                        try {
-                          const fileArray = Array.from(files) as File[];
-                          if (fileArray.length === 1) {
-                            const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
-                            if (resp.is_image) setImages((prev) => [...prev, resp.url]);
-                            else setAttachments((prev) => [...prev, resp]);
-                          } else {
-                            const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                            for (const f of resp.files) {
-                              if (f.is_image) setImages((prev) => [...prev, f.url]);
-                              else setAttachments((prev) => [...prev, f]);
-                            }
-                          }
-                        } catch (err: any) {
-                          console.error('[AIChatPage] File upload failed:', err);
-                        } finally {
-                          setIsUploading(false);
-                        }
-                      };
-                      input.click();
-                    }}
-                    onUploadFolder={() => {
-                      const input = document.createElement('input');
-                      input.type = 'file';
-                      (input as any).webkitdirectory = true;
-                      (input as any).directory = true;
-                      input.multiple = true;
-                      input.onchange = async (e) => {
-                        const files = (e.target as HTMLInputElement).files;
-                        if (!files || files.length === 0) return;
-                        setIsUploading(true);
-                        try {
-                          const fileArray = Array.from(files) as File[];
-                          const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                          for (const f of resp.files) {
-                            if (f.is_image) setImages((prev) => [...prev, f.url]);
-                            else setAttachments((prev) => [...prev, f]);
-                          }
-                        } catch (err: any) {
-                          console.error('[AIChatPage] Folder upload failed:', err);
-                        } finally {
-                          setIsUploading(false);
-                        }
-                      };
-                      input.click();
-                    }}
-                    onUploadImages={() => fileInputRef.current?.click()}
-                  />
-                </div>
                 {pendingSkill ? (
-                  <button
-                    type="button"
-                    onClick={() => setPendingSkill(null)}
-                    className="shrink-0 self-end mb-2 ml-0.5 inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[13px] font-medium border-0 cursor-pointer"
-                    style={{ color: '#b08d57', background: 'color-mix(in srgb, #b08d57 12%, transparent)' }}
-                    title={`Remove skill /${pendingSkill.dir}`}
-                  >
-                    <span>/{pendingSkill.dir}</span>
-                    <X size={12} className="opacity-70" />
-                  </button>
+                  <div className="px-3.5 pt-3 pb-0">
+                    <button
+                      type="button"
+                      onClick={() => setPendingSkill(null)}
+                      className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[13px] font-medium border-0 cursor-pointer"
+                      style={{ color: '#b08d57', background: 'color-mix(in srgb, #b08d57 12%, transparent)' }}
+                      title={`Remove skill /${pendingSkill.dir}`}
+                    >
+                      <span>/{pendingSkill.dir}</span>
+                      <X size={12} className="opacity-70" />
+                    </button>
+                  </div>
                 ) : null}
                 <textarea
                   ref={inputRef}
@@ -5650,72 +5780,145 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       ? sessionLoadingLabel
                       : pendingSkill
                         ? 'Add details for this skill…'
-                        : 'Type a message...'
+                        : '输入消息... (输入 / 召唤 Skill)'
                   }
                   disabled={isLoadingSession}
-                  className={`flex-1 min-w-0 border-0 px-2 py-2 text-sm text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[38px] max-h-[120px] bg-transparent leading-5 ${
+                  className={`w-full border-0 px-3.5 pt-3.5 pb-2 text-[15px] text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[72px] max-h-[200px] bg-transparent leading-6 ${
                     isLoadingSession ? 'text-textMuted cursor-not-allowed' : ''
                   }`}
-                  rows={1}
+                  rows={2}
                   style={{ height: 'auto' }}
                   onInput={(e) => {
                     const target = e.target as HTMLTextAreaElement;
                     target.style.height = 'auto';
-                    target.style.height = Math.min(target.scrollHeight, 120) + 'px';
+                    target.style.height = Math.min(target.scrollHeight, 200) + 'px';
                   }}
                 />
-                <div className="shrink-0 flex items-center gap-1 pr-1.5 self-end min-h-[38px]">
-                  {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
-                    <>
-                      <button
-                        onClick={handleSend}
-                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
-                        className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                        title={t('aiChat.queueMessage')}
-                      >
-                        <Send size={14} className="text-white" />
-                      </button>
-                      <button
-                        onClick={handleStop}
-                        className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
-                        title="Stop"
-                      >
-                        <Square size={14} className="text-white" />
-                      </button>
-                    </>
-                  ) : (
+                {/* Bottom control bar: attach left · model + mic + send right */}
+                <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-0.5">
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <SoloAttachMenu
+                      disabled={isLoadingSession}
+                      skills={availableSkills}
+                      skillsLoading={skillsLoading}
+                      onOpenSkills={loadSkillsIfNeeded}
+                      autoSpeechEnabled={autoSpeechEnabled}
+                      onToggleAutoSpeech={toggleAutoSpeech}
+                      onSelectSkill={(skill) => {
+                        const dir = (skill.dir || skill.name || '').trim();
+                        if (!dir) return;
+                        setPendingSkill({
+                          dir,
+                          name: skill.display_name || skill.name || dir,
+                        });
+                        requestAnimationFrame(() => inputRef.current?.focus());
+                      }}
+                      onUploadFiles={() => {
+                        const input = document.createElement('input');
+                        input.type = 'file';
+                        input.multiple = true;
+                        input.onchange = async (e) => {
+                          const files = (e.target as HTMLInputElement).files;
+                          if (!files) return;
+                          setIsUploading(true);
+                          try {
+                            const fileArray = Array.from(files) as File[];
+                            if (fileArray.length === 1) {
+                              const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
+                              if (resp.is_image) setImages((prev) => [...prev, resp.url]);
+                              else setAttachments((prev) => [...prev, resp]);
+                            } else {
+                              const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
+                              for (const f of resp.files) {
+                                if (f.is_image) setImages((prev) => [...prev, f.url]);
+                                else setAttachments((prev) => [...prev, f]);
+                              }
+                            }
+                          } catch (err: any) {
+                            console.error('[AIChatPage] File upload failed:', err);
+                          } finally {
+                            setIsUploading(false);
+                          }
+                        };
+                        input.click();
+                      }}
+                      onUploadFolder={() => {
+                        const input = document.createElement('input');
+                        input.type = 'file';
+                        (input as any).webkitdirectory = true;
+                        (input as any).directory = true;
+                        input.multiple = true;
+                        input.onchange = async (e) => {
+                          const files = (e.target as HTMLInputElement).files;
+                          if (!files || files.length === 0) return;
+                          setIsUploading(true);
+                          try {
+                            const fileArray = Array.from(files) as File[];
+                            const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
+                            for (const f of resp.files) {
+                              if (f.is_image) setImages((prev) => [...prev, f.url]);
+                              else setAttachments((prev) => [...prev, f]);
+                            }
+                          } catch (err: any) {
+                            console.error('[AIChatPage] Folder upload failed:', err);
+                          } finally {
+                            setIsUploading(false);
+                          }
+                        };
+                        input.click();
+                      }}
+                      onUploadImages={() => fileInputRef.current?.click()}
+                    />
                     <button
-                      onClick={handleSend}
-                      disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
-                      className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                      title="Send"
+                      type="button"
+                      disabled={isLoadingSession}
+                      onClick={() => {
+                        const input = document.createElement('input');
+                        input.type = 'file';
+                        input.multiple = true;
+                        input.onchange = async (e) => {
+                          const files = (e.target as HTMLInputElement).files;
+                          if (!files) return;
+                          setIsUploading(true);
+                          try {
+                            const fileArray = Array.from(files) as File[];
+                            if (fileArray.length === 1) {
+                              const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
+                              if (resp.is_image) setImages((prev) => [...prev, resp.url]);
+                              else setAttachments((prev) => [...prev, resp]);
+                            } else {
+                              const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
+                              for (const f of resp.files) {
+                                if (f.is_image) setImages((prev) => [...prev, f.url]);
+                                else setAttachments((prev) => [...prev, f]);
+                              }
+                            }
+                          } catch (err: any) {
+                            console.error('[AIChatPage] File upload failed:', err);
+                          } finally {
+                            setIsUploading(false);
+                          }
+                        };
+                        input.click();
+                      }}
+                      className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50"
+                      title="上传文件"
                     >
-                      <Send size={14} className="text-white" />
+                      <FileText size={16} strokeWidth={1.75} />
                     </button>
-                  )}
-                </div>
-              </div>
-              {/* One toolbar row: Folder | Mode | … | Model | Effort | Token ring */}
-              <SoloContextFooter
-                cwd={agentCwd || defaultCwd}
-                tokenStats={tokenStats}
-                locked={cwdLocked}
-                onViewReport={() => setShowContextViewer(true)}
-                onSelectCwd={async (pickedPath) => {
-                  try {
-                    const dirName = agentProfile?.dir_name || agentId;
-                    await adminAPI.setWorkingDirectory(dirName, pickedPath);
-                    pushCwdRecent(pickedPath);
-                    setAgentCwd(pickedPath);
-                    pendingProjectPathRef.current = pickedPath;
-                  } catch (err: any) {
-                    console.error('[AIChatPage] Failed to set working directory:', err);
-                    alert(`Failed to set working directory: ${err.message || err}`);
-                    throw err;
-                  }
-                }}
-                trailing={
-                  <>
+                    <ModePicker
+                      mode={agentMode}
+                      disabled={isLoadingSession}
+                      onSelect={(mode) => {
+                        setAgentMode(mode);
+                        wsServiceRef.current?.setAgentMode(mode);
+                      }}
+                    />
+                  </div>
+
+                  <div className="flex-1 min-w-0" />
+
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <SoloModelPicker
                       cards={modelCards}
                       currentCardName={currentCardName}
@@ -5752,18 +5955,103 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                         />
                       );
                     })()}
-                  </>
-                }
-              >
-                <ModePicker
-                  mode={agentMode}
-                  disabled={isLoadingSession}
-                  onSelect={(mode) => {
-                    setAgentMode(mode);
-                    wsServiceRef.current?.setAgentMode(mode);
-                  }}
-                />
-              </SoloContextFooter>
+                    {voiceCapture.recording || sttDictating ? (
+                      <VoiceRecordPill
+                        durationSec={voiceCapture.durationSec}
+                        level={voiceCapture.level}
+                        dictating={sttDictating}
+                        disabled={isLoadingSession}
+                        onClick={() => {
+                          if (sttDictating) return;
+                          voiceCaptureApiRef.current?.stopRecord();
+                        }}
+                        title={
+                          sttDictating
+                            ? '正在转写…'
+                            : '点击停止并转写'
+                        }
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isLoadingSession}
+                        onClick={() => setVoicePanelOpen((v) => !v)}
+                        className={`w-8 h-8 rounded-full flex items-center justify-center relative border-0 cursor-pointer transition-colors ${
+                          voicePanelOpen
+                            ? 'bg-primary/20 text-primary'
+                            : voiceRealtimeStatus === 'connected' ||
+                                voiceRealtimeStatus === 'tool_running' ||
+                                voiceRealtimeStatus === 'connecting'
+                              ? 'bg-emerald-500/20 text-emerald-500'
+                              : 'text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] bg-transparent'
+                        }`}
+                        title={
+                          voiceRealtimeStatus === 'connected' ||
+                          voiceRealtimeStatus === 'tool_running' ||
+                          voiceRealtimeStatus === 'connecting'
+                            ? '实时通话进行中（点击展开/折叠）'
+                            : '语音消息 / 实时通话'
+                        }
+                      >
+                        <Mic size={18} strokeWidth={1.75} />
+                        {(voiceRealtimeStatus === 'connected' ||
+                          voiceRealtimeStatus === 'tool_running' ||
+                          voiceRealtimeStatus === 'connecting') && (
+                          <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        )}
+                      </button>
+                    )}
+                    {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
+                      <>
+                        <button
+                          onClick={handleSend}
+                          disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
+                          className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+                          title={t('aiChat.queueMessage')}
+                        >
+                          <Send size={14} className="text-white" />
+                        </button>
+                        <button
+                          onClick={handleStop}
+                          className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
+                          title="Stop"
+                        >
+                          <Square size={14} className="text-white" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={handleSend}
+                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
+                        className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+                        title="Send"
+                      >
+                        <Send size={14} className="text-white" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {/* Status row: Folder | Token ring (model moved into composer) */}
+              <SoloContextFooter
+                cwd={agentCwd || defaultCwd}
+                tokenStats={tokenStats}
+                locked={cwdLocked}
+                onViewReport={() => setShowContextViewer(true)}
+                onSelectCwd={async (pickedPath) => {
+                  try {
+                    const dirName = agentProfile?.dir_name || agentId;
+                    await adminAPI.setWorkingDirectory(dirName, pickedPath);
+                    pushCwdRecent(pickedPath);
+                    setAgentCwd(pickedPath);
+                    pendingProjectPathRef.current = pickedPath;
+                  } catch (err: any) {
+                    console.error('[AIChatPage] Failed to set working directory:', err);
+                    alert(`Failed to set working directory: ${err.message || err}`);
+                    throw err;
+                  }
+                }}
+              />
 
             <input
               ref={fileInputRef}
@@ -5799,6 +6087,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             /* ignore */
           }
         }}
+        focusChangedNonce={focusChangedNonce}
+        onSessionChanges={onSessionChangesStable}
       />
     </div>
   );
