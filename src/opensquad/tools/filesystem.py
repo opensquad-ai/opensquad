@@ -607,6 +607,15 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     resolved = _resolve_path(path)
 
     try:
+        # Capture previous body for UI red/green (+ session edit_base) before overwrite
+        prev_content: str | None = None
+        if os.path.isfile(resolved):
+            try:
+                with open(resolved, encoding="utf-8-sig", errors="replace") as f:
+                    prev_content = f.read()
+            except Exception:
+                prev_content = None
+
         _track_mutation(resolved)
         os.makedirs(os.path.dirname(resolved), exist_ok=True)
         # Use plain utf-8 (no BOM). The earlier utf-8-sig writer was used to
@@ -616,10 +625,28 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         # (notably all mcp_config.json / mcp_global.json handlers). Read paths
         # elsewhere now use "utf-8-sig" so they are BOM-tolerant, and writers
         # should stay BOM-free so freshly produced files round-trip cleanly.
+        new_content = content if content is not None else ""
         with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+            f.write(new_content)
         _track_mutation_done(resolved)
-        return {"status": "success", "message": f"File '{resolved}' written successfully."}
+
+        out: dict[str, Any] = {
+            "status": "success",
+            "message": f"File '{resolved}' written successfully.",
+        }
+        # Full-file before/after for chat FileDiffBlock (same keys as replace_in_file)
+        _MAX_WRITE_DIFF = 400_000
+        if prev_content is not None and len(prev_content) <= _MAX_WRITE_DIFF and len(new_content) <= _MAX_WRITE_DIFF:
+            out["diff_old"] = prev_content
+            out["diff_new"] = new_content
+            out["diff_start_line"] = 1
+        elif prev_content is None:
+            # Brand-new file: still emit empty→new so UI can show green adds
+            if len(new_content) <= _MAX_WRITE_DIFF:
+                out["diff_old"] = ""
+                out["diff_new"] = new_content
+                out["diff_start_line"] = 1
+        return out
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

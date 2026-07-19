@@ -308,15 +308,16 @@ export function extractFileEditInfo(toolName: string, args: any): FileEditInfo |
 }
 
 /**
- * Prefer server-expanded snippets (±unchanged context) from replace_in_file
- * over the raw tool args when available.
+ * Prefer server-expanded snippets (±unchanged context) from replace_in_file /
+ * write_file over the raw tool args when available.
  */
 export function applyEditDiffContext(
   info: FileEditInfo | null,
   ctx?: { diffOld?: string; diffNew?: string; diffStartLine?: number } | null,
 ): FileEditInfo | null {
-  if (!info || info.kind !== 'edit' || !ctx) return info;
+  if (!info || !ctx) return info;
   if (ctx.diffOld == null || ctx.diffNew == null) return info;
+  if (info.kind !== 'edit' && info.kind !== 'write') return info;
   const oldLines = ctx.diffOld.split('\n');
   const newLines = ctx.diffNew.split('\n');
   // Count real +/- so Solo "+N -M" stays about the edit, not the whole context window.
@@ -334,6 +335,8 @@ export function applyEditDiffContext(
   const lcs = dp[oldLines.length][newLines.length];
   return {
     ...info,
+    // Promote write→edit semantics when we have a real before/after pair
+    kind: info.kind === 'write' && ctx.diffOld.length > 0 ? 'edit' : info.kind,
     oldStr: ctx.diffOld,
     newStr: ctx.diffNew,
     addedLines: Math.max(0, newLines.length - lcs),
@@ -657,13 +660,28 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
   // Build raw diff lines — always call hooks unconditionally (Rules of Hooks)
   const rawDiffLines = useMemo<RawDiffLine[]>(() => {
     let lines: RawDiffLine[];
-    if (info.kind === 'write') {
+    // write with a real before/after (from server diff_old) → unified red/green
+    if (info.kind === 'write' && (info.oldStr == null || info.oldStr === '')) {
       lines = info.newStr.split('\n').map((content, i): RawDiffLine => ({
         kind: 'added',
         oldNo: null,
         newNo: i + 1,
         content,
       }));
+    } else if (info.kind === 'write' || info.kind === 'edit') {
+      const oldLines = (info.oldStr ?? '').split('\n');
+      const newLines = info.newStr.split('\n');
+      // Empty old file: treat as all adds (avoid a fake blank delete line)
+      if (info.oldStr == null || (info.oldStr === '' && info.newStr !== '')) {
+        lines = newLines.map((content, i): RawDiffLine => ({
+          kind: 'added',
+          oldNo: null,
+          newNo: i + 1,
+          content,
+        }));
+      } else {
+        lines = buildDiff(oldLines, newLines);
+      }
     } else if (!info.oldStr) {
       lines = [];
     } else {

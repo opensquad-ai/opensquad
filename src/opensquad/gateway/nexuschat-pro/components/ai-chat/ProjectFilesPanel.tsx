@@ -56,6 +56,9 @@ type ChangedEntry = {
   additions?: number;
   deletions?: number;
   oversized?: boolean;
+  mtime?: number;
+  size?: number;
+  created?: boolean;
 };
 
 type ListTab = 'changed' | 'all';
@@ -153,6 +156,17 @@ interface ProjectFilesPanelProps {
   onWidthChange: (w: number) => void;
   /** Force switch to changed tab + refresh (from Changes bar). */
   focusChangedNonce?: number;
+  /**
+   * Live snapshot from parent (tool/turn events). Applied in-place without
+   * full-panel loading spinners so the chat/files UI does not flash-reload.
+   */
+  liveChanges?: {
+    nonce: number;
+    additions: number;
+    deletions: number;
+    count: number;
+    files: ChangedEntry[];
+  } | null;
   /** Notify parent when session change list refreshes. */
   onSessionChanges?: (summary: {
     additions: number;
@@ -400,6 +414,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   width,
   onWidthChange,
   focusChangedNonce,
+  liveChanges,
   onSessionChanges,
 }) => {
   const [browsePath, setBrowsePath] = useState('');
@@ -408,6 +423,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [treeCount, setTreeCount] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [listLoading, setListLoading] = useState(false);
+  /** Soft refresh: spin header icon only, keep current tree visible */
+  const [treeRefreshing, setTreeRefreshing] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [showSearch, setShowSearch] = useState(false);
@@ -415,6 +432,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [tab, setTab] = useState<ListTab>('all');
   const [changedEntries, setChangedEntries] = useState<ChangedEntry[]>([]);
   const [changedLoading, setChangedLoading] = useState(false);
+  const [changedRefreshing, setChangedRefreshing] = useState(false);
   const [changedError, setChangedError] = useState<string | null>(null);
   /** Accordion: which changed files have inline diff expanded */
   const [expandedChanged, setExpandedChanged] = useState<Set<string>>(() => new Set());
@@ -435,6 +453,29 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   useEffect(() => {
     expandedChangedRef.current = expandedChanged;
   }, [expandedChanged]);
+  const treeEntriesRef = useRef(treeEntries);
+  useEffect(() => {
+    treeEntriesRef.current = treeEntries;
+  }, [treeEntries]);
+  const changedEntriesRef = useRef(changedEntries);
+  useEffect(() => {
+    changedEntriesRef.current = changedEntries;
+  }, [changedEntries]);
+  const lastLiveNonceRef = useRef(0);
+  const treeLoadedOnceRef = useRef(false);
+  const prefetchGenRef = useRef(0);
+  const fileContentCacheRef = useRef<
+    Map<
+      string,
+      {
+        content: string;
+        imageSrc: string | null;
+        meta: { truncated?: boolean; path?: string; size?: number; kind?: 'text' | 'image' };
+        at: number;
+      }
+    >
+  >(new Map());
+  const filePrefetchInflightRef = useRef<Set<string>>(new Set());
 
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -499,9 +540,172 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     setNewMenuOpen(false);
   }, []);
 
-  const loadTree = useCallback(async () => {
+  const prefetchDiffs = useCallback(
+    async (paths: string[], opts?: { showLoadingFor?: string[] }) => {
+      if (!agentId || !rootPath || paths.length === 0) return;
+      const unique = [...new Set(paths.filter(Boolean))];
+      if (unique.length === 0) return;
+      const loadingSet = new Set(opts?.showLoadingFor || []);
+      for (const p of loadingSet) setInlineDiffLoading(p);
+      const gen = ++prefetchGenRef.current;
+      try {
+        const resp = await adminAPI.getSessionDiffsBatch(agentId, unique, rootPath);
+        if (gen !== prefetchGenRef.current) return;
+        const batch = resp.files || {};
+        setInlineDiffByPath((prev) => {
+          const next = { ...prev };
+          for (const [p, d] of Object.entries(batch)) {
+            next[p] = {
+              lines: d.lines || [],
+              additions: d.additions || 0,
+              deletions: d.deletions || 0,
+              oversized: d.oversized,
+            };
+          }
+          return next;
+        });
+      } catch {
+        // Fallback: fetch individually for paths that still need UI (expanded)
+        for (const p of loadingSet) {
+          try {
+            const d = await adminAPI.getSessionDiff(agentId, p, rootPath);
+            if (gen !== prefetchGenRef.current) return;
+            setInlineDiffByPath((prev) => ({
+              ...prev,
+              [p]: {
+                lines: d.lines || [],
+                additions: d.additions || 0,
+                deletions: d.deletions || 0,
+                oversized: d.oversized,
+              },
+            }));
+          } catch {
+            /* ignore */
+          }
+        }
+      } finally {
+        if (loadingSet.size) {
+          setInlineDiffLoading((cur) => (cur && loadingSet.has(cur) ? null : cur));
+        }
+      }
+    },
+    [agentId, rootPath],
+  );
+
+  const prefetchFileContent = useCallback(
+    async (relPath: string, opts?: { force?: boolean }) => {
+      if (!agentId || !rootPath || !relPath) return;
+      if (!opts?.force && fileContentCacheRef.current.has(relPath)) return;
+      if (filePrefetchInflightRef.current.has(relPath)) return;
+      // Skip images for prefetch budget (open still loads them on demand)
+      if (isImageFile(relPath)) return;
+      filePrefetchInflightRef.current.add(relPath);
+      try {
+        const resp = await adminAPI.readProjectFile(agentId, relPath, rootPath);
+        const kind =
+          resp.kind === 'image' || (resp.content_base64 && resp.mime?.startsWith('image/'))
+            ? 'image'
+            : 'text';
+        const imageSrc =
+          kind === 'image' && resp.content_base64 && resp.mime
+            ? `data:${resp.mime};base64,${resp.content_base64}`
+            : null;
+        const entry = {
+          content: kind === 'image' ? '' : (resp.content ?? ''),
+          imageSrc,
+          meta: {
+            truncated: resp.truncated,
+            path: resp.path || relPath,
+            size: resp.size,
+            kind: kind as 'text' | 'image',
+          },
+          at: Date.now(),
+        };
+        fileContentCacheRef.current.set(relPath, entry);
+        if (resp.path && resp.path !== relPath) {
+          fileContentCacheRef.current.set(resp.path, entry);
+        }
+        if (fileContentCacheRef.current.size > 80) {
+          const oldest = [...fileContentCacheRef.current.entries()].sort((a, b) => a[1].at - b[1].at);
+          for (let i = 0; i < oldest.length - 60; i++) {
+            fileContentCacheRef.current.delete(oldest[i][0]);
+          }
+        }
+      } catch {
+        /* ignore prefetch errors */
+      } finally {
+        filePrefetchInflightRef.current.delete(relPath);
+      }
+    },
+    [agentId, rootPath],
+  );
+
+  /** Merge changed-file list in place; only invalidate diffs whose stats changed. */
+  const applyChangedFiles = useCallback(
+    (
+      files: ChangedEntry[],
+      summary: { additions: number; deletions: number; count: number },
+      opts?: { notifyParent?: boolean },
+    ) => {
+      const prev = changedEntriesRef.current;
+      const prevByPath = new Map(prev.map((e) => [e.path, e]));
+      const staleDiffPaths: string[] = [];
+      for (const f of files) {
+        const old = prevByPath.get(f.path);
+        if (
+          !old ||
+          old.additions !== f.additions ||
+          old.deletions !== f.deletions ||
+          old.status !== f.status ||
+          old.oversized !== f.oversized ||
+          old.mtime !== f.mtime ||
+          old.size !== f.size
+        ) {
+          staleDiffPaths.push(f.path);
+        }
+      }
+      // Always refresh diffs for listed files — content can change with identical +/-
+      const toPrefetch = files.map((f) => f.path);
+      const nextPaths = new Set(toPrefetch);
+      setInlineDiffByPath((cache) => {
+        const next: typeof cache = {};
+        // Keep only non-stale cached diffs for paths still in the list
+        for (const [key, val] of Object.entries(cache)) {
+          if (!nextPaths.has(key)) continue;
+          if (staleDiffPaths.includes(key)) continue;
+          next[key] = val;
+        }
+        return next;
+      });
+      for (const p of staleDiffPaths) {
+        fileContentCacheRef.current.delete(p);
+      }
+      setChangedEntries(files);
+      setChangedError(null);
+      if (opts?.notifyParent !== false) {
+        onSessionChangesRef.current?.(summary);
+      }
+      if (toPrefetch.length > 0) {
+        void prefetchDiffs(toPrefetch);
+      }
+      for (const f of files.slice(0, 40)) {
+        if (f.type === 'file' && !f.oversized) {
+          void prefetchFileContent(f.path, {
+            force: staleDiffPaths.includes(f.path),
+          });
+        }
+      }
+    },
+    [prefetchDiffs, prefetchFileContent],
+  );
+
+  const loadTree = useCallback(async (opts?: { silent?: boolean }) => {
     if (!agentId || !rootPath) return;
-    setListLoading(true);
+    const hasTree = treeEntriesRef.current.length > 0 || treeLoadedOnceRef.current;
+    // Soft-refresh by default once a tree is on screen (avoid full-panel flash)
+    const silent = hasTree && opts?.silent !== false;
+    if (silent) setTreeRefreshing(true);
+    else setListLoading(true);
     setListError(null);
     try {
       const resp = await adminAPI.listProjectTree(agentId, rootPath, 10000);
@@ -515,16 +719,24 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setTreeEntries(entries);
       setTreeTruncated(!!resp.truncated);
       setTreeCount(resp.count ?? entries.length);
-      // Expand top-level dirs by default for a useful first glance
-      const topDirs = entries.filter((e) => e.type === 'dir' && !e.path.includes('/')).map((e) => e.path);
-      setExpanded(new Set(topDirs.slice(0, 12)));
+      // Preserve fold state on soft refresh; only seed defaults on first load
+      if (!treeLoadedOnceRef.current) {
+        const topDirs = entries
+          .filter((e) => e.type === 'dir' && !e.path.includes('/'))
+          .map((e) => e.path);
+        setExpanded(new Set(topDirs.slice(0, 12)));
+      }
+      treeLoadedOnceRef.current = true;
     } catch (err: any) {
-      setTreeEntries([]);
-      setTreeTruncated(false);
-      setTreeCount(0);
+      if (!silent) {
+        setTreeEntries([]);
+        setTreeTruncated(false);
+        setTreeCount(0);
+      }
       setListError(err?.message || '无法加载项目文件树');
     } finally {
       setListLoading(false);
+      setTreeRefreshing(false);
     }
   }, [agentId, rootPath]);
 
@@ -547,13 +759,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     });
   }, []);
 
-  const loadChanged = useCallback(async () => {
+  const loadChanged = useCallback(async (opts?: { silent?: boolean }) => {
     if (!agentId || !rootPath) return;
-    setChangedLoading(true);
-    setChangedError(null);
-    // Drop cached diffs so refresh always reflects disk (e.g. after CMD edits)
-    setInlineDiffByPath({});
-    inlineDiffByPathRef.current = {};
+    const hasList = changedEntriesRef.current.length > 0;
+    // Soft-refresh once we already show rows; first paint may still use full loading
+    const silent = hasList ? opts?.silent !== false : !!opts?.silent;
+    if (silent) setChangedRefreshing(true);
+    else setChangedLoading(true);
+    if (!silent) setChangedError(null);
     try {
       const resp = await adminAPI.listSessionChanges(agentId, rootPath);
       const files = (resp.files || resp.entries || []).map((e) => ({
@@ -564,53 +777,36 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         additions: e.additions,
         deletions: e.deletions,
         oversized: e.oversized,
+        mtime: e.mtime,
+        size: e.size,
+        created: e.created,
       }));
-      setChangedEntries(files);
-      onSessionChangesRef.current?.({
-        additions: resp.additions || 0,
-        deletions: resp.deletions || 0,
-        count: resp.count ?? files.length,
-      });
-      if (files.length === 0) {
-        setChangedError(null);
-      }
-      // Re-fetch diffs for rows that are still expanded
-      const stillExpanded = [...expandedChangedRef.current].filter((p) =>
-        files.some((f) => f.path === p),
+      applyChangedFiles(
+        files,
+        {
+          additions: resp.additions || 0,
+          deletions: resp.deletions || 0,
+          count: resp.count ?? files.length,
+        },
+        { notifyParent: true },
       );
-      for (const p of stillExpanded) {
-        void (async () => {
-          setInlineDiffLoading(p);
-          try {
-            const d = await adminAPI.getSessionDiff(agentId, p, rootPath);
-            setInlineDiffByPath((prev) => ({
-              ...prev,
-              [p]: {
-                lines: d.lines || [],
-                additions: d.additions || 0,
-                deletions: d.deletions || 0,
-                oversized: d.oversized,
-              },
-            }));
-          } catch {
-            /* keep empty until user re-expands */
-          } finally {
-            setInlineDiffLoading((cur) => (cur === p ? null : cur));
-          }
-        })();
-      }
     } catch (err: any) {
-      setChangedEntries([]);
-      setChangedError(err?.message || '无法加载变动文件');
-      onSessionChangesRef.current?.({ additions: 0, deletions: 0, count: 0 });
+      if (!silent) {
+        setChangedEntries([]);
+        setChangedError(err?.message || '无法加载变动文件');
+        onSessionChangesRef.current?.({ additions: 0, deletions: 0, count: 0 });
+      } else {
+        setChangedError(err?.message || '无法加载变动文件');
+      }
     } finally {
       setChangedLoading(false);
+      setChangedRefreshing(false);
     }
-  }, [agentId, rootPath]);
+  }, [agentId, rootPath, applyChangedFiles]);
 
   const refreshCurrent = useCallback(() => {
-    if (tab === 'changed') void loadChanged();
-    else void loadTree();
+    if (tab === 'changed') void loadChanged({ silent: true });
+    else void loadTree({ silent: true });
   }, [tab, loadChanged, loadTree]);
 
   const openDiff = useCallback(
@@ -618,21 +814,41 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       if (!agentId || !relPath || !rootPath) return;
       setActiveFile(relPath);
       setShowPreview(true);
-      setFileLoading(true);
       setFileError(null);
       setFileContent('');
       setImageSrc(null);
       setFileMeta(null);
+      setMdRaw(false);
+
+      const cached = inlineDiffByPathRef.current[relPath];
+      if (cached) {
+        setFileLoading(false);
+        setDiffLines(cached.lines);
+        setDiffMeta({
+          additions: cached.additions,
+          deletions: cached.deletions,
+          oversized: cached.oversized,
+        });
+        return;
+      }
+
+      setFileLoading(true);
       setDiffLines(null);
       setDiffMeta(null);
-      setMdRaw(false);
       try {
         const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath);
-        setDiffLines(resp.lines || []);
-        setDiffMeta({
+        const entry = {
+          lines: resp.lines || [],
           additions: resp.additions || 0,
           deletions: resp.deletions || 0,
           oversized: resp.oversized,
+        };
+        setInlineDiffByPath((prev) => ({ ...prev, [relPath]: entry }));
+        setDiffLines(entry.lines);
+        setDiffMeta({
+          additions: entry.additions,
+          deletions: entry.deletions,
+          oversized: entry.oversized,
           status: resp.status,
         });
         setActiveFile(resp.path || relPath);
@@ -654,30 +870,71 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setActiveFile(relPath);
       setBrowsePath(parentRel(relPath));
       expandToPath(relPath);
-      setFileLoading(true);
       setFileError(null);
+      setMdRaw(false);
+
+      const cached = fileContentCacheRef.current.get(relPath);
+      if (cached) {
+        // Instant paint from cache — no loading flash
+        setFileLoading(false);
+        setFileContent(cached.content);
+        setImageSrc(cached.imageSrc);
+        setFileMeta(cached.meta);
+        setActiveFile(cached.meta.path || relPath);
+        // Soft revalidate in background
+        void (async () => {
+          try {
+            await prefetchFileContent(relPath, { force: true });
+            const fresh = fileContentCacheRef.current.get(relPath);
+            if (!fresh) return;
+            setActiveFile((cur) => {
+              if (cur !== relPath && cur !== fresh.meta.path) return cur;
+              setFileContent(fresh.content);
+              setImageSrc(fresh.imageSrc);
+              setFileMeta(fresh.meta);
+              return fresh.meta.path || relPath;
+            });
+          } catch {
+            /* keep cached */
+          }
+        })();
+        return;
+      }
+
+      setFileLoading(true);
       setFileContent('');
       setImageSrc(null);
       setFileMeta(null);
-      setMdRaw(false);
       try {
         const resp = await adminAPI.readProjectFile(agentId, relPath, rootPath);
         const kind = resp.kind === 'image' || (resp.content_base64 && resp.mime?.startsWith('image/'))
           ? 'image'
           : 'text';
-        if (kind === 'image' && resp.content_base64 && resp.mime) {
-          setImageSrc(`data:${resp.mime};base64,${resp.content_base64}`);
-          setFileContent('');
-        } else {
-          setImageSrc(null);
-          setFileContent(resp.content ?? '');
-        }
-        setFileMeta({
+        const imageSrc =
+          kind === 'image' && resp.content_base64 && resp.mime
+            ? `data:${resp.mime};base64,${resp.content_base64}`
+            : null;
+        const content = kind === 'image' ? '' : (resp.content ?? '');
+        const meta = {
           truncated: resp.truncated,
           path: resp.path,
           size: resp.size,
-          kind,
+          kind: kind as 'text' | 'image',
+        };
+        fileContentCacheRef.current.set(relPath, {
+          content,
+          imageSrc,
+          meta: { ...meta, path: resp.path || relPath },
+          at: Date.now(),
         });
+        if (imageSrc) {
+          setImageSrc(imageSrc);
+          setFileContent('');
+        } else {
+          setImageSrc(null);
+          setFileContent(content);
+        }
+        setFileMeta(meta);
         const finalPath = resp.path || relPath;
         setActiveFile(finalPath);
         setBrowsePath(parentRel(finalPath));
@@ -688,7 +945,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setFileLoading(false);
       }
     },
-    [agentId, rootPath, expandToPath],
+    [agentId, rootPath, expandToPath, prefetchFileContent],
   );
 
   // Reset when root / open changes — load full tree once
@@ -706,9 +963,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     setInlineCreate(null);
     setRenamingPath(null);
     closeMenus();
+    treeLoadedOnceRef.current = false;
     if (rootPath) {
-      void loadTree();
-      if (tab === 'changed') void loadChanged();
+      void loadTree({ silent: false });
+      if (tab === 'changed') void loadChanged({ silent: false });
     } else {
       setTreeEntries([]);
       setListError(null);
@@ -727,19 +985,37 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     void openFile(rel);
   }, [isOpen, openRequest, rootPath, openFile]);
 
-  // Load changed when switching to that tab
+  // Load changed when switching to that tab (silent if we already have rows)
   useEffect(() => {
     if (!isOpen || !rootPath || tab !== 'changed') return;
-    void loadChanged();
+    void loadChanged({ silent: changedEntriesRef.current.length > 0 });
   }, [isOpen, rootPath, tab, loadChanged]);
 
-  // Changes bar → force changed tab + refresh
+  // Changes bar → switch to changed tab; soft refresh (no full-panel flash)
   useEffect(() => {
     if (!focusChangedNonce || !isOpen) return;
     setTab('changed');
     setShowPreview(false);
-    void loadChanged();
+    void loadChanged({ silent: true });
   }, [focusChangedNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Parent live snapshot after tool/turn — apply in place, soft-refresh tree
+  useEffect(() => {
+    if (!liveChanges || !isOpen) return;
+    if (liveChanges.nonce === lastLiveNonceRef.current) return;
+    lastLiveNonceRef.current = liveChanges.nonce;
+    applyChangedFiles(
+      liveChanges.files || [],
+      {
+        additions: liveChanges.additions || 0,
+        deletions: liveChanges.deletions || 0,
+        count: liveChanges.count ?? (liveChanges.files?.length || 0),
+      },
+      { notifyParent: false },
+    );
+    // Keep file tree in sync without wiping fold state / spinner flash
+    void loadTree({ silent: true });
+  }, [liveChanges, isOpen, applyChangedFiles, loadTree]);
 
   const toggleChangedExpand = useCallback(
     async (relPath: string) => {
@@ -751,29 +1027,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         return next;
       });
       if (wasOpen || !agentId || !rootPath) return;
-      // Always fetch fresh disk diff on expand (CMD/external edits)
-      setInlineDiffLoading(relPath);
-      try {
-        const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath);
-        setInlineDiffByPath((prev) => ({
-          ...prev,
-          [relPath]: {
-            lines: resp.lines || [],
-            additions: resp.additions || 0,
-            deletions: resp.deletions || 0,
-            oversized: resp.oversized,
-          },
-        }));
-      } catch {
-        setInlineDiffByPath((prev) => ({
-          ...prev,
-          [relPath]: { lines: [], additions: 0, deletions: 0 },
-        }));
-      } finally {
-        setInlineDiffLoading((cur) => (cur === relPath ? null : cur));
-      }
+      // Cache hit → instant expand, no loading UI
+      if (inlineDiffByPathRef.current[relPath]) return;
+      // Rare miss (prefetch still in flight): show spinner only for this row
+      await prefetchDiffs([relPath], { showLoadingFor: [relPath] });
     },
-    [agentId, rootPath],
+    [agentId, rootPath, prefetchDiffs],
   );
 
   const revertChangedFile = useCallback(
@@ -1247,11 +1506,6 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             </div>
           ) : (
             <div className="flex flex-col min-h-0">
-              {changedLoading ? (
-                <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-textMuted border-b border-border/50">
-                  <Loader2 size={10} className="animate-spin" /> 刷新中…
-                </div>
-              ) : null}
               {filteredChanged.map((e) => {
                 const isOpenRow = expandedChanged.has(e.path);
                 const inline = inlineDiffByPath[e.path];
@@ -1265,6 +1519,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                           ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
                           : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
                       }`}
+                      onMouseEnter={() => {
+                        if (!inlineDiffByPathRef.current[e.path]) {
+                          void prefetchDiffs([e.path]);
+                        }
+                        void prefetchFileContent(e.path);
+                      }}
                       onContextMenu={(ev) =>
                         openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
                       }
@@ -1338,11 +1598,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     </div>
                     {isOpenRow ? (
                       <div className="max-h-[280px] overflow-auto border-t border-border/30 bg-bgLight/80">
-                        {isDiffLoading ? (
-                          <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-                            <Loader2 size={12} className="animate-spin" /> 加载 diff…
-                          </div>
-                        ) : inline ? (
+                        {inline ? (
                           <UnifiedDiffView
                             fileName={e.name}
                             lines={inline.lines}
@@ -1350,6 +1606,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                             deletions={inline.deletions}
                             oversized={inline.oversized}
                           />
+                        ) : isDiffLoading ? (
+                          <div className="flex items-center gap-2 px-3 py-2 text-[10px] text-textMuted/70">
+                            <Loader2 size={11} className="animate-spin" /> 准备中…
+                          </div>
                         ) : (
                           <div className="px-3 py-2 text-[11px] text-textMuted">无 diff</div>
                         )}
@@ -1360,11 +1620,11 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               })}
             </div>
           )
-        ) : listLoading ? (
+        ) : listLoading && treeEntries.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
             <Loader2 size={12} className="animate-spin" /> 正在加载文件树…
           </div>
-        ) : listError ? (
+        ) : listError && treeEntries.length === 0 ? (
           <div className="px-3 py-3 text-[11px] text-red-400">{listError}</div>
         ) : (
           <>
@@ -1426,6 +1686,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
                     }`}
                     style={{ paddingLeft: 6 + e.depth * 12 }}
+                    onMouseEnter={() => {
+                      if (e.type === 'file') void prefetchFileContent(e.path);
+                    }}
                     onContextMenu={(ev) =>
                       openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
                     }
@@ -1596,13 +1859,21 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <button
               type="button"
               onClick={() => refreshCurrent()}
-              disabled={listLoading || changedLoading || !rootPath}
+              disabled={
+                (listLoading && treeEntries.length === 0) ||
+                (changedLoading && changedEntries.length === 0) ||
+                !rootPath
+              }
               className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
               title="刷新"
             >
               <RefreshCw
                 size={13}
-                className={`text-textMuted ${listLoading || changedLoading ? 'animate-spin' : ''}`}
+                className={`text-textMuted ${
+                  listLoading || treeRefreshing || changedLoading || changedRefreshing
+                    ? 'animate-spin'
+                    : ''
+                }`}
               />
             </button>
             <button

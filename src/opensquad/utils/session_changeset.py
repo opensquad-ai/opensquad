@@ -78,10 +78,14 @@ def _blob_path(bucket_dir: str, rel: str) -> str | None:
 def _empty_meta() -> dict[str, Any]:
     return {
         "version": 2,
-        # path -> "file" | "missing" | "oversized"
+        # path -> "file" | "missing" | "oversized"  (Accept / revert point)
         "baseline": {},
+        # path -> "file" | "missing" | "oversized"  (content before latest edit; UI diff)
+        "edit_base": {},
         # path -> {additions, deletions, status}
         "file_stats": {},
+        # path -> True if file was created this session (revert should delete)
+        "created": {},
         "checkpoint_order": [],
     }
 
@@ -104,7 +108,9 @@ def _load_meta(root: str) -> dict[str, Any]:
             return _empty_meta()
         data.setdefault("version", 2)
         data.setdefault("baseline", {})
+        data.setdefault("edit_base", {})
         data.setdefault("file_stats", {})
+        data.setdefault("created", {})
         data.setdefault("checkpoint_order", [])
         return data
     except Exception:
@@ -170,20 +176,25 @@ def _baseline_dir(root: str) -> str:
     return os.path.join(_changes_root(root), "baseline")
 
 
+def _edit_base_dir(root: str) -> str:
+    return os.path.join(_changes_root(root), "edit_base")
+
+
 def _ckpt_dir(root: str, message_id: str) -> str:
     return os.path.join(_changes_root(root), "ckpt", _safe_message_id(message_id))
 
 
-def _read_baseline_content(root: str, rel: str, meta: dict[str, Any]) -> tuple[str | None, bool]:
-    """Return (content, oversized). content None = missing at baseline."""
-    state = (meta.get("baseline") or {}).get(rel)
+def _read_snap_content(root: str, rel: str, store: str, meta: dict[str, Any]) -> tuple[str | None, bool]:
+    """Read snapshot content from baseline/ or edit_base/. content None = missing."""
+    state = (meta.get(store) or {}).get(rel)
     if state == "oversized":
         return None, True
     if state == "missing":
         return None, False
     if state != "file":
         return None, False
-    blob = _blob_path(_baseline_dir(root), rel)
+    base = _baseline_dir(root) if store == "baseline" else _edit_base_dir(root)
+    blob = _blob_path(base, rel)
     if not blob or not os.path.isfile(blob):
         return None, False
     content, oversized = _read_text(blob)
@@ -192,13 +203,26 @@ def _read_baseline_content(root: str, rel: str, meta: dict[str, Any]) -> tuple[s
     return content, False
 
 
-def _write_baseline_blob(root: str, rel: str, content: str | None, *, oversized: bool) -> str:
-    """Persist baseline body; return state label."""
+def _read_baseline_content(root: str, rel: str, meta: dict[str, Any]) -> tuple[str | None, bool]:
+    """Accept/revert snapshot."""
+    return _read_snap_content(root, rel, "baseline", meta)
+
+
+def _read_edit_base_content(root: str, rel: str, meta: dict[str, Any]) -> tuple[str | None, bool]:
+    """Pre-latest-edit snapshot for UI red/green (falls back to Accept baseline)."""
+    if rel in (meta.get("edit_base") or {}):
+        return _read_snap_content(root, rel, "edit_base", meta)
+    return _read_baseline_content(root, rel, meta)
+
+
+def _write_snap_blob(root: str, rel: str, content: str | None, *, oversized: bool, store: str) -> str:
+    """Persist snapshot body; return state label."""
     if oversized:
         return "oversized"
     if content is None:
         return "missing"
-    blob = _blob_path(_baseline_dir(root), rel)
+    base = _baseline_dir(root) if store == "baseline" else _edit_base_dir(root)
+    blob = _blob_path(base, rel)
     if not blob:
         return "oversized"
     os.makedirs(os.path.dirname(blob), exist_ok=True)
@@ -207,65 +231,109 @@ def _write_baseline_blob(root: str, rel: str, content: str | None, *, oversized:
     return "file"
 
 
+def _write_baseline_blob(root: str, rel: str, content: str | None, *, oversized: bool) -> str:
+    return _write_snap_blob(root, rel, content, oversized=oversized, store="baseline")
+
+
+def _capture_edit_base_from_disk(root: str, rel: str, meta: dict[str, Any]) -> None:
+    """Freeze current disk as the 'before this edit' peer for red/green UI."""
+    abs_path = _abs(root, rel)
+    content, oversized = _read_text(abs_path)
+    state = _write_snap_blob(root, rel, content, oversized=oversized, store="edit_base")
+    meta.setdefault("edit_base", {})[rel] = state
+
+
 def _recompute_file_stat(root: str, rel: str, meta: dict[str, Any]) -> None:
-    old, oversized_base = _read_baseline_content(root, rel, meta)
+    accept_old, accept_over = _read_baseline_content(root, rel, meta)
+    edit_old, edit_over = _read_edit_base_content(root, rel, meta)
     abs_path = _abs(root, rel)
     exists = os.path.isfile(abs_path)
-    if oversized_base or (exists and os.path.getsize(abs_path) > _MAX_BASELINE_BYTES):
-        status = "A" if old is None and exists else ("D" if not exists else "M")
+    mtime = 0.0
+    size = 0
+    if exists:
+        try:
+            stt = os.stat(abs_path)
+            mtime = float(stt.st_mtime)
+            size = int(stt.st_size)
+        except Exception:
+            pass
+    created = bool((meta.get("created") or {}).get(rel))
+    oversized = bool(accept_over or edit_over or (exists and size > _MAX_BASELINE_BYTES))
+
+    if not exists:
+        new = None
+    else:
+        new, over = _read_text(abs_path)
+        if over:
+            oversized = True
+            new = None
+
+    # Fully restored to Accept → drop tracking
+    if not created and accept_old == new and not oversized:
+        meta["file_stats"].pop(rel, None)
+        meta["baseline"].pop(rel, None)
+        meta.get("edit_base", {}).pop(rel, None)
+        meta.get("created", {}).pop(rel, None)
+        for d in (_baseline_dir(root), _edit_base_dir(root)):
+            blob = _blob_path(d, rel)
+            if blob and os.path.isfile(blob):
+                try:
+                    os.remove(blob)
+                except Exception:
+                    pass
+        return
+
+    if oversized:
+        status = "A" if accept_old is None and exists else ("D" if not exists else "M")
+        if created and exists:
+            status = "A"
         meta["file_stats"][rel] = {
             "additions": 0,
             "deletions": 0,
             "status": status,
             "oversized": True,
+            "mtime": mtime,
+            "size": size,
         }
         return
-    if not exists:
-        new = None
+
+    # UI +/- vs edit_base (before this edit) so replacing prior additions shows red deletes
+    add, dele = _line_stats(edit_old, new)
+    if created:
+        status = "A" if exists else "D"
+    elif accept_old is None and exists:
+        status = "A"
+    elif not exists:
         status = "D"
     else:
-        new, over = _read_text(abs_path)
-        if over:
-            meta["file_stats"][rel] = {
-                "additions": 0,
-                "deletions": 0,
-                "status": "M",
-                "oversized": True,
-            }
-            return
-        status = "A" if old is None else "M"
-    if old == new:
-        meta["file_stats"].pop(rel, None)
-        # Drop baseline tracking if identical (lazy clean)
-        meta["baseline"].pop(rel, None)
-        blob = _blob_path(_baseline_dir(root), rel)
-        if blob and os.path.isfile(blob):
-            try:
-                os.remove(blob)
-            except Exception:
-                pass
-        return
-    add, dele = _line_stats(old, new)
+        status = "M"
     meta["file_stats"][rel] = {
         "additions": add,
         "deletions": dele,
         "status": status,
+        "mtime": mtime,
+        "size": size,
     }
 
 
 def ensure_baseline_before_write(root: str, path: str) -> None:
-    """Capture baseline snapshot for *path* before the first mutation since Accept."""
+    """Capture Accept baseline (once) + edit_base (every time) before mutating."""
     rel = _norm_rel(root, path)
     if not rel:
         return
     with _lock:
         meta = _load_meta(root)
-        if rel in meta["baseline"]:
-            return
+        meta.setdefault("created", {})
+        meta.setdefault("edit_base", {})
         abs_path = _abs(root, rel)
-        content, oversized = _read_text(abs_path)
-        state = _write_baseline_blob(root, rel, content, oversized=oversized)
-        meta["baseline"][rel] = state
+        if rel not in meta["baseline"]:
+            content, oversized = _read_text(abs_path)
+            state = _write_baseline_blob(root, rel, content, oversized=oversized)
+            meta["baseline"][rel] = state
+            if state == "missing":
+                meta["created"][rel] = True
+        # Always snapshot disk as the peer for this upcoming edit (red/green vs prior content)
+        _capture_edit_base_from_disk(root, rel, meta)
         _save_meta(root, meta)
 
 
@@ -379,6 +447,9 @@ def summary(root: str) -> dict[str, Any]:
                     "additions": add,
                     "deletions": dele,
                     "oversized": bool(st.get("oversized")),
+                    "mtime": float(st.get("mtime") or 0),
+                    "size": int(st.get("size") or 0),
+                    "created": bool((meta.get("created") or {}).get(rel)),
                 }
             )
         _save_meta(root, meta)
@@ -392,16 +463,93 @@ def summary(root: str) -> dict[str, Any]:
         }
 
 
-def diff_file(root: str, path: str) -> dict[str, Any]:
-    rel = _norm_rel(root, path)
-    if not rel:
-        return {"error": "Invalid path", "status": 400}
-    with _lock:
-        meta = _load_meta(root)
-        if rel not in meta["baseline"] and rel not in meta.get("file_stats", {}):
-            return {"error": "Path not in session changes", "status": 404, "path": rel}
-        old, oversized = _read_baseline_content(root, rel, meta)
-        if oversized:
+def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
+    old_lines = (old or "").splitlines()
+    new_lines = (new or "").splitlines()
+    lines: list[dict[str, Any]] = []
+    sm = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    old_no = new_no = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            chunk = old_lines[i1:i2]
+            if len(chunk) > 8:
+                for i, text in enumerate(chunk[:3]):
+                    lines.append(
+                        {
+                            "type": "context",
+                            "old_lineno": old_no + i + 1,
+                            "new_lineno": new_no + i + 1,
+                            "text": text,
+                        }
+                    )
+                skipped = len(chunk) - 6
+                if skipped > 0:
+                    lines.append({"type": "collapse", "count": skipped, "text": f"{skipped} unmodified lines"})
+                for i, text in enumerate(chunk[-3:]):
+                    off = len(chunk) - 3 + i
+                    lines.append(
+                        {
+                            "type": "context",
+                            "old_lineno": old_no + off + 1,
+                            "new_lineno": new_no + off + 1,
+                            "text": text,
+                        }
+                    )
+            else:
+                for i, text in enumerate(chunk):
+                    lines.append(
+                        {
+                            "type": "context",
+                            "old_lineno": old_no + i + 1,
+                            "new_lineno": new_no + i + 1,
+                            "text": text,
+                        }
+                    )
+            old_no += i2 - i1
+            new_no += j2 - j1
+        elif tag == "delete":
+            for i, text in enumerate(old_lines[i1:i2]):
+                lines.append({"type": "delete", "old_lineno": old_no + i + 1, "new_lineno": None, "text": text})
+            old_no += i2 - i1
+        elif tag == "insert":
+            for i, text in enumerate(new_lines[j1:j2]):
+                lines.append({"type": "insert", "old_lineno": None, "new_lineno": new_no + i + 1, "text": text})
+            new_no += j2 - j1
+        elif tag == "replace":
+            for i, text in enumerate(old_lines[i1:i2]):
+                lines.append({"type": "delete", "old_lineno": old_no + i + 1, "new_lineno": None, "text": text})
+            old_no += i2 - i1
+            for i, text in enumerate(new_lines[j1:j2]):
+                lines.append({"type": "insert", "old_lineno": None, "new_lineno": new_no + i + 1, "text": text})
+            new_no += j2 - j1
+    return lines
+
+
+def _diff_file_unlocked(root: str, rel: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """Compute one file diff; caller must hold ``_lock``.
+
+    Diff is against *edit_base* (content before the latest edit) so replacing
+    previously-added lines shows as red deletions + green insertions.
+    """
+    if rel not in meta["baseline"] and rel not in meta.get("file_stats", {}):
+        return {"error": "Path not in session changes", "status": 404, "path": rel}
+    old, oversized = _read_edit_base_content(root, rel, meta)
+    if oversized:
+        return {
+            "path": rel,
+            "oversized": True,
+            "additions": 0,
+            "deletions": 0,
+            "lines": [],
+            "status": "M",
+        }
+    abs_path = _abs(root, rel)
+    if not os.path.isfile(abs_path):
+        new = None
+        status = "D"
+    else:
+        new, over = _read_text(abs_path)
+        if over:
             return {
                 "path": rel,
                 "oversized": True,
@@ -410,91 +558,54 @@ def diff_file(root: str, path: str) -> dict[str, Any]:
                 "lines": [],
                 "status": "M",
             }
-        abs_path = _abs(root, rel)
-        if not os.path.isfile(abs_path):
-            new = None
-            status = "D"
+        status = "A" if old is None else "M"
+    if (meta.get("created") or {}).get(rel) and new is not None:
+        status = "A"
+
+    add, dele = _line_stats(old, new)
+    return {
+        "path": rel,
+        "status": status,
+        "additions": add,
+        "deletions": dele,
+        "oversized": False,
+        "lines": _build_diff_lines(old, new),
+    }
+
+
+def diff_file(root: str, path: str) -> dict[str, Any]:
+    rel = _norm_rel(root, path)
+    if not rel:
+        return {"error": "Invalid path", "status": 400}
+    with _lock:
+        meta = _load_meta(root)
+        return _diff_file_unlocked(root, rel, meta)
+
+
+_MAX_BATCH_DIFFS = 60
+
+
+def diff_files_batch(root: str, paths: list[str] | None = None) -> dict[str, Any]:
+    """Return diffs for many session-changed paths in one lock/IO pass."""
+    with _lock:
+        meta = _load_meta(root)
+        if paths:
+            rels: list[str] = []
+            for p in paths:
+                rel = _norm_rel(root, p)
+                if rel:
+                    rels.append(rel)
         else:
-            new, over = _read_text(abs_path)
-            if over:
-                return {
-                    "path": rel,
-                    "oversized": True,
-                    "additions": 0,
-                    "deletions": 0,
-                    "lines": [],
-                    "status": "M",
-                }
-            status = "A" if old is None else "M"
-
-        add, dele = _line_stats(old, new)
-        old_lines = (old or "").splitlines()
-        new_lines = (new or "").splitlines()
-        lines: list[dict[str, Any]] = []
-        sm = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
-        old_no = new_no = 0
-        for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag == "equal":
-                chunk = old_lines[i1:i2]
-                if len(chunk) > 8:
-                    for i, text in enumerate(chunk[:3]):
-                        lines.append(
-                            {
-                                "type": "context",
-                                "old_lineno": old_no + i + 1,
-                                "new_lineno": new_no + i + 1,
-                                "text": text,
-                            }
-                        )
-                    skipped = len(chunk) - 6
-                    if skipped > 0:
-                        lines.append({"type": "collapse", "count": skipped, "text": f"{skipped} unmodified lines"})
-                    for i, text in enumerate(chunk[-3:]):
-                        off = len(chunk) - 3 + i
-                        lines.append(
-                            {
-                                "type": "context",
-                                "old_lineno": old_no + off + 1,
-                                "new_lineno": new_no + off + 1,
-                                "text": text,
-                            }
-                        )
-                else:
-                    for i, text in enumerate(chunk):
-                        lines.append(
-                            {
-                                "type": "context",
-                                "old_lineno": old_no + i + 1,
-                                "new_lineno": new_no + i + 1,
-                                "text": text,
-                            }
-                        )
-                old_no += i2 - i1
-                new_no += j2 - j1
-            elif tag == "delete":
-                for i, text in enumerate(old_lines[i1:i2]):
-                    lines.append({"type": "delete", "old_lineno": old_no + i + 1, "new_lineno": None, "text": text})
-                old_no += i2 - i1
-            elif tag == "insert":
-                for i, text in enumerate(new_lines[j1:j2]):
-                    lines.append({"type": "insert", "old_lineno": None, "new_lineno": new_no + i + 1, "text": text})
-                new_no += j2 - j1
-            elif tag == "replace":
-                for i, text in enumerate(old_lines[i1:i2]):
-                    lines.append({"type": "delete", "old_lineno": old_no + i + 1, "new_lineno": None, "text": text})
-                old_no += i2 - i1
-                for i, text in enumerate(new_lines[j1:j2]):
-                    lines.append({"type": "insert", "old_lineno": None, "new_lineno": new_no + i + 1, "text": text})
-                new_no += j2 - j1
-
-        return {
-            "path": rel,
-            "status": status,
-            "additions": add,
-            "deletions": dele,
-            "oversized": False,
-            "lines": lines,
-        }
+            rels = sorted(set(meta.get("file_stats") or {}) | set(meta.get("baseline") or {}))
+        if len(rels) > _MAX_BATCH_DIFFS:
+            rels = rels[:_MAX_BATCH_DIFFS]
+        files: dict[str, Any] = {}
+        for rel in rels:
+            result = _diff_file_unlocked(root, rel, meta)
+            if "error" in result:
+                continue
+            files[rel] = result
+        return {"count": len(files), "files": files}
 
 
 def _load_ckpt_manifest(root: str, message_id: str) -> dict[str, Any] | None:
@@ -587,16 +698,25 @@ def revert_to_checkpoint(root: str, message_id: str) -> dict[str, Any]:
 def _revert_all_locked(root: str, meta: dict[str, Any]) -> dict[str, Any]:
     restored: list[str] = []
     skipped: list[str] = []
+    created = meta.get("created") or {}
     for rel, state in list((meta.get("baseline") or {}).items()):
         if state == "oversized":
             skipped.append(rel)
+            continue
+        abs_path = _abs(root, rel)
+        if created.get(rel):
+            try:
+                _write_text(abs_path, None)
+                restored.append(rel)
+            except Exception:
+                skipped.append(rel)
             continue
         old, oversized = _read_baseline_content(root, rel, meta)
         if oversized:
             skipped.append(rel)
             continue
         try:
-            _write_text(_abs(root, rel), old)
+            _write_text(abs_path, old)
             restored.append(rel)
         except Exception:
             skipped.append(rel)
@@ -627,21 +747,31 @@ def revert_file(root: str, path: str) -> dict[str, Any]:
         meta = _load_meta(root)
         if rel not in meta["baseline"] and rel not in meta.get("file_stats", {}):
             return {"ok": False, "error": "Path not in session changes"}
-        old, oversized = _read_baseline_content(root, rel, meta)
-        if oversized:
-            return {"ok": False, "error": "File too large to auto-revert", "path": rel, "oversized": True}
-        try:
-            _write_text(_abs(root, rel), old)
-        except Exception as e:
-            return {"ok": False, "error": str(e), "path": rel}
+        abs_path = _abs(root, rel)
+        if (meta.get("created") or {}).get(rel):
+            try:
+                _write_text(abs_path, None)
+            except Exception as e:
+                return {"ok": False, "error": str(e), "path": rel}
+        else:
+            old, oversized = _read_baseline_content(root, rel, meta)
+            if oversized:
+                return {"ok": False, "error": "File too large to auto-revert", "path": rel, "oversized": True}
+            try:
+                _write_text(abs_path, old)
+            except Exception as e:
+                return {"ok": False, "error": str(e), "path": rel}
         meta["baseline"].pop(rel, None)
         meta["file_stats"].pop(rel, None)
-        blob = _blob_path(_baseline_dir(root), rel)
-        if blob and os.path.isfile(blob):
-            try:
-                os.remove(blob)
-            except Exception:
-                pass
+        meta.get("created", {}).pop(rel, None)
+        meta.get("edit_base", {}).pop(rel, None)
+        for d in (_baseline_dir(root), _edit_base_dir(root)):
+            blob = _blob_path(d, rel)
+            if blob and os.path.isfile(blob):
+                try:
+                    os.remove(blob)
+                except Exception:
+                    pass
         _save_meta(root, meta)
         return {"ok": True, "path": rel, **summary(root)}
 
@@ -705,18 +835,25 @@ def _git_head_content(root: str, rel: str) -> tuple[str | None, bool]:
 
 
 def prepare_shell_watch(root: str) -> None:
-    """Before a shell command: baseline any already-dirty git paths from current disk."""
+    """Before a shell command: baseline dirties + freeze edit_base for tracked paths."""
     porcelain = _git_porcelain_paths(root)
     with _lock:
         meta = _load_meta(root)
+        meta.setdefault("created", {})
+        meta.setdefault("edit_base", {})
+        # Freeze current disk as edit peer for already-tracked files
+        for rel in list(meta.get("baseline") or {}):
+            _capture_edit_base_from_disk(root, rel, meta)
         for rel in porcelain:
             if rel in meta["baseline"]:
                 continue
-            # Capture current disk as Accept-relative baseline for pre-existing dirties
             abs_path = _abs(root, rel)
             content, oversized = _read_text(abs_path)
             state = _write_baseline_blob(root, rel, content, oversized=oversized)
             meta["baseline"][rel] = state
+            if state == "missing":
+                meta["created"][rel] = True
+            _capture_edit_base_from_disk(root, rel, meta)
         _save_meta(root, meta)
 
 
@@ -744,6 +881,7 @@ def finish_shell_watch(root: str) -> dict[str, Any]:
             else:
                 # Untracked / created by shell
                 meta["baseline"][rel] = "missing"
+                meta.setdefault("created", {})[rel] = True
             _recompute_file_stat(root, rel, meta)
 
         _save_meta(root, meta)

@@ -1,5 +1,5 @@
 /**
- * UnifiedDiffView — red/green line diff for session file changes.
+ * UnifiedDiffView — Cursor-style inline diff (context / green inserts / red deletes).
  */
 import React, { useMemo, useState } from 'react';
 import { getLangForFile, highlightLine } from '../../utils/codeHighlight';
@@ -45,10 +45,10 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
   }
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto bg-[#0d1117] font-mono text-[11px] leading-5">
-      <div className="sticky top-0 z-[1] flex items-center gap-2 px-2 py-1 border-b border-white/5 bg-[#0d1117]/80 backdrop-blur-sm text-[10px]">
-        <span className="text-emerald-400 tabular-nums">+{additions}</span>
-        <span className="text-rose-400/90 tabular-nums">-{deletions}</span>
+    <div className="flex-1 min-h-0 overflow-auto bg-[#1e1e1e] font-mono text-[11px] leading-[18px]">
+      <div className="sticky top-0 z-[1] flex items-center gap-2 px-2 py-1 border-b border-white/10 bg-[#1e1e1e]/95 backdrop-blur-sm text-[10px]">
+        <span className="text-emerald-400 tabular-nums font-medium">+{additions}</span>
+        <span className="text-rose-400 tabular-nums font-medium">-{deletions}</span>
       </div>
       <div className="min-w-full inline-block">
         {lines.map((line, i) => {
@@ -58,7 +58,7 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
               <button
                 key={i}
                 type="button"
-                className="w-full text-left px-2 py-0.5 text-[10px] text-gray-500 hover:text-gray-300 hover:bg-white/[0.03]"
+                className="w-full text-left px-2 py-0.5 text-[10px] text-gray-500 hover:text-gray-300 bg-[#2a2a2a]/80 hover:bg-[#333] border-y border-black/40"
                 onClick={() => {
                   setExpandedCollapses((prev) => {
                     const next = new Set(prev);
@@ -73,28 +73,47 @@ export const UnifiedDiffView: React.FC<UnifiedDiffViewProps> = ({
               </button>
             );
           }
-          const bg =
-            line.type === 'insert'
-              ? 'bg-emerald-500/15'
-              : line.type === 'delete'
-                ? 'bg-rose-500/15'
-                : '';
-          const numColor =
-            line.type === 'insert'
-              ? 'text-emerald-500/70'
-              : line.type === 'delete'
-                ? 'text-rose-400/70'
-                : 'text-gray-600';
+
+          const isIns = line.type === 'insert';
+          const isDel = line.type === 'delete';
+          const rowBg = isIns
+            ? 'bg-[#12261e]'
+            : isDel
+              ? 'bg-[#2a1215]'
+              : 'bg-transparent';
+          const gutterBg = isIns
+            ? 'bg-[#0e3a28] text-emerald-400/90'
+            : isDel
+              ? 'bg-[#4a151c] text-rose-300/90'
+              : 'text-gray-600';
+          const mark = isIns ? '+' : isDel ? '-' : ' ';
+          const markColor = isIns
+            ? 'text-emerald-400'
+            : isDel
+              ? 'text-rose-400'
+              : 'text-transparent';
+
           return (
-            <div key={i} className={`flex items-start ${bg}`}>
-              <span className={`select-none w-10 shrink-0 text-right pr-1 tabular-nums text-[10px] ${numColor}`}>
+            <div key={i} className={`flex items-stretch ${rowBg}`}>
+              <span
+                className={`select-none w-9 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] ${gutterBg}`}
+              >
                 {line.old_lineno ?? ''}
               </span>
-              <span className={`select-none w-10 shrink-0 text-right pr-2 tabular-nums text-[10px] border-r border-gray-800 ${numColor}`}>
+              <span
+                className={`select-none w-9 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] border-r border-white/5 ${gutterBg}`}
+              >
                 {line.new_lineno ?? ''}
               </span>
               <span
-                className="flex-1 min-w-0 whitespace-pre-wrap break-words pl-2 text-gray-200"
+                className={`select-none w-4 shrink-0 text-center font-semibold leading-[18px] ${markColor}`}
+              >
+                {mark}
+              </span>
+              <span
+                className={`flex-1 min-w-0 whitespace-pre-wrap break-words pr-2 leading-[18px] ${
+                  isIns ? 'text-emerald-100/95' : isDel ? 'text-rose-100/90' : 'text-gray-300'
+                }`}
                 dangerouslySetInnerHTML={{ __html: highlightLine(line.text || '', lang) }}
               />
             </div>

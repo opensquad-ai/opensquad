@@ -957,6 +957,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [sessionChanges, setSessionChanges] = useState<SessionChangesSummary | null>(null);
   const [focusChangedNonce, setFocusChangedNonce] = useState(0);
   const [changesBusy, setChangesBusy] = useState(false);
+  const [filesLiveChanges, setFilesLiveChanges] = useState<{
+    nonce: number;
+    additions: number;
+    deletions: number;
+    count: number;
+    files: Array<{
+      name: string;
+      path: string;
+      type: 'file' | 'dir';
+      status?: string;
+      additions?: number;
+      deletions?: number;
+      oversized?: boolean;
+      mtime?: number;
+      size?: number;
+      created?: boolean;
+    }>;
+  } | null>(null);
   const onSessionChangesStable = useCallback((summary: SessionChangesSummary) => {
     setSessionChanges(summary);
   }, []);
@@ -1459,10 +1477,29 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
     try {
       const resp = await adminAPI.listSessionChanges(fsAgentName, projectRoot);
-      setSessionChanges({
+      const files = (resp.files || resp.entries || []).map((e) => ({
+        name: e.name,
+        path: e.path,
+        type: e.type,
+        status: e.status,
+        additions: e.additions,
+        deletions: e.deletions,
+        oversized: e.oversized,
+        mtime: e.mtime,
+        size: e.size,
+        created: e.created,
+      }));
+      const summary = {
         additions: resp.additions || 0,
         deletions: resp.deletions || 0,
-        count: resp.count ?? (resp.files?.length || 0),
+        count: resp.count ?? files.length,
+      };
+      setSessionChanges(summary);
+      // Push snapshot into files panel — in-place update, no loading flash
+      setFilesLiveChanges({
+        nonce: Date.now(),
+        ...summary,
+        files,
       });
     } catch {
       /* ignore — Launcher may be restarting */
@@ -1474,9 +1511,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     refreshSessionChangesRef.current = refreshSessionChanges;
   }, [refreshSessionChanges]);
 
+  const refreshSessionChangesDebouncedRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefreshSessionChanges = useCallback(() => {
+    if (refreshSessionChangesDebouncedRef.current) {
+      clearTimeout(refreshSessionChangesDebouncedRef.current);
+    }
+    refreshSessionChangesDebouncedRef.current = setTimeout(() => {
+      refreshSessionChangesDebouncedRef.current = null;
+      void refreshSessionChangesRef.current?.();
+    }, 280);
+  }, []);
+
   useEffect(() => {
     void refreshSessionChanges();
   }, [refreshSessionChanges]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshSessionChangesDebouncedRef.current) {
+        clearTimeout(refreshSessionChangesDebouncedRef.current);
+      }
+    };
+  }, []);
 
   // Load available model cards once, to populate the runtime model-switch dropdown.
   useEffect(() => {
@@ -2030,16 +2086,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         return;
       }
       setTimeline(prev => appendWorkflowEvent(prev, event, `${toolName} completed`));
-      // Refresh session change stats after filesystem mutations
+      // Live-update session change stats / files panel after mutations (no page reload)
       const tn = String(toolName || '').toLowerCase();
       if (
         tn.includes('write') ||
         tn.includes('replace') ||
         tn.includes('delete') ||
         tn.includes('edit_file') ||
-        tn.includes('filesystem')
+        tn.includes('filesystem') ||
+        tn.includes('run_session') ||
+        tn.includes('start_job') ||
+        tn.includes('check_job') ||
+        tn.includes('shell') ||
+        tn.includes('cmd')
       ) {
-        void refreshSessionChangesRef.current?.();
+        scheduleRefreshSessionChanges();
       }
     });
 
@@ -2632,7 +2693,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
       // Clear live start timestamp (turn is over)
       setTurnStartedMs(undefined);
-      void refreshSessionChangesRef.current?.();
+      scheduleRefreshSessionChanges();
     });
 
     // Prompt update — insert/update prompt entry in timeline (first item = first prompt)
@@ -5578,6 +5639,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       await adminAPI.commitSessionChanges(dirName, root).catch(() => {});
                     }
                     setSessionChanges({ additions: 0, deletions: 0, count: 0 });
+                    setFilesLiveChanges({
+                      nonce: Date.now(),
+                      additions: 0,
+                      deletions: 0,
+                      count: 0,
+                      files: [],
+                    });
                     setFocusChangedNonce(Date.now());
                     deliverMessage(
                       { text: COMMIT_PUSH_MESSAGE, images: [], attachments: [] },
@@ -6088,6 +6156,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
         }}
         focusChangedNonce={focusChangedNonce}
+        liveChanges={filesLiveChanges}
         onSessionChanges={onSessionChangesStable}
       />
     </div>

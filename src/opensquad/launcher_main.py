@@ -816,6 +816,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
                 return self._handle_fs_open_terminal(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-diffs"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_diffs(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/commit"):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
@@ -1383,6 +1387,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             result = diff_file(root, rel_path)
             if "error" in result:
                 return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
+            result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_diffs(self, name: str, body: dict):
+            """POST — batch baseline vs disk diffs for session-changed files."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import diff_files_batch
+
+            raw_paths = body.get("paths")
+            paths = None
+            if isinstance(raw_paths, list):
+                paths = [str(p) for p in raw_paths if str(p or "").strip()]
+            result = diff_files_batch(root, paths)
             result["agent"] = name
             return self._send_json(result)
 

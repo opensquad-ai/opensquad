@@ -954,6 +954,9 @@ export const adminAPI = {
         additions: number;
         deletions: number;
         oversized?: boolean;
+        mtime?: number;
+        size?: number;
+        created?: boolean;
       }>;
       entries: Array<{
         path: string;
@@ -963,6 +966,9 @@ export const adminAPI = {
         additions: number;
         deletions: number;
         oversized?: boolean;
+        mtime?: number;
+        size?: number;
+        created?: boolean;
       }>;
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes${r}`);
   },
@@ -986,6 +992,34 @@ export const adminAPI = {
         count?: number;
       }>;
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diff?path=${q}${r}`);
+  },
+
+  /** 批量预取 session diffs（变动列表后台预热） */
+  getSessionDiffsBatch: async (name: string, paths?: string[], root?: string) => {
+    return apiRequest<{
+      agent: string;
+      count: number;
+      files: Record<
+        string,
+        {
+          path: string;
+          status: string;
+          additions: number;
+          deletions: number;
+          oversized?: boolean;
+          lines: Array<{
+            type: 'context' | 'insert' | 'delete' | 'collapse';
+            old_lineno?: number | null;
+            new_lineno?: number | null;
+            text: string;
+            count?: number;
+          }>;
+        }
+      >;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diffs`, {
+      method: 'POST',
+      body: JSON.stringify({ paths: paths || null, root }),
+    });
   },
 
   commitSessionChanges: async (name: string, root?: string) => {

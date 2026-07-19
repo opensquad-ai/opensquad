@@ -421,6 +421,12 @@ async def admin_fs_session_diff(
     return await _proxy_get(f"/api/agents/{name}/fs/session-diff?path={q}{r}", http_only=True)
 
 
+@admin_router.post("/admin/agents/{name}/fs/session-diffs")
+async def admin_fs_session_diffs(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Batch unified diffs for session-changed files (prefetch)."""
+    return await _proxy_post(f"/api/agents/{name}/fs/session-diffs", body or {}, timeout=60.0)
+
+
 @admin_router.post("/admin/agents/{name}/fs/session-changes/commit")
 async def admin_fs_session_commit(
     name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)
