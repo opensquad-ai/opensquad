@@ -824,6 +824,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
                 return self._handle_fs_session_commit(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/keep"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_keep(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/checkpoint"):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
@@ -1414,6 +1418,20 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             result = accept_reset(root)
             result["agent"] = name
+            return self._send_json(result)
+
+        def _handle_fs_session_keep(self, name: str, body: dict):
+            """POST — keep/save one path: drop from Changes; baseline retained for withdraw."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import keep_file
+
+            path = str(body.get("path") or "").strip()
+            result = keep_file(root, path)
+            result["agent"] = name
+            if not result.get("ok"):
+                return self._send_json({"error": result.get("error") or "keep failed"}, 400)
             return self._send_json(result)
 
         def _handle_fs_session_checkpoint(self, name: str, body: dict):

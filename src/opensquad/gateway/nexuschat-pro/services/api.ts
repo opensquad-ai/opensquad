@@ -1029,6 +1029,23 @@ export const adminAPI = {
     );
   },
 
+  /** 保留单文件当前磁盘改动：从 Changes 去掉统计，消息撤回仍可回滚 */
+  keepSessionFile: async (name: string, path: string, root?: string) => {
+    return apiRequest<{
+      ok: boolean;
+      path?: string;
+      kept?: boolean;
+      additions?: number;
+      deletions?: number;
+      count?: number;
+      files?: unknown[];
+      error?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/keep`, {
+      method: 'POST',
+      body: JSON.stringify({ path, root }),
+    });
+  },
+
   checkpointSessionChanges: async (name: string, messageId: string, root?: string) => {
     return apiRequest<{ ok: boolean; message_id: string; files: number }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/checkpoint`,

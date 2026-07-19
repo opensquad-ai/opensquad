@@ -434,6 +434,12 @@ async def admin_fs_session_commit(
     return await _proxy_post(f"/api/agents/{name}/fs/session-changes/commit", body or {}, timeout=30.0)
 
 
+@admin_router.post("/admin/agents/{name}/fs/session-changes/keep")
+async def admin_fs_session_keep(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Keep/save one changed file: remove from Changes stats; withdraw still rolls back."""
+    return await _proxy_post(f"/api/agents/{name}/fs/session-changes/keep", body or {}, timeout=30.0)
+
+
 @admin_router.post("/admin/agents/{name}/fs/session-changes/checkpoint")
 async def admin_fs_session_checkpoint(
     name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)

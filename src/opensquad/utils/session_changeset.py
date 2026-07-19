@@ -86,6 +86,8 @@ def _empty_meta() -> dict[str, Any]:
         "file_stats": {},
         # path -> True if file was created this session (revert should delete)
         "created": {},
+        # path -> {mtime, size} — user kept/saved; hidden from Changes until mutated again
+        "kept": {},
         "checkpoint_order": [],
     }
 
@@ -111,6 +113,7 @@ def _load_meta(root: str) -> dict[str, Any]:
         data.setdefault("edit_base", {})
         data.setdefault("file_stats", {})
         data.setdefault("created", {})
+        data.setdefault("kept", {})
         data.setdefault("checkpoint_order", [])
         return data
     except Exception:
@@ -243,6 +246,16 @@ def _capture_edit_base_from_disk(root: str, rel: str, meta: dict[str, Any]) -> N
     meta.setdefault("edit_base", {})[rel] = state
 
 
+def _capture_edit_base_content(root: str, rel: str, meta: dict[str, Any], content: str | None) -> None:
+    """Freeze known pre-edit body (avoids racing the upcoming write)."""
+    if content is None:
+        state = "missing"
+    else:
+        oversized = len(content.encode("utf-8", errors="replace")) > _MAX_BASELINE_BYTES
+        state = _write_snap_blob(root, rel, content, oversized=oversized, store="edit_base")
+    meta.setdefault("edit_base", {})[rel] = state
+
+
 def _recompute_file_stat(root: str, rel: str, meta: dict[str, Any]) -> None:
     accept_old, accept_over = _read_baseline_content(root, rel, meta)
     edit_old, edit_over = _read_edit_base_content(root, rel, meta)
@@ -260,6 +273,25 @@ def _recompute_file_stat(root: str, rel: str, meta: dict[str, Any]) -> None:
     created = bool((meta.get("created") or {}).get(rel))
     oversized = bool(accept_over or edit_over or (exists and size > _MAX_BASELINE_BYTES))
 
+    # User kept this file: hide from Changes until disk changes or a new tool edit
+    kept_info = (meta.get("kept") or {}).get(rel)
+    if kept_info is not None:
+        still_kept = False
+        if isinstance(kept_info, dict):
+            if (not exists and kept_info.get("missing")) or (
+                exists
+                and abs(float(kept_info.get("mtime") or 0) - mtime) < 1e-6
+                and int(kept_info.get("size") or -1) == size
+            ):
+                still_kept = True
+        elif kept_info:
+            still_kept = True
+        if still_kept:
+            meta["file_stats"].pop(rel, None)
+            return
+        # Disk changed after keep → show in Changes again
+        meta.get("kept", {}).pop(rel, None)
+
     if not exists:
         new = None
     else:
@@ -274,6 +306,7 @@ def _recompute_file_stat(root: str, rel: str, meta: dict[str, Any]) -> None:
         meta["baseline"].pop(rel, None)
         meta.get("edit_base", {}).pop(rel, None)
         meta.get("created", {}).pop(rel, None)
+        meta.get("kept", {}).pop(rel, None)
         for d in (_baseline_dir(root), _edit_base_dir(root)):
             blob = _blob_path(d, rel)
             if blob and os.path.isfile(blob):
@@ -316,29 +349,54 @@ def _recompute_file_stat(root: str, rel: str, meta: dict[str, Any]) -> None:
     }
 
 
-def ensure_baseline_before_write(root: str, path: str) -> None:
-    """Capture Accept baseline (once) + edit_base (every time) before mutating."""
+_PREV_UNSET = object()
+
+
+def ensure_baseline_before_write(
+    root: str,
+    path: str,
+    *,
+    prev_content: Any = _PREV_UNSET,
+) -> str | None:
+    """Capture Accept baseline (once) + edit_base (every time) before mutating.
+
+    Returns the normalized relative path, or None if *path* is outside *root*.
+
+    ``prev_content``:
+      - omitted: snapshot edit_base from disk
+      - ``None``: file did not exist before this edit (edit_base = missing)
+      - ``str``: exact pre-edit body (preferred for write/replace tools)
+    """
     rel = _norm_rel(root, path)
     if not rel:
-        return
+        return None
     with _lock:
         meta = _load_meta(root)
         meta.setdefault("created", {})
         meta.setdefault("edit_base", {})
+        meta.setdefault("kept", {})
         abs_path = _abs(root, rel)
+        # New edit after Keep → show in Changes again
+        meta["kept"].pop(rel, None)
         if rel not in meta["baseline"]:
             content, oversized = _read_text(abs_path)
             state = _write_baseline_blob(root, rel, content, oversized=oversized)
             meta["baseline"][rel] = state
             if state == "missing":
                 meta["created"][rel] = True
-        # Always snapshot disk as the peer for this upcoming edit (red/green vs prior content)
-        _capture_edit_base_from_disk(root, rel, meta)
+        if prev_content is _PREV_UNSET:
+            _capture_edit_base_from_disk(root, rel, meta)
+        else:
+            _capture_edit_base_content(root, rel, meta, prev_content if isinstance(prev_content, str) else None)
+        # Heal legacy rows that never set created for baseline=missing
+        if meta["baseline"].get(rel) == "missing":
+            meta["created"][rel] = True
         _save_meta(root, meta)
+    return rel
 
 
-def note_deleted(root: str, path: str) -> None:
-    ensure_baseline_before_write(root, path)
+def note_deleted(root: str, path: str, *, prev_content: Any = _PREV_UNSET) -> str | None:
+    return ensure_baseline_before_write(root, path, prev_content=prev_content)
 
 
 def note_after_mutation(root: str, path: str) -> dict[str, Any]:
@@ -351,6 +409,7 @@ def note_after_mutation(root: str, path: str) -> dict[str, Any]:
         if rel not in meta["baseline"]:
             # Should have been baselined before write; best-effort capture as missing
             meta["baseline"][rel] = "missing"
+            meta.setdefault("created", {})[rel] = True
         _recompute_file_stat(root, rel, meta)
         _save_meta(root, meta)
         st = meta["file_stats"].get(rel) or {}
@@ -428,6 +487,10 @@ def clear_for_new_session(root: str) -> dict[str, Any]:
 def summary(root: str) -> dict[str, Any]:
     with _lock:
         meta = _load_meta(root)
+        # Heal legacy rows: baseline=missing but created flag never set
+        for rel, state in list((meta.get("baseline") or {}).items()):
+            if state == "missing":
+                meta.setdefault("created", {})[rel] = True
         # Always recompute vs disk so Shell/CMD/external edits show up after refresh
         for rel in list(meta["baseline"].keys()):
             _recompute_file_stat(root, rel, meta)
@@ -645,7 +708,12 @@ def revert_to_checkpoint(root: str, message_id: str) -> dict[str, Any]:
 
         restored: list[str] = []
         skipped: list[str] = []
-        all_paths = set(meta["baseline"].keys()) | set(meta.get("file_stats", {}).keys()) | set(manifest.keys())
+        all_paths = (
+            set(meta["baseline"].keys())
+            | set(meta.get("file_stats", {}).keys())
+            | set((meta.get("kept") or {}).keys())
+            | set(manifest.keys())
+        )
 
         for rel in all_paths:
             abs_path = _abs(root, rel)
@@ -683,6 +751,9 @@ def revert_to_checkpoint(root: str, message_id: str) -> dict[str, Any]:
         meta["checkpoint_order"] = keep_ids
 
         # Refresh stats vs baseline after restore-to-checkpoint
+        meta.setdefault("kept", {})
+        for rel in list(meta.get("kept", {}).keys()):
+            meta["kept"].pop(rel, None)
         for rel in list(meta["baseline"].keys()):
             _recompute_file_stat(root, rel, meta)
         _save_meta(root, meta)
@@ -765,6 +836,7 @@ def revert_file(root: str, path: str) -> dict[str, Any]:
         meta["file_stats"].pop(rel, None)
         meta.get("created", {}).pop(rel, None)
         meta.get("edit_base", {}).pop(rel, None)
+        meta.get("kept", {}).pop(rel, None)
         for d in (_baseline_dir(root), _edit_base_dir(root)):
             blob = _blob_path(d, rel)
             if blob and os.path.isfile(blob):
@@ -774,6 +846,46 @@ def revert_file(root: str, path: str) -> dict[str, Any]:
                     pass
         _save_meta(root, meta)
         return {"ok": True, "path": rel, **summary(root)}
+
+
+def keep_file(root: str, path: str) -> dict[str, Any]:
+    """Keep/save current disk for one path: drop from Changes stats, retain baseline for withdraw.
+
+    Disk is left unchanged. Message-checkpoint revert still uses Accept baseline /
+    ckpt snapshots, so withdraw can roll the file back even after Keep.
+    """
+    rel = _norm_rel(root, path)
+    if not rel:
+        return {"ok": False, "error": "Invalid path"}
+    with _lock:
+        meta = _load_meta(root)
+        if rel not in meta["baseline"] and rel not in meta.get("file_stats", {}):
+            return {"ok": False, "error": "Path not in session changes"}
+        # Ensure we still have an Accept baseline for future withdraw/revert
+        if rel not in meta["baseline"]:
+            meta["baseline"][rel] = "missing"
+            meta.setdefault("created", {})[rel] = True
+        abs_path = _abs(root, rel)
+        kept: dict[str, Any]
+        if os.path.isfile(abs_path):
+            try:
+                stt = os.stat(abs_path)
+                kept = {"mtime": float(stt.st_mtime), "size": int(stt.st_size)}
+            except Exception:
+                kept = {"mtime": 0.0, "size": 0}
+        else:
+            kept = {"missing": True, "mtime": 0.0, "size": 0}
+        meta.setdefault("kept", {})[rel] = kept
+        meta["file_stats"].pop(rel, None)
+        meta.get("edit_base", {}).pop(rel, None)
+        eb = _blob_path(_edit_base_dir(root), rel)
+        if eb and os.path.isfile(eb):
+            try:
+                os.remove(eb)
+            except Exception:
+                pass
+        _save_meta(root, meta)
+        return {"ok": True, "path": rel, "kept": True, **summary(root)}
 
 
 def _git_porcelain_paths(root: str) -> list[str]:
