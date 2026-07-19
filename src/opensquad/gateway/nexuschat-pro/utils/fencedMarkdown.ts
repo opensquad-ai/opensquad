@@ -144,8 +144,15 @@ export function renderFencedMarkdown(text: string): string {
     /<pre><code class="language-([^"]+)">([\s\S]*?)<\/code><\/pre>/gi,
     (_m, lang: string, body: string) => {
       const code = decodeBasicEntities(body.replace(/\n$/, ''));
+      const langKey = (lang || '').split(/[\s,{]/)[0] || '';
+      if (langKey.toLowerCase() === 'mermaid') {
+        // Placeholder for client-side mermaid.render (see mermaidHydrate.ts)
+        return (
+          `<div class="ai-mermaid" data-src="${encodeURIComponent(code)}"></div>`
+        );
+      }
       const highlighted = highlightCode(code, lang);
-      const label = escapeHtml((lang || '').split(/[\s,{]/)[0] || 'code');
+      const label = escapeHtml(langKey || 'code');
       return (
         `<div class="ai-code-wrap">` +
         `<div class="ai-code-lang">${label}</div>` +

@@ -25,6 +25,7 @@ import { ShellJobFold } from './ShellJobFold';
 import { parsePlanContent, type PlanStep } from './PlanBlock';
 import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
+import { extractHtmlEmbed, HtmlEmbedBlock } from './HtmlEmbedBlock';
 
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
@@ -39,6 +40,11 @@ interface SoloActivityRowProps {
   shellStreams?: Record<string, ShellStreamState>;
   /** Open a project file in the right-side files panel */
   onOpenFile?: (path: string) => void;
+  /**
+   * Classic Agent Web only: embed visualization.create HTML in the dialog.
+   * Solo must leave this false.
+   */
+  embedVisualizations?: boolean;
 }
 
 function toolNameOf(evt: WorkflowEvent): string {
@@ -541,9 +547,37 @@ const SoloToolExpandPanel: React.FC<{
   args: Record<string, unknown> | null | undefined;
   result: string;
   running?: boolean;
-}> = ({ toolName, args, result, running }) => {
+  /** Hide bulky html arg when already embedded above */
+  hideHtmlArg?: boolean;
+}> = ({ toolName, args, result, running, hideHtmlArg = false }) => {
   const hasArgs = !!(args && Object.keys(args).length > 0);
   const hasResult = !!(result && result.trim());
+  const displayArgs = useMemo(() => {
+    if (!args || !hideHtmlArg) return args;
+    const next = { ...args };
+    if ('html' in next) {
+      const raw = next.html;
+      const len = typeof raw === 'string' ? raw.length : JSON.stringify(raw ?? '').length;
+      next.html = `[HTML ${len} chars — rendered above]`;
+    }
+    return next;
+  }, [args, hideHtmlArg]);
+
+  // Prefer short host message from html_embed result
+  const displayResult = useMemo(() => {
+    if (!hasResult) return '';
+    try {
+      const o = JSON.parse(result);
+      if (o && typeof o === 'object' && o.kind === 'html_embed') {
+        if (typeof o.text === 'string' && o.text.trim()) return o.text;
+        if (Array.isArray(o.content) && o.content[0]?.text) return String(o.content[0].text);
+        return `Interactive visualization "${o.filename || o.title || 'viz'}" was created.`;
+      }
+    } catch {
+      /* fall through */
+    }
+    return result;
+  }, [hasResult, result]);
 
   return (
     <div className="mt-1 mb-1.5 rounded-md border border-border/50 bg-black/[0.035] dark:bg-white/[0.05] overflow-hidden">
@@ -552,9 +586,9 @@ const SoloToolExpandPanel: React.FC<{
       </div>
       {hasArgs && (
         <div className="px-2.5 py-2 border-b border-border/30">
-          <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">Args</div>
+          <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">Input</div>
           <div className="space-y-1 max-h-[220px] overflow-y-auto">
-            {Object.entries(args!).map(([k, v]) => {
+            {Object.entries(displayArgs || {}).map(([k, v]) => {
               const valStr = typeof v === 'string' ? v : prettyJson(v);
               const isLong = valStr.length > 120 || valStr.includes('\n');
               return (
@@ -579,13 +613,13 @@ const SoloToolExpandPanel: React.FC<{
       )}
       <div className="px-2.5 py-2">
         <div className="text-[10px] font-medium text-textMuted/60 mb-1 uppercase tracking-wide">
-          {running && !hasResult ? 'Status' : 'Result'}
+          {running && !hasResult ? 'Status' : 'Output'}
         </div>
         {running && !hasResult ? (
           <div className="text-[12px] text-textMuted/55">Running…</div>
         ) : hasResult ? (
           <pre className="text-[11px] text-textMuted/75 whitespace-pre-wrap break-words font-mono m-0 leading-relaxed max-h-[280px] overflow-y-auto">
-            {prettyJson(result)}
+            {prettyJson(displayResult)}
           </pre>
         ) : (
           <div className="text-[12px] text-textMuted/45">No result</div>
@@ -679,7 +713,9 @@ const SoloEventLine: React.FC<{
   defaultOpen?: boolean;
   shellStreamFor?: (callId: string) => ShellStreamState | null | undefined;
   onOpenFile?: (path: string) => void;
-}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile }) => {
+  /** Classic-only HTML visualization embeds */
+  embedVisualizations?: boolean;
+}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile, embedVisualizations = false }) => {
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
@@ -687,6 +723,11 @@ const SoloEventLine: React.FC<{
   const isThought = line.kind === 'thought';
   const isFileEdit = !!(line.fileEdit && (line.fileEdit.kind === 'edit' || line.fileEdit.kind === 'write'));
   const isFileRead = line.fileEdit?.kind === 'read';
+
+  const htmlEmbed = useMemo(() => {
+    if (!embedVisualizations || line.kind !== 'tool') return null;
+    return extractHtmlEmbed(line.toolName, line.toolArgs, line.toolResult);
+  }, [embedVisualizations, line.kind, line.toolName, line.toolArgs, line.toolResult]);
 
   useEffect(() => {
     // Lightbulb / defaultOpen drives thoughts both ways; tools only auto-open when
@@ -833,6 +874,13 @@ const SoloEventLine: React.FC<{
         </div>
       )}
 
+      {/* Classic-only: always show HTML visualization embed once available */}
+      {htmlEmbed && !line.running && (
+        <div className="pl-1 sm:pl-2">
+          <HtmlEmbedBlock payload={htmlEmbed} />
+        </div>
+      )}
+
       {open && line.kind === 'tool' && !isFileEdit && !isFileRead && (
         <div className="pl-4">
           <SoloToolExpandPanel
@@ -840,6 +888,7 @@ const SoloEventLine: React.FC<{
             args={line.toolArgs}
             result={line.toolResult || ''}
             running={line.running}
+            hideHtmlArg={!!htmlEmbed}
           />
         </div>
       )}
@@ -882,6 +931,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   turnStartedMs,
   shellStreams = {},
   onOpenFile,
+  embedVisualizations = false,
 }) => {
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
@@ -1228,6 +1278,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             line={line}
             shellStreamFor={(id) => shellStreams[id]}
             onOpenFile={onOpenFile}
+            embedVisualizations={embedVisualizations}
             defaultOpen={
               (line.kind === 'thought' && expandDetails) ||
               !!(line.kind === 'summary' && line.running) ||

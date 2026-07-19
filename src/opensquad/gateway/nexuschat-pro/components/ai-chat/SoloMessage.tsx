@@ -14,6 +14,8 @@ interface SoloMessageProps {
   anchorId?: string;
   /** Agent id for message TTS */
   agentId?: string;
+  canWithdraw?: boolean;
+  onWithdraw?: () => void;
 }
 
 export const SoloMessage: React.FC<SoloMessageProps> = (props) => (

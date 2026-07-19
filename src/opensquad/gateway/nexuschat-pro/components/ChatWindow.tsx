@@ -5,6 +5,7 @@ import { MoreHorizontal, Paperclip, Pin, Reply, Trash2, Copy, MessageSquare, Dow
 import { Message, User, Group, MessageType, Attachment } from '../types';
 import { MessageInput } from './MessageInput';
 import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../services/api';
+import { blobToWavFile } from '../utils/mediaDevices';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
 import {
@@ -1878,16 +1879,14 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const handleVoiceRecord = async (audioBlob: Blob, _duration: number) => {
     try {
       setSttDictating(true);
-      const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, {
-        type: audioBlob.type || 'audio/webm',
-      });
+      const audioFile = await blobToWavFile(audioBlob, `voice_${Date.now()}.wav`);
       const res = await agentSessionAPI.groupTranscribe(audioFile, {
         filename: audioFile.name,
         language: 'zh',
       });
       const text = (res.text || '').trim();
       if (!text) {
-        alert(t('chat.sendVoiceFailed') || '语音转写结果为空');
+        alert('未识别到语音内容，请再说一次');
         return;
       }
       setInputText((prev) => {
@@ -1898,7 +1897,12 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     } catch (error) {
       console.error('Failed to transcribe voice:', error);
       const msg = error instanceof Error ? error.message : String(error || '');
-      alert(msg || t('chat.sendVoiceFailed'));
+      // Surface a shorter, readable alert for known ASR empty cases
+      if (/empty transcript|未识别/i.test(msg)) {
+        alert('未识别到语音内容，请靠近麦克风再说一次（按住多说几秒）');
+      } else {
+        alert(msg || t('chat.sendVoiceFailed'));
+      }
     } finally {
       setSttDictating(false);
     }

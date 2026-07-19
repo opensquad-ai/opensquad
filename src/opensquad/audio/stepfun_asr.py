@@ -151,7 +151,17 @@ async def _transcribe_b64(
 
     text = (final_text or "".join(text_parts)).strip()
     if not text:
-        return {"success": False, "error": "ASR returned empty transcript"}
+        logger.warning(
+            "[stepfun_asr] empty transcript label=%s fmt=%s model=%s base=%s",
+            label,
+            fmt,
+            model,
+            base_url,
+        )
+        return {
+            "success": False,
+            "error": "ASR returned empty transcript (no speech detected or unsupported audio format)",
+        }
     return {
         "success": True,
         "text": text,
@@ -174,24 +184,104 @@ async def transcribe_file(
     """Transcribe a local audio file via StepFun ASR SSE API."""
     if not os.path.isfile(audio_path):
         return {"success": False, "error": f"File not found: {audio_path}"}
+
+    work_path = audio_path
+    cleanup: str | None = None
+    ext = os.path.splitext(audio_path)[1].lower().lstrip(".")
+    if ext in ("webm", "ogg", "opus"):
+        converted = _ffmpeg_to_wav(audio_path)
+        if converted:
+            work_path = converted
+            cleanup = converted
+
     try:
-        with open(audio_path, "rb") as f:
+        with open(work_path, "rb") as f:
             raw = f.read()
     except Exception as e:
+        if cleanup and os.path.isfile(cleanup):
+            try:
+                os.remove(cleanup)
+            except OSError:
+                pass
         return {"success": False, "error": f"Failed to read audio: {e}"}
 
+    if len(raw) < 64:
+        if cleanup and os.path.isfile(cleanup):
+            try:
+                os.remove(cleanup)
+            except OSError:
+                pass
+        return {"success": False, "error": "ASR returned empty transcript (audio file too small)"}
+
     b64 = base64.b64encode(raw).decode("ascii")
-    return await _transcribe_b64(
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        audio_b64=b64,
-        fmt=_guess_format(audio_path),
-        language=language,
-        enable_itn=enable_itn,
-        timeout=timeout,
-        label=os.path.basename(audio_path),
-    )
+    try:
+        return await _transcribe_b64(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            audio_b64=b64,
+            fmt=_guess_format(work_path),
+            language=language,
+            enable_itn=enable_itn,
+            timeout=timeout,
+            label=os.path.basename(audio_path),
+        )
+    finally:
+        if cleanup and os.path.isfile(cleanup):
+            try:
+                os.remove(cleanup)
+            except OSError:
+                pass
+
+
+def _ffmpeg_to_wav(src: str) -> str | None:
+    """Convert browser webm/ogg to 16k mono wav via ffmpeg when available."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    fd, dst = tempfile.mkstemp(suffix=".wav", prefix="asr_")
+    os.close(fd)
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                src,
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-f",
+                "wav",
+                dst,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0 or not os.path.isfile(dst) or os.path.getsize(dst) < 64:
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            logger.warning(
+                "[stepfun_asr] ffmpeg convert failed rc=%s err=%s",
+                proc.returncode,
+                (proc.stderr or b"")[:300],
+            )
+            return None
+        return dst
+    except Exception as e:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        logger.warning("[stepfun_asr] ffmpeg convert error: %s", e)
+        return None
 
 
 async def transcribe_bytes(

@@ -169,6 +169,12 @@ class RealtimeSessionBridge:
         self._last_user_transcript = ""
         self._auto_ask_done_for: str = ""
         self._suppress_followup = False
+        self._pending_response = False
+        self._response_watchdog: asyncio.Task | None = None
+        self._bus_sub_ids: list[str] = []
+        self._speak_lock = asyncio.Lock()
+        self._recent_spoken: list[str] = []
+        self.mode = "realtime"
 
     @staticmethod
     async def _noop_emit(event_type: str, data: Any) -> None:
@@ -233,10 +239,11 @@ class RealtimeSessionBridge:
             "voice": self.voice,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            # create_response=false: we drive replies after ask_agent (model alone skips tools).
+            # create_response=false: we drive replies on speech_stopped (not after ASR).
             "turn_detection": {
                 "type": "server_vad",
-                "prefix_padding_ms": 500,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 600,
                 "create_response": False,
             },
             "tools": tools,
@@ -246,11 +253,14 @@ class RealtimeSessionBridge:
             "\n\nYou are a pure voice mouthpiece for the main Agent Web agent when "
             "force-delegate is on: do not invent answers; after tool/ask results, "
             "speak them concisely. If result is [VOICE_NO_REPLY], stay silent. "
-            "When not force-delegating, you may answer greetings/time yourself or call ask_agent."
+            "When not force-delegating, you may answer greetings/time yourself or call ask_agent. "
+            "Call ask_agent for weather/news/search/facts — spoken answers arrive separately; "
+            "if tool result is [VOICE_NO_REPLY], stay silent and do not narrate the delegation."
         )
 
         await self._send({"type": "session.update", "session": session})
         self._recv_task = asyncio.create_task(self._recv_loop(), name="realtime-recv")
+        self._subscribe_agent_speech()
         await self.emit(
             "voice_realtime_status",
             {"status": "connected", "tools": len(tools), "force_ask_agent": self.force_ask_agent},
@@ -264,10 +274,13 @@ class RealtimeSessionBridge:
 
     async def stop(self) -> None:
         self._closed = True
+        self._unsubscribe_agent_speech()
         if self._auto_ask_task and not self._auto_ask_task.done():
             self._auto_ask_task.cancel()
         if self._followup_watchdog and not self._followup_watchdog.done():
             self._followup_watchdog.cancel()
+        if self._response_watchdog and not self._response_watchdog.done():
+            self._response_watchdog.cancel()
         if self._recv_task and not self._recv_task.done():
             self._recv_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -289,8 +302,143 @@ class RealtimeSessionBridge:
         if self._closed or not self._ws:
             return
         await self._send({"type": "input_audio_buffer.commit"})
-        # Do not response.create here — wait for ASR transcript, then either
-        # auto ask_agent (Agent Web) or create a short local reply for greetings.
+
+    def _subscribe_agent_speech(self) -> None:
+        """Speak every main-agent to_user_* while duplex call is live (like mouthpiece)."""
+        if self.force_ask_agent:
+            return
+        from opensquad.events import bus
+
+        self._unsubscribe_agent_speech()
+
+        def _on(data: Any) -> None:
+            if self._closed:
+                return
+            from opensquad.audio.realtime_manager import _unwrap_bus_payload, is_voice_no_reply
+
+            text = _unwrap_bus_payload(data)
+            if not text or is_voice_no_reply(text):
+                return
+            asyncio.create_task(self._speak_agent_text(text), name="realtime-agent-speak")
+
+        for evt in ("to_user_reply", "to_user_final", "to_user_end_task"):
+            sid = bus.subscribe(evt, _on, owner="realtime_duplex_speech")
+            self._bus_sub_ids.append(sid)
+
+    def _unsubscribe_agent_speech(self) -> None:
+        if not self._bus_sub_ids:
+            return
+        from opensquad.events import bus
+
+        for sid in self._bus_sub_ids:
+            with contextlib.suppress(Exception):
+                bus.unsubscribe_by_id(sid)
+        self._bus_sub_ids.clear()
+
+    async def _speak_agent_text(self, text: str) -> None:
+        """Inject agent reply into realtime conversation and request speech."""
+        from opensquad.audio.realtime_manager import sanitize_for_tts
+
+        spoken = (sanitize_for_tts(text) or text or "").strip()
+        if not spoken or self._closed:
+            return
+        # Dedup near-identical bursts (reply + final with same body).
+        key = spoken[:160]
+        if key in self._recent_spoken:
+            return
+        self._recent_spoken.append(key)
+        if len(self._recent_spoken) > 12:
+            self._recent_spoken = self._recent_spoken[-12:]
+
+        async with self._speak_lock:
+            if self._closed:
+                return
+            # Wait briefly if a model response is finishing; then speak.
+            for _ in range(40):
+                if self._closed:
+                    return
+                if not self._response_in_flight:
+                    break
+                await asyncio.sleep(0.1)
+            speak = (
+                "Speak the following answer to the user in their language. "
+                "Be concise. Do not call tools. Do not invent extra facts. "
+                "Plain speech only:\n\n"
+                f"{spoken[:2500]}"
+            )
+            with contextlib.suppress(Exception):
+                await self._send(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": speak}],
+                        },
+                    }
+                )
+            self._followup_retries = 0
+            await self._request_followup_response()
+            await self.emit("voice_realtime_status", {"status": "connected", "phase": "agent_speech"})
+
+    def _queue_or_create_response(self, *, reason: str = "") -> None:
+        """Create a model response, or queue if tools/response already in flight."""
+        if self._closed:
+            return
+        if self._response_in_flight or self._tools_busy:
+            self._pending_response = True
+            logger.warning(
+                "[RealtimeBridge] queue response.create (busy in_flight=%s tools=%s) reason=%s",
+                self._response_in_flight,
+                self._tools_busy,
+                reason,
+            )
+            return
+        asyncio.create_task(self._create_response_now(reason=reason), name="realtime-response-create")
+
+    async def _create_response_now(self, *, reason: str = "") -> None:
+        if self._closed or self._response_in_flight or self._tools_busy:
+            self._pending_response = True
+            return
+        with contextlib.suppress(Exception):
+            await self._send({"type": "response.create"})
+            self._response_in_flight = True
+            logger.warning("[RealtimeBridge] response.create reason=%s", reason or "unspecified")
+            self._arm_response_watchdog()
+
+    def _arm_response_watchdog(self) -> None:
+        if self._response_watchdog and not self._response_watchdog.done():
+            self._response_watchdog.cancel()
+        self._response_watchdog = asyncio.create_task(self._response_watchdog_loop())
+
+    def _clear_response_watchdog(self) -> None:
+        if self._response_watchdog and not self._response_watchdog.done():
+            self._response_watchdog.cancel()
+        self._response_watchdog = None
+
+    async def _response_watchdog_loop(self) -> None:
+        """If response.created/done never arrives, clear flags so the call is not stuck."""
+        try:
+            await asyncio.sleep(8.0)
+            if self._closed or not self._response_in_flight:
+                return
+            logger.error("[RealtimeBridge] response watchdog — clearing stuck in_flight")
+            with contextlib.suppress(Exception):
+                await self._send({"type": "response.cancel"})
+            self._response_in_flight = False
+            self._awaiting_followup = False
+            await self.emit("voice_realtime_status", {"status": "connected", "phase": "watchdog_reset"})
+            await self._flush_pending_response()
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_pending_response(self) -> None:
+        if not self._pending_response or self._closed:
+            return
+        if self._response_in_flight or self._tools_busy:
+            return
+        self._pending_response = False
+        await self._create_response_now(reason="flush_pending")
 
     async def _send(self, obj: dict) -> None:
         if not self._ws:
@@ -326,11 +474,9 @@ class RealtimeSessionBridge:
         }
 
     async def _request_followup_response(self) -> None:
-        """After function_call_output: clear buffer, response.create, watch for stall."""
+        """After function_call_output / agent speech: clear buffer, response.create, watch for stall."""
         with contextlib.suppress(Exception):
             await self._send({"type": "input_audio_buffer.clear"})
-        # Docs: plain {"type":"response.create"} — nested modalities sometimes ignored.
-        await asyncio.sleep(0.15)
         await self._send({"type": "response.create"})
         self._response_in_flight = True
         self._awaiting_followup = True
@@ -339,6 +485,7 @@ class RealtimeSessionBridge:
             "voice_realtime_status",
             {"status": "tool_running", "phase": "awaiting_followup"},
         )
+        self._arm_response_watchdog()
         if self._followup_watchdog and not self._followup_watchdog.done():
             self._followup_watchdog.cancel()
         self._followup_watchdog = asyncio.create_task(self._followup_watchdog_loop())
@@ -349,13 +496,16 @@ class RealtimeSessionBridge:
             if self._closed or not self._awaiting_followup:
                 return
             if self._followup_retries >= 2:
-                logger.error("[RealtimeBridge] follow-up still missing after retries — giving up")
+                logger.error("[RealtimeBridge] follow-up still missing after retries — reset to connected")
                 self._tools_busy = False
                 self._awaiting_followup = False
+                self._response_in_flight = False
+                self._clear_response_watchdog()
                 await self.emit(
                     "voice_realtime_status",
-                    {"status": "error", "error": "tool follow-up response timed out"},
+                    {"status": "connected", "phase": "followup_timeout"},
                 )
+                await self._flush_pending_response()
                 return
             self._followup_retries += 1
             logger.warning(
@@ -366,6 +516,7 @@ class RealtimeSessionBridge:
                 await self._send({"type": "input_audio_buffer.clear"})
             await self._send({"type": "response.create"})
             self._response_in_flight = True
+            self._arm_response_watchdog()
             self._followup_watchdog = asyncio.create_task(self._followup_watchdog_loop())
         except asyncio.CancelledError:
             return
@@ -384,9 +535,22 @@ class RealtimeSessionBridge:
                     self._followup_watchdog.cancel()
                 logger.warning("[RealtimeBridge] follow-up response.created OK")
             return
+        if etype == "input_audio_buffer.speech_started":
+            # Barge-in: cancel idle model speech so the next utterance is heard promptly.
+            if self._response_in_flight and not self._tools_busy and not self._awaiting_followup:
+                logger.warning("[RealtimeBridge] speech_started → cancel in-flight response")
+                with contextlib.suppress(Exception):
+                    await self._send({"type": "response.cancel"})
+            return
+        if etype == "input_audio_buffer.speech_stopped":
+            # Drive reply on VAD end — do not wait for ASR (was adding 1–10s+).
+            if not self.force_ask_agent:
+                self._queue_or_create_response(reason="speech_stopped")
+            return
         if etype in ("response.cancelled", "response.cancel"):
             was_tools = self._tools_busy
             self._response_in_flight = False
+            self._clear_response_watchdog()
             if was_tools and not self._closed and self._followup_retries < 1:
                 self._followup_retries += 1
                 logger.warning("[RealtimeBridge] follow-up cancelled while tools_busy — retrying")
@@ -396,6 +560,7 @@ class RealtimeSessionBridge:
             self._awaiting_followup = False
             self._followup_retries = 0
             logger.warning("[RealtimeBridge] response cancelled: %s", event)
+            await self._flush_pending_response()
             return
         if etype in ("response.audio.delta", "response.output_audio.delta"):
             delta = event.get("delta") or ""
@@ -422,7 +587,9 @@ class RealtimeSessionBridge:
             if text:
                 self._last_user_transcript = text
                 logger.warning("[RealtimeBridge] user transcript: %s", text[:160])
-                self._schedule_auto_ask(text)
+                # Non-force already created on speech_stopped; only force path needs transcript gate.
+                if self.force_ask_agent:
+                    self._schedule_auto_ask(text)
             return
         if etype == "response.function_call_arguments.done":
             call_id = event.get("call_id") or ""
@@ -445,6 +612,7 @@ class RealtimeSessionBridge:
             return
         if etype == "response.done":
             self._response_in_flight = False
+            self._clear_response_watchdog()
             resp = event.get("response") or {}
             status = resp.get("status")
             if status and status not in ("completed", "incomplete"):
@@ -470,12 +638,13 @@ class RealtimeSessionBridge:
                         raw_args=meta.get("arguments") or "{}",
                     )
                 if self._suppress_followup:
-                    logger.warning("[RealtimeBridge] suppress follow-up speech (VOICE_NO_REPLY)")
+                    logger.warning("[RealtimeBridge] suppress follow-up speech (VOICE_NO_REPLY / delegated)")
                     self._suppress_followup = False
                     self._tools_busy = False
                     self._awaiting_followup = False
                     self._followup_retries = 0
-                    await self.emit("voice_realtime_status", {"status": "connected", "phase": "no_reply"})
+                    await self.emit("voice_realtime_status", {"status": "connected", "phase": "delegated"})
+                    await self._flush_pending_response()
                 else:
                     await self._request_followup_response()
             else:
@@ -483,6 +652,7 @@ class RealtimeSessionBridge:
                 self._awaiting_followup = False
                 self._followup_retries = 0
                 await self.emit("voice_realtime_status", {"status": "connected"})
+                await self._flush_pending_response()
             return
         if etype == "error":
             err = event.get("error") or event
@@ -490,7 +660,10 @@ class RealtimeSessionBridge:
             self._tools_busy = False
             self._response_in_flight = False
             self._awaiting_followup = False
-            await self.emit("voice_realtime_status", {"status": "error", "error": err})
+            self._clear_response_watchdog()
+            # Stay usable — do not freeze the call on transient upstream errors.
+            await self.emit("voice_realtime_status", {"status": "connected", "phase": "upstream_error", "error": err})
+            await self._flush_pending_response()
             return
         if etype in ("session.created", "session.updated"):
             await self.emit("voice_realtime_status", {"status": etype, "session": event.get("session")})
@@ -505,15 +678,7 @@ class RealtimeSessionBridge:
             return
 
         def _local_reply() -> None:
-            if self._response_in_flight or self._tools_busy:
-                return
-
-            async def _go() -> None:
-                with contextlib.suppress(Exception):
-                    await self._send({"type": "response.create"})
-                    self._response_in_flight = True
-
-            asyncio.create_task(_go())
+            self._queue_or_create_response(reason="local_reply")
 
         # Non-force: realtime model decides whether to call ask_agent.
         if not self.force_ask_agent:
@@ -572,7 +737,10 @@ class RealtimeSessionBridge:
             {"status": "tool_running", "tool": "ask_agent", "phase": "auto_delegate"},
         )
         try:
-            answer = await self.local_tool_handler("ask_agent", {"question": text})
+            # Force path needs the spoken answer synchronously (bus speech is for duplex only).
+            from opensquad.audio.realtime_manager import ask_main_agent
+
+            answer = await ask_main_agent(text, wait_reply=True)
         except Exception as e:
             answer = f"Error: ask_agent failed: {e}"
             logger.error("[RealtimeBridge] auto ask_agent failed: %s", e)

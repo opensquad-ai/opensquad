@@ -18,6 +18,8 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
+    "e2e": "playwright test",
+    "e2e:smoke": "playwright test --grep @smoke",
     "preview": "vite preview",
     "icons:build": "python ../../../../scripts/build_icons.py",
     "electron:dev": "vite build && node scripts/compile-electron.mjs && electron dist-electron/main.cjs",
@@ -33,11 +35,13 @@
     "i18next": "^25.8.13",
     "lucide-react": "^0.563.0",
     "marked": "12.0.0",
+    "mermaid": "^11.16.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-i18next": "^16.5.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.51.0",
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

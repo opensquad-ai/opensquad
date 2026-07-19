@@ -1598,12 +1598,19 @@ export function buildTimelineFromSession(
     }
 
     // Only user and assistant messages reach here (system/hidden handled above)
+    const stableMsgId = String(
+      (m as any).message_id ||
+        (m as any).client_id ||
+        (m as any).id ||
+        ((m as any).extra && ((m as any).extra.message_id || (m as any).extra.id)) ||
+        '',
+    ).trim();
     timeline.push({
       kind: 'message',
       data: {
         role: m.role,
         content: cleanedContent,
-        message_id: (m as any).message_id || (m as any).id || ((m as any).extra && ((m as any).extra.message_id || (m as any).extra.id)) || undefined,
+        message_id: stableMsgId || undefined,
         timestamp: m.timestamp,
         type: m.type,
         images: mergedImages.length > 0 ? mergedImages : undefined,
@@ -1612,7 +1619,7 @@ export function buildTimelineFromSession(
         output_audio: rawOutputAudio.length > 0 ? rawOutputAudio : undefined,
         end_task: !!(m as any).end_task,
       },
-      _uid: genTimelineUID(),
+      _uid: stableMsgId || genTimelineUID(),
     });
   }
 

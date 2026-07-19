@@ -33,9 +33,13 @@ describe('renderFencedMarkdown', () => {
     expect(html).toContain('hljs');
   });
 
-  it('keeps plain text without fences readable', () => {
-    const html = renderFencedMarkdown('普通说明文字');
-    expect(html).toContain('普通说明文字');
+  it('emits mermaid placeholders instead of highlighted code', () => {
+    const html = renderFencedMarkdown(
+      '流程：\n\n```mermaid\nflowchart TD\n  A[User] --> B[Agent]\n```\n',
+    );
+    expect(html).toContain('ai-mermaid');
+    expect(html).toContain('data-src=');
     expect(html).not.toContain('ai-code-wrap');
+    expect(decodeURIComponent(/data-src="([^"]+)"/.exec(html)?.[1] || '')).toContain('flowchart TD');
   });
 });

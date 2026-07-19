@@ -1,0 +1,33 @@
+{
+  "name": "visualization",
+  "display_name": "Visualization",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Create interactive HTML visualizations for Agent Web. Pass self-contained HTML; classic Agent Web embeds it in the chat dialog.",
+  "author": "OpenSquad",
+  "tags": [
+    "ui",
+    "visualization",
+    "html"
+  ],
+  "tools": [
+    {
+      "name": "visualization",
+      "module": "plugin_api",
+      "level": "extended",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {}
+  },
+  "config_schema": {},
+  "contributes": {},
+  "dependencies": {
+    "pip": []
+  }
+}

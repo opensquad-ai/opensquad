@@ -42,6 +42,37 @@
 .ai-markdown .hljs-number { color: #f78c6c; }
 .ai-markdown .hljs-string { color: #c3e88d; }
 .ai-markdown .hljs-comment { color: #676e95; font-style: italic; }
+
+/* Mermaid diagrams in Agent Web replies */
+.ai-markdown .ai-mermaid {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  background: rgba(127, 127, 127, 0.06);
+}
+.ai-markdown .ai-mermaid svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+.ai-markdown .ai-mermaid-fallback {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: inherit;
+  opacity: 0.85;
+}
+.ai-markdown .ai-mermaid-error {
+  font-size: 11px;
+  color: #f87171;
+  margin-bottom: 0.35rem;
+}
 .ai-markdown .hljs-title,
 .ai-markdown .hljs-title.function_ { color: #82aaff; }
 .ai-markdown .hljs-attr { color: #ffcb6b; }
