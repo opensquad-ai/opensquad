@@ -39,6 +39,7 @@ import {
   appendWorkflowEvent,
   buildTimelineFromSession,
   foldTaskProcessSinceLastUser,
+  formatUserSkillDisplayContent,
   genTimelineUID,
   timelineHasToolEvent,
   workflowToolEventKey,
@@ -60,6 +61,7 @@ import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
 import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
 import { SessionChangesBar, COMMIT_PUSH_MESSAGE, type SessionChangesSummary } from './ai-chat/SessionChangesBar';
+import { RestoreCheckpointModal } from './ai-chat/RestoreCheckpointModal';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -957,6 +959,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [sessionChanges, setSessionChanges] = useState<SessionChangesSummary | null>(null);
   const [focusChangedNonce, setFocusChangedNonce] = useState(0);
   const [changesBusy, setChangesBusy] = useState(false);
+  const [restoreConfirm, setRestoreConfirm] = useState<{
+    entryUid: string;
+    message: ChatMessage;
+  } | null>(null);
   const [filesLiveChanges, setFilesLiveChanges] = useState<{
     nonce: number;
     additions: number;
@@ -1479,7 +1485,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const resp = await adminAPI.listSessionChanges(fsAgentName, projectRoot);
       const files = (resp.files || resp.entries || []).map((e) => ({
         name: e.name,
-        path: e.path,
+        path: (e.path || '').replace(/\\/g, '/'),
         type: e.type,
         status: e.status,
         additions: e.additions,
@@ -1488,6 +1494,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         mtime: e.mtime,
         size: e.size,
         created: e.created,
+        missing: !!(e as { missing?: boolean }).missing || e.status === 'D',
       }));
       const summary = {
         additions: resp.additions || 0,
@@ -2100,6 +2107,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         tn.includes('shell') ||
         tn.includes('cmd')
       ) {
+        // Immediate refresh + debounced follow-up (covers slow disk / meta flush)
+        void refreshSessionChangesRef.current?.();
         scheduleRefreshSessionChanges();
       }
     });
@@ -3077,7 +3086,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     if (Number.isNaN(dTs)) return false;
                     return dTs > mTs;
                   });
-                  const entry = { kind: 'message' as const, data: m, _uid: genUID() };
+                  const entry = {
+                    kind: 'message' as const,
+                    data: m,
+                    _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
+                  };
                   if (insertAt >= 0) {
                     mergedEntries.splice(insertAt, 0, entry);
                   } else {
@@ -3085,7 +3098,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   }
                   continue;
                 }
-                mergedEntries.push({ kind: 'message', data: m, _uid: genUID() });
+                mergedEntries.push({
+                  kind: 'message',
+                  data: m,
+                  _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
+                });
               }
               nextEntries = mergedEntries;
             }
@@ -3187,7 +3204,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             if (buffered.length > 0) {
               const fallbackEntries: TimelineEntry[] = [];
               for (const m of buffered) {
-                fallbackEntries.push({ kind: 'message', data: m, _uid: genUID() });
+                fallbackEntries.push({
+                  kind: 'message',
+                  data: m,
+                  _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
+                });
               }
               let merged = flushBufferedFilePushes(fallbackEntries);
               setTimeline(merged);
@@ -3204,7 +3225,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (buffered.length > 0 && !viewingHistorySessionRef.current) {
             const fallbackEntries: TimelineEntry[] = [];
             for (const m of buffered) {
-              fallbackEntries.push({ kind: 'message', data: m, _uid: genUID() });
+              fallbackEntries.push({
+                kind: 'message',
+                data: m,
+                _uid: String((m as any).message_id || (m as any).client_id || '').trim() || genUID(),
+              });
             }
             setTimeline(prev => {
               if (prev.length > 0) return prev;
@@ -3590,6 +3615,47 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         // without requiring a page refresh. Merge path keeps in-flight tools.
         compressionHydrationPendingRef.current = true;
         scheduleCurrentSessionHydration(80);
+        return;
+      }
+      if (reason === 'withdraw') {
+        // Agent truncated messages+events on disk; apply payload immediately so
+        // chat / tool-stream rewind without waiting for HTTP hydrate races.
+        setIsStreaming(false);
+        setAgentStatus('idle');
+        setTurnStartedMs(undefined);
+        clearOutboundTurnPending();
+        setStreamingText('');
+        streamingTextRef.current = '';
+        pendingHydrationMediaRef.current = [];
+        pendingHydrationWorkflowEventsRef.current = [];
+        try {
+          const msgs = Array.isArray(data.messages) ? data.messages : [];
+          const evts = Array.isArray(data.events) ? data.events : [];
+          const archivedMsgs = Array.isArray(data.archived_messages)
+            ? data.archived_messages
+            : undefined;
+          const archivedEvts = Array.isArray(data.archived_events)
+            ? data.archived_events
+            : undefined;
+          const entries = buildTimelineFromSession(
+            msgs,
+            evts,
+            archivedMsgs,
+            archivedEvts,
+          );
+          setTimeline(entries);
+          if (data.session_id) {
+            currentSessionIdRef.current = data.session_id;
+          }
+          sessionBootstrapDoneRef.current = true;
+          diskSessionLoadedRef.current = true;
+        } catch (err) {
+          console.warn('[AIChatPage] withdraw history apply failed', err);
+        }
+        // Verify against disk shortly after (Gateway cache already invalidated)
+        scheduleCurrentSessionHydration(120);
+        // Refresh file panel so withdrawn creates show as red tombstones
+        scheduleRefreshSessionChanges();
         return;
       }
       if (!sid || !currentSessionIdRef.current || sid === currentSessionIdRef.current || !sessionBootstrapDoneRef.current) {
@@ -3987,26 +4053,59 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [skillsLoading]);
 
+  const composerTextFromUserMessage = useCallback((message: ChatMessage): string => {
+    let text = formatUserSkillDisplayContent(
+      typeof message.content === 'string' ? message.content : '',
+    );
+    text = text
+      .replace(/<image>[\s\S]*?<\/image>/gi, '')
+      .replace(/\[File:[^\]]*\](?:\([^)]*\))?/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return text;
+  }, []);
+
+  const requestWithdrawUserMessage = useCallback(
+    (entryUid: string, message: ChatMessage) => {
+      if (!entryUid || message.role !== 'user' || changesBusy) return;
+      setRestoreConfirm({ entryUid, message });
+    },
+    [changesBusy],
+  );
+
   const handleWithdrawUserMessage = useCallback(
-    async (entryUid: string, message: ChatMessage) => {
-      if (!entryUid || message.role !== 'user') return;
+    async () => {
+      if (!restoreConfirm) return;
+      const { entryUid, message } = restoreConfirm;
+      if (!entryUid || message.role !== 'user') {
+        setRestoreConfirm(null);
+        return;
+      }
       if (isStreaming || agentStatus === 'working' || agentStatus === 'thinking') {
         // Still allow withdraw — stop first
         wsServiceRef.current?.stopTask();
       }
-      if (!window.confirm('恢复检查点？将还原该消息之后的文件改动，并删除之后的对话。')) {
-        return;
-      }
       const root = (agentCwd || defaultCwd || '').trim();
       const dirName = agentProfile?.dir_name || agentId;
+      // Prefer stable ids: checkpoint was created with timeline _uid (= message_id when set)
+      const checkpointId = String(message.message_id || entryUid).trim();
+      // Align with server utc_now_iso (second precision, no ms)
+      const cutTs = String(message.timestamp || '')
+        .trim()
+        .replace(/\.\d{3}Z$/, 'Z');
+      const refillText = composerTextFromUserMessage(message);
       setChangesBusy(true);
       try {
-        if (dirName && root) {
-          await adminAPI.revertSessionChanges(dirName, entryUid, root);
+        // Avoid hydration merge resurrecting withdrawn turns from WS buffers.
+        pendingHydrationMediaRef.current = [];
+        pendingHydrationWorkflowEventsRef.current = [];
+
+        if (dirName && root && checkpointId) {
+          await adminAPI.revertSessionChanges(dirName, checkpointId, root);
         }
         wsServiceRef.current?.withdrawTurn({
-          message_id: entryUid,
-          timestamp: message.timestamp || '',
+          message_id: checkpointId,
+          timestamp: cutTs,
         });
         setTimeline((prev) => {
           const idx = prev.findIndex((e) => e._uid === entryUid);
@@ -4018,16 +4117,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setIsStreaming(false);
         setAgentStatus('idle');
         setTurnStartedMs(undefined);
+        setPendingMessages([]);
+        clearOutboundTurnPending();
+        setInputText(refillText);
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (!el) return;
+          el.focus();
+          el.style.height = 'auto';
+          el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+        });
+        setRestoreConfirm(null);
         await refreshSessionChanges();
         setFocusChangedNonce(Date.now());
       } catch (err) {
         console.warn('[withdraw] failed', err);
-        window.alert('恢复检查点失败，请稍后重试');
+        window.alert(t('aiChat.restoreCheckpoint.failed'));
       } finally {
         setChangesBusy(false);
       }
     },
     [
+      restoreConfirm,
       isStreaming,
       agentStatus,
       agentCwd,
@@ -4035,6 +4146,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       agentProfile?.dir_name,
       agentId,
       refreshSessionChanges,
+      clearOutboundTurnPending,
+      composerTextFromUserMessage,
+      t,
     ],
   );
 
@@ -4122,10 +4236,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Add user message to timeline (display text without [File: ...],
     // attachments stored separately for card rendering)
     const userUid = genUID();
+    // Second-precision UTC to match server utc_now_iso(); store message_id for checkpoint/withdraw
+    const userTs = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     const userMsg: ChatMessage = {
       role: 'user',
       content: displayText,
-      timestamp: new Date().toISOString(),
+      timestamp: userTs,
+      message_id: userUid,
       images: allImages.length > 0 ? allImages : undefined,
       attachments: fileAtts.length > 0 ? fileAtts : undefined,
     };
@@ -4204,7 +4321,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       wsServiceRef.current?.switchAndReply(currentSessionId, wsText);
       setViewingHistorySession(false); // now we're in this session
     } else {
-      wsServiceRef.current?.sendMessage(wsText, allImages.length > 0 ? allImages : undefined, nonImageAttachments);
+      wsServiceRef.current?.sendMessage(
+        wsText,
+        allImages.length > 0 ? allImages : undefined,
+        nonImageAttachments,
+        { client_id: userUid },
+      );
     }
 
     if (clearInputState) {
@@ -5194,7 +5316,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   !changesBusy,
                 onWithdraw:
                   entry.data.role === 'user'
-                    ? () => void handleWithdrawUserMessage(entryKey, entry.data)
+                    ? () => requestWithdrawUserMessage(entryKey, entry.data)
                     : undefined,
               };
               return isSolo
@@ -5302,7 +5424,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           !changesBusy,
                         onWithdraw:
                           nested.data.role === 'user'
-                            ? () => void handleWithdrawUserMessage(nestedKey, nested.data)
+                            ? () => requestWithdrawUserMessage(nestedKey, nested.data)
                             : undefined,
                       };
                       return isSolo
@@ -6132,6 +6254,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         </div>
       </div>
+
+      <RestoreCheckpointModal
+        open={!!restoreConfirm}
+        busy={changesBusy}
+        onCancel={() => {
+          if (!changesBusy) setRestoreConfirm(null);
+        }}
+        onConfirm={handleWithdrawUserMessage}
+      />
 
       <ProjectFilesPanel
         isOpen={filesPanelOpen}

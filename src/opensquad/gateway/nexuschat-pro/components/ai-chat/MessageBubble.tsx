@@ -1,16 +1,17 @@
 /**
  * MessageBubble - renders a single chat message (user or assistant)
  *
- * User messages: right-aligned, primary-tinted background
- * Assistant messages: left-aligned, panel background, rendered as Markdown
+ * Classic: user = right-aligned bubble; assistant = document stream (no bubble).
+ * Solo: document-stream layout for both (user still in a full-width bubble).
  * Supports image attachments displayed inline.
  * Supports file attachments displayed as cards (structured or parsed from text).
  */
 import React, { useMemo } from 'react';
-import { User, Bot, Copy, Check, FileText, Volume2, Loader2, Square } from 'lucide-react';
+import { Copy, Check, FileText, Volume2, Loader2, Square, Undo2 } from 'lucide-react';
 import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
+import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { VoicePlayer } from './VoicePlayer';
 
 /** Structured file attachment on a ChatMessage */
@@ -45,37 +46,20 @@ export interface ChatMessage {
 interface MessageBubbleProps {
   message: ChatMessage;
   isStreaming?: boolean;
-  /** Display name shown above the bubble */
+  /** Display name shown above the message */
   senderName?: string;
-  /** Avatar URL (absolute or relative). Falls back to icon when absent. */
+  /** Kept for API compatibility (classic no longer shows avatars). */
   senderAvatar?: string | null;
-  /** classic = chat bubbles; solo = document-stream (Codex / Cursor Agent style) */
+  /** classic = user right-bubble + agent document; solo = document-stream */
   variant?: 'classic' | 'solo';
   /** DOM id for Solo user-message nav jump targets */
   anchorId?: string;
   /** Agent id for TTS (voice.tts_card). When set, speak button appears next to copy. */
   agentId?: string;
+  /** Allow withdrawing this user turn (files + conversation). */
+  canWithdraw?: boolean;
+  onWithdraw?: () => void;
 }
-
-/** Resolve an avatar URL. Prefer same-origin relative paths for /uploads. */
-function resolveAvatarUrl(avatar: string): string {
-  if (avatar.startsWith('data:') || avatar.startsWith('blob:')) {
-    return avatar;
-  }
-  if (avatar.startsWith('http://') || avatar.startsWith('https://')) {
-    try {
-      const u = new URL(avatar);
-      if (u.pathname.startsWith('/uploads/')) {
-        return `${u.pathname}${u.search}`;
-      }
-    } catch {
-      // keep absolute
-    }
-    return avatar;
-  }
-  return avatar.startsWith('/') ? avatar : `/${avatar}`;
-}
-
 
 // Pattern to match:
 // [File: filename (size) path=... type=audio|video|voice|file]
@@ -111,18 +95,20 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
   message,
   isStreaming,
   senderName,
-  senderAvatar,
+  senderAvatar: _senderAvatar,
   variant = 'classic',
   anchorId,
   agentId,
+  canWithdraw,
+  onWithdraw,
 }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = React.useState(false);
-  const [avatarError, setAvatarError] = React.useState(false);
   const [ttsState, setTtsState] = React.useState<'idle' | 'loading' | 'playing'>('idle');
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const isUser = message.role === 'user';
   const isSolo = variant === 'solo';
+  void _senderAvatar;
 
   // Parse file attachments from message text (for historical messages loaded
   // from disk that don't have structured attachments).
@@ -299,6 +285,8 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       return displayContent;
     }
   }, [displayContent, isUser]);
+
+  const mermaidRef = useMermaidHydration(renderedHtml, !isUser);
 
   const handleCopy = async () => {
     try {
@@ -489,10 +477,6 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     );
   }
 
-  // Resolved avatar URL (null when absent or broken)
-  const resolvedAvatar =
-    senderAvatar && !avatarError ? resolveAvatarUrl(senderAvatar) : null;
-
   const label = senderName || (isUser ? 'You' : 'Agent');
 
   const mediaAndBody = (
@@ -532,6 +516,7 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
       ) : (
         <>
           <div
+            ref={mermaidRef}
             className={AI_MARKDOWN_CLASS}
             dangerouslySetInnerHTML={{ __html: renderedHtml }}
           />
@@ -593,6 +578,16 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
               >
                 {copied ? <Check size={12} /> : <Copy size={12} />}
               </button>
+              {isUser && canWithdraw && onWithdraw ? (
+                <button
+                  type="button"
+                  onClick={onWithdraw}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-rose-500 p-0.5"
+                  title={t('aiChat.restoreCheckpoint.actionTitle')}
+                >
+                  <Undo2 size={12} />
+                </button>
+              ) : null}
               {agentId && (
                 <button
                   onClick={() => void handleSpeak()}
@@ -636,82 +631,84 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     );
   }
 
-  return (
-    <div className={`flex gap-2 mb-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
-      {/* Avatar */}
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden ${
-        isUser ? 'bg-primary/20' : 'bg-emerald-500/20'
-      }`}>
-        {resolvedAvatar ? (
-          <img
-            src={resolvedAvatar}
-            alt={senderName || (isUser ? 'User' : 'Agent')}
-            className="w-full h-full object-cover"
-            onError={() => setAvatarError(true)}
-          />
-        ) : isUser ? (
-          <User size={14} className="text-primary" />
-        ) : (
-          <Bot size={14} className="text-emerald-500" />
-        )}
-      </div>
+  // Classic: user = right bubble; agent = document stream (no bubble)
+  const actionRow = !isStreaming && message.content ? (
+    <div
+      className={`flex items-center gap-0.5 mt-1.5 transition-opacity ${
+        ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+      } ${isUser ? 'justify-end' : 'justify-start'}`}
+    >
+      <button
+        onClick={handleCopy}
+        className="text-textMuted hover:text-primary p-0.5 border-0 bg-transparent cursor-pointer"
+        title="Copy"
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+      {isUser && canWithdraw && onWithdraw ? (
+        <button
+          type="button"
+          onClick={onWithdraw}
+          className="text-textMuted hover:text-rose-500 p-0.5 border-0 bg-transparent cursor-pointer"
+          title={t('aiChat.restoreCheckpoint.actionTitle')}
+        >
+          <Undo2 size={13} />
+        </button>
+      ) : null}
+      {agentId && (
+        <button
+          onClick={() => void handleSpeak()}
+          disabled={ttsState === 'loading'}
+          className={`p-0.5 border-0 bg-transparent cursor-pointer ${
+            ttsState !== 'idle' ? 'text-primary' : 'text-textMuted hover:text-primary'
+          }`}
+          title={ttsState === 'playing' ? 'Stop' : 'Speak'}
+        >
+          {ttsState === 'loading' ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : ttsState === 'playing' ? (
+            <Square size={13} />
+          ) : (
+            <Volume2 size={13} />
+          )}
+        </button>
+      )}
+      {message.timestamp && (
+        <span className="text-[11px] text-textMuted/55 ml-1.5 tabular-nums">
+          {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        </span>
+      )}
+    </div>
+  ) : message.timestamp ? (
+    <div className={`text-[11px] text-textMuted/55 mt-1.5 tabular-nums ${isUser ? 'text-right' : 'text-left'}`}>
+      {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+    </div>
+  ) : null;
 
-      {/* Bubble */}
-      <div className={`max-w-[85%] sm:max-w-[80%] min-w-0 group relative ${isUser ? 'items-end' : 'items-start'}`}>
-        {senderName && (
-          <div className={`text-[11px] font-medium text-textMuted mb-0.5 ${isUser ? 'text-right' : 'text-left'}`}>
-            {senderName}
+  if (isUser) {
+    return (
+      <div className={`mb-5 w-full flex justify-end group ${isStreaming ? 'ai-streaming' : ''}`}>
+        <div className="max-w-[min(85%,36rem)] min-w-0">
+          <div className="rounded-2xl rounded-br-md bg-black/[0.04] dark:bg-white/[0.08] border border-border/50 px-4 py-2.5 text-sm leading-relaxed text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+            {mediaAndBody}
           </div>
-        )}
-
-        <div className={`rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5 text-sm leading-relaxed overflow-hidden ${
-          isUser
-            ? 'bg-chatBubbleSelf text-textMain rounded-tr-sm border border-border/60 shadow-sm'
-            : 'bg-chatBubbleOther text-textMain rounded-tl-sm border border-border'
-        } ${isStreaming ? 'ai-streaming' : ''}`}>
-          {mediaAndBody}
+          {actionRow}
         </div>
-
-        {!isStreaming && message.content && (
-          <div
-            className={`absolute -bottom-5 flex items-center gap-0.5 transition-opacity ${
-              ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-            } ${isUser ? 'left-1' : 'right-1'}`}
-          >
-            <button
-              onClick={handleCopy}
-              className="text-textMuted hover:text-primary p-0.5"
-              title="Copy"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-            </button>
-            {agentId && (
-              <button
-                onClick={() => void handleSpeak()}
-                disabled={ttsState === 'loading'}
-                className={`p-0.5 ${
-                  ttsState !== 'idle' ? 'text-primary' : 'text-textMuted hover:text-primary'
-                }`}
-                title={ttsState === 'playing' ? 'Stop' : 'Speak'}
-              >
-                {ttsState === 'loading' ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : ttsState === 'playing' ? (
-                  <Square size={12} />
-                ) : (
-                  <Volume2 size={12} />
-                )}
-              </button>
-            )}
-          </div>
-        )}
-
-        {message.timestamp && (
-          <div className={`text-[10px] text-textMuted mt-0.5 ${isUser ? 'text-right' : 'text-left'}`}>
-            {new Date(message.timestamp).toLocaleTimeString()}
-          </div>
-        )}
       </div>
+    );
+  }
+
+  return (
+    <div className={`mb-6 w-full group ${isStreaming ? 'ai-streaming' : ''}`}>
+      {(senderName || label) && (
+        <div className="text-[11px] font-medium text-textMuted/70 mb-2">
+          {senderName || label}
+        </div>
+      )}
+      <div className="text-[15px] leading-7 text-textMain w-full min-w-0">
+        {mediaAndBody}
+      </div>
+      {actionRow}
     </div>
   );
 };

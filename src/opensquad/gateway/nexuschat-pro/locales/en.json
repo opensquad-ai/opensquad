@@ -732,6 +732,14 @@
       "pathPlaceholder": "e.g. C:\\ai_test\\ds or /home/user/project",
       "browse": "Browse",
       "saving": "Saving…"
+    },
+    "restoreCheckpoint": {
+      "title": "Restore Checkpoint?",
+      "description": "This will undo file changes and remove chat history after this message. The message will be restored to the input box so you can edit and resend it.",
+      "confirm": "Continue",
+      "restoring": "Restoring…",
+      "failed": "Failed to restore checkpoint. Please try again.",
+      "actionTitle": "Restore checkpoint: undo file changes after this message and truncate later chat"
     }
   },
   "quickNote": {

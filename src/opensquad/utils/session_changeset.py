@@ -513,6 +513,8 @@ def summary(root: str) -> dict[str, Any]:
                     "mtime": float(st.get("mtime") or 0),
                     "size": int(st.get("size") or 0),
                     "created": bool((meta.get("created") or {}).get(rel)),
+                    # Missing on disk (e.g. created then withdrawn) — UI shows red tombstone
+                    "missing": not os.path.isfile(_abs(root, rel)),
                 }
             )
         _save_meta(root, meta)

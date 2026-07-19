@@ -311,6 +311,7 @@ class InputHub:
         chat_name: str = "",
         source_chat_id: str = "",
         user_id: str = "",
+        client_id: str = "",
     ):
         """Push a new command, optionally with image path list, attachments, and channel identifier.
 
@@ -379,6 +380,8 @@ class InputHub:
             data["source_chat_id"] = source_chat_id
         if user_id:
             data["user_id"] = user_id
+        if client_id:
+            data["client_id"] = str(client_id).strip()
         if fixed_images:
             data["images"] = fixed_images
         if fixed_attachments:

@@ -47,6 +47,8 @@ type TreeEntry = {
   type: 'file' | 'dir';
   size?: number | null;
   skipped?: boolean;
+  /** Present in Changes as deleted / withdrawn — not on disk */
+  missing?: boolean;
 };
 
 type ChangedEntry = {
@@ -60,6 +62,7 @@ type ChangedEntry = {
   mtime?: number;
   size?: number;
   created?: boolean;
+  missing?: boolean;
 };
 
 type ListTab = 'changed' | 'all';
@@ -522,7 +525,31 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     return parts[parts.length - 1] || rootPath;
   }, [rootPath]);
 
-  const childrenMap = useMemo(() => buildChildrenMap(treeEntries), [treeEntries]);
+  const childrenMap = useMemo(() => {
+    // Inject ghost rows for deleted/withdrawn files so 所有文件 still shows them (red)
+    const byPath = new Map<string, TreeEntry>();
+    for (const e of treeEntries) {
+      byPath.set((e.path || '').replace(/\\/g, '/'), { ...e, path: (e.path || '').replace(/\\/g, '/') });
+    }
+    for (const ch of changedEntries) {
+      const p = (ch.path || '').replace(/\\/g, '/');
+      if (!p) continue;
+      const gone = ch.missing || ch.status === 'D';
+      if (!gone) continue;
+      if (byPath.has(p)) {
+        byPath.set(p, { ...byPath.get(p)!, missing: true });
+      } else {
+        byPath.set(p, {
+          path: p,
+          name: ch.name || p.split('/').pop() || p,
+          type: 'file',
+          missing: true,
+          size: 0,
+        });
+      }
+    }
+    return buildChildrenMap([...byPath.values()]);
+  }, [treeEntries, changedEntries]);
 
   const visibleRows = useMemo(
     () => collectVisibleRows(childrenMap, expanded, search),
@@ -670,10 +697,21 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       summary: { additions: number; deletions: number; count: number },
       opts?: { notifyParent?: boolean; forceDiffRefresh?: boolean },
     ) => {
+      const normalized = files.map((f) => ({
+        ...f,
+        path: (f.path || '').replace(/\\/g, '/'),
+      }));
       const prev = changedEntriesRef.current;
-      const prevByPath = new Map(prev.map((e) => [e.path, e]));
+      const prevByPath = new Map(
+        prev.map((e) => [(e.path || '').replace(/\\/g, '/'), e] as const),
+      );
+      const nextPaths = new Set(normalized.map((f) => f.path));
+      const removedPaths: string[] = [];
+      for (const p of prevByPath.keys()) {
+        if (!nextPaths.has(p)) removedPaths.push(p);
+      }
       const staleDiffPaths: string[] = [];
-      for (const f of files) {
+      for (const f of normalized) {
         const old = prevByPath.get(f.path);
         if (
           opts?.forceDiffRefresh ||
@@ -688,40 +726,41 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           staleDiffPaths.push(f.path);
         }
       }
-      // Always re-fetch diffs for listed files so replace/write red-green stays live
-      const toPrefetch = files.map((f) => f.path);
-      const nextPaths = new Set(toPrefetch);
+      // Keep prior diffs on screen until prefetch replaces them — dropping cache
+      // early causes accordion to flash「无 diff」then reappear.
       setInlineDiffByPath((cache) => {
         const next: typeof cache = {};
         for (const [key, val] of Object.entries(cache)) {
-          if (!nextPaths.has(key)) continue;
-          // Drop anything stale or force-refreshed so UI cannot keep a prior +hi snapshot
-          if (staleDiffPaths.includes(key) || opts?.forceDiffRefresh) continue;
-          next[key] = val;
+          const k = key.replace(/\\/g, '/');
+          if (!nextPaths.has(k)) continue;
+          next[k] = val;
         }
         return next;
       });
-      for (const p of staleDiffPaths) {
+      // Disk content may have changed for stale + removed (withdraw/revert) paths
+      for (const p of [...staleDiffPaths, ...removedPaths]) {
         fileContentCacheRef.current.delete(p);
       }
       if (opts?.forceDiffRefresh) {
-        for (const p of toPrefetch) fileContentCacheRef.current.delete(p);
+        for (const p of nextPaths) fileContentCacheRef.current.delete(p);
       }
-      setChangedEntries(files);
+      setChangedEntries(normalized);
       setChangedError(null);
       if (opts?.notifyParent !== false) {
         onSessionChangesRef.current?.(summary);
       }
+      const toPrefetch = opts?.forceDiffRefresh
+        ? normalized.map((f) => f.path)
+        : staleDiffPaths;
       if (toPrefetch.length > 0) {
         void prefetchDiffs(toPrefetch);
       }
-      for (const f of files.slice(0, 40)) {
-        if (f.type === 'file' && !f.oversized) {
-          void prefetchFileContent(f.path, {
-            force: staleDiffPaths.includes(f.path) || !!opts?.forceDiffRefresh,
-          });
+      for (const f of normalized.slice(0, 40)) {
+        if (f.type === 'file' && !f.oversized && staleDiffPaths.includes(f.path)) {
+          void prefetchFileContent(f.path, { force: true });
         }
       }
+      return { staleDiffPaths, removedPaths, nextPaths };
     },
     [prefetchDiffs, prefetchFileContent],
   );
@@ -798,7 +837,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       const resp = await adminAPI.listSessionChanges(agentId, rootPath);
       const files = (resp.files || resp.entries || []).map((e) => ({
         name: e.name,
-        path: e.path,
+        path: (e.path || '').replace(/\\/g, '/'),
         type: e.type,
         status: e.status,
         additions: e.additions,
@@ -807,6 +846,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         mtime: e.mtime,
         size: e.size,
         created: e.created,
+        missing: !!(e as { missing?: boolean }).missing || e.status === 'D',
       }));
       applyChangedFiles(
         files,
@@ -897,7 +937,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   );
 
   const openFile = useCallback(
-    async (relPath: string) => {
+    async (relPath: string, opts?: { force?: boolean }) => {
       if (!agentId || !relPath || !rootPath) return;
       setShowPreview(true);
       setDiffLines(null);
@@ -908,7 +948,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setFileError(null);
       setMdRaw(false);
 
-      const cached = fileContentCacheRef.current.get(relPath);
+      const cached = !opts?.force ? fileContentCacheRef.current.get(relPath) : undefined;
       if (cached) {
         // Instant paint from cache — no loading flash
         setFileLoading(false);
@@ -983,17 +1023,42 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     [agentId, rootPath, expandToPath, prefetchFileContent],
   );
 
+  /** Show red tombstone preview for files deleted by withdraw/revert. */
+  const openUnavailable = useCallback(
+    (relPath: string) => {
+      const norm = (relPath || '').replace(/\\/g, '/');
+      setShowPreview(true);
+      setActiveFile(norm);
+      setBrowsePath(parentRel(norm));
+      expandToPath(norm);
+      setDiffLines(null);
+      setDiffMeta(null);
+      setFileContent('');
+      setImageSrc(null);
+      setFileMeta(null);
+      setFileLoading(false);
+      setMdRaw(false);
+      setFileError('该文件已因撤回被删除，无法查看内容');
+    },
+    [expandToPath],
+  );
+
   /** All-files: dirty (session-changed, not kept) → same red/green diff as 变动文件. */
   const openFileOrDiff = useCallback(
     async (relPath: string) => {
       const norm = (relPath || '').replace(/\\/g, '/');
-      if (changedByPath.has(norm) || changedByPath.has(relPath)) {
+      const ch = changedByPath.get(norm) || changedByPath.get(relPath);
+      if (ch && (ch.missing || ch.status === 'D')) {
+        openUnavailable(norm);
+        return;
+      }
+      if (ch) {
         await openDiff(relPath);
         return;
       }
-      await openFile(relPath);
+      await openFile(relPath, { force: true });
     },
-    [changedByPath, openDiff, openFile],
+    [changedByPath, openDiff, openFile, openUnavailable],
   );
 
   // Reset when root / open changes — load full tree once
@@ -1014,8 +1079,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     treeLoadedOnceRef.current = false;
     if (rootPath) {
       void loadTree({ silent: false });
-      // Always warm change stats so 所有文件 can show +/- even before opening 变动文件
-      void loadChanged({ silent: tab !== 'changed' });
+      // Silent warm of change stats (both tabs) — no full-panel flash
+      void loadChanged({ silent: true });
     } else {
       setTreeEntries([]);
       setListError(null);
@@ -1034,12 +1099,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     void openFileOrDiff(rel);
   }, [isOpen, openRequest, rootPath, openFileOrDiff]);
 
-  // Keep session-change map fresh on either tab (silent on 所有文件 for +/- badges)
+  // Keep session-change map fresh on either tab (always silent once open)
   useEffect(() => {
     if (!isOpen || !rootPath) return;
-    void loadChanged({
-      silent: tab !== 'changed' || changedEntriesRef.current.length > 0,
-    });
+    void loadChanged({ silent: true });
   }, [isOpen, rootPath, tab, loadChanged]);
   // Changes bar → switch to changed tab; soft refresh (no full-panel flash)
   useEffect(() => {
@@ -1049,32 +1112,84 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     void loadChanged({ silent: true });
   }, [focusChangedNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Parent live snapshot after tool/turn — apply in place, soft-refresh tree
+  // Parent live snapshot after tool/turn/withdraw — apply in place, soft-refresh tree
   useEffect(() => {
     if (!liveChanges || !isOpen) return;
     if (liveChanges.nonce === lastLiveNonceRef.current) return;
     lastLiveNonceRef.current = liveChanges.nonce;
-    applyChangedFiles(
-      liveChanges.files || [],
+    const files = (liveChanges.files || []).map((e) => ({
+      ...e,
+      path: (e.path || '').replace(/\\/g, '/'),
+      missing: !!(e as ChangedEntry).missing || e.status === 'D',
+    }));
+    const result = applyChangedFiles(
+      files,
       {
         additions: liveChanges.additions || 0,
         deletions: liveChanges.deletions || 0,
-        count: liveChanges.count ?? (liveChanges.files?.length || 0),
+        count: liveChanges.count ?? files.length,
       },
-      { notifyParent: false, forceDiffRefresh: true },
+      // Soft merge: only refetch diffs whose stats/mtime changed (no full-list flash)
+      { notifyParent: false, forceDiffRefresh: false },
     );
     // Keep file tree in sync without wiping fold state / spinner flash
     void loadTree({ silent: true });
-  }, [liveChanges, isOpen, applyChangedFiles, loadTree]);
+    // Expand parents of deleted ghosts so they stay visible in 所有文件
+    for (const f of files) {
+      if (f.missing || f.status === 'D') {
+        for (const a of ancestorPaths(f.path)) {
+          setExpanded((prev) => {
+            if (prev.has(a)) return prev;
+            const next = new Set(prev);
+            next.add(a);
+            return next;
+          });
+        }
+      }
+    }
+    // Refresh open preview silently when disk/diff changed
+    const active = (activeFile || '').replace(/\\/g, '/');
+    if (active && showPreview && tab === 'all') {
+      const ch = files.find((f) => f.path === active);
+      if (ch && (ch.missing || ch.status === 'D')) {
+        openUnavailable(active);
+      } else if (result?.nextPaths.has(active) || result?.staleDiffPaths.includes(active)) {
+        void openDiff(active);
+      } else if (result?.removedPaths.includes(active)) {
+        void openFile(active, { force: true });
+      }
+    }
+  }, [
+    liveChanges,
+    isOpen,
+    applyChangedFiles,
+    loadTree,
+    activeFile,
+    showPreview,
+    tab,
+    openUnavailable,
+    openDiff,
+    openFile,
+  ]);
 
   // 所有文件右侧预览：未 Keep 的改动文件同步为红绿 diff（与变动文件同源缓存）
   useEffect(() => {
     if (!isOpen || tab !== 'all' || !activeFile || !showPreview) return;
     const norm = activeFile.replace(/\\/g, '/');
-    const dirty = changedByPath.has(norm) || changedByPath.has(activeFile);
+    const ch = changedByPath.get(norm) || changedByPath.get(activeFile);
+    if (ch && (ch.missing || ch.status === 'D')) {
+      setDiffLines(null);
+      setDiffMeta(null);
+      setFileContent('');
+      setImageSrc(null);
+      setFileError('该文件已因撤回被删除，无法查看内容');
+      return;
+    }
+    const dirty = !!ch;
     if (!dirty) return;
     const cached = inlineDiffByPath[activeFile] || inlineDiffByPath[norm];
     if (!cached) return;
+    setFileError(null);
     setDiffLines(cached.lines);
     setDiffMeta({
       additions: cached.additions,
@@ -1127,7 +1242,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           deletions: resp.deletions || 0,
           count: resp.count ?? 0,
         });
-        await loadChanged();
+        await loadChanged({ silent: true });
       } catch (err: any) {
         setChangedError(err?.message || '撤回失败');
       } finally {
@@ -1801,15 +1916,18 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                   (childrenMap.get(e.path)?.length ?? 0) > 0;
                 const ch = e.type === 'file' ? changedByPath.get(e.path) : undefined;
                 const dirDirty = e.type === 'dir' && dirsWithChanges.has(e.path);
-                const nameClass = ch
-                  ? ch.status === 'A' || ch.status === 'U'
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : ch.status === 'D'
-                      ? 'text-rose-500/90'
-                      : 'text-amber-700 dark:text-amber-400'
-                  : dirDirty
-                    ? 'text-amber-700/90 dark:text-amber-400/90'
-                    : 'text-inherit';
+                const isMissing = !!(e.missing || ch?.missing || ch?.status === 'D');
+                const nameClass = isMissing
+                  ? 'text-rose-500/90 line-through decoration-rose-500/50'
+                  : ch
+                    ? ch.status === 'A' || ch.status === 'U'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : ch.status === 'D'
+                        ? 'text-rose-500/90'
+                        : 'text-amber-700 dark:text-amber-400'
+                    : dirDirty
+                      ? 'text-amber-700/90 dark:text-amber-400/90'
+                      : 'text-inherit';
                 return (
                   <div
                     key={`${e.type}:${e.path}`}
@@ -1817,10 +1935,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       selected
                         ? 'bg-black/[0.06] dark:bg-white/10 text-textMain'
                         : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
-                    }`}
+                    } ${isMissing ? 'opacity-80' : ''}`}
                     style={{ paddingLeft: 6 + e.depth * 12 }}
                     onMouseEnter={() => {
-                      if (e.type !== 'file') return;
+                      if (e.type !== 'file' || isMissing) return;
                       void prefetchFileContent(e.path);
                       if (ch) void prefetchDiffs([e.path]);
                     }}
@@ -1872,9 +1990,11 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         type="button"
                         className={`flex-1 min-w-0 ml-1 text-left truncate font-mono border-0 bg-transparent p-0 cursor-pointer ${nameClass}`}
                         title={
-                          ch
-                            ? `${e.path}  (+${ch.additions || 0} -${ch.deletions || 0})`
-                            : e.path + (e.skipped ? '（未展开深层）' : '')
+                          isMissing
+                            ? `${e.path}（已因撤回删除，无法查看）`
+                            : ch
+                              ? `${e.path}  (+${ch.additions || 0} -${ch.deletions || 0})`
+                              : e.path + (e.skipped ? '（未展开深层）' : '')
                         }
                         onClick={() => {
                           if (e.type === 'dir') {
@@ -1886,7 +2006,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         }}
                       >
                         {e.name}
-                        {e.skipped ? (
+                        {isMissing ? (
+                          <span className="ml-1 text-[9px] text-rose-400/80 no-underline">已删除</span>
+                        ) : e.skipped ? (
                           <span className="ml-1 text-[9px] opacity-50">…</span>
                         ) : null}
                       </button>

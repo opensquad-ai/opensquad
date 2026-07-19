@@ -541,6 +541,67 @@ class AgentRunner:
         else:
             logger.info("[Runner] Session history is empty")
 
+    async def _withdraw_turn(self, timestamp: str, message_id: str | None = None) -> None:
+        """Truncate session messages/events from a user turn and reload LLM context.
+
+        Must be reachable from the main loop and mid-task urgent checkpoints —
+        otherwise ``__WITHDRAW_TURN__`` is drained and discarded, leaving disk
+        history intact (UI looks truncated until refresh).
+        """
+        input_hub.clear_stop_request()
+        try:
+            from opensquad.tools.system import abort_all_tool_processes
+
+            abort_all_tool_processes("withdraw_turn")
+        except Exception:
+            logger.debug("[Runner] abort_all_tool_processes on withdraw skipped", exc_info=True)
+        try:
+            from opensquad.sub_agent_runner import job_manager
+
+            job_manager.cancel_all("withdraw_turn")
+        except Exception:
+            logger.debug("[Runner] sub-agent cancel_all on withdraw skipped", exc_info=True)
+
+        result = _get_session_manager().truncate_from_timestamp(
+            timestamp or "",
+            inclusive=True,
+            message_id=message_id or None,
+        )
+        logger.warning(
+            "[Runner] withdraw_turn ts=%s mid=%s ok=%s messages=%s events=%s cut_index=%s",
+            timestamp,
+            message_id,
+            result.get("ok"),
+            result.get("messages"),
+            result.get("events"),
+            result.get("cut_index"),
+        )
+        self._load_history()
+        sid = _get_session_manager().get_current_session_id()
+        self._turn_sid = sid
+        history_data = {
+            "messages": _get_session_manager().get_messages(),
+            "events": _get_session_manager().get_events(),
+            "session_id": sid,
+            "is_working_session": True,
+            "reason": "withdraw",
+        }
+        await bus.emit_async("history_sync", history_data)
+        await self._broadcast_token_stats()
+        await self._emit("info", "Turn withdrawn")
+        await self._emit("state", "idle")
+        now_ms = int(datetime.now().timestamp() * 1000)
+        await self._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
+
+    @staticmethod
+    def _parse_withdraw_payload(content: str) -> tuple[str, str]:
+        payload = content.split(":", 1)[1].strip() if ":" in content else ""
+        ts, mid = payload, ""
+        if "|" in payload:
+            ts, mid = payload.split("|", 1)
+            ts, mid = ts.strip(), mid.strip()
+        return ts, mid
+
     def _validate_message_sequence(self):
         """Fix message sequence for DeepSeek/OpenAI compatibility.
 
@@ -835,6 +896,7 @@ class AgentRunner:
                 self._current_chat_name = user_input_data.get("chat_name", "")
                 self._current_source_chat_id = user_input_data.get("source_chat_id", "")
                 self._current_user_id = user_input_data.get("user_id", "")
+                self._current_client_id = str(user_input_data.get("client_id") or "").strip()
                 # Update shared runtime context for tools
                 from opensquad import _runtime_ctx
 
@@ -1012,6 +1074,14 @@ class AgentRunner:
                     # Re-send turn_elapsed to close any workflow timer block that may exist in the frontend
                     _now_ms = int(datetime.now().timestamp() * 1000)
                     await self._emit("turn_elapsed", {"started_ms": _now_ms, "ended_ms": _now_ms})
+                    initial_query = None
+                    continue
+
+                # Withdraw / restore checkpoint: truncate messages+events on disk
+                if isinstance(initial_query, str) and initial_query.startswith("__WITHDRAW_TURN__:"):
+                    _ts, _mid = self._parse_withdraw_payload(initial_query)
+                    logger.info("[Runner] Command: Withdraw turn ts=%r mid=%r", _ts, _mid)
+                    await self._withdraw_turn(_ts, message_id=_mid or None)
                     initial_query = None
                     continue
 
@@ -1257,7 +1327,11 @@ class AgentRunner:
                 # Do not call self._emit('user_msg', ...)
             else:
                 # Normal user message
-                _get_session_manager().add_message("user", initial_query)
+                _cid = getattr(self, "_current_client_id", "") or ""
+                if _cid:
+                    _get_session_manager().add_message("user", initial_query, client_id=_cid, message_id=_cid)
+                else:
+                    _get_session_manager().add_message("user", initial_query)
                 self._last_user_input = initial_query
                 self._turn_sid = _get_session_manager().get_current_session_id()
                 await self._emit("user_msg", initial_query)
@@ -1380,6 +1454,20 @@ class AgentRunner:
                 # ========== Safety interrupt checkpoint 1: Before turn starts ==========
                 urgent_commands = input_hub.check_urgent_commands()
                 if urgent_commands:
+                    # Prefer withdraw over stop when both arrive in one drain —
+                    # stop alone would break the loop and drop WITHDRAW forever.
+                    urgent_commands = sorted(
+                        urgent_commands,
+                        key=lambda c: (
+                            0
+                            if str(c.get("content") or "").startswith("__WITHDRAW_TURN__:")
+                            else 1
+                            if str(c.get("content") or "") == "__NEW_SESSION__"
+                            else 99
+                            if str(c.get("content") or "") == "__STOP__"
+                            else 50
+                        ),
+                    )
                     for cmd in urgent_commands:
                         content = cmd.get("content", "")
                         if content == "__STOP__":
@@ -1388,6 +1476,17 @@ class AgentRunner:
                             task_finished = True
                             initial_query = None
                             await self._emit("status", "Task stopped by user")
+                            break
+                        elif content.startswith("__WITHDRAW_TURN__:"):
+                            _ts, _mid = self._parse_withdraw_payload(content)
+                            logger.info(
+                                "[Runner] Urgent: Withdraw turn during task ts=%r mid=%r",
+                                _ts,
+                                _mid,
+                            )
+                            await self._withdraw_turn(_ts, message_id=_mid or None)
+                            task_finished = True
+                            initial_query = None
                             break
                         elif content == "__NEW_SESSION__":
                             # Urgent session switch: start new session
@@ -2026,7 +2125,7 @@ class AgentRunner:
                     await self._emit("status", "Waiting for events...")
 
                     # Wait for pipeline events with periodic polling
-                    _wait_poll_interval = 1.0  # Check every 1 second
+                    _wait_poll_interval = 0.25  # Faster pickup of mid-call voice supplements
                     _max_wait_turns = 0  # 0 = wait indefinitely
                     _wait_turn_count = 0
 
@@ -2045,6 +2144,18 @@ class AgentRunner:
                         # Check for urgent commands
                         urgent_commands = input_hub.check_urgent_commands()
                         if urgent_commands:
+                            urgent_commands = sorted(
+                                urgent_commands,
+                                key=lambda c: (
+                                    0
+                                    if str(c.get("content") or "").startswith("__WITHDRAW_TURN__:")
+                                    else 1
+                                    if str(c.get("content") or "") == "__NEW_SESSION__"
+                                    else 99
+                                    if str(c.get("content") or "") == "__STOP__"
+                                    else 50
+                                ),
+                            )
                             for cmd in urgent_commands:
                                 content = cmd.get("content", "")
                                 if content == "__STOP__":
@@ -2053,6 +2164,17 @@ class AgentRunner:
                                     task_finished = True
                                     initial_query = None
                                     await self._emit("status", "Task stopped by user")
+                                    break
+                                elif content.startswith("__WITHDRAW_TURN__:"):
+                                    _ts, _mid = self._parse_withdraw_payload(content)
+                                    logger.info(
+                                        "[Runner] Urgent: Withdraw turn while waiting ts=%r mid=%r",
+                                        _ts,
+                                        _mid,
+                                    )
+                                    await self._withdraw_turn(_ts, message_id=_mid or None)
+                                    task_finished = True
+                                    initial_query = None
                                     break
                                 elif content == "__NEW_SESSION__":
                                     logger.info("[Runner] New session requested while waiting")
@@ -2898,6 +3020,41 @@ class AgentRunner:
                     finally:
                         reset_tool_call_context(_ctx_token)
                     task_supervisor.report_activity()
+
+                    # Mid-tool drain: voice/web supplements arriving during a long tool
+                    # should enter event_pipeline ASAP (not wait for the whole batch).
+                    try:
+                        _mid_sup = input_hub.get_all_pending()
+                    except Exception:
+                        _mid_sup = []
+                    if _mid_sup:
+                        from opensquad.event_pipeline import event_pipeline as _ep_mid
+
+                        for _item in _mid_sup:
+                            _c = (_item.get("content") or "").strip()
+                            if not _c or _c == "[wakeup-urgent-command]":
+                                continue
+                            logger.info(
+                                "[Runner] Mid-tool supplement from input_hub: %s",
+                                _c[:80],
+                            )
+                            _imgs = _item.get("images") or []
+                            if _imgs:
+                                self._current_images.extend(_imgs)
+                            _atts = _item.get("attachments") or []
+                            if _atts:
+                                self._current_attachments = list(self._current_attachments or []) + list(_atts)
+                            _ep_mid.push_nowait(
+                                source=_item.get("source", "web"),
+                                content=_c,
+                                metadata={
+                                    "sender_name": _item.get("sender_name", ""),
+                                    "channel": _item.get("channel", ""),
+                                    "source": "input_hub",
+                                    "images": _imgs,
+                                    "attachments": _atts,
+                                },
+                            )
 
                 # Collaboration board auto-sync
                 try:

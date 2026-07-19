@@ -35,6 +35,8 @@ class SessionManager:
         self.history_dir = history_dir or syscfg.workspace_data_dir("ai_his_talk")
         self.current_session_file = os.path.join(self.save_dir, "current_session.json")
         self._lock = threading.Lock()
+        # Bumped on truncate / new_session so in-flight async mutations are skipped.
+        self._mutation_gen = 0
         self.session_data = {
             "id": None,
             "title": None,
@@ -196,35 +198,33 @@ class SessionManager:
                 # Clear idle before processing (writer is busy)
                 if self._writer_idle_event:
                     self._writer_idle_event.clear()
-                # Snapshot the save_seq BEFORE applying mutations, so we can
-                # detect whether a concurrent sync save (e.g. add_event for
-                # tool_call) has already written a newer version to disk.
-                seq_before = self._save_seq
-                # Apply all queued mutations (they are lightweight closures)
-                for mutation in batch:
-                    mutation()
-                # Only save if nobody else has saved since we started the batch.
-                # If add_event('tool_call', ...) ran between seq_before and now,
-                # self._save_seq > seq_before, meaning the file on disk is already
-                # newer than what we would write — skip to avoid stale overwrite.
-                if self._save_seq > seq_before:
-                    logger.debug(
-                        "[SessionManager] Async writer raced sync save (seq %d > %d); "
-                        "re-saving in-memory state so thought/info are not lost",
-                        self._save_seq,
-                        seq_before,
-                    )
-                    # Mutations in this batch are already applied to session_data.
-                    # A concurrent sync save may have flushed a snapshot taken
-                    # before those mutations; persist the merged in-memory state.
-                    self._save_session()
-                else:
+                # Apply + save under the same lock as truncate/new_session so a
+                # withdraw cannot cut the session while this batch still holds
+                # dequeued (but unapplied) appends that would resurrect messages.
+                with self._lock:
+                    seq_before = self._save_seq
+                    for mutation in batch:
+                        try:
+                            mutation()
+                        except Exception as e:
+                            logger.warning("[SessionManager] Async mutation failed: %s", e)
+                    # Always persist current in-memory state after the batch.
+                    # If truncate already saved (seq advanced) and invalidated
+                    # guarded mutations, this re-saves the truncated snapshot.
+                    if self._save_seq > seq_before:
+                        logger.debug(
+                            "[SessionManager] Async writer raced sync save (seq %d > %d); "
+                            "re-saving in-memory state so thought/info are not lost",
+                            self._save_seq,
+                            seq_before,
+                        )
                     self._save_session()
                 # Mark idle after flush is complete
                 if self._writer_idle_event:
                     self._writer_idle_event.set()
                 logger.debug(
-                    f"[SessionManager] Async flush: {len(batch)} mutation(s), seq_before={seq_before}, seq_after={self._save_seq}"
+                    f"[SessionManager] Async flush: {len(batch)} mutation(s), "
+                    f"seq_before={seq_before}, seq_after={self._save_seq}"
                 )
 
         # Final drain on shutdown
@@ -235,9 +235,13 @@ class SessionManager:
             except queue.Empty:
                 break
         if final_batch:
-            for mutation in final_batch:
-                mutation()
-            self._save_session()
+            with self._lock:
+                for mutation in final_batch:
+                    try:
+                        mutation()
+                    except Exception as e:
+                        logger.warning("[SessionManager] Final mutation failed: %s", e)
+                self._save_session()
             if self._writer_idle_event:
                 self._writer_idle_event.set()
             logger.info(f"[SessionManager] Final drain: {len(final_batch)} mutation(s)")
@@ -246,19 +250,32 @@ class SessionManager:
         """Enqueue a lightweight mutation closure if the async writer is active;
         otherwise fall back to synchronous _save_session().
 
-        Each mutation captures a snapshot of self._save_seq at enqueue time.
-        The async writer uses this to detect whether the mutation is stale
-        (i.e. a concurrent sync save has already superseded it).
+        Each mutation captures ``_mutation_gen`` at enqueue time. After
+        truncate / new_session bumps the generation, stale closures no-op so
+        they cannot re-append withdrawn messages.
         """
+        gen = self._mutation_gen
+
+        def _guarded():
+            if self._mutation_gen != gen:
+                logger.debug(
+                    "[SessionManager] Skipping stale mutation (gen %s -> %s)",
+                    gen,
+                    self._mutation_gen,
+                )
+                return
+            mutation()
+
         if self._writer_running and self._write_queue is not None:
             try:
-                self._write_queue.put_nowait(mutation)
+                self._write_queue.put_nowait(_guarded)
                 return
             except queue.Full:
                 pass  # Fallback to sync
         # Synchronous fallback (boot phase or queue overflow)
-        mutation()
-        self._save_session()
+        with self._lock:
+            _guarded()
+            self._save_session()
 
     def add_event(self, event_type: str, event_data: dict, turn_id: int | None = None, round_id: int | None = None):
         """Add an interaction event to history.
@@ -288,9 +305,10 @@ class SessionManager:
             # Layer 3b: critical events — drain any pending async mutations first
             # to ensure the saved snapshot includes all prior add_message() calls,
             # then append the event and flush synchronously.
-            self._drain_pending_mutations_sync()
-            _mutate()
-            self._save_session()
+            with self._lock:
+                self._drain_pending_mutations_sync()
+                _mutate()
+                self._save_session()
             self._last_save_time = time.monotonic()
         else:
             self._enqueue_mutation(_mutate)
@@ -526,6 +544,7 @@ class SessionManager:
         """
         with self._lock:
             self._drain_pending_mutations_sync()
+            self._mutation_gen += 1
             # Snapshot old session data before we overwrite session_data
             old_data = copy.deepcopy(self.session_data) if self.session_data.get("messages") else None
             # 1. Write new empty session to current_session.json FIRST
@@ -944,8 +963,9 @@ class SessionManager:
         Call this before reading session data from another process/thread
         (e.g. Gateway) to guarantee the file reflects all in-memory state.
         """
-        self._drain_pending_mutations_sync()
-        self._save_session()
+        with self._lock:
+            self._drain_pending_mutations_sync()
+            self._save_session()
 
     def get_current_session_id(self) -> str:
         return self.session_data.get("id", "unknown")
@@ -996,48 +1016,137 @@ class SessionManager:
         return fallback
 
     def clear(self):
-        self._init_new_session()
-        # clear() is user-initiated; sync flush to guarantee immediate persistence
-        self._save_session()
+        with self._lock:
+            self._drain_pending_mutations_sync()
+            self._mutation_gen += 1
+            self._init_new_session()
+            # clear() is user-initiated; sync flush to guarantee immediate persistence
+            self._save_session()
 
-    def truncate_from_timestamp(self, timestamp: str, *, inclusive: bool = True) -> dict[str, Any]:
-        """Remove messages/events at or after *timestamp* (ISO). Used by withdraw.
+    def truncate_from_timestamp(
+        self,
+        timestamp: str,
+        *,
+        inclusive: bool = True,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove messages/events at or after a cut point. Used by withdraw.
 
-        Matching is string-compare on ISO timestamps (UTC lexicographic order).
+        Applies synchronously (drain + mutate + save) so subsequent
+        ``get_messages()`` / ``history_sync`` see the truncated session — not
+        the pre-withdraw snapshot.
+
+        Prefer *message_id* (client/server id) to locate the cut **index** —
+        many messages can share the same second-precision timestamp.
         """
         ts = (timestamp or "").strip()
-        if not ts:
-            return {"ok": False, "error": "timestamp required"}
+        mid = (message_id or "").strip()
+        if not ts and not mid:
+            return {"ok": False, "error": "timestamp or message_id required"}
 
-        def _keep(item_ts: Any) -> bool:
-            raw = str(item_ts or "").strip()
-            if not raw:
-                return True
-            if inclusive:
-                return raw < ts
-            return raw <= ts
+        with self._lock:
+            # Ensure prior async mutations are applied before we cut the session
+            self._drain_pending_mutations_sync()
 
-        def _mutate():
             messages = list(self.session_data.get("messages") or [])
             events = list(self.session_data.get("events") or [])
-            kept_m = [m for m in messages if _keep(m.get("timestamp"))]
-            kept_e = [e for e in events if _keep(e.get("timestamp"))]
+
+            cut_idx: int | None = None
+            cut_raw = ts
+
+            if mid:
+                for i, m in enumerate(messages):
+                    if not isinstance(m, dict):
+                        continue
+                    ids = {
+                        str(m.get("message_id") or "").strip(),
+                        str(m.get("client_id") or "").strip(),
+                        str(m.get("id") or "").strip(),
+                    }
+                    if mid in ids and mid:
+                        cut_idx = i
+                        cut_raw = str(m.get("timestamp") or "").strip() or cut_raw
+                        break
+
+            if cut_idx is not None:
+                kept_m = messages[:cut_idx] if inclusive else messages[: cut_idx + 1]
+            else:
+                if not cut_raw:
+                    return {"ok": False, "error": "could not resolve cut timestamp"}
+
+                from opensquad.time_utils import utc_from_iso
+
+                def _parse(raw: str):
+                    try:
+                        return utc_from_iso(raw)
+                    except Exception:
+                        return None
+
+                cut_dt = _parse(cut_raw)
+
+                # First message at/after cut time (avoids wiping a whole same-second burst
+                # when we cannot resolve message_id).
+                found_idx: int | None = None
+                for i, m in enumerate(messages):
+                    raw = str((m or {}).get("timestamp") or "").strip()
+                    if not raw:
+                        continue
+                    item_dt = _parse(raw)
+                    if cut_dt is not None and item_dt is not None:
+                        if item_dt >= cut_dt:
+                            found_idx = i
+                            break
+                    elif (inclusive and raw >= cut_raw) or (not inclusive and raw > cut_raw):
+                        found_idx = i
+                        break
+                if found_idx is None:
+                    kept_m = list(messages)
+                else:
+                    kept_m = messages[:found_idx] if inclusive else messages[: found_idx + 1]
+                    cut_idx = found_idx
+
+            # Events: drop at/after cut timestamp when known; else drop all after last kept msg ts
+            if cut_raw:
+                from opensquad.time_utils import utc_from_iso
+
+                def _parse2(raw: str):
+                    try:
+                        return utc_from_iso(raw)
+                    except Exception:
+                        return None
+
+                cut_dt2 = _parse2(cut_raw)
+
+                def _keep_e(item_ts: Any) -> bool:
+                    raw = str(item_ts or "").strip()
+                    if not raw:
+                        return True
+                    item_dt = _parse2(raw)
+                    if cut_dt2 is not None and item_dt is not None:
+                        return item_dt < cut_dt2 if inclusive else item_dt <= cut_dt2
+                    return (raw < cut_raw) if inclusive else (raw <= cut_raw)
+
+                kept_e = [e for e in events if _keep_e(e.get("timestamp"))]
+            else:
+                kept_e = events
+
             self.session_data["messages"] = kept_m
             self.session_data["events"] = kept_e
             self.session_data["last_updated"] = utc_now_iso()
-
-        self._enqueue_mutation(_mutate)
-        # Sync flush so UI reload sees truncated history immediately
-        try:
-            self._save_session()
-        except Exception:
-            pass
-        return {
-            "ok": True,
-            "timestamp": ts,
-            "messages": len(self.session_data.get("messages") or []),
-            "events": len(self.session_data.get("events") or []),
-        }
+            # Invalidate any async batch already dequeued before this lock.
+            self._mutation_gen += 1
+            try:
+                self._save_session()
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "timestamp": cut_raw or ts,
+                "message_id": mid or None,
+                "messages": len(kept_m),
+                "events": len(kept_e),
+                "cut_index": cut_idx,
+            }
 
     def get_stats(self) -> dict[str, Any]:
         return {

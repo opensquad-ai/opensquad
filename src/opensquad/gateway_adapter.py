@@ -271,9 +271,9 @@ class GatewayAdapter(BaseAgent):
             input_hub.request_stop()
             ts = str(cmd_data.get("timestamp") or "").strip()
             mid = str(cmd_data.get("message_id") or "").strip()
-            # Encode timestamp (ISO has no spaces); message_id is optional metadata for logs.
-            payload = ts or mid
-            if payload:
+            # Prefer ISO timestamp for cut; keep message_id for checkpoint / id lookup.
+            if ts or mid:
+                payload = f"{ts}|{mid}" if mid else ts
                 input_hub.push_urgent(f"__WITHDRAW_TURN__:{payload}", source="gateway")
                 logger.info(f"[Adapter] withdraw_turn queued ts={ts!r} message_id={mid!r}")
                 await self._try_wake_agent("urgent-command")
@@ -568,6 +568,7 @@ class GatewayAdapter(BaseAgent):
         sender_name = data.get("sender_name", "")
         chat_name = data.get("chat_name", "")
         source_chat_id = data.get("source_chat_id", "")
+        client_id = str(data.get("client_id") or data.get("message_id") or "").strip()
         self.current_user_id = user_id
 
         logger.info(
@@ -590,6 +591,7 @@ class GatewayAdapter(BaseAgent):
             chat_name=chat_name,
             source_chat_id=source_chat_id,
             user_id=user_id or "",
+            client_id=client_id,
         )
         logger.debug("[Adapter] Push to input_hub DONE")
 

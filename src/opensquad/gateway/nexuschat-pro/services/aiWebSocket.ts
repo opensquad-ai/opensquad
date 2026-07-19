@@ -171,13 +171,22 @@ class AIWebSocketService {
   }
 
   /** Send a chat message */
-  sendMessage(content: string, images?: string[], attachments?: any[]) {
+  sendMessage(
+    content: string,
+    images?: string[],
+    attachments?: any[],
+    opts?: { client_id?: string },
+  ) {
     const msg: any = { type: 'chat', content };
     if (images && images.length > 0) {
       msg.images = images;
     }
     if (attachments && attachments.length > 0) {
       msg.attachments = attachments;
+    }
+    if (opts?.client_id) {
+      msg.client_id = opts.client_id;
+      msg.message_id = opts.client_id;
     }
     this._send(msg);
   }

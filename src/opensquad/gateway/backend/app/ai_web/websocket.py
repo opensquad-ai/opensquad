@@ -225,10 +225,10 @@ class AgentWebSocketHandler:
                                     user_id,
                                     agent_id,
                                 )
-                                # Compression rewrites archived_* on disk — drop
-                                # the cached reader so the next HTTP hydrate sees
-                                # the new archive without requiring a refresh.
-                                if hdata.get("reason") == "compression":
+                                # Compression / withdraw rewrite current_session
+                                # on disk — drop the cached reader so the next
+                                # HTTP hydrate sees the truncated snapshot.
+                                if hdata.get("reason") in ("compression", "withdraw"):
                                     from .agent_sessions import invalidate_reader
 
                                     invalidate_reader(agent_id)

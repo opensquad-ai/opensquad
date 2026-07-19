@@ -732,6 +732,14 @@
       "pathPlaceholder": "例如 C:\\ai_test\\ds 或 /home/user/project",
       "browse": "浏览",
       "saving": "保存中…"
+    },
+    "restoreCheckpoint": {
+      "title": "恢复检查点？",
+      "description": "这将还原该消息之后的文件改动，并删除之后的对话。撤回的消息会填回下方输入框，便于你修改后重新发送。",
+      "confirm": "继续",
+      "restoring": "恢复中…",
+      "failed": "恢复检查点失败，请稍后重试",
+      "actionTitle": "恢复检查点：还原该消息之后的文件改动并截断后续对话"
     }
   },
   "quickNote": {

@@ -573,16 +573,68 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
 glob = find_files
 
 
-def _track_mutation(path: str, *, deleting: bool = False) -> None:
+def _session_project_root() -> str:
+    """Active session project folder (session_cwd) or permanent workspace."""
+    return _get_workspace_root()
+
+
+def _path_under_root(root: str, abs_path: str) -> bool:
+    try:
+        r = os.path.normcase(os.path.abspath(root))
+        p = os.path.normcase(os.path.abspath(abs_path))
+        return os.path.commonpath([r, p]) == r
+    except Exception:
+        return False
+
+
+def _reject_outside_session_project(resolved: str) -> str | None:
+    """When a session folder is selected, keep mutations inside it for Changes tracking.
+
+    Absolute paths under the permanent workspace / other allowed dirs used to
+    succeed while session changeset tracking no-op'd (path outside session
+    root) — UI Changes then never saw the edit.
+    """
+    try:
+        from opensquad.utils.path_utils import get_session_cwd_override
+
+        session = (get_session_cwd_override() or "").strip()
+        if not session:
+            from opensquad._context import get_current_context
+
+            ctx = get_current_context()
+            session = (ctx.session_cwd if ctx and ctx.session_cwd else "") or ""
+        if not session or not os.path.isdir(session):
+            return None
+        if _path_under_root(session, resolved):
+            return None
+        return (
+            f"Path outside session project folder ({os.path.normcase(os.path.abspath(session))}). "
+            "Use a path relative to the selected project folder so Changes can track the edit."
+        )
+    except Exception:
+        return None
+
+
+def _track_mutation(path: str, *, deleting: bool = False, prev_content: Any = ...) -> None:
     """Record session changeset baseline before mutating a project file."""
     try:
         from opensquad.utils.session_changeset import ensure_baseline_before_write, note_deleted
 
-        root = _get_workspace_root()
+        root = _session_project_root()
+        if not _path_under_root(root, path):
+            logger.warning(
+                "[filesystem] session changeset skip: path outside project root root=%s path=%s",
+                root,
+                path,
+            )
+            return
+        kwargs: dict[str, Any] = {}
+        if prev_content is not ...:
+            kwargs["prev_content"] = prev_content
         if deleting:
-            note_deleted(root, path)
+            note_deleted(root, path, **kwargs)
         else:
-            ensure_baseline_before_write(root, path)
+            ensure_baseline_before_write(root, path, **kwargs)
     except Exception:
         logger.debug("[filesystem] session changeset track failed", exc_info=True)
 
@@ -592,7 +644,10 @@ def _track_mutation_done(path: str) -> None:
     try:
         from opensquad.utils.session_changeset import note_after_mutation
 
-        note_after_mutation(_get_workspace_root(), path)
+        root = _session_project_root()
+        if not _path_under_root(root, path):
+            return
+        note_after_mutation(root, path)
     except Exception:
         logger.debug("[filesystem] session changeset note_after failed", exc_info=True)
 
@@ -605,6 +660,9 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
     resolved = _resolve_path(path)
+    outside = _reject_outside_session_project(resolved)
+    if outside:
+        return {"status": "error", "message": outside}
 
     try:
         # Capture previous body for UI red/green (+ session edit_base) before overwrite
@@ -616,8 +674,10 @@ def write_file(path: str, content: str) -> dict[str, Any]:
             except Exception:
                 prev_content = None
 
-        _track_mutation(resolved)
-        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+        _track_mutation(resolved, prev_content=prev_content)
+        parent = os.path.dirname(resolved)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         # Use plain utf-8 (no BOM). The earlier utf-8-sig writer was used to
         # handle Windows BOMs from external editors, but writing with utf-8-sig
         # *adds* a BOM to every file produced by this tool — which then breaks
@@ -724,6 +784,9 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
     resolved = _resolve_path(path)
+    outside = _reject_outside_session_project(resolved)
+    if outside:
+        return {"status": "error", "message": outside}
 
     try:
         # Use utf-8-sig to handle Windows BOM files written by write_file
@@ -746,7 +809,7 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
             new_content = content.replace(old_str, new_str, 1)
             replaced = 1
 
-        _track_mutation(resolved)
+        _track_mutation(resolved, prev_content=content)
         # See write_file() for why we use plain utf-8 here: we must not add a
         # BOM on write, otherwise subsequent json.load() calls (which read with
         # utf-8-sig but still treat the BOM as content) will see corrupted data.
@@ -782,10 +845,19 @@ def delete_file(path: str) -> dict[str, Any]:
         return {"status": "error", "message": "Security Denied: Path outside project."}
 
     resolved = _resolve_path(path)
+    outside = _reject_outside_session_project(resolved)
+    if outside:
+        return {"status": "error", "message": outside}
 
     try:
         if os.path.isfile(resolved):
-            _track_mutation(resolved, deleting=True)
+            prev_content: str | None = None
+            try:
+                with open(resolved, encoding="utf-8-sig", errors="replace") as f:
+                    prev_content = f.read()
+            except Exception:
+                prev_content = None
+            _track_mutation(resolved, deleting=True, prev_content=prev_content)
             os.remove(resolved)
             _track_mutation_done(resolved)
             return {"status": "success", "message": f"Deleted file '{resolved}'."}
