@@ -411,14 +411,16 @@ async def admin_fs_session_diff(
     name: str,
     path: str = "",
     root: str = "",
+    collapse: str = "1",
     current_user: User = Depends(get_current_user_dep),
 ):
-    """Unified diff for one session-changed file."""
+    """Unified diff for one session-changed file. collapse=0 returns full context."""
     from urllib.parse import quote
 
     q = quote(path or "", safe="")
     r = f"&root={quote(root, safe='')}" if root else ""
-    return await _proxy_get(f"/api/agents/{name}/fs/session-diff?path={q}{r}", http_only=True)
+    c = f"&collapse={quote(collapse or '1', safe='')}"
+    return await _proxy_get(f"/api/agents/{name}/fs/session-diff?path={q}{r}{c}", http_only=True)
 
 
 @admin_router.post("/admin/agents/{name}/fs/session-diffs")

@@ -528,7 +528,7 @@ def summary(root: str) -> dict[str, Any]:
         }
 
 
-def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
+def _build_diff_lines(old: str | None, new: str | None, *, collapse: bool = True) -> list[dict[str, Any]]:
     old_lines = (old or "").splitlines()
     new_lines = (new or "").splitlines()
     lines: list[dict[str, Any]] = []
@@ -537,7 +537,18 @@ def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             chunk = old_lines[i1:i2]
-            if len(chunk) > 8:
+            # Full context (All Files preview): never fold equal spans.
+            if not collapse or len(chunk) <= 8:
+                for i, text in enumerate(chunk):
+                    lines.append(
+                        {
+                            "type": "context",
+                            "old_lineno": old_no + i + 1,
+                            "new_lineno": new_no + i + 1,
+                            "text": text,
+                        }
+                    )
+            else:
                 for i, text in enumerate(chunk[:3]):
                     lines.append(
                         {
@@ -547,9 +558,25 @@ def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
                             "text": text,
                         }
                     )
-                skipped = len(chunk) - 6
-                if skipped > 0:
-                    lines.append({"type": "collapse", "count": skipped, "text": f"{skipped} unmodified lines"})
+                middle = chunk[3:-3]
+                if middle:
+                    lines.append(
+                        {
+                            "type": "collapse",
+                            "count": len(middle),
+                            "text": f"{len(middle)} unmodified lines",
+                            # Frontend can expand these into context rows.
+                            "hidden": [
+                                {
+                                    "type": "context",
+                                    "old_lineno": old_no + 3 + i + 1,
+                                    "new_lineno": new_no + 3 + i + 1,
+                                    "text": text,
+                                }
+                                for i, text in enumerate(middle)
+                            ],
+                        }
+                    )
                 for i, text in enumerate(chunk[-3:]):
                     off = len(chunk) - 3 + i
                     lines.append(
@@ -557,16 +584,6 @@ def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
                             "type": "context",
                             "old_lineno": old_no + off + 1,
                             "new_lineno": new_no + off + 1,
-                            "text": text,
-                        }
-                    )
-            else:
-                for i, text in enumerate(chunk):
-                    lines.append(
-                        {
-                            "type": "context",
-                            "old_lineno": old_no + i + 1,
-                            "new_lineno": new_no + i + 1,
                             "text": text,
                         }
                     )
@@ -590,7 +607,7 @@ def _build_diff_lines(old: str | None, new: str | None) -> list[dict[str, Any]]:
     return lines
 
 
-def _diff_file_unlocked(root: str, rel: str, meta: dict[str, Any]) -> dict[str, Any]:
+def _diff_file_unlocked(root: str, rel: str, meta: dict[str, Any], *, collapse: bool = True) -> dict[str, Any]:
     """Compute one file diff; caller must hold ``_lock``.
 
     Diff is against *edit_base* (content before the latest edit) so replacing
@@ -634,23 +651,23 @@ def _diff_file_unlocked(root: str, rel: str, meta: dict[str, Any]) -> dict[str, 
         "additions": add,
         "deletions": dele,
         "oversized": False,
-        "lines": _build_diff_lines(old, new),
+        "lines": _build_diff_lines(old, new, collapse=collapse),
     }
 
 
-def diff_file(root: str, path: str) -> dict[str, Any]:
+def diff_file(root: str, path: str, *, collapse: bool = True) -> dict[str, Any]:
     rel = _norm_rel(root, path)
     if not rel:
         return {"error": "Invalid path", "status": 400}
     with _lock:
         meta = _load_meta(root)
-        return _diff_file_unlocked(root, rel, meta)
+        return _diff_file_unlocked(root, rel, meta, collapse=collapse)
 
 
 _MAX_BATCH_DIFFS = 60
 
 
-def diff_files_batch(root: str, paths: list[str] | None = None) -> dict[str, Any]:
+def diff_files_batch(root: str, paths: list[str] | None = None, *, collapse: bool = True) -> dict[str, Any]:
     """Return diffs for many session-changed paths in one lock/IO pass."""
     with _lock:
         meta = _load_meta(root)
@@ -666,7 +683,7 @@ def diff_files_batch(root: str, paths: list[str] | None = None) -> dict[str, Any
             rels = rels[:_MAX_BATCH_DIFFS]
         files: dict[str, Any] = {}
         for rel in rels:
-            result = _diff_file_unlocked(root, rel, meta)
+            result = _diff_file_unlocked(root, rel, meta, collapse=collapse)
             if "error" in result:
                 continue
             files[rel] = result

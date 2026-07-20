@@ -656,11 +656,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 root = (qs.get("root") or [""])[0]
                 return self._handle_fs_session_changes(name, root)
             elif path.startswith("/api/agents/") and path.endswith("/fs/session-diff"):
-                # GET /api/agents/{name}/fs/session-diff?path=&root=
+                # GET /api/agents/{name}/fs/session-diff?path=&root=&collapse=0|1
                 name = path.split("/")[3]
                 rel = (qs.get("path") or [""])[0]
                 root = (qs.get("root") or [""])[0]
-                return self._handle_fs_session_diff(name, rel, root)
+                collapse_raw = (qs.get("collapse") or ["1"])[0].strip().lower()
+                collapse = collapse_raw not in ("0", "false", "no", "off")
+                return self._handle_fs_session_diff(name, rel, root, collapse=collapse)
             elif path.startswith("/api/agents/") and path.endswith("/role"):
                 name = path.split("/")[3]
                 return self._handle_get_role(name)
@@ -1381,14 +1383,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             result["agent"] = name
             return self._send_json(result)
 
-        def _handle_fs_session_diff(self, name: str, rel_path: str = "", root_override: str = ""):
-            """GET /api/agents/{name}/fs/session-diff?path=&root= — baseline vs disk diff."""
+        def _handle_fs_session_diff(
+            self, name: str, rel_path: str = "", root_override: str = "", *, collapse: bool = True
+        ):
+            """GET /api/agents/{name}/fs/session-diff?path=&root=&collapse= — baseline vs disk diff."""
             root, err = self._agent_fs_root(name, root_override)
             if err is not None:
                 return err
             from opensquad.utils.session_changeset import diff_file
 
-            result = diff_file(root, rel_path)
+            result = diff_file(root, rel_path, collapse=collapse)
             if "error" in result:
                 return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
             result["agent"] = name
@@ -1405,7 +1409,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             paths = None
             if isinstance(raw_paths, list):
                 paths = [str(p) for p in raw_paths if str(p or "").strip()]
-            result = diff_files_batch(root, paths)
+            collapse = body.get("collapse", True)
+            if isinstance(collapse, str):
+                collapse = collapse.strip().lower() not in ("0", "false", "no", "off")
+            else:
+                collapse = bool(collapse)
+            result = diff_files_batch(root, paths, collapse=collapse)
             result["agent"] = name
             return self._send_json(result)
 

@@ -973,10 +973,16 @@ export const adminAPI = {
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes${r}`);
   },
 
-  /** 单文件 baseline vs 磁盘 unified diff */
-  getSessionDiff: async (name: string, path: string, root?: string) => {
+  /** 单文件 baseline vs 磁盘 unified diff；collapse=false 返回完整 context（所有文件预览） */
+  getSessionDiff: async (
+    name: string,
+    path: string,
+    root?: string,
+    opts?: { collapse?: boolean },
+  ) => {
     const q = encodeURIComponent(path || '');
     const r = root ? `&root=${encodeURIComponent(root)}` : '';
+    const c = opts?.collapse === false ? '&collapse=0' : '';
     return apiRequest<{
       agent: string;
       path: string;
@@ -990,12 +996,23 @@ export const adminAPI = {
         new_lineno?: number | null;
         text: string;
         count?: number;
+        hidden?: Array<{
+          type?: 'context';
+          old_lineno?: number | null;
+          new_lineno?: number | null;
+          text: string;
+        }>;
       }>;
-    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diff?path=${q}${r}`);
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diff?path=${q}${r}${c}`);
   },
 
   /** 批量预取 session diffs（变动列表后台预热） */
-  getSessionDiffsBatch: async (name: string, paths?: string[], root?: string) => {
+  getSessionDiffsBatch: async (
+    name: string,
+    paths?: string[],
+    root?: string,
+    opts?: { collapse?: boolean },
+  ) => {
     return apiRequest<{
       agent: string;
       count: number;
@@ -1013,12 +1030,22 @@ export const adminAPI = {
             new_lineno?: number | null;
             text: string;
             count?: number;
+            hidden?: Array<{
+              type?: 'context';
+              old_lineno?: number | null;
+              new_lineno?: number | null;
+              text: string;
+            }>;
           }>;
         }
       >;
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-diffs`, {
       method: 'POST',
-      body: JSON.stringify({ paths: paths || null, root }),
+      body: JSON.stringify({
+        paths: paths || null,
+        root,
+        collapse: opts?.collapse !== false,
+      }),
     });
   },
 

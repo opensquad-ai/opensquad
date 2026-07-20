@@ -34,6 +34,7 @@ import { adminAPI } from '../../services/api';
 import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
+import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 
 export type ProjectFileOpenRequest = {
   /** Path relative to project root, or absolute under root */
@@ -454,6 +455,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   useEffect(() => {
     inlineDiffByPathRef.current = inlineDiffByPath;
   }, [inlineDiffByPath]);
+  /** Uncollapsed diffs for All Files preview — click hits this first (no loading flash). */
+  const fullDiffByPathRef = useRef<
+    Record<string, { lines: DiffLine[]; additions: number; deletions: number; oversized?: boolean }>
+  >({});
   const expandedChangedRef = useRef(expandedChanged);
   useEffect(() => {
     expandedChangedRef.current = expandedChanged;
@@ -483,6 +488,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const filePrefetchInflightRef = useRef<Set<string>>(new Set());
 
   const [activeFile, setActiveFile] = useState<string | null>(null);
+  const activeFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
   const [fileContent, setFileContent] = useState<string>('');
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [fileMeta, setFileMeta] = useState<{ truncated?: boolean; path?: string; size?: number; kind?: 'text' | 'image' } | null>(null);
@@ -590,6 +599,41 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     setNewMenuOpen(false);
   }, []);
 
+  const enrichDiffLines = useCallback(
+    async (relPath: string, lines: DiffLine[]): Promise<DiffLine[]> => {
+      const needsFill = lines.some(
+        (l) => l.type === 'collapse' && !(Array.isArray(l.hidden) && l.hidden.length > 0),
+      );
+      if (!needsFill) return lines;
+      let content = fileContentCacheRef.current.get(relPath)?.content;
+      if (content == null && agentId && rootPath) {
+        try {
+          const resp = await adminAPI.readProjectFile(agentId, relPath, rootPath);
+          content = resp.content ?? '';
+          const entry = {
+            content,
+            imageSrc: null as string | null,
+            meta: {
+              truncated: resp.truncated,
+              path: resp.path || relPath,
+              size: resp.size,
+              kind: 'text' as const,
+            },
+            at: Date.now(),
+          };
+          fileContentCacheRef.current.set(relPath, entry);
+          if (resp.path && resp.path !== relPath) {
+            fileContentCacheRef.current.set(resp.path, entry);
+          }
+        } catch {
+          return lines;
+        }
+      }
+      return fillDiffCollapseHidden(lines, content) as DiffLine[];
+    },
+    [agentId, rootPath],
+  );
+
   const prefetchDiffs = useCallback(
     async (paths: string[], opts?: { showLoadingFor?: string[] }) => {
       if (!agentId || !rootPath || paths.length === 0) return;
@@ -602,32 +646,48 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         const resp = await adminAPI.getSessionDiffsBatch(agentId, unique, rootPath);
         if (gen !== prefetchGenRef.current) return;
         const batch = resp.files || {};
-        setInlineDiffByPath((prev) => {
-          const next = { ...prev };
-          for (const [p, d] of Object.entries(batch)) {
-            next[p] = {
-              lines: d.lines || [],
-              additions: d.additions || 0,
-              deletions: d.deletions || 0,
-              oversized: d.oversized,
-            };
-          }
-          return next;
-        });
+        const nextEntries: Record<
+          string,
+          { lines: DiffLine[]; additions: number; deletions: number; oversized?: boolean }
+        > = {};
+        for (const [p, d] of Object.entries(batch)) {
+          const lines = await enrichDiffLines(p, (d.lines || []) as DiffLine[]);
+          if (gen !== prefetchGenRef.current) return;
+          nextEntries[p] = {
+            lines,
+            additions: d.additions || 0,
+            deletions: d.deletions || 0,
+            oversized: d.oversized,
+          };
+          // Pre-build All Files full preview so click paints instantly.
+          fullDiffByPathRef.current[p] = {
+            lines: flattenDiffCollapses(lines) as DiffLine[],
+            additions: d.additions || 0,
+            deletions: d.deletions || 0,
+            oversized: d.oversized,
+          };
+        }
+        setInlineDiffByPath((prev) => ({ ...prev, ...nextEntries }));
       } catch {
         // Fallback: fetch individually for paths that still need UI (expanded)
         for (const p of loadingSet) {
           try {
             const d = await adminAPI.getSessionDiff(agentId, p, rootPath);
             if (gen !== prefetchGenRef.current) return;
+            const lines = await enrichDiffLines(p, (d.lines || []) as DiffLine[]);
+            const entry = {
+              lines,
+              additions: d.additions || 0,
+              deletions: d.deletions || 0,
+              oversized: d.oversized,
+            };
+            fullDiffByPathRef.current[p] = {
+              ...entry,
+              lines: flattenDiffCollapses(lines) as DiffLine[],
+            };
             setInlineDiffByPath((prev) => ({
               ...prev,
-              [p]: {
-                lines: d.lines || [],
-                additions: d.additions || 0,
-                deletions: d.deletions || 0,
-                oversized: d.oversized,
-              },
+              [p]: entry,
             }));
           } catch {
             /* ignore */
@@ -639,7 +699,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         }
       }
     },
-    [agentId, rootPath],
+    [agentId, rootPath, enrichDiffLines],
   );
 
   const prefetchFileContent = useCallback(
@@ -740,9 +800,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       // Disk content may have changed for stale + removed (withdraw/revert) paths
       for (const p of [...staleDiffPaths, ...removedPaths]) {
         fileContentCacheRef.current.delete(p);
+        delete fullDiffByPathRef.current[p];
       }
       if (opts?.forceDiffRefresh) {
-        for (const p of nextPaths) fileContentCacheRef.current.delete(p);
+        for (const p of nextPaths) {
+          fileContentCacheRef.current.delete(p);
+          delete fullDiffByPathRef.current[p];
+        }
       }
       setChangedEntries(normalized);
       setChangedError(null);
@@ -791,6 +855,19 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           .filter((e) => e.type === 'dir' && !e.path.includes('/'))
           .map((e) => e.path);
         setExpanded(new Set(topDirs.slice(0, 12)));
+        // Warm root + first-level files so All Files clicks paint from cache.
+        const warmDirs = new Set(topDirs.slice(0, 12));
+        const warmFiles = entries
+          .filter((e) => {
+            if (e.type !== 'file') return false;
+            if (!e.path.includes('/')) return true;
+            const parent = e.path.slice(0, e.path.lastIndexOf('/'));
+            return warmDirs.has(parent);
+          })
+          .slice(0, 50);
+        for (const f of warmFiles) {
+          void prefetchFileContent(f.path);
+        }
       }
       treeLoadedOnceRef.current = true;
     } catch (err: any) {
@@ -804,16 +881,28 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setListLoading(false);
       setTreeRefreshing(false);
     }
-  }, [agentId, rootPath]);
+  }, [agentId, rootPath, prefetchFileContent]);
 
   const toggleExpand = useCallback((dirPath: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(dirPath)) next.delete(dirPath);
-      else next.add(dirPath);
+      else {
+        next.add(dirPath);
+        // Prefetch children when opening a folder
+        const kids = treeEntriesRef.current.filter(
+          (e) =>
+            e.type === 'file' &&
+            e.path.startsWith(dirPath ? `${dirPath}/` : '') &&
+            !e.path.slice(dirPath.length + (dirPath ? 1 : 0)).includes('/'),
+        );
+        for (const f of kids.slice(0, 40)) {
+          void prefetchFileContent(f.path);
+        }
+      }
       return next;
     });
-  }, []);
+  }, [prefetchFileContent]);
 
   const expandToPath = useCallback((relPath: string) => {
     const ancestors = ancestorPaths(relPath);
@@ -883,57 +972,163 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const openDiff = useCallback(
     async (relPath: string) => {
       if (!agentId || !relPath || !rootPath) return;
+      const norm = relPath.replace(/\\/g, '/');
+      activeFileRef.current = relPath;
       setActiveFile(relPath);
       setBrowsePath(parentRel(relPath));
       expandToPath(relPath);
       setShowPreview(true);
       setFileError(null);
-      setFileContent('');
+      setMdRaw(false);
       setImageSrc(null);
       setFileMeta(null);
-      setMdRaw(false);
 
-      const cached =
-        inlineDiffByPathRef.current[relPath] ||
-        inlineDiffByPathRef.current[relPath.replace(/\\/g, '/')];
-      if (cached) {
+      const paintFull = (
+        lines: DiffLine[],
+        meta: { additions: number; deletions: number; oversized?: boolean; status?: string },
+      ) => {
         setFileLoading(false);
-        setDiffLines(cached.lines);
-        setDiffMeta({
-          additions: cached.additions,
-          deletions: cached.deletions,
-          oversized: cached.oversized,
+        setFileContent('');
+        setDiffLines(lines);
+        setDiffMeta(meta);
+      };
+
+      // 1) Instant: pre-flattened All Files cache
+      const fullCached =
+        fullDiffByPathRef.current[relPath] ||
+        fullDiffByPathRef.current[norm];
+      // 2) Instant: collapsed prefetch → enrich+flatten from file content
+      const inlineCached =
+        inlineDiffByPathRef.current[relPath] ||
+        inlineDiffByPathRef.current[norm];
+      let painted = false;
+      if (fullCached?.lines?.length) {
+        paintFull(fullCached.lines, {
+          additions: fullCached.additions,
+          deletions: fullCached.deletions,
+          oversized: fullCached.oversized,
         });
-        return;
+        painted = true;
+      } else if (inlineCached?.lines?.length) {
+        const content =
+          fileContentCacheRef.current.get(relPath)?.content ??
+          fileContentCacheRef.current.get(norm)?.content;
+        const enriched = (
+          content
+            ? fillDiffCollapseHidden(inlineCached.lines, content)
+            : inlineCached.lines
+        ) as DiffLine[];
+        const flat = flattenDiffCollapses(enriched) as DiffLine[];
+        if (flat.length) {
+          fullDiffByPathRef.current[relPath] = {
+            lines: flat,
+            additions: inlineCached.additions,
+            deletions: inlineCached.deletions,
+            oversized: inlineCached.oversized,
+          };
+          paintFull(flat, {
+            additions: inlineCached.additions,
+            deletions: inlineCached.deletions,
+            oversized: inlineCached.oversized,
+          });
+          painted = true;
+        }
+      }
+      if (!painted) {
+        // Instant: plain file content while full diff loads
+        const fileCached =
+          fileContentCacheRef.current.get(relPath) ||
+          fileContentCacheRef.current.get(norm);
+        if (fileCached) {
+          setFileLoading(false);
+          setDiffLines(null);
+          setDiffMeta(null);
+          setFileContent(fileCached.content);
+          setImageSrc(fileCached.imageSrc);
+          setFileMeta(fileCached.meta);
+          setActiveFile(fileCached.meta.path || relPath);
+          painted = true;
+        }
       }
 
-      setFileLoading(true);
-      setDiffLines(null);
-      setDiffMeta(null);
+      if (!painted) {
+        setFileLoading(true);
+        setDiffLines(null);
+        setDiffMeta(null);
+        setFileContent('');
+      }
+
+      // Soft refresh: uncollapsed server diff (upgrade preview without flash)
       try {
-        const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath);
+        const resp = await adminAPI.getSessionDiff(agentId, relPath, rootPath, {
+          collapse: false,
+        });
+        let lines = await enrichDiffLines(relPath, (resp.lines || []) as DiffLine[]);
+        lines = flattenDiffCollapses(lines) as DiffLine[];
         const entry = {
-          lines: resp.lines || [],
+          lines,
           additions: resp.additions || 0,
           deletions: resp.deletions || 0,
           oversized: resp.oversized,
         };
-        setInlineDiffByPath((prev) => ({ ...prev, [relPath]: entry }));
-        setDiffLines(entry.lines);
-        setDiffMeta({
-          additions: entry.additions,
-          deletions: entry.deletions,
-          oversized: entry.oversized,
-          status: resp.status,
-        });
-        setActiveFile(resp.path || relPath);
+        fullDiffByPathRef.current[relPath] = entry;
+        if (resp.path && resp.path !== relPath) {
+          fullDiffByPathRef.current[resp.path] = entry;
+        }
+        const cur = (activeFileRef.current || '').replace(/\\/g, '/');
+        if (cur === norm || cur === relPath || cur === resp.path) {
+          setActiveFile(resp.path || relPath);
+          paintFull(entry.lines, {
+            additions: entry.additions,
+            deletions: entry.deletions,
+            oversized: entry.oversized,
+            status: resp.status,
+          });
+        }
       } catch (err: any) {
-        setFileError(err?.message || '无法加载 diff');
+        if (!painted) {
+          setFileError(err?.message || '无法加载 diff');
+        }
       } finally {
-        setFileLoading(false);
+        if (!painted || (activeFileRef.current || '').replace(/\\/g, '/') === norm) {
+          setFileLoading(false);
+        }
       }
     },
-    [agentId, rootPath, expandToPath],
+    [agentId, rootPath, expandToPath, enrichDiffLines],
+  );
+
+  const expandInlineDiffFull = useCallback(
+    async (relPath: string) => {
+      if (!agentId || !rootPath || !relPath) return;
+      try {
+        const d = await adminAPI.getSessionDiff(agentId, relPath, rootPath, {
+          collapse: false,
+        });
+        let lines = await enrichDiffLines(relPath, (d.lines || []) as DiffLine[]);
+        lines = flattenDiffCollapses(lines) as DiffLine[];
+        const entry = {
+          lines,
+          additions: d.additions || 0,
+          deletions: d.deletions || 0,
+          oversized: d.oversized,
+        };
+        fullDiffByPathRef.current[relPath] = entry;
+        setInlineDiffByPath((prev) => ({ ...prev, [relPath]: entry }));
+        if (activeFile === relPath || activeFile === d.path) {
+          setDiffLines(entry.lines);
+          setDiffMeta({
+            additions: entry.additions,
+            deletions: entry.deletions,
+            oversized: entry.oversized,
+            status: d.status,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    },
+    [agentId, rootPath, activeFile, enrichDiffLines],
   );
 
   const openFile = useCallback(
@@ -942,6 +1137,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setShowPreview(true);
       setDiffLines(null);
       setDiffMeta(null);
+      activeFileRef.current = relPath;
       setActiveFile(relPath);
       setBrowsePath(parentRel(relPath));
       expandToPath(relPath);
@@ -1842,6 +2038,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                             additions={inline.additions}
                             deletions={inline.deletions}
                             oversized={inline.oversized}
+                            onExpandWithoutHidden={() => {
+                              void expandInlineDiffFull(e.path);
+                            }}
                           />
                         ) : isDiffLoading ? (
                           <div className="flex items-center gap-2 px-3 py-2 text-[10px] text-textMuted/70">
@@ -2208,6 +2407,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     additions={diffMeta?.additions}
                     deletions={diffMeta?.deletions}
                     oversized={diffMeta?.oversized}
+                    collapseUnmodified={false}
                   />
                 ) : imageSrc ? (
                   <ImagePreview
