@@ -214,6 +214,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.style.setProperty('--color-primary', palette.primary);
   root.style.setProperty('--color-bg', palette.bg);
   root.style.setProperty('--color-rail', palette.rail);
+  root.style.setProperty('--color-nest', palette.nest);
   root.style.setProperty('--color-stage', palette.stage);
   root.style.setProperty('--color-panel', palette.panel);
   root.style.setProperty('--color-border', palette.border);

@@ -176,10 +176,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
 
     const navBtn = (view: string | string[]) => {
         const isActive = Array.isArray(view) ? view.includes(currentView || '') : currentView === view;
-        return `flex items-center md:justify-center justify-start gap-3 w-full px-4 md:px-1 py-2.5 md:py-1.5 rounded-lg transition-all duration-200 ${
+        return `flex items-center md:justify-center justify-start gap-3 w-full px-4 md:px-1 py-2.5 md:py-1.5 rounded-lg border border-transparent transition-all duration-soft ease-soft ${
             isActive
-                ? 'text-primary bg-primary/10'
-                : 'text-textMuted hover:bg-primary/10 hover:text-primary'
+                ? 'text-primary bg-panel border-border/60 shadow-sm'
+                : 'text-textMuted/80 hover:bg-black/[0.07] dark:hover:bg-white/[0.08] hover:text-textMuted'
         }`;
     };
 
@@ -208,37 +208,29 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
     };
 
     const gradientId = `os-logo-grad-${Math.random().toString(36).substr(2, 9)}`;
-    const filterId = `os-node-glow-${Math.random().toString(36).substr(2, 9)}`;
 
     return (
-        <div className="w-full md:w-[52px] bg-bgLight h-full flex flex-col md:items-center items-start py-3 z-30 shadow-lg border-r border-border shrink-0">
-            <div className="w-8 h-8 mb-3 flex-shrink-0 transition-transform hover:scale-105 cursor-pointer ml-4 md:ml-0">
-                <svg viewBox="0 0 100 100" className="w-full h-full drop-shadow-md">
+        <div className="w-full md:w-[52px] bg-rail h-full flex flex-col md:items-center items-start py-3 z-30 shrink-0 md:border-0 border-r border-border">
+            <div className="w-8 h-8 mb-3 flex-shrink-0 transition-transform duration-soft ease-soft hover:scale-[1.03] cursor-pointer ml-4 md:ml-0">
+                <svg viewBox="0 0 100 100" className="w-full h-full">
                     <defs>
                         <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stopColor="#4338ca" />
-                            <stop offset="100%" stopColor="#7c3aed" />
+                            <stop offset="0%" stopColor="var(--color-primary)" stopOpacity="0.92" />
+                            <stop offset="100%" stopColor="var(--color-primary)" stopOpacity="0.72" />
                         </linearGradient>
-                        <filter id={filterId} x="-50%" y="-50%" width="200%" height="200%">
-                            <feGaussianBlur stdDeviation="2" result="blur" />
-                            <feMerge>
-                                <feMergeNode in="blur" />
-                                <feMergeNode in="SourceGraphic" />
-                            </feMerge>
-                        </filter>
                     </defs>
-                    <rect width="100" height="100" rx="22" ry="22" fill={`url(#${gradientId})`} />
+                    <rect width="100" height="100" rx="18" ry="18" fill={`url(#${gradientId})`} />
                     <ellipse cx="50" cy="18" rx="30" ry="15" fill="white" fillOpacity="0.08" />
                     <line x1="30" y1="30" x2="70" y2="30" stroke="white" strokeWidth="2" strokeOpacity="0.35" strokeLinecap="round" />
                     <line x1="30" y1="30" x2="30" y2="70" stroke="white" strokeWidth="2" strokeOpacity="0.35" strokeLinecap="round" />
                     <line x1="70" y1="30" x2="70" y2="70" stroke="white" strokeWidth="2" strokeOpacity="0.35" strokeLinecap="round" />
                     <line x1="30" y1="70" x2="70" y2="70" stroke="white" strokeWidth="2" strokeOpacity="0.35" strokeLinecap="round" />
-                    <line x1="30" y1="30" x2="70" y2="70" stroke="white" strokeWidth="1.5" strokeOpacity="0.20" strokeLinecap="round" />
-                    <line x1="70" y1="30" x2="30" y2="70" stroke="white" strokeWidth="1.5" strokeOpacity="0.20" strokeLinecap="round" />
-                    <circle cx="30" cy="30" r="8" fill="white" filter={`url(#${filterId})`} />
-                    <circle cx="70" cy="30" r="8" fill="white" filter={`url(#${filterId})`} />
-                    <circle cx="30" cy="70" r="8" fill="white" filter={`url(#${filterId})`} />
-                    <circle cx="70" cy="70" r="8" fill="white" filter={`url(#${filterId})`} />
+                    <line x1="30" y1="30" x2="70" y2="70" stroke="white" strokeWidth="1.5" strokeOpacity="0.18" strokeLinecap="round" />
+                    <line x1="70" y1="30" x2="30" y2="70" stroke="white" strokeWidth="1.5" strokeOpacity="0.18" strokeLinecap="round" />
+                    <circle cx="30" cy="30" r="7" fill="white" fillOpacity="0.95" />
+                    <circle cx="70" cy="30" r="7" fill="white" fillOpacity="0.95" />
+                    <circle cx="30" cy="70" r="7" fill="white" fillOpacity="0.95" />
+                    <circle cx="70" cy="70" r="7" fill="white" fillOpacity="0.95" />
                 </svg>
             </div>
 

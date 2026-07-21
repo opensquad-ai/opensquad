@@ -251,117 +251,115 @@ function toProjectRelative(rootPath: string, filePath: string): string {
   return p.replace(/^\.\//, '');
 }
 
-/** Per-extension icon + color for the file list. */
-type ExtStyle = { Icon: React.ComponentType<{ size?: number; className?: string }>; color: string; label?: string };
+/** Per-extension icon + muted color for the file list (fig-2 soft grey hierarchy). */
+type ExtStyle = { Icon: React.ComponentType<{ size?: number; className?: string; strokeWidth?: number }>; color: string; label?: string };
 
 const EXT_STYLE: Record<string, ExtStyle> = {
-  // Languages
-  py: { Icon: FileCode2, color: 'text-yellow-500', label: 'PY' },
-  pyw: { Icon: FileCode2, color: 'text-yellow-500', label: 'PY' },
-  js: { Icon: FileCode2, color: 'text-amber-400', label: 'JS' },
-  mjs: { Icon: FileCode2, color: 'text-amber-400', label: 'JS' },
-  cjs: { Icon: FileCode2, color: 'text-amber-400', label: 'JS' },
-  jsx: { Icon: FileCode2, color: 'text-sky-400', label: 'JSX' },
-  ts: { Icon: FileCode2, color: 'text-blue-500', label: 'TS' },
-  tsx: { Icon: FileCode2, color: 'text-blue-400', label: 'TSX' },
-  vue: { Icon: FileCode2, color: 'text-emerald-500', label: 'VUE' },
-  svelte: { Icon: FileCode2, color: 'text-orange-500', label: 'SV' },
-  go: { Icon: FileCode2, color: 'text-cyan-500', label: 'GO' },
-  rs: { Icon: FileCode2, color: 'text-orange-600', label: 'RS' },
-  java: { Icon: FileCode2, color: 'text-red-500', label: 'JV' },
-  kt: { Icon: FileCode2, color: 'text-purple-400', label: 'KT' },
-  c: { Icon: FileCode2, color: 'text-blue-600', label: 'C' },
-  h: { Icon: FileCode2, color: 'text-blue-600', label: 'H' },
-  cpp: { Icon: FileCode2, color: 'text-blue-500', label: 'C++' },
-  hpp: { Icon: FileCode2, color: 'text-blue-500', label: 'H++' },
-  cs: { Icon: FileCode2, color: 'text-violet-500', label: 'CS' },
-  rb: { Icon: FileCode2, color: 'text-red-400', label: 'RB' },
-  php: { Icon: FileCode2, color: 'text-indigo-400', label: 'PHP' },
-  swift: { Icon: FileCode2, color: 'text-orange-400', label: 'SW' },
+  // Languages — soft / low-chroma
+  py: { Icon: FileCode2, color: 'text-yellow-700/45 dark:text-yellow-400/40', label: 'PY' },
+  pyw: { Icon: FileCode2, color: 'text-yellow-700/45 dark:text-yellow-400/40', label: 'PY' },
+  js: { Icon: FileCode2, color: 'text-amber-700/45 dark:text-amber-400/40', label: 'JS' },
+  mjs: { Icon: FileCode2, color: 'text-amber-700/45 dark:text-amber-400/40', label: 'JS' },
+  cjs: { Icon: FileCode2, color: 'text-amber-700/45 dark:text-amber-400/40', label: 'JS' },
+  jsx: { Icon: FileCode2, color: 'text-sky-700/45 dark:text-sky-400/40', label: 'JSX' },
+  ts: { Icon: FileCode2, color: 'text-blue-700/45 dark:text-blue-400/40', label: 'TS' },
+  tsx: { Icon: FileCode2, color: 'text-blue-700/40 dark:text-blue-400/40', label: 'TSX' },
+  vue: { Icon: FileCode2, color: 'text-emerald-700/45 dark:text-emerald-400/40', label: 'VUE' },
+  svelte: { Icon: FileCode2, color: 'text-orange-700/40 dark:text-orange-400/35', label: 'SV' },
+  go: { Icon: FileCode2, color: 'text-cyan-700/45 dark:text-cyan-400/40', label: 'GO' },
+  rs: { Icon: FileCode2, color: 'text-orange-800/40 dark:text-orange-400/35', label: 'RS' },
+  java: { Icon: FileCode2, color: 'text-red-700/40 dark:text-red-400/35', label: 'JV' },
+  kt: { Icon: FileCode2, color: 'text-purple-700/40 dark:text-purple-400/35', label: 'KT' },
+  c: { Icon: FileCode2, color: 'text-blue-800/40 dark:text-blue-400/40', label: 'C' },
+  h: { Icon: FileCode2, color: 'text-blue-800/40 dark:text-blue-400/40', label: 'H' },
+  cpp: { Icon: FileCode2, color: 'text-blue-700/40 dark:text-blue-400/40', label: 'C++' },
+  hpp: { Icon: FileCode2, color: 'text-blue-700/40 dark:text-blue-400/40', label: 'H++' },
+  cs: { Icon: FileCode2, color: 'text-violet-700/40 dark:text-violet-400/35', label: 'CS' },
+  rb: { Icon: FileCode2, color: 'text-red-700/40 dark:text-red-400/35', label: 'RB' },
+  php: { Icon: FileCode2, color: 'text-indigo-700/40 dark:text-indigo-400/35', label: 'PHP' },
+  swift: { Icon: FileCode2, color: 'text-orange-700/40 dark:text-orange-400/35', label: 'SW' },
   // Markup / style
-  html: { Icon: FileType2, color: 'text-orange-500', label: 'HTML' },
-  htm: { Icon: FileType2, color: 'text-orange-500', label: 'HTML' },
-  css: { Icon: FileType2, color: 'text-sky-500', label: 'CSS' },
-  scss: { Icon: FileType2, color: 'text-pink-400', label: 'SCSS' },
-  less: { Icon: FileType2, color: 'text-indigo-400', label: 'LESS' },
-  xml: { Icon: FileType2, color: 'text-orange-400', label: 'XML' },
-  svg: { Icon: ImageIcon, color: 'text-pink-400', label: 'SVG' },
+  html: { Icon: FileType2, color: 'text-orange-700/40 dark:text-orange-400/35', label: 'HTML' },
+  htm: { Icon: FileType2, color: 'text-orange-700/40 dark:text-orange-400/35', label: 'HTML' },
+  css: { Icon: FileType2, color: 'text-sky-700/45 dark:text-sky-400/40', label: 'CSS' },
+  scss: { Icon: FileType2, color: 'text-pink-700/40 dark:text-pink-400/35', label: 'SCSS' },
+  less: { Icon: FileType2, color: 'text-indigo-700/40 dark:text-indigo-400/35', label: 'LESS' },
+  xml: { Icon: FileType2, color: 'text-orange-700/40 dark:text-orange-400/35', label: 'XML' },
+  svg: { Icon: ImageIcon, color: 'text-pink-700/40 dark:text-pink-400/35', label: 'SVG' },
   // Data / config
-  json: { Icon: FileJson, color: 'text-amber-500', label: 'JSON' },
-  jsonc: { Icon: FileJson, color: 'text-amber-500', label: 'JSON' },
-  yaml: { Icon: Settings2, color: 'text-rose-400', label: 'YML' },
-  yml: { Icon: Settings2, color: 'text-rose-400', label: 'YML' },
-  toml: { Icon: Settings2, color: 'text-slate-400', label: 'TOML' },
-  ini: { Icon: Settings2, color: 'text-slate-400', label: 'INI' },
-  cfg: { Icon: Settings2, color: 'text-slate-400', label: 'CFG' },
-  conf: { Icon: Settings2, color: 'text-slate-400', label: 'CFG' },
-  env: { Icon: Settings2, color: 'text-lime-500', label: 'ENV' },
+  json: { Icon: FileJson, color: 'text-amber-700/45 dark:text-amber-400/40', label: 'JSON' },
+  jsonc: { Icon: FileJson, color: 'text-amber-700/45 dark:text-amber-400/40', label: 'JSON' },
+  yaml: { Icon: Settings2, color: 'text-rose-700/40 dark:text-rose-400/35', label: 'YML' },
+  yml: { Icon: Settings2, color: 'text-rose-700/40 dark:text-rose-400/35', label: 'YML' },
+  toml: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'TOML' },
+  ini: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'INI' },
+  cfg: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'CFG' },
+  conf: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'CFG' },
+  env: { Icon: Settings2, color: 'text-lime-700/40 dark:text-lime-400/35', label: 'ENV' },
   // Docs
-  md: { Icon: FileText, color: 'text-sky-500', label: 'MD' },
-  mdx: { Icon: FileText, color: 'text-sky-500', label: 'MDX' },
-  markdown: { Icon: FileText, color: 'text-sky-500', label: 'MD' },
-  txt: { Icon: FileText, color: 'text-textMuted', label: 'TXT' },
-  csv: { Icon: FileText, color: 'text-emerald-400', label: 'CSV' },
-  log: { Icon: FileText, color: 'text-textMuted', label: 'LOG' },
+  md: { Icon: FileText, color: 'text-sky-700/45 dark:text-sky-400/40', label: 'MD' },
+  mdx: { Icon: FileText, color: 'text-sky-700/45 dark:text-sky-400/40', label: 'MDX' },
+  markdown: { Icon: FileText, color: 'text-sky-700/45 dark:text-sky-400/40', label: 'MD' },
+  txt: { Icon: FileText, color: 'text-neutral-400 dark:text-neutral-500', label: 'TXT' },
+  csv: { Icon: FileText, color: 'text-emerald-700/40 dark:text-emerald-400/35', label: 'CSV' },
+  log: { Icon: FileText, color: 'text-neutral-400 dark:text-neutral-500', label: 'LOG' },
   // Shell
-  sh: { Icon: Terminal, color: 'text-green-500', label: 'SH' },
-  bash: { Icon: Terminal, color: 'text-green-500', label: 'SH' },
-  zsh: { Icon: Terminal, color: 'text-green-500', label: 'SH' },
-  ps1: { Icon: Terminal, color: 'text-blue-400', label: 'PS' },
-  bat: { Icon: Terminal, color: 'text-textMuted', label: 'BAT' },
-  cmd: { Icon: Terminal, color: 'text-textMuted', label: 'CMD' },
+  sh: { Icon: Terminal, color: 'text-green-700/40 dark:text-green-400/35', label: 'SH' },
+  bash: { Icon: Terminal, color: 'text-green-700/40 dark:text-green-400/35', label: 'SH' },
+  zsh: { Icon: Terminal, color: 'text-green-700/40 dark:text-green-400/35', label: 'SH' },
+  ps1: { Icon: Terminal, color: 'text-blue-700/40 dark:text-blue-400/35', label: 'PS' },
+  bat: { Icon: Terminal, color: 'text-neutral-400 dark:text-neutral-500', label: 'BAT' },
+  cmd: { Icon: Terminal, color: 'text-neutral-400 dark:text-neutral-500', label: 'CMD' },
   // Images
-  png: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'PNG' },
-  jpg: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'JPG' },
-  jpeg: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'JPG' },
-  gif: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'GIF' },
-  webp: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'WEBP' },
-  bmp: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'BMP' },
-  ico: { Icon: ImageIcon, color: 'text-fuchsia-400', label: 'ICO' },
+  png: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'PNG' },
+  jpg: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'JPG' },
+  jpeg: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'JPG' },
+  gif: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'GIF' },
+  webp: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'WEBP' },
+  bmp: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'BMP' },
+  ico: { Icon: ImageIcon, color: 'text-fuchsia-700/35 dark:text-fuchsia-400/30', label: 'ICO' },
   // Dotfiles
-  gitignore: { Icon: Settings2, color: 'text-orange-400', label: 'GIT' },
-  dockerfile: { Icon: Settings2, color: 'text-blue-400', label: 'DKR' },
-  editorconfig: { Icon: Settings2, color: 'text-textMuted', label: 'EDC' },
+  gitignore: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'GIT' },
+  dockerfile: { Icon: Settings2, color: 'text-blue-700/40 dark:text-blue-400/35', label: 'DKR' },
+  editorconfig: { Icon: Settings2, color: 'text-neutral-400 dark:text-neutral-500', label: 'EDC' },
 };
 
 const FileTypeIcon: React.FC<{ name: string; type: 'file' | 'dir' }> = ({ name, type }) => {
   if (type === 'dir') {
-    return <Folder size={14} className="text-amber-500 shrink-0" strokeWidth={1.75} />;
+    return <Folder size={14} className="text-neutral-400 dark:text-neutral-500 shrink-0" strokeWidth={1.5} />;
   }
   const ext = fileExt(name);
-  // HTML: orange badge (reference style)
   if (ext === 'html' || ext === 'htm') {
     return (
       <span
-        className="shrink-0 inline-flex items-center justify-center min-w-[26px] h-[14px] px-0.5 rounded-[3px] text-[8px] font-bold leading-none tracking-tight text-orange-500"
-        style={{ backgroundColor: 'color-mix(in srgb, #f97316 16%, transparent)' }}
+        className="shrink-0 inline-flex items-center justify-center min-w-[26px] h-[14px] px-0.5 rounded-[3px] text-[8px] font-semibold leading-none tracking-tight text-orange-700/45 dark:text-orange-400/40"
+        style={{ backgroundColor: 'color-mix(in srgb, #c2410c 8%, transparent)' }}
         title={ext}
       >
         HTML
       </span>
     );
   }
-  // MD: blue FileText
   if (ext === 'md' || ext === 'mdx' || ext === 'markdown') {
-    return <FileText size={14} className="text-sky-500 shrink-0" strokeWidth={1.75} />;
+    return <FileText size={14} className="text-sky-700/45 dark:text-sky-400/40 shrink-0" strokeWidth={1.5} />;
   }
   const style = EXT_STYLE[ext] || EXT_STYLE[name.toLowerCase()];
   if (!style) {
-    return <FileIcon size={14} className="text-sky-500/70 shrink-0" strokeWidth={1.75} />;
+    return <FileIcon size={14} className="text-neutral-400 dark:text-neutral-500 shrink-0" strokeWidth={1.5} />;
   }
   const { Icon, color, label } = style;
   if (label && label.length <= 4) {
     return (
       <span
-        className={`shrink-0 inline-flex items-center justify-center min-w-[22px] h-[13px] px-0.5 rounded-[2px] text-[8px] font-bold leading-none tracking-tight ${color}`}
-        style={{ backgroundColor: 'color-mix(in srgb, currentColor 14%, transparent)' }}
+        className={`shrink-0 inline-flex items-center justify-center min-w-[22px] h-[13px] px-0.5 rounded-[2px] text-[8px] font-semibold leading-none tracking-tight ${color}`}
+        style={{ backgroundColor: 'color-mix(in srgb, currentColor 8%, transparent)' }}
         title={ext || name}
       >
         {label}
       </span>
     );
   }
-  return <Icon size={14} className={`${color} shrink-0`} />;
+  return <Icon size={14} className={`${color} shrink-0`} strokeWidth={1.5} />;
 };
 
 const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName, content }) => {
@@ -1862,7 +1860,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索文件…"
               autoFocus
-              className="w-full pl-7 pr-2 py-1 text-[11px] rounded-md bg-black/[0.03] dark:bg-white/5 border border-border/60 text-textMain placeholder:text-textMuted/50 outline-none focus:border-primary/40"
+              className="w-full pl-7 pr-2 py-1 text-[11px] rounded-md bg-black/[0.03] dark:bg-white/5 border border-border/60 text-textMuted placeholder:text-textMuted/40 outline-none focus:border-primary/40"
             />
           </div>
         </div>
@@ -1887,13 +1885,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             }}
             className={`px-2.5 py-1.5 text-[11px] relative transition-colors ${
               tab === t.id
-                ? 'text-textMain font-medium'
-                : 'text-textMuted hover:text-textMain'
+                ? 'text-textMuted font-medium'
+                : 'text-textMuted/55 hover:text-textMuted'
             }`}
           >
             {t.label}
             {tab === t.id ? (
-              <span className="absolute left-2 right-2 bottom-0 h-[2px] rounded-full bg-primary" />
+              <span className="absolute left-2 right-2 bottom-0 h-[1.5px] rounded-full bg-textMuted/35" />
             ) : null}
           </button>
         ))}
@@ -1901,7 +1899,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
 
       {/* Tree status — all-files only */}
       {tab === 'all' && rootPath && !listLoading ? (
-        <div className="px-2.5 py-1 border-b border-border/50 text-[10px] text-textMuted/70 flex-shrink-0 flex items-center gap-2">
+        <div className="px-2.5 py-1 border-b border-border/40 text-[10px] text-textMuted/50 flex-shrink-0 flex items-center gap-2">
           <span>
             已加载 {treeCount.toLocaleString()} 项
             {treeTruncated ? '（已达上限 10000）' : ''}
@@ -1913,7 +1911,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       ) : null}
 
       <div
-        className="flex-1 min-h-0 overflow-y-auto py-0.5"
+        className="flex-1 min-h-0 mx-2 mb-2 overflow-y-auto py-1 os-depth-nest"
         data-fs-empty="1"
         onContextMenu={(e) => {
           if ((e.target as HTMLElement).dataset?.fsEmpty === '1') {
@@ -1951,10 +1949,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 return (
                   <div key={`ch:${e.path}`} className="border-b border-border/40 last:border-b-0">
                     <div
-                      className={`group flex items-center gap-1 px-1.5 py-[5px] text-[11px] ${
+                      className={`group os-interactive flex items-center gap-1 px-1.5 py-[5px] text-[11px] rounded-md mx-0.5 ${
                         isOpenRow
-                          ? 'bg-black/[0.05] dark:bg-white/[0.08] text-textMain'
-                          : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+                          ? 'is-active text-textMuted'
+                          : 'text-textMuted/70'
                       }`}
                       onMouseEnter={() => {
                         if (!inlineDiffByPathRef.current[e.path]) {
@@ -1968,7 +1966,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     >
                       <button
                         type="button"
-                        className="p-0.5 rounded shrink-0 text-textMuted hover:text-textMain"
+                        className="p-0.5 rounded shrink-0 text-textMuted/50 hover:text-textMuted"
                         title={isOpenRow ? '折叠' : '展开 diff'}
                         onClick={() => void toggleChangedExpand(e.path)}
                       >
@@ -1984,10 +1982,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         <span
                           className={
                             e.status === 'A' || e.status === 'U'
-                              ? 'text-emerald-600 dark:text-emerald-400'
+                              ? 'text-emerald-700/70 dark:text-emerald-400/65'
                               : e.status === 'D'
-                                ? 'text-rose-500/90'
-                                : 'text-textMain'
+                                ? 'text-rose-500/70'
+                                : 'text-textMuted/80'
                           }
                         >
                           {e.path}
@@ -1995,10 +1993,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       </button>
                       <span className="flex items-center gap-1 shrink-0 text-[10px] tabular-nums font-mono">
                         {(e.additions || 0) > 0 ? (
-                          <span className="text-emerald-500">+{e.additions}</span>
+                          <span className="text-emerald-600/70">+{e.additions}</span>
                         ) : null}
                         {(e.deletions || 0) > 0 ? (
-                          <span className="text-rose-400">-{e.deletions}</span>
+                          <span className="text-rose-500/60">-{e.deletions}</span>
                         ) : (
                           (e.additions || 0) === 0 ? (
                             <span className="text-textMuted/50">+0</span>
@@ -2090,9 +2088,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 style={{ paddingLeft: 8 + ((createUnder || '').split('/').filter(Boolean).length) * 12 }}
               >
                 {inlineCreate.kind === 'dir' ? (
-                  <Folder size={14} className="text-amber-500 shrink-0" strokeWidth={1.75} />
+                  <Folder size={14} className="text-neutral-400 dark:text-neutral-500 shrink-0" strokeWidth={1.5} />
                 ) : (
-                  <FileText size={14} className="text-sky-500 shrink-0" strokeWidth={1.75} />
+                  <FileText size={14} className="text-neutral-400 dark:text-neutral-500 shrink-0" strokeWidth={1.5} />
                 )}
                 <input
                   ref={createInputRef}
@@ -2137,23 +2135,23 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 const dirDirty = e.type === 'dir' && dirsWithChanges.has(e.path);
                 const isMissing = !!(e.missing || ch?.missing || ch?.status === 'D');
                 const nameClass = isMissing
-                  ? 'text-rose-500/90 line-through decoration-rose-500/50'
+                  ? 'text-rose-500/70 line-through decoration-rose-500/40'
                   : ch
                     ? ch.status === 'A' || ch.status === 'U'
-                      ? 'text-emerald-600 dark:text-emerald-400'
+                      ? 'text-emerald-700/70 dark:text-emerald-400/65'
                       : ch.status === 'D'
-                        ? 'text-rose-500/90'
-                        : 'text-amber-700 dark:text-amber-400'
+                        ? 'text-rose-500/70'
+                        : 'text-amber-800/55 dark:text-amber-400/55'
                     : dirDirty
-                      ? 'text-amber-700/90 dark:text-amber-400/90'
+                      ? 'text-amber-800/50 dark:text-amber-400/50'
                       : 'text-inherit';
                 return (
                   <div
                     key={`${e.type}:${e.path}`}
-                    className={`group relative flex items-center gap-0.5 pr-1 py-[4px] text-[11px] ${
+                    className={`group os-interactive relative flex items-center gap-0.5 pr-1 py-[4px] text-[11px] rounded-md mx-0.5 ${
                       selected
-                        ? 'bg-black/[0.06] dark:bg-white/10 text-textMain'
-                        : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+                        ? 'is-active text-textMuted'
+                        : 'text-textMuted/70'
                     } ${isMissing ? 'opacity-80' : ''}`}
                     style={{ paddingLeft: 6 + e.depth * 12 }}
                     onMouseEnter={() => {
@@ -2168,7 +2166,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     {e.type === 'dir' ? (
                       <button
                         type="button"
-                        className="w-4 h-4 flex items-center justify-center shrink-0 border-0 bg-transparent p-0 cursor-pointer text-textMuted/70"
+                        className="w-4 h-4 flex items-center justify-center shrink-0 border-0 bg-transparent p-0 cursor-pointer text-textMuted/45"
                         onClick={() => {
                           if (e.skipped) return;
                           toggleExpand(e.path);
@@ -2235,10 +2233,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     {ch && !isRenaming ? (
                       <span className="flex items-center gap-1 shrink-0 text-[10px] tabular-nums font-mono mr-0.5">
                         {(ch.additions || 0) > 0 ? (
-                          <span className="text-emerald-500">+{ch.additions}</span>
+                          <span className="text-emerald-600/70">+{ch.additions}</span>
                         ) : null}
                         {(ch.deletions || 0) > 0 ? (
-                          <span className="text-rose-400">-{ch.deletions}</span>
+                          <span className="text-rose-500/60">-{ch.deletions}</span>
                         ) : (ch.additions || 0) === 0 ? (
                           <span className="text-textMuted/50">+0</span>
                         ) : null}
@@ -2269,7 +2267,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   return (
     <div
       ref={panelRef}
-      className="relative h-full border-l border-border bg-rail flex flex-col flex-shrink-0 min-w-[200px]"
+      className="relative h-full os-depth-card flex flex-col flex-shrink-0 min-w-[200px]"
       style={{ width }}
     >
       {/* Left drag handle (widen by dragging left) */}
@@ -2286,8 +2284,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       <div className="px-2.5 pt-2.5 pb-1.5 border-b border-border box-border flex-shrink-0">
         <div className="flex items-start gap-1">
           <div className="flex-1 min-w-0">
-            <div className="text-[13px] font-semibold text-textMain leading-tight">工作区文件</div>
-            <div className="text-[10px] text-textMuted truncate mt-0.5" title={rootPath || undefined}>
+            <div className="text-[13px] font-medium text-textMuted leading-tight">工作区文件</div>
+            <div className="text-[10px] text-textMuted/55 truncate mt-0.5" title={rootPath || undefined}>
               {projectLabel}
             </div>
           </div>
@@ -2322,7 +2320,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
                     onClick={() => void startCreate('file')}
                   >
-                    <FileText size={12} className="text-sky-500" />
+                    <FileText size={12} className="text-neutral-400" />
                     新建文档
                   </button>
                   <button
@@ -2330,7 +2328,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
                     onClick={() => void startCreate('dir')}
                   >
-                    <FolderPlus size={12} className="text-amber-500" />
+                    <FolderPlus size={12} className="text-neutral-400" />
                     新建文件夹
                   </button>
                 </div>
@@ -2390,13 +2388,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               <>
                 <div className="px-2 py-1.5 border-b border-border flex-shrink-0 flex items-start gap-2">
                   <div className="min-w-0 flex-1">
-                    <div className="text-[11px] font-medium text-textMain font-mono truncate flex items-center gap-1.5">
+                    <div className="text-[11px] font-medium text-textMuted font-mono truncate flex items-center gap-1.5">
                       <FileTypeIcon name={basename(activeFile)} type="file" />
                       <span className="truncate">{basename(activeFile)}</span>
                       {diffMeta ? (
                         <span className="text-[10px] font-normal tabular-nums shrink-0">
-                          <span className="text-emerald-500">+{diffMeta.additions}</span>{' '}
-                          <span className="text-rose-400">-{diffMeta.deletions}</span>
+                          <span className="text-emerald-600/70">+{diffMeta.additions}</span>{' '}
+                          <span className="text-rose-500/60">-{diffMeta.deletions}</span>
                         </span>
                       ) : null}
                     </div>

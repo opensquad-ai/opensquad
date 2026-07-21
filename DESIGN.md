@@ -27,19 +27,20 @@ Driven by `nexuschat-pro/utils/themeEngine.ts` → CSS vars:
 
 | Token | Role |
 |-------|------|
-| `--color-bg` | App wash (equals rail in light hierarchy) |
-| `--color-rail` | Side rails: session list + workspace files (deeper) |
-| `--color-stage` | Center stage: Agent Web chat (lighter) |
-| `--color-panel` | Raised surfaces, modals, bubbles |
+| `--color-bg` | Page wash (equals stage behind cards) |
+| `--color-rail` | Side cards: session list + workspace (deeper) |
+| `--color-nest` | Nested wells inside rails (deeper still) |
+| `--color-stage` | Page wash behind rounded layout cards |
+| `--color-panel` | Raised center / selected pills (lightest) |
 | `--color-border` | Hairline separators |
 | `--color-primary` | Accent only (active, CTA, focus) |
 | `--color-text-main` / `--color-text-muted` | Body / secondary |
 
-**Agent Web hierarchy (luxury reference):** sides use `bg-rail` (slightly deeper / more saturated); center chat uses `bg-stage` (lighter). Never hardcode near-white (`#f8f8f8`) for workspace.
+**Depth hierarchy:** stage (page) → rail (cards) → nest (inner wells) → hover darken. Prefer `os-depth-card` / `os-depth-panel` / `os-depth-nest` / `os-interactive`. Never hardcode near-white (`#f8f8f8`) for workspace.
 
 Never hardcode purple/indigo gradients for brand chrome. Prefer `var(--color-primary)`.
 
-Use Tailwind: `bg-rail`, `bg-stage`, `bg-bgLight`, `bg-panel`, `border-border`, `text-textMain`, `text-textMuted`, `bg-primary`.
+Use Tailwind: `bg-rail`, `bg-nest`, `bg-stage`, `bg-bgLight`, `bg-panel`, `border-border`, `text-textMain`, `text-textMuted`, `bg-primary`.
 
 ## Typography
 

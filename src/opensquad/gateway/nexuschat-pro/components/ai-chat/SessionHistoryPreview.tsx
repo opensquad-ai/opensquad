@@ -63,7 +63,7 @@ export const SessionHistoryPreview: React.FC<SessionHistoryPreviewProps> = ({
   }, [lines.length, loading]);
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col bg-stage">
+    <div className="flex-1 min-h-0 flex flex-col bg-panel">
       <div
         className="px-3 py-1.5 border-b border-border/60 text-[11px] text-textMuted shrink-0 cursor-pointer"
         onClick={onActivate}

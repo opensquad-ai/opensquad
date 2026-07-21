@@ -6210,7 +6210,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
       </div>
 
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden gap-2 p-2 pt-1.5 bg-stage">
       {/* Session Sidebar */}
       <SessionSidebar
         agentId={agentId}
@@ -6255,11 +6255,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       )}
 
       {activeWorkspace && workspaceLayout ? (
-        <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
         {/* Shared agent chrome — outside panes so focus never swaps it left/right */}
-        <div className="flex-shrink-0 bg-stage border-b border-border">
+        <div className="flex-shrink-0 bg-panel border-b border-border/70">
 {/* Header — same h-11+border-b box as SessionSidebar so the split-line aligns */}
-        <div className="flex-shrink-0 bg-stage">
+        <div className="flex-shrink-0 bg-panel">
           <div className="h-11 px-2 sm:px-3 border-b border-border box-border flex items-center">
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-1 sm:gap-2 min-w-0">
@@ -6876,7 +6876,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               └────────────────────────────────────────────────────────────┘
         */}
         {pendingMessages.length > 0 && (
-          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-stage flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-panel flex-shrink-0">
             <div className={soloColumnClass}>
             <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
               {/* Header bar: status + actions */}
@@ -6984,7 +6984,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Inline Plan Panel (docked above input) */}
         {showPlanViewer && (
-          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-stage flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-panel flex-shrink-0">
             <div className={soloColumnClass}>
             {effectivePlanSteps.length > 0 ? (
               <PlanBlock
@@ -7025,7 +7025,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
       )}
 
-      <div className="flex-shrink-0 h-full min-w-[200px]">
+      {filesPanelOpen ? (
+      <div className="flex-shrink-0 h-full min-w-[200px] flex">
       <ProjectFilesPanel
         isOpen={filesPanelOpen}
         onClose={() => {
@@ -7055,6 +7056,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenFile={handleOpenFileInTab}
       />
       </div>
+      ) : null}
       </div>
 
       <RestoreCheckpointModal

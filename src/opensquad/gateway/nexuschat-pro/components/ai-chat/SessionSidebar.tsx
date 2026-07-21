@@ -367,10 +367,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return (
       <div
         key={rowKey}
-        className={`group flex items-center gap-1 px-2 py-1.5 mx-1 rounded-md cursor-pointer text-[12px] ${
+        className={`group os-interactive flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer text-[12px] ${
           isCurrent
-            ? 'bg-primary/15 text-textMain'
-            : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+            ? 'is-active text-textMuted'
+            : 'text-textMuted/75'
         }`}
         onClick={() => {
           if (editing || confirming) return;
@@ -533,7 +533,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   return (
     <div
-      className="relative flex-shrink-0 h-full flex flex-col bg-rail border-r border-border"
+      className="relative flex-shrink-0 h-full flex flex-col os-depth-card"
       style={{ width: sidebarWidth }}
     >
       <div
@@ -553,7 +553,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         >
           <ChevronLeft size={14} className="text-textMuted" />
         </button>
-        <div className="flex-1 min-w-0 text-[12px] font-semibold text-textMain truncate">会话</div>
+        <div className="flex-1 min-w-0 text-[12px] font-medium text-textMuted truncate">会话</div>
         <button
           type="button"
           onClick={() => void loadSessions()}
@@ -569,7 +569,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           type="button"
           disabled={!workspaceRootPath}
           onClick={() => onNewSession(workspaceRootPath || undefined)}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMain hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive disabled:opacity-40"
         >
           <MessageSquarePlus size={14} className="text-sky-500" />
           新建对话
@@ -577,14 +577,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         <button
           type="button"
           onClick={() => onOpenSkills?.()}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMain hover:bg-black/[0.05] dark:hover:bg-white/10"
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive"
         >
-          <Sparkles size={14} className="text-violet-500" />
+          <Sparkles size={14} className="text-textMuted/70" />
           Skill 库
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto py-1">
+      <div className="flex-1 min-h-0 overflow-y-auto mx-1.5 mb-1.5 py-1 os-depth-nest">
         {!workspaceRootPath ? (
           <div className="px-3 py-4 text-[11px] text-textMuted/70">请先打开或创建一个工作区</div>
         ) : error ? (

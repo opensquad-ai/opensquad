@@ -76,7 +76,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
       data-pane-focused={focused ? '1' : '0'}
     >
       <div
-        className="flex-shrink-0 border-b border-border bg-stage"
+        className="flex-shrink-0 border-b border-border/70 bg-panel"
         onMouseDown={(e) => {
           e.stopPropagation();
           handlers.onFocus();

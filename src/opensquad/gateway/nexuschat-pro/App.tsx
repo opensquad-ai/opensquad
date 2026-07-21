@@ -52,9 +52,6 @@ const CollabBoardPage = React.lazy(() => import('./components/CollabBoardPage').
 const PluginViewContainer = React.lazy(() => import('./components/plugin-views/PluginViewContainer').then(m => ({ default: m.PluginViewContainer })));
 const SystemConfigPage = React.lazy(() => import('./components/SystemConfigPage').then(m => ({ default: m.SystemConfigPage })));
 
-const THEMES = ['default', 'warm', 'coffee', 'coffee-dark', 'red', 'orange', 'pink', 'yellow', 'green', 'cyan', 'blue', 'purple', 'midnight', 'opencode', 'tokyonight', 'catppuccin', 'catppuccin-macchiato', 'nord', 'onedark', 'everforest', 'gruvbox', 'kanagawa', 'sakura', 'dracula', 'ayu', 'monokai', 'matrix'] as const;
-type ThemeType = typeof THEMES[number];
-
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [currentView, setCurrentView] = useState<string>(() => {
@@ -139,33 +136,7 @@ const App: React.FC = () => {
   // 群聊首屏加载完成信号：loadMessages 成功后设为 true，用于门控其他面板的预加载
   const [chatReady, setChatReady] = useState(false);
   const chatReadySetRef = useRef(false); // 防止 setChatReady 重复触发
-  const [theme, setTheme] = useState<ThemeType>(() => {
-    return (localStorage.getItem('chat_theme') as ThemeType) || 'default';
-  });
-
-  const getThemeClass = () => {
-    return theme === 'default' ? '' : `theme-${theme}`;
-  };
-
-  useEffect(() => {
-    const root = window.document.documentElement;
-    THEMES.forEach(t => root.classList.remove(`theme-${t}`));
-    if (theme !== 'default') {
-      root.classList.add(`theme-${theme}`);
-    }
-    localStorage.setItem('chat_theme', theme);
-  }, [theme]);
-
-  // Listen for theme change events from components
-  useEffect(() => {
-    const handleSetTheme = (e: any) => {
-      if (e.detail && THEMES.includes(e.detail)) {
-        setTheme(e.detail);
-      }
-    };
-    window.addEventListener('setTheme', handleSetTheme);
-    return () => window.removeEventListener('setTheme', handleSetTheme);
-  }, []);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'theme' | 'workspace' | 'ports' | 'advanced' | 'about' | undefined>();
 
   // ─── 智能预加载系统 ───────────────────────────────────────────────
   // 规则：
@@ -237,6 +208,16 @@ const App: React.FC = () => {
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    const openTheme = () => {
+      setSettingsInitialTab('theme');
+      setIsSettingsOpen(true);
+    };
+    window.addEventListener('openThemeSettings', openTheme);
+    return () => window.removeEventListener('openThemeSettings', openTheme);
+  }, []);
+
   const [editName, setEditName] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -960,19 +941,21 @@ const App: React.FC = () => {
 
 
   return (
-    <ElectronShell className={`transition-colors duration-300 ${getThemeClass()}`}>
-    <div className={`h-full w-full flex overflow-hidden`}>
-      <div className="hidden md:flex shrink-0">
+    <ElectronShell className="transition-colors duration-300">
+    <div className={`h-full w-full flex overflow-hidden bg-stage`}>
+      <div className="hidden md:flex shrink-0 h-full py-2 pl-2">
+        <div className="h-full rounded-xl border border-border/70 overflow-hidden">
         <Sidebar
           currentUser={currentUser}
           onUpdateUser={handleUpdateUser}
           onLogout={handleLogout}
-          theme={theme}
+          theme="default"
           onToggleTheme={() => {}}
           onOpenProfile={handleOpenProfile}
           onOpenSettings={() => setIsSettingsOpen(true)}
           currentView={currentView}
         />
+        </div>
       </div>
 
       {/* Mobile: sidebar drawer overlay */}
@@ -990,7 +973,7 @@ const App: React.FC = () => {
 
               onUpdateUser={handleUpdateUser}
               onLogout={handleLogout}
-              theme={theme}
+              theme="default"
               onToggleTheme={() => {}}
               onOpenProfile={() => { setIsMobileSidebarOpen(false); handleOpenProfile(); }}
               onOpenSettings={() => { setIsMobileSidebarOpen(false); setIsSettingsOpen(true); }}
@@ -1089,7 +1072,6 @@ const App: React.FC = () => {
 
               onUpdateUser={handleUpdateUser}
               onLogout={handleLogout}
-              theme={theme}
               onSwitchView={setCurrentView}
               onPrefetchGroup={handlePrefetchGroup}
             />
@@ -1460,7 +1442,14 @@ const App: React.FC = () => {
 
       {/* Settings Modal */}
       <Suspense fallback={null}>
-        <SystemConfigPage isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+        <SystemConfigPage
+          isOpen={isSettingsOpen}
+          initialTab={settingsInitialTab}
+          onClose={() => {
+            setIsSettingsOpen(false);
+            setSettingsInitialTab(undefined);
+          }}
+        />
       </Suspense>
       <DesktopUpdateOverlay />
     </div>

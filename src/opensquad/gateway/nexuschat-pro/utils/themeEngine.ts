@@ -29,6 +29,8 @@ export interface ThemePalette {
   bg: string;
   /** Side rails (session list, workspace files) — slightly deeper */
   rail: string;
+  /** Nested wells inside rails — deeper still */
+  nest: string;
   /** Center stage (Agent Web chat) — lighter wash */
   stage: string;
   panel: string;
@@ -62,7 +64,7 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'random',
     primary: '#5A6B5E',
     surfaceHue: 40,
-    light: { bg: '#F3F1EC', panel: '#FFFEFB', border: '#E2DDD4' },
+    light: { bg: '#F0EEEA', panel: '#FFFEFB', border: '#E0DDD7' },
     dark: { bg: '#171A18', panel: '#222623', border: '#323833' },
     i18nNameKey: 'themeSettings.presets.random.name',
     i18nDescKey: 'themeSettings.presets.random.desc',
@@ -71,8 +73,8 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'ink-green',
     primary: '#2D4739',
     surfaceHue: 38,
-    // Claude-like warm parchment
-    light: { bg: '#F4F1EA', panel: '#FFFEFB', border: '#E4DED2' },
+    // Soft warm parchment — low chroma
+    light: { bg: '#F0EEE9', panel: '#FFFEFB', border: '#E0DCD4' },
     dark: { bg: '#1A1F1C', panel: '#242A26', border: '#343B36' },
     i18nNameKey: 'themeSettings.presets.inkGreen.name',
     i18nDescKey: 'themeSettings.presets.inkGreen.desc',
@@ -81,7 +83,7 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'lake-blue',
     primary: '#3D6B8A',
     surfaceHue: 210,
-    light: { bg: '#E8F0F5', panel: '#F5FAFC', border: '#C9D9E4' },
+    light: { bg: '#EAEEF1', panel: '#F7FAFB', border: '#D4DCE2' },
     dark: { bg: '#12181F', panel: '#1A222B', border: '#2A3542' },
     i18nNameKey: 'themeSettings.presets.lakeBlue.name',
     i18nDescKey: 'themeSettings.presets.lakeBlue.desc',
@@ -90,7 +92,7 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'minimal',
     primary: '#2F4A6E',
     surfaceHue: 220,
-    light: { bg: '#EEF1F6', panel: '#F8FAFC', border: '#D0D7E4' },
+    light: { bg: '#EEF0F3', panel: '#F8FAFB', border: '#D6DAE0' },
     dark: { bg: '#0F141B', panel: '#171D27', border: '#273041' },
     i18nNameKey: 'themeSettings.presets.minimal.name',
     i18nDescKey: 'themeSettings.presets.minimal.desc',
@@ -99,7 +101,7 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'violet',
     primary: '#5C4A6E',
     surfaceHue: 280,
-    light: { bg: '#F3EEF5', panel: '#FBFAFC', border: '#DDD2E4' },
+    light: { bg: '#EEECEF', panel: '#FAF9FB', border: '#DDD9E0' },
     dark: { bg: '#17141C', panel: '#211C28', border: '#342C3E' },
     i18nNameKey: 'themeSettings.presets.violet.name',
     i18nDescKey: 'themeSettings.presets.violet.desc',
@@ -108,8 +110,8 @@ export const PRESET_METAS: PresetMeta[] = [
     id: 'luxury',
     primary: '#6B5A3E',
     surfaceHue: 42,
-    // Luxury hierarchy: deeper rails, lighter center stage
-    light: { bg: '#E8DFD0', panel: '#FFFEFA', border: '#D9CCB8' },
+    // Soft luxury: muted rails, quiet parchment stage
+    light: { bg: '#E9E4DA', panel: '#FFFEFA', border: '#D8D1C4' },
     dark: { bg: '#1A1610', panel: '#2A241C', border: '#3D3428' },
     i18nNameKey: 'themeSettings.presets.luxury.name',
     i18nDescKey: 'themeSettings.presets.luxury.desc',
@@ -120,7 +122,7 @@ export const DEFAULT_THEME_PREFS: ThemePrefs = {
   mode: 'system',
   preset: 'ink-green',
   primary: '#2D4739',
-  purity: 27,
+  purity: 18,
   contrast: 8.3,
   fontSize: 1,
   serif: false,
@@ -241,8 +243,8 @@ export function mixHex(a: string, b: string, t: number): string {
 export function applyPurity(hex: string, purity: number): string {
   const { r, g, b } = hexToRgb(hex);
   const { h, s: _s, l } = rgbToHsl(r, g, b);
-  // Map 0–100 purity to ~8–55% saturation (Claude-like low chroma)
-  const targetS = 8 + (clamp(purity, 0, 100) / 100) * 47;
+  // Map 0–100 purity to ~6–40% saturation (soft tooling, low chroma)
+  const targetS = 6 + (clamp(purity, 0, 100) / 100) * 34;
   return hslToHex(h, targetS, l);
 }
 
@@ -286,14 +288,14 @@ export function surfacesFromPrimary(primary: string): { light: SurfacePair; dark
   const { h } = rgbToHsl(rgb.r, rgb.g, rgb.b);
   return {
     light: {
-      bg: hslToHex(h, 22, 93),
-      panel: hslToHex(h, 14, 98),
-      border: hslToHex(h, 16, 84),
+      bg: hslToHex(h, 12, 93),
+      panel: hslToHex(h, 8, 98),
+      border: hslToHex(h, 10, 86),
     },
     dark: {
-      bg: hslToHex(h, 14, 11),
-      panel: hslToHex(h, 12, 16),
-      border: hslToHex(h, 10, 24),
+      bg: hslToHex(h, 10, 11),
+      panel: hslToHex(h, 8, 16),
+      border: hslToHex(h, 8, 24),
     },
   };
 }
@@ -335,41 +337,51 @@ export function buildPalette(opts: {
   const surfaces = getPresetSurfaces(opts.preset || 'custom', opts.primary);
   const base = opts.appearance === 'light' ? surfaces.light : surfaces.dark;
 
-  // Tint surfaces with primary so purity/preset feel connected to the page wash
-  const tintAmount = opts.appearance === 'light' ? 0.04 + tint * 0.14 : 0.06 + tint * 0.18;
+  // Tint surfaces lightly — keep page wash muted across presets
+  const tintAmount = opts.appearance === 'light' ? 0.02 + tint * 0.08 : 0.04 + tint * 0.12;
   let bg = mixHex(base.bg, primary, tintAmount);
-  let panel = mixHex(base.panel, primary, tintAmount * 0.45);
-  const border = mixHex(base.border, primary, tintAmount * 0.7);
+  let panel = mixHex(base.panel, primary, tintAmount * 0.35);
+  const border = mixHex(base.border, primary, tintAmount * 0.5);
 
   if (opts.appearance === 'light') {
     const c = hexToRgb(bg);
     const bgHsl = rgbToHsl(c.r, c.g, c.b);
-    // Rail (sides): deeper + a touch more chroma — frames the center
+    // Rail (side cards): deeper than page, low chroma
     const rail = hslToHex(
       bgHsl.h,
-      clamp(bgHsl.s + 4 + tint * 6, 8, 36),
-      clamp(bgHsl.l - 3 - cT * 2, 84, 94),
+      clamp(bgHsl.s + 1 + tint * 3, 4, 18),
+      clamp(bgHsl.l - 4 - cT * 2, 82, 92),
     );
-    // Stage (center chat): lighter, quieter wash
+    // Nest (wells inside rails): one step deeper
+    const railRgb = hexToRgb(rail);
+    const railHsl = rgbToHsl(railRgb.r, railRgb.g, railRgb.b);
+    const nest = hslToHex(
+      railHsl.h,
+      clamp(railHsl.s + 1, 4, 20),
+      clamp(railHsl.l - 3.5, 78, 90),
+    );
+    // Stage (page wash behind cards): quieter mid-light
     const p = hexToRgb(panel);
     const pHsl = rgbToHsl(p.r, p.g, p.b);
-    const stage = hslToHex(pHsl.h, clamp(pHsl.s - 2, 4, 22), clamp(pHsl.l + 1, 96, 99.5));
-    panel = hslToHex(pHsl.h, pHsl.s, clamp(Math.max(pHsl.l, 98), 97, 100));
+    const stage = hslToHex(pHsl.h, clamp(pHsl.s - 1, 3, 14), clamp(pHsl.l - 1, 94, 98));
+    panel = hslToHex(pHsl.h, clamp(pHsl.s - 2, 2, 12), clamp(Math.max(pHsl.l, 98.5), 97, 100));
     const textMain = adjustTextForContrast(
-      hslToHex(sh, 14 + cT * 10, 16 - cT * 6),
+      hslToHex(sh, 8 + cT * 6, 22 - cT * 4),
       rail,
       cTarget,
       'darken',
     );
-    const textMuted = mixHex(textMain, rail, 0.4);
+    // Greyer secondary text
+    const textMuted = mixHex(textMain, rail, 0.52);
     return {
       primary,
-      bg: rail,
+      bg: stage,
       rail,
+      nest,
       stage,
       panel,
       border,
-      bubbleSelf: mixHex(primary, stage, 0.82),
+      bubbleSelf: mixHex(primary, stage, 0.86),
       bubbleOther: panel,
       textMain,
       textMuted,
@@ -379,23 +391,25 @@ export function buildPalette(opts: {
   {
     const c = hexToRgb(bg);
     const bgHsl = rgbToHsl(c.r, c.g, c.b);
-    bg = hslToHex(bgHsl.h, bgHsl.s, clamp(bgHsl.l - cT * 3, 6, 18));
+    bg = hslToHex(bgHsl.h, clamp(bgHsl.s - 2, 4, 16), clamp(bgHsl.l - cT * 3, 6, 18));
     panel = mixHex(panel, '#000000', cT * 0.12);
   }
-  // Dark: rail darkest, stage slightly lifted
+  // Dark: nest deepest, rail mid, stage lifted, panel raised
   const rail = bg;
-  const stage = mixHex(bg, panel, 0.45);
-  const textMain = adjustTextForContrast(hslToHex(sh, 8, 92), rail, cTarget, 'lighten');
-  const textMuted = mixHex(textMain, rail, 0.45);
+  const nest = mixHex(rail, '#000000', 0.18);
+  const stage = mixHex(bg, panel, 0.4);
+  const textMain = adjustTextForContrast(hslToHex(sh, 6, 90), rail, cTarget, 'lighten');
+  const textMuted = mixHex(textMain, rail, 0.5);
   return {
     primary,
-    bg: rail,
+    bg: stage,
     rail,
+    nest,
     stage,
     panel,
     border,
-    bubbleSelf: mixHex(primary, panel, 0.5),
-    bubbleOther: mixHex(panel, primary, 0.08),
+    bubbleSelf: mixHex(primary, panel, 0.55),
+    bubbleOther: mixHex(panel, primary, 0.06),
     textMain,
     textMuted,
   };

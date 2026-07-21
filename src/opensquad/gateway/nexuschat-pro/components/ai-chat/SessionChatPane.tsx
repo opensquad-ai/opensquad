@@ -136,7 +136,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
 
   return (
     <div
-      className="flex-1 min-h-0 flex flex-col bg-stage relative"
+      className="flex-1 min-h-0 flex flex-col bg-panel relative"
       onMouseDown={() => onFocus?.()}
     >
       <div className="flex-1 relative min-h-0">

@@ -39,7 +39,9 @@ module.exports = {
         bgPage: 'var(--color-bg)',
         /** Side rails: session list + workspace files (deeper) */
         rail: 'var(--color-rail)',
-        /** Center stage: Agent Web chat (lighter) */
+        /** Nested wells inside rails (deeper still) */
+        nest: 'var(--color-nest)',
+        /** Center stage / page wash behind cards */
         stage: 'var(--color-stage)',
         chatBubbleSelf: 'var(--color-bubble-self)',
         chatBubbleOther: 'var(--color-bubble-other)',
