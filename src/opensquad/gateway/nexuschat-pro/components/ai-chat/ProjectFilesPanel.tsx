@@ -23,7 +23,6 @@ import {
   Loader2,
   MoreHorizontal,
   Plus,
-  RefreshCw,
   RotateCcw,
   Search,
   Settings2,
@@ -35,6 +34,7 @@ import { getLangForFile, highlightLine, HLJS_THEME_CSS } from '../../utils/codeH
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
+import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 
 export type ProjectFileOpenRequest = {
   /** Path relative to project root, or absolute under root */
@@ -432,8 +432,6 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [treeCount, setTreeCount] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [listLoading, setListLoading] = useState(false);
-  /** Soft refresh: spin header icon only, keep current tree visible */
-  const [treeRefreshing, setTreeRefreshing] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [showSearch, setShowSearch] = useState(false);
@@ -441,7 +439,6 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const [tab, setTab] = useState<ListTab>('all');
   const [changedEntries, setChangedEntries] = useState<ChangedEntry[]>([]);
   const [changedLoading, setChangedLoading] = useState(false);
-  const [changedRefreshing, setChangedRefreshing] = useState(false);
   const [changedError, setChangedError] = useState<string | null>(null);
   /** Accordion: which changed files have inline diff expanded */
   const [expandedChanged, setExpandedChanged] = useState<Set<string>>(() => new Set());
@@ -838,8 +835,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     const hasTree = treeEntriesRef.current.length > 0 || treeLoadedOnceRef.current;
     // Soft-refresh by default once a tree is on screen (avoid full-panel flash)
     const silent = hasTree && opts?.silent !== false;
-    if (silent) setTreeRefreshing(true);
-    else setListLoading(true);
+    if (!silent) setListLoading(true);
     setListError(null);
     try {
       const resp = await adminAPI.listProjectTree(agentId, rootPath, 10000);
@@ -882,8 +878,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       }
       setListError(err?.message || '无法加载项目文件树');
     } finally {
-      setListLoading(false);
-      setTreeRefreshing(false);
+      if (!silent) setListLoading(false);
     }
   }, [agentId, rootPath, prefetchFileContent]);
 
@@ -923,9 +918,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     const hasList = changedEntriesRef.current.length > 0;
     // Soft-refresh once we already show rows; first paint may still use full loading
     const silent = hasList ? opts?.silent !== false : !!opts?.silent;
-    if (silent) setChangedRefreshing(true);
-    else setChangedLoading(true);
-    if (!silent) setChangedError(null);
+    if (!silent) {
+      setChangedLoading(true);
+      setChangedError(null);
+    }
     try {
       const resp = await adminAPI.listSessionChanges(agentId, rootPath);
       const files = (resp.files || resp.entries || []).map((e) => ({
@@ -959,8 +955,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setChangedError(err?.message || '无法加载变动文件');
       }
     } finally {
-      setChangedLoading(false);
-      setChangedRefreshing(false);
+      if (!silent) setChangedLoading(false);
     }
   }, [agentId, rootPath, applyChangedFiles]);
 
@@ -972,6 +967,24 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       void loadChanged({ silent: true });
     }
   }, [tab, loadChanged, loadTree]);
+
+  // Silent keep-alive — tree/changed stay fresh without a manual refresh control
+  useEffect(() => {
+    if (!isOpen || !rootPath || !agentId) return;
+    const tick = () => refreshCurrent();
+    const id = window.setInterval(tick, 5000);
+    const onFocus = () => tick();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [isOpen, rootPath, agentId, refreshCurrent]);
 
   const openDiff = useCallback(
     async (relPath: string) => {
@@ -1758,7 +1771,16 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     }
   }, [closeMenus]);
 
-  if (!isOpen) return null;
+  const { mounted: softMounted, visible: softVisible } = useSoftPresence(isOpen, SOFT_PRESENCE_MS);
+  const [railToggling, setRailToggling] = useState(false);
+
+  useEffect(() => {
+    setRailToggling(true);
+    const t = window.setTimeout(() => setRailToggling(false), SOFT_PRESENCE_MS);
+    return () => window.clearTimeout(t);
+  }, [isOpen]);
+
+  if (!softMounted) return null;
 
   const canCreateHere = tab === 'all';
 
@@ -1770,7 +1792,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     return (
       <div
         ref={ctxMenuRef}
-        className="fixed z-[80] min-w-[168px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] text-textMain"
+        className="fixed z-[80] min-w-[168px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] text-textMain os-soft-pop is-open"
         style={{ left: ctxMenu.x, top: ctxMenu.y }}
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -2266,8 +2288,15 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
 
   return (
     <div
+      className={`os-soft-rail os-soft-rail--right ${softVisible ? 'is-open' : ''} ${
+        railToggling ? 'is-toggling' : ''
+      }`}
+      style={{ width: softVisible ? width : 0 }}
+      aria-hidden={!softVisible}
+    >
+    <div
       ref={panelRef}
-      className="relative h-full os-depth-card flex flex-col flex-shrink-0 min-w-[200px]"
+      className="relative h-full os-depth-card flex flex-col os-soft-rail-inner"
       style={{ width }}
     >
       {/* Left drag handle (widen by dragging left) */}
@@ -2314,7 +2343,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 <Plus size={13} className="text-textMuted" />
               </button>
               {newMenuOpen ? (
-                <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px]">
+                <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] os-soft-pop is-open">
                   <button
                     type="button"
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
@@ -2347,26 +2376,6 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               ) : (
                 <EyeOff size={13} className="text-textMuted" />
               )}
-            </button>
-            <button
-              type="button"
-              onClick={() => refreshCurrent()}
-              disabled={
-                (listLoading && treeEntries.length === 0) ||
-                (changedLoading && changedEntries.length === 0) ||
-                !rootPath
-              }
-              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
-              title="刷新"
-            >
-              <RefreshCw
-                size={13}
-                className={`text-textMuted ${
-                  listLoading || treeRefreshing || changedLoading || changedRefreshing
-                    ? 'animate-spin'
-                    : ''
-                }`}
-              />
             </button>
             <button
               type="button"
@@ -2453,6 +2462,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       </div>
 
       {renderCtxMenu()}
+    </div>
     </div>
   );
 };

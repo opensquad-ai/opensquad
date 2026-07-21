@@ -51,7 +51,6 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
-import { formatElapsed } from '../utils/formatElapsed';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -113,6 +112,7 @@ import {
   AgentWebComposer,
   type ComposerSendPayload,
 } from './ai-chat/AgentWebComposer';
+import { PulseDotsStatus } from './ai-chat/PulseDotsStatus';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -180,74 +180,20 @@ interface UploadedFile {
   duration?: number;
 }
 
-// ---- Agent Working Indicator (shown when workflow is hidden and agent is active) ----
-const AgentWorkingIndicator: React.FC<{ agentProfile: AdminAgent | null; startedMs?: number }> = ({ agentProfile, startedMs }) => {
-  const [dotCount, setDotCount] = React.useState(1);
-  const [liveElapsed, setLiveElapsed] = React.useState(0);
-
-  React.useEffect(() => {
-    const t = setInterval(() => setDotCount(p => (p % 4) + 1), 450);
-    return () => clearInterval(t);
-  }, []);
-
-  React.useEffect(() => {
-    if (startedMs === undefined) { setLiveElapsed(0); return; }
-    setLiveElapsed(Date.now() - startedMs);
-    const t = setInterval(() => setLiveElapsed(Date.now() - startedMs), 100);
-    return () => clearInterval(t);
-  }, [startedMs]);
-
-  const avatarSrc = resolveChatAvatar(agentProfile?.chat_profile);
-  const resolvedAvatar = toAbsoluteMediaUrl(avatarSrc, SERVER_BASE_URL);
-
-  return (
-    <div className="flex items-center gap-2 mb-4 pl-0.5">
-      {/* Agent avatar */}
-      <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden bg-emerald-500/20">
-        {resolvedAvatar
-          ? <img src={resolvedAvatar} alt="" className="w-full h-full object-cover" loading="lazy" />
-          : <Bot size={14} className="text-emerald-500" />
-        }
-      </div>
-
-      {/* Spinner + time below it */}
-      <div className="flex flex-col items-center gap-0.5">
-        <svg width="26" height="26" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="osq-wk-arc" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-              <stop stopColor="#818cf8" />
-              <stop offset="0.6" stopColor="#a78bfa" stopOpacity="0.5" />
-              <stop offset="1" stopColor="#818cf8" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          <g style={{ transformOrigin: '16px 16px', animation: 'osqSpin 1.4s linear infinite' }}>
-            <circle cx="16" cy="16" r="13.5" stroke="url(#osq-wk-arc)" strokeWidth="2.5" strokeLinecap="round" strokeDasharray="53 33" />
-          </g>
-          <line x1="10" y1="10" x2="22" y2="10" stroke="#818cf8" strokeWidth="1" strokeOpacity="0.35" />
-          <line x1="22" y1="10" x2="22" y2="22" stroke="#818cf8" strokeWidth="1" strokeOpacity="0.35" />
-          <line x1="22" y1="22" x2="10" y2="22" stroke="#818cf8" strokeWidth="1" strokeOpacity="0.35" />
-          <line x1="10" y1="22" x2="10" y2="10" stroke="#818cf8" strokeWidth="1" strokeOpacity="0.35" />
-          <line x1="10" y1="10" x2="22" y2="22" stroke="#818cf8" strokeWidth="0.8" strokeOpacity="0.18" />
-          <line x1="22" y1="10" x2="10" y2="22" stroke="#818cf8" strokeWidth="0.8" strokeOpacity="0.18" />
-          <circle cx="10" cy="10" r="2.5" fill="#818cf8" style={{ animation: 'osqPulse 1.6s ease-in-out infinite' }} />
-          <circle cx="22" cy="10" r="2.5" fill="#a78bfa" style={{ animation: 'osqPulse 1.6s ease-in-out 0.4s infinite' }} />
-          <circle cx="22" cy="22" r="2.5" fill="#818cf8" style={{ animation: 'osqPulse 1.6s ease-in-out 0.8s infinite' }} />
-          <circle cx="10" cy="22" r="2.5" fill="#a78bfa" style={{ animation: 'osqPulse 1.6s ease-in-out 1.2s infinite' }} />
-        </svg>
-        {startedMs !== undefined && (
-          <span className="text-[10px] text-textMuted font-mono leading-none">{formatElapsed(liveElapsed)}</span>
-        )}
-      </div>
-      <style>{`
-        @keyframes osqSpin { to { transform: rotate(360deg); } }
-        @keyframes osqPulse { 0%,100% { opacity:1; } 50% { opacity:0.25; } }
-      `}</style>
-
-      {/* Animated dots */}
-      <span className="text-xs text-textMuted font-mono">{'.'.repeat(dotCount)}</span>
-    </div>
-  );
-};
+// ---- Agent Working Indicator (classic, workflow details hidden) ----
+const AgentWorkingIndicator: React.FC<{
+  kind?: 'preparing' | 'thinking' | 'working';
+  startedMs?: number;
+  stepCount?: number;
+}> = ({ kind = 'preparing', startedMs, stepCount }) => (
+  <div className="mb-4 pl-0.5">
+    <PulseDotsStatus
+      kind={kind}
+      startedMs={startedMs}
+      stepCount={stepCount}
+    />
+  </div>
+);
 
 // ---- Workflow Block with event pagination ----
 const WORKFLOW_EVENTS_PAGE_SIZE = 10;
@@ -5845,6 +5791,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         key={`composer-${paneId}`}
         agentId={agentId}
         columnClass={soloColumnClass}
+        landing={
+          sessionId === currentSessionId && !hasContent && !isLoadingSession
+        }
         disabled={isLoadingSession}
         busy={isSessionBusy(sessionId)}
         agentMode={agentModeBySession[sessionId] ?? agentMode}
@@ -5925,15 +5874,122 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }}
         onSend={(payload) => handlePaneComposerSend(paneId, sessionId, payload)}
         onStop={handleStop}
-        statusHint={(() => {
-          const n = pendingMessages.filter((m) => m.sessionId === sessionId).length;
-          if (n > 0) {
-            return `本会话已排队 ${n} 条 — 当前回合结束后自动发送`;
-          }
-          return null;
+        planPanel={
+          sessionId === currentSessionId && showPlanViewer ? (
+            effectivePlanSteps.length > 0 ? (
+              <PlanBlock
+                steps={effectivePlanSteps}
+                className="mb-0 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]"
+              />
+            ) : (
+              <div className="text-xs text-textMuted border border-border/55 rounded-lg px-3 py-2 bg-black/[0.02] dark:bg-white/[0.03]">
+                {t('aiChat.noPlanYet')}
+              </div>
+            )
+          ) : null
+        }
+        pendingPanel={(() => {
+          const queue = pendingMessages.filter((m) => m.sessionId === sessionId);
+          if (queue.length === 0) return null;
+          return (
+            <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
+              <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
+                <Clock size={11} className="text-primary flex-shrink-0" />
+                <span className="text-[11px] text-textMain font-semibold">
+                  {t('aiChat.pendingCount', { count: queue.length })}
+                </span>
+                <span className="text-[10px] text-textMuted">
+                  · ↗ {t('aiChat.pendingAutoSendHint')}
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={handleSendNextPending}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  title={t('aiChat.sendNext')}
+                >
+                  <Zap size={10} />
+                  {t('aiChat.sendNext')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelAllPending}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  title={t('aiChat.pendingClearAll')}
+                >
+                  <X size={10} />
+                  {t('aiChat.pendingClearAll')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPendingCollapsed((c) => !c)}
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
+                >
+                  {pendingCollapsed ? '▴' : '▾'}
+                </button>
+              </div>
+              {!pendingCollapsed && (
+                <div className="max-h-[200px] overflow-y-auto">
+                  {queue.map((pm, idx) => {
+                    const imgCount = pm.images.length;
+                    const fileCount = pm.fileAtts.length;
+                    const preview = (pm.text || '').replace(/\s+/g, ' ').trim();
+                    return (
+                      <div
+                        key={pm.id}
+                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+                      >
+                        <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
+                          {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
+                        </span>
+                        <div className="flex-1 min-w-0 flex items-center gap-2">
+                          {preview ? (
+                            <span className="truncate text-[12px] text-textMain">{preview}</span>
+                          ) : (
+                            <span className="text-[12px] italic text-textMuted">
+                              {imgCount > 0 || fileCount > 0
+                                ? t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })
+                                : t('aiChat.pendingLabel')}
+                            </span>
+                          )}
+                          {(imgCount > 0 || fileCount > 0) && preview && (
+                            <span className="flex-shrink-0 text-[10px] text-textMuted whitespace-nowrap">
+                              {t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={() => handleSendPendingNow(pm.id)}
+                            className="p-1 rounded text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                            title={t('aiChat.sendNow')}
+                          >
+                            <Zap size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCancelPending(pm.id)}
+                            className="p-1 rounded text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain transition-colors"
+                            title={t('aiChat.cancelPending')}
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
         })()}
+        statusHint={null}
       />
     ),
+    isComposerLanding: (sessionId: string) =>
+      sessionId === currentSessionId && !hasContent && !isLoadingSession,
     onFileDirty: (relPath, dirty) => {
       setFileDirtyMap((prev) => {
         if (!!prev[relPath] === dirty) return prev;
@@ -6152,66 +6208,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
       )}
 
-      {/* Top chrome: L1 workspaces + L2 content tabs */}
-      <div className="flex-shrink-0 bg-stage border-b border-border relative z-30 overflow-visible">
-        <div className="h-9 px-2 flex items-center gap-2 border-b border-border/60 min-w-0 overflow-visible">
-          <button
-            type="button"
-            onClick={onBack}
-            className="p-1 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-            title="返回"
-          >
-            <ArrowLeft size={16} className="text-textMuted" />
-          </button>
-          <div className="flex items-center gap-1.5 min-w-0 max-w-[160px] shrink-0">
-            <div className="w-5 h-5 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-              <Bot size={12} className="text-primary" />
-            </div>
-            <span className="text-[11px] font-semibold text-textMain truncate">
-              {agentProfile?.agent_name || modelName || agentId}
-            </span>
-          </div>
-          <WorkspaceTabBar
-            workspaces={wsSnap.workspaces}
-            openIds={wsSnap.chrome.openWorkspaceIds}
-            activeId={wsSnap.chrome.activeWorkspaceId}
-            onSelect={handleSelectWorkspace}
-            onRequestClose={(id) => {
-              const ws = wsSnap.workspaces.find((w) => w.id === id);
-              if (ws) setCloseWorkspaceTarget(ws);
-            }}
-            onOpenExisting={handleOpenExistingWorkspace}
-            onCreateNew={() => setCreateWorkspaceOpen(true)}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              setFilesPanelOpen((v) => {
-                const next = !v;
-                try {
-                  localStorage.setItem('opensquad.filesPanel.open', String(next));
-                } catch {
-                  /* ignore */
-                }
-                return next;
-              });
-            }}
-            className={`ml-auto p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-              filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-            }`}
-            title={filesPanelOpen ? '隐藏项目文件' : '显示项目文件'}
-          >
-            {filesPanelOpen ? (
-              <PanelRightClose size={16} className="text-primary" />
-            ) : (
-              <PanelRightOpen size={16} className="text-textMuted" />
-            )}
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 flex min-h-0 overflow-hidden gap-2 p-2 pt-1.5 bg-stage">
-      {/* Session Sidebar */}
+      {/* Three columns from top: session | center chrome+content | files */}
+      <div className="flex-1 flex min-h-0 overflow-hidden p-2 bg-stage">
+      {/* Session Sidebar — full height, flush with center top row */}
       <SessionSidebar
         agentId={agentId}
         currentSessionId={currentSessionId}
@@ -6254,48 +6253,63 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         />
       )}
 
-      {activeWorkspace && workspaceLayout ? (
-        <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
-        {/* Shared agent chrome — outside panes so focus never swaps it left/right */}
+      <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
+        {/* Single top row: agent left | workspace tabs | ops right (Manus-style) */}
         <div className="flex-shrink-0 bg-panel border-b border-border/70">
-{/* Header — same h-11+border-b box as SessionSidebar so the split-line aligns */}
-        <div className="flex-shrink-0 bg-panel">
-          <div className="h-11 px-2 sm:px-3 border-b border-border box-border flex items-center">
-            <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-1 sm:gap-2 min-w-0">
-                <button
-                  onClick={onBack}
-                  className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-                >
-                  <ArrowLeft size={18} className="text-textMuted" />
-                </button>
-                <button
-                  onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
-                  className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-                  title={sessionSidebarOpen ? 'Close sessions' : 'Open sessions'}
-                >
-                  {sessionSidebarOpen
-                    ? <PanelLeftClose size={16} className="text-textMuted" />
-                    : <PanelLeftOpen size={16} className="text-textMuted" />
-                  }
-                </button>
-                <div className="w-6 h-6 sm:w-7 sm:h-7 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                  <Bot size={14} className="text-primary" />
-                </div>
-                <div className="min-w-0">
-                  <h2 className="font-bold text-textMain text-sm truncate leading-tight">
-                    {agentProfile?.agent_name || modelName || agentId}
-                    {switchingModel ? (
-                      <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">switching…</span>
-                    ) : null}
-                  </h2>
-                  <StatusBadge status={agentStatus} />
-                </div>
+          <div className="h-11 px-2 sm:px-2.5 box-border flex items-center gap-1.5 sm:gap-2 min-w-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 shrink-0">
+              <button
+                type="button"
+                onClick={onBack}
+                className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                title="返回"
+              >
+                <ArrowLeft size={18} className="text-textMuted" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
+                className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+                title={sessionSidebarOpen ? 'Close sessions' : 'Open sessions'}
+              >
+                {sessionSidebarOpen ? (
+                  <PanelLeftClose size={16} className="text-textMuted" />
+                ) : (
+                  <PanelLeftOpen size={16} className="text-textMuted" />
+                )}
+              </button>
+              <div className="w-6 h-6 sm:w-7 sm:h-7 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+                <Bot size={14} className="text-primary" />
               </div>
+              <div className="min-w-0 max-w-[120px] sm:max-w-[160px]">
+                <h2 className="font-bold text-textMain text-sm truncate leading-tight">
+                  {agentProfile?.agent_name || modelName || agentId}
+                  {switchingModel ? (
+                    <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">
+                      switching…
+                    </span>
+                  ) : null}
+                </h2>
+                <StatusBadge status={agentStatus} />
+              </div>
+            </div>
 
-            {/* Header actions (right side) */}
-            <div className="flex items-center gap-0.5 sm:gap-1">
-              {/* Classic | Solo render mode */}
+            <div className="flex-1 min-w-0 overflow-visible">
+              <WorkspaceTabBar
+                workspaces={wsSnap.workspaces}
+                openIds={wsSnap.chrome.openWorkspaceIds}
+                activeId={wsSnap.chrome.activeWorkspaceId}
+                onSelect={handleSelectWorkspace}
+                onRequestClose={(id) => {
+                  const ws = wsSnap.workspaces.find((w) => w.id === id);
+                  if (ws) setCloseWorkspaceTarget(ws);
+                }}
+                onOpenExisting={handleOpenExistingWorkspace}
+                onCreateNew={() => setCreateWorkspaceOpen(true)}
+              />
+            </div>
+
+            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
               <div
                 className="flex items-center rounded-md border border-border overflow-hidden flex-shrink-0"
                 title="Chat UI mode"
@@ -6324,10 +6338,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 </button>
               </div>
               <button
+                type="button"
                 onClick={() => {
-                  setShowPlanViewer(v => {
+                  setShowPlanViewer((v) => {
                     const next = !v;
-                    try { localStorage.setItem('ai_chat_show_plan_viewer', String(next)); } catch {}
+                    try {
+                      localStorage.setItem('ai_chat_show_plan_viewer', String(next));
+                    } catch {
+                      /* ignore */
+                    }
                     return next;
                   });
                 }}
@@ -6339,6 +6358,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <ClipboardList size={16} className={showPlanViewer ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setFilesPanelOpen((v) => {
                     const next = !v;
@@ -6355,12 +6375,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }`}
                 title={filesPanelOpen ? 'Hide project files' : 'Show project files'}
               >
-                {filesPanelOpen
-                  ? <PanelRightClose size={16} className="text-primary" />
-                  : <PanelRightOpen size={16} className="text-textMuted" />}
+                {filesPanelOpen ? (
+                  <PanelRightClose size={16} className="text-primary" />
+                ) : (
+                  <PanelRightOpen size={16} className="text-textMuted" />
+                )}
               </button>
               <button
-                onClick={() => setShowContextViewer(v => !v)}
+                type="button"
+                onClick={() => setShowContextViewer((v) => !v)}
                 className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
                   showContextViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
                 }`}
@@ -6369,10 +6392,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <List size={16} className={showContextViewer ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
+                type="button"
                 onClick={() => {
-                  setShowTokenStats(v => {
+                  setShowTokenStats((v) => {
                     const next = !v;
-                    try { localStorage.setItem('ai_chat_show_token_stats', String(next)); } catch {}
+                    try {
+                      localStorage.setItem('ai_chat_show_token_stats', String(next));
+                    } catch {
+                      /* ignore */
+                    }
                     return next;
                   });
                 }}
@@ -6384,6 +6412,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <Gauge size={16} className={showTokenStats ? 'text-primary' : 'text-textMuted'} />
               </button>
               <button
+                type="button"
                 onClick={() => {
                   if (isSolo) setSoloExpandDetails((v) => !v);
                   else toggleWorkflow();
@@ -6395,26 +6424,38 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }`}
                 title={
                   isSolo
-                    ? (soloExpandDetails ? 'Collapse all thinking' : 'Expand all thinking')
-                    : (showWorkflow ? 'Hide workflow details' : 'Show workflow details')
+                    ? soloExpandDetails
+                      ? 'Collapse all thinking'
+                      : 'Expand all thinking'
+                    : showWorkflow
+                      ? 'Hide workflow details'
+                      : 'Show workflow details'
                 }
               >
-                {(isSolo ? soloExpandDetails : showWorkflow)
-                  ? <Lightbulb size={16} className="text-primary" />
-                  : <Lightbulb size={16} className="text-textMuted" />
-                }
+                <Lightbulb
+                  size={16}
+                  className={
+                    (isSolo ? soloExpandDetails : showWorkflow) ? 'text-primary' : 'text-textMuted'
+                  }
+                />
               </button>
               <button
+                type="button"
                 onClick={handleCompressContext}
                 disabled={isLoadingSession || isCompressingContext}
                 className="p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                title={isCompressingContext ? 'Summarizing session...' : 'Summarize/compress current session context'}
+                title={
+                  isCompressingContext
+                    ? 'Summarizing session...'
+                    : 'Summarize/compress current session context'
+                }
               >
-                <Scissors size={16} className={isCompressingContext ? 'text-primary' : 'text-textMuted'} />
+                <Scissors
+                  size={16}
+                  className={isCompressingContext ? 'text-primary' : 'text-textMuted'}
+                />
               </button>
-
             </div>
-          </div>
           </div>
 
           {showTokenStats && tokenStats && tokenStats.max > 0 && (
@@ -6427,6 +6468,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           )}
         </div>
 
+      {activeWorkspace && workspaceLayout ? (
+        <>
         {/* Auth expired banner */}
         {sessionExpired && (
           <div className="px-4 py-3 bg-yellow-500/15 border-b border-yellow-500/30 flex items-center justify-between gap-3 flex-shrink-0">
@@ -6441,8 +6484,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </button>
           </div>
         )}
-
-        </div>
 
         <PaneSplitLayout
           layout={workspaceLayout}
@@ -6502,14 +6543,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
         <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
           <div className={soloColumnClass}>
-          {!hasContent && !isLoadingSession && (
-            <div className="flex flex-col items-center justify-center h-full text-textMuted">
-              <Bot size={48} className="mb-4 opacity-30" />
-              <p className="text-sm">Start a conversation with the agent</p>
-              <p className="text-xs mt-1">Type a message or drag files here to begin</p>
-            </div>
-          )}
-
           {/* Session loading overlay */}
           {isLoadingSession && (
             <div className="flex flex-col items-center justify-center h-full text-textMuted">
@@ -6764,8 +6797,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           {!isSolo && !showWorkflow && hasActiveWorkflow && (
             <div className="mb-1">
               <AgentWorkingIndicator
-                agentProfile={agentProfile}
+                kind={
+                  agentStatus === 'thinking'
+                    ? 'thinking'
+                    : agentStatus === 'working'
+                      ? 'working'
+                      : 'preparing'
+                }
                 startedMs={turnStartedMs}
+                stepCount={(() => {
+                  for (let i = timeline.length - 1; i >= 0; i--) {
+                    const e = timeline[i];
+                    if (e.kind !== 'workflow' || e.data.completed) continue;
+                    const n = e.data.events?.length || 0;
+                    return n > 0 ? n : undefined;
+                  }
+                  return undefined;
+                })()}
               />
             </div>
           )}
@@ -6862,142 +6910,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
-        {/* Pending message queue — docked above the input area (and above the
-            plan panel when it is open). Messages here are NOT yet part of the
-            conversation: they only enter the timeline when drained one-by-one
-            after each agent reply, or when the user clicks send-next / send-now.
-
-            UI shape (one large container, no per-message card):
-              ┌────────────────────────────────────────────────────────────┐
-              │ ⏱ 2 Queued  ↗ one-by-one when idle    [Send next] [▾]     │
-              ├────────────────────────────────────────────────────────────┤
-              │ #1  How are you?                              [⚡] [×]      │
-              │ #2  Feeling alright?                          [⚡] [×]      │
-              └────────────────────────────────────────────────────────────┘
-        */}
-        {pendingMessages.length > 0 && (
-          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-panel flex-shrink-0">
-            <div className={soloColumnClass}>
-            <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
-              {/* Header bar: status + actions */}
-              <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
-                <Clock size={11} className="text-primary flex-shrink-0" />
-                <span className="text-[11px] text-textMain font-semibold">
-                  {t('aiChat.pendingCount', { count: pendingMessages.length })}
-                </span>
-                <span className="text-[10px] text-textMuted">
-                  · ↗ {t('aiChat.pendingAutoSendHint')}
-                </span>
-                <div className="flex-1" />
-                {/* Send-all: flush the whole queue immediately. */}
-                <button
-                  type="button"
-                  onClick={handleSendNextPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
-                  title={t('aiChat.sendNext')}
-                >
-                  <Zap size={10} />
-                  {t('aiChat.sendNext')}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCancelAllPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
-                  title={t('aiChat.pendingClearAll')}
-                >
-                  <X size={10} />
-                  {t('aiChat.pendingClearAll')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPendingCollapsed(c => !c)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
-                  title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
-                >
-                  {pendingCollapsed ? '▴' : '▾'}
-                </button>
-              </div>
-
-              {/* Message rows — compact, no per-message card */}
-              {!pendingCollapsed && (
-                <div className="max-h-[200px] overflow-y-auto">
-                  {pendingMessages.map((pm, idx) => {
-                    const imgCount = pm.images.length;
-                    const fileCount = pm.fileAtts.length;
-                    const preview = (pm.text || '').replace(/\s+/g, ' ').trim();
-                    return (
-                      <div
-                        key={pm.id}
-                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
-                      >
-                        {/* Queue position badge */}
-                        <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
-                          {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
-                        </span>
-                        {/* Message preview + attachment summary */}
-                        <div className="flex-1 min-w-0 flex items-center gap-2">
-                          {preview ? (
-                            <span className="truncate text-[12px] text-textMain">
-                              {preview}
-                            </span>
-                          ) : (
-                            <span className="text-[12px] italic text-textMuted">
-                              {imgCount > 0 || fileCount > 0
-                                ? t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })
-                                : t('aiChat.pendingLabel')}
-                            </span>
-                          )}
-                          {(imgCount > 0 || fileCount > 0) && preview && (
-                            <span className="flex-shrink-0 text-[10px] text-textMuted whitespace-nowrap">
-                              {t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })}
-                            </span>
-                          )}
-                        </div>
-                        {/* Row actions — visible on hover for a cleaner default */}
-                        <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                          <button
-                            type="button"
-                            onClick={() => handleSendPendingNow(pm.id)}
-                            className="p-1 rounded text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
-                            title={t('aiChat.sendNow')}
-                          >
-                            <Zap size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCancelPending(pm.id)}
-                            className="p-1 rounded text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain transition-colors"
-                            title={t('aiChat.cancelPending')}
-                          >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            </div>
-          </div>
-        )}
-
-        {/* Inline Plan Panel (docked above input) */}
-        {showPlanViewer && (
-          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-panel flex-shrink-0">
-            <div className={soloColumnClass}>
-            {effectivePlanSteps.length > 0 ? (
-              <PlanBlock
-                steps={effectivePlanSteps}
-                className="mb-0 ml-0 border border-border/50 rounded-lg overflow-hidden bg-transparent"
-              />
-            ) : (
-              <div className="text-xs text-textMuted bg-transparent border border-border/50 rounded-lg px-3 py-2">{t('aiChat.noPlanYet')}</div>
-            )}
-            </div>
-          </div>
-        )}
-
         {/* Classic only: scroll-to-bottom centered above composer */}
         {!isSolo && showScrollBottom && (
           <div className="relative flex-shrink-0 z-20 pointer-events-none h-0">
@@ -7018,15 +6930,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       </div>
           )}
         />
-        </div>
+        </>
       ) : (
         <div className="flex-1 min-w-0 flex items-center justify-center text-[12px] text-textMuted px-4 text-center">
           打开或创建一个工作区以开始
         </div>
       )}
+      </div>
 
-      {filesPanelOpen ? (
-      <div className="flex-shrink-0 h-full min-w-[200px] flex">
+      <div className="flex-shrink-0 h-full flex">
       <ProjectFilesPanel
         isOpen={filesPanelOpen}
         onClose={() => {
@@ -7056,7 +6968,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenFile={handleOpenFileInTab}
       />
       </div>
-      ) : null}
       </div>
 
       <RestoreCheckpointModal

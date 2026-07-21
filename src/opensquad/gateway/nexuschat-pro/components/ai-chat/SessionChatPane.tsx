@@ -181,11 +181,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
               </div>
             ) : error ? (
               <div className="px-1 py-8 text-[12px] text-rose-400 text-center">{error}</div>
-            ) : timeline.length === 0 ? (
-              <div className="flex flex-col items-center justify-center text-textMuted py-16 px-4 text-center">
-                <p className="text-sm">空会话 — 在下方输入开始对话</p>
-              </div>
-            ) : (
+            ) : timeline.length === 0 ? null : (
               timeline.map((entry, i) => {
                 const entryKey = entry._uid || `entry-${i}`;
                 if (entry.kind === 'message') {

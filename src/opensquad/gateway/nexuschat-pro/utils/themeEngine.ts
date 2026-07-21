@@ -359,11 +359,18 @@ export function buildPalette(opts: {
       clamp(railHsl.s + 1 + tint * 2, 6, 28),
       clamp(railHsl.l - 2.5, 84, 93),
     );
-    // Stage (page wash behind cards): bright, quiet
-    const p = hexToRgb(panel);
-    const pHsl = rgbToHsl(p.r, p.g, p.b);
-    const stage = hslToHex(pHsl.h, clamp(pHsl.s + tint * 2, 4, 18), clamp(pHsl.l, 96, 99));
-    panel = hslToHex(pHsl.h, clamp(pHsl.s, 3, 16), clamp(Math.max(pHsl.l, 98.5), 97.5, 100));
+    // Stage (page wash): lighter than rail, still carries theme hue
+    const stage = hslToHex(
+      railHsl.h,
+      clamp(railHsl.s * 0.55 + 2 + tint * 5, 6, 22),
+      clamp(railHsl.l + 3.2 + (1 - tint) * 0.8, 93, 97),
+    );
+    // Panel (center column): lightest surface — whiter than rails, soft tint (not pure white)
+    panel = hslToHex(
+      railHsl.h,
+      clamp(railHsl.s * 0.4 + 1.5 + tint * 4, 5, 18),
+      clamp(railHsl.l + 5.2 + (1 - tint) * 0.6, 95.5, 98.2),
+    );
     const textMain = adjustTextForContrast(
       hslToHex(sh, 10 + cT * 8, 20 - cT * 4),
       rail,

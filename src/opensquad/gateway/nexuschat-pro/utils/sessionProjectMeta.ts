@@ -7,6 +7,10 @@ import { folderLabel } from './cwdRecents';
 export interface SessionProjectMeta {
   projectPath: string;
   pinned?: boolean;
+  /** Soft-archive in left sidebar (not deleted). */
+  archived?: boolean;
+  /** Linked workspace id from workspaceStore. */
+  workspaceId?: string;
 }
 
 type AgentMetaMap = Record<string, SessionProjectMeta>;
@@ -73,6 +77,37 @@ export function setSessionPinned(
   const map = loadSessionProjectMeta(agentId);
   const prev = map[sessionId] || { projectPath: '' };
   const next: SessionProjectMeta = { ...prev, pinned };
+  map[sessionId] = next;
+  saveSessionProjectMeta(agentId, map, sessionId);
+  return next;
+}
+
+export function setSessionArchived(
+  agentId: string,
+  sessionId: string,
+  archived: boolean,
+): SessionProjectMeta {
+  const map = loadSessionProjectMeta(agentId);
+  const prev = map[sessionId] || { projectPath: '' };
+  const next: SessionProjectMeta = { ...prev, archived };
+  map[sessionId] = next;
+  saveSessionProjectMeta(agentId, map, sessionId);
+  return next;
+}
+
+export function setSessionWorkspaceId(
+  agentId: string,
+  sessionId: string,
+  workspaceId: string,
+  projectPath?: string,
+): SessionProjectMeta {
+  const map = loadSessionProjectMeta(agentId);
+  const prev = map[sessionId] || { projectPath: '' };
+  const next: SessionProjectMeta = {
+    ...prev,
+    workspaceId,
+    projectPath: (projectPath ?? prev.projectPath) || '',
+  };
   map[sessionId] = next;
   saveSessionProjectMeta(agentId, map, sessionId);
   return next;

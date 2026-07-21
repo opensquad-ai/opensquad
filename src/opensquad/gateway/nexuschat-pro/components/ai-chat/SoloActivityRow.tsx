@@ -8,7 +8,6 @@
  *   - other tools (websearch, etc.): expand → light box with Args + Result
  */
 import React, { useEffect, useMemo, useState, useRef } from 'react';
-import { CircleDashed, CheckCircle2, XCircle, ListTodo, ArrowRightCircle } from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
@@ -22,10 +21,11 @@ import {
 } from '../../utils/shellJobGrouping';
 import { DelegateFold } from './DelegateFold';
 import { ShellJobFold } from './ShellJobFold';
-import { parsePlanContent, type PlanStep } from './PlanBlock';
+import { parsePlanContent, PlanBlock, type PlanStep } from './PlanBlock';
 import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
-import { extractHtmlEmbed, HtmlEmbedBlock } from './HtmlEmbedBlock';
+import { extractHtmlEmbed, isVisualizationToolName } from './HtmlEmbedBlock';
+import { PulseDotsStatus, pulseKindFromFlags } from './PulseDotsStatus';
 
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
@@ -426,7 +426,19 @@ const ShimmerLabel: React.FC<{
 );
 
 /** Waiting buffer while the next thought / tool call is being prepared. */
-const NextPlanningPlaceholder: React.FC<{ depth?: 0 | 1 }> = ({ depth = 1 }) => {
+const NextPlanningPlaceholder: React.FC<{
+  depth?: 0 | 1;
+  /** Classic Agent Web: Manus-style pulse dots instead of shimmer ellipsis */
+  classic?: boolean;
+  startedMs?: number;
+}> = ({ depth = 1, classic = false, startedMs }) => {
+  if (classic) {
+    return (
+      <div className="w-full select-none py-0.5">
+        <PulseDotsStatus kind="preparing" startedMs={startedMs} />
+      </div>
+    );
+  }
   const faint =
     depth === 0
       ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
@@ -518,7 +530,6 @@ const TextChevronToggle: React.FC<{
   >
     <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
       {shimmer ? <ShimmerLabel color={faint}>{title}</ShimmerLabel> : title}
-      {running && !shimmer ? <span style={{ color: faint, opacity: 0.85 }}> …</span> : null}
     </span>
     {!errored && (addedLines != null && addedLines > 0) && (
       <span className="text-[12px] font-mono font-semibold shrink-0" style={{ color: 'color-mix(in srgb, #059669 55%, transparent)' }}>
@@ -547,7 +558,7 @@ const SoloToolExpandPanel: React.FC<{
   args: Record<string, unknown> | null | undefined;
   result: string;
   running?: boolean;
-  /** Hide bulky html arg when already embedded above */
+  /** Hide bulky html arg when the iframe is rendered below the assistant reply */
   hideHtmlArg?: boolean;
 }> = ({ toolName, args, result, running, hideHtmlArg = false }) => {
   const hasArgs = !!(args && Object.keys(args).length > 0);
@@ -558,7 +569,7 @@ const SoloToolExpandPanel: React.FC<{
     if ('html' in next) {
       const raw = next.html;
       const len = typeof raw === 'string' ? raw.length : JSON.stringify(raw ?? '').length;
-      next.html = `[HTML ${len} chars — rendered above]`;
+      next.html = `[HTML ${len} chars — rendered below reply]`;
     }
     return next;
   }, [args, hideHtmlArg]);
@@ -629,93 +640,30 @@ const SoloToolExpandPanel: React.FC<{
   );
 };
 
-const SoloPlanStepIcon: React.FC<{ status: PlanStep['status'] }> = ({ status }) => {
-  const muted = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
-  switch (status) {
-    case 'done':
-      return <CheckCircle2 size={14} className="text-emerald-500/80 flex-shrink-0 mt-0.5" />;
-    case 'running':
-      return <ArrowRightCircle size={14} className="text-primary/80 flex-shrink-0 mt-0.5" />;
-    case 'failed':
-      return <XCircle size={14} className="text-red-500/80 flex-shrink-0 mt-0.5" />;
-    default:
-      return <CircleDashed size={14} className="flex-shrink-0 mt-0.5" style={{ color: muted }} strokeWidth={1.5} />;
-  }
-};
-
-/** Cursor-style To-dos fold inside Solo activity stream. */
+/** Workflow-style Plan card inside Solo activity stream. */
 const SoloPlanFold: React.FC<{
   steps: PlanStep[];
   running?: boolean;
   defaultOpen?: boolean;
-}> = ({ steps, running, defaultOpen = true }) => {
-  const [open, setOpen] = useState(defaultOpen || !!running);
-  useEffect(() => {
-    if (defaultOpen || running) setOpen(true);
-  }, [defaultOpen, running]);
-
-  const faint = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
-
-  return (
-    <div className="w-full select-text my-0.5">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={{ color: faint }}
-        className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
-      >
-        <ListTodo size={13} className="shrink-0 opacity-80" style={{ color: faint }} />
-        <span className="text-[13px] leading-relaxed" style={{ color: faint }}>
-          <span className="font-medium">plan</span>
-          <span>{' '}{steps.length}</span>
-          {running ? <span style={{ opacity: 0.85 }}> …</span> : null}
-        </span>
-        <span className="text-[13px] shrink-0" style={{ color: faint }}>
-          {open ? '⌄' : '>'}
-        </span>
-      </button>
-
-      {open && (
-        <div className="mt-1 mb-1 rounded-lg border border-border/55 bg-black/[0.02] dark:bg-white/[0.03] overflow-hidden">
-          <div className="px-3 py-2 space-y-1.5">
-            {steps.map((step, i) => (
-              <div key={i} className="flex items-start gap-2">
-                <SoloPlanStepIcon status={step.status} />
-                <span
-                  className={`text-[12.5px] leading-snug break-words ${
-                    step.status === 'done'
-                      ? 'line-through'
-                      : step.status === 'running'
-                        ? 'font-medium text-textMain/90'
-                        : step.status === 'failed'
-                          ? 'text-red-500/90'
-                          : ''
-                  }`}
-                  style={
-                    step.status === 'done' || step.status === 'pending'
-                      ? { color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }
-                      : undefined
-                  }
-                >
-                  {step.content}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
+}> = ({ steps, running, defaultOpen = true }) => (
+  <div className="w-full select-text my-0.5">
+    <PlanBlock
+      steps={steps}
+      defaultOpen={defaultOpen || !!running}
+      className="mb-0 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]"
+    />
+  </div>
+);
 
 const SoloEventLine: React.FC<{
   line: ActivityLine;
   defaultOpen?: boolean;
   shellStreamFor?: (callId: string) => ShellStreamState | null | undefined;
   onOpenFile?: (path: string) => void;
-  /** Classic-only HTML visualization embeds */
+  /** @deprecated Embeds render below the assistant reply; tool stream stays a normal tool row. */
   embedVisualizations?: boolean;
-}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile, embedVisualizations = false }) => {
+}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile, embedVisualizations: _embedVisualizations = false }) => {
+  void _embedVisualizations;
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
@@ -723,11 +671,11 @@ const SoloEventLine: React.FC<{
   const isThought = line.kind === 'thought';
   const isFileEdit = !!(line.fileEdit && (line.fileEdit.kind === 'edit' || line.fileEdit.kind === 'write'));
   const isFileRead = line.fileEdit?.kind === 'read';
-
-  const htmlEmbed = useMemo(() => {
-    if (!embedVisualizations || line.kind !== 'tool') return null;
-    return extractHtmlEmbed(line.toolName, line.toolArgs, line.toolResult);
-  }, [embedVisualizations, line.kind, line.toolName, line.toolArgs, line.toolResult]);
+  // Hide bulky html arg/result text in the tool expand panel; iframe renders below the reply.
+  const hideVizHtml =
+    line.kind === 'tool' &&
+    (!!extractHtmlEmbed(line.toolName, line.toolArgs, line.toolResult) ||
+      isVisualizationToolName(line.toolName));
 
   useEffect(() => {
     // Lightbulb / defaultOpen drives thoughts both ways; tools only auto-open when
@@ -874,13 +822,6 @@ const SoloEventLine: React.FC<{
         </div>
       )}
 
-      {/* Classic-only: always show HTML visualization embed once available */}
-      {htmlEmbed && !line.running && (
-        <div className="pl-1 sm:pl-2">
-          <HtmlEmbedBlock payload={htmlEmbed} />
-        </div>
-      )}
-
       {open && line.kind === 'tool' && !isFileEdit && !isFileRead && (
         <div className="pl-4">
           <SoloToolExpandPanel
@@ -888,7 +829,7 @@ const SoloEventLine: React.FC<{
             args={line.toolArgs}
             result={line.toolResult || ''}
             running={line.running}
-            hideHtmlArg={!!htmlEmbed}
+            hideHtmlArg={hideVizHtml}
           />
         </div>
       )}
@@ -1068,11 +1009,66 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     !planningActive &&
     !displayLines.some((l) => !!l.running);
 
+  const liveStartedMs =
+    turnStartedMs ??
+    (typeof block.started_ms === 'number' ? block.started_ms : undefined);
+
+  const classicPulseKind = pulseKindFromFlags({
+    thinking: thinkingActive,
+    working:
+      hasRunning ||
+      planningActive ||
+      hasLiveCompression ||
+      (isLiveTurn && !thinkingActive && !showNextPlanning),
+  });
+
+  const renderOuterToggle = (opts?: { shimmer?: boolean; running?: boolean }) => {
+    if (embedVisualizations && isLiveTurn) {
+      const steps = Math.max(displayLines.length, block.events?.length || 0);
+      return (
+        <button
+          type="button"
+          onClick={toggleOuter}
+          className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
+        >
+          <PulseDotsStatus
+            kind={showNextPlanning ? 'preparing' : classicPulseKind}
+            startedMs={liveStartedMs}
+            stepCount={steps > 0 ? steps : undefined}
+          />
+          <span
+            className="text-[13px] font-normal leading-none shrink-0"
+            style={{
+              color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)',
+            }}
+          >
+            {outerOpen ? '⌄' : '>'}
+          </span>
+        </button>
+      );
+    }
+    return (
+      <TextChevronToggle
+        primary={summary.primary}
+        secondary={summary.secondary}
+        open={outerOpen}
+        onToggle={toggleOuter}
+        running={opts?.running ?? isLiveTurn}
+        shimmer={opts?.shimmer}
+        depth={0}
+      />
+    );
+  };
+
   if (!lines.length) {
     if (!showNextPlanning) return null;
     return (
       <div className="my-1.5 w-full select-text">
-        <NextPlanningPlaceholder depth={0} />
+        <NextPlanningPlaceholder
+          depth={0}
+          classic={embedVisualizations}
+          startedMs={liveStartedMs}
+        />
       </div>
     );
   }
@@ -1106,18 +1102,21 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   if (isThoughtOnly) {
     // Info-only / empty chrome used to render a bare "Activity" fold on new session.
     if (thoughtBodies.length === 0 && !showNextPlanning) return null;
+    if (thoughtBodies.length === 0 && showNextPlanning) {
+      return (
+        <div className="my-1.5 w-full select-text">
+          <NextPlanningPlaceholder
+            depth={0}
+            classic={embedVisualizations}
+            startedMs={liveStartedMs}
+          />
+        </div>
+      );
+    }
 
     return (
       <div className="my-1.5 w-full select-text">
-        <TextChevronToggle
-          primary={summary.primary}
-          secondary={summary.secondary}
-          open={outerOpen}
-          onToggle={toggleOuter}
-          running={isLiveTurn}
-          shimmer={thinkingActive}
-          depth={0}
-        />
+        {renderOuterToggle({ running: isLiveTurn, shimmer: thinkingActive })}
         {outerOpen && thoughtBodies.length > 0 && (
           <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
             {thoughtBodies.map((text, i) => (
@@ -1133,7 +1132,11 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         )}
         {showNextPlanning ? (
           <div className={outerOpen ? 'pl-4' : undefined}>
-            <NextPlanningPlaceholder depth={outerOpen ? 1 : 0} />
+            <NextPlanningPlaceholder
+              depth={outerOpen ? 1 : 0}
+              classic={embedVisualizations}
+              startedMs={liveStartedMs}
+            />
           </div>
         ) : null}
       </div>
@@ -1148,15 +1151,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
     return (
       <div className="my-1.5 w-full select-text">
-        <TextChevronToggle
-          primary={summary.primary}
-          secondary={summary.secondary}
-          open={outerOpen}
-          onToggle={toggleOuter}
-          running={live}
-          shimmer={live}
-          depth={0}
-        />
+        {renderOuterToggle({ running: live, shimmer: live })}
         {outerOpen && summaryLine && (summaryLine.detail || summaryLine.running) && (
           <div
             className={`mt-0.5 pl-4 pr-1 py-1.5 rounded-md border ${
@@ -1190,7 +1185,11 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
         )}
         {showNextPlanning ? (
           <div className={outerOpen ? 'pl-4' : undefined}>
-            <NextPlanningPlaceholder depth={outerOpen ? 1 : 0} />
+            <NextPlanningPlaceholder
+              depth={outerOpen ? 1 : 0}
+              classic={embedVisualizations}
+              startedMs={liveStartedMs}
+            />
           </div>
         ) : null}
       </div>
@@ -1204,15 +1203,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
       <div className="my-1.5 w-full select-text space-y-0.5">
         {thoughtBodies.length > 0 && (
           <div className="mb-1">
-            <TextChevronToggle
-              primary={summary.primary.startsWith('plan') ? 'Thought' : summary.primary}
-              secondary={summary.primary.startsWith('plan') ? 'for a bit' : summary.secondary}
-              open={outerOpen}
-              onToggle={toggleOuter}
-              running={thinkingActive}
-              shimmer={thinkingActive}
-              depth={0}
-            />
+            {renderOuterToggle({ running: thinkingActive, shimmer: thinkingActive })}
             {outerOpen && (
               <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
                 {thoughtBodies.map((text, i) => (
@@ -1236,22 +1227,19 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             defaultOpen
           />
         ))}
-        {showNextPlanning ? <NextPlanningPlaceholder /> : null}
+        {showNextPlanning ? (
+          <NextPlanningPlaceholder classic={embedVisualizations} startedMs={liveStartedMs} />
+        ) : null}
       </div>
     );
   }
 
   return (
     <div className="my-1.5 w-full select-text">
-      <TextChevronToggle
-        primary={summary.primary}
-        secondary={summary.secondary}
-        open={outerOpen}
-        onToggle={toggleOuter}
-        running={isLiveTurn || hasRunning || hasLiveCompression}
-        shimmer={thinkingActive || hasRunning || hasLiveCompression}
-        depth={0}
-      />
+      {renderOuterToggle({
+        running: isLiveTurn || hasRunning || hasLiveCompression,
+        shimmer: thinkingActive || hasRunning || hasLiveCompression,
+      })}
       {/* Depth 1: event lines indented under the outer fold.
           >10 steps → fixed-height scroll box so the page doesn't grow forever.
           Delegate folds stay mounted (hidden when collapsed) so an open
@@ -1288,7 +1276,9 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             }
           />
         ))}
-        {showNextPlanning ? <NextPlanningPlaceholder /> : null}
+        {showNextPlanning ? (
+          <NextPlanningPlaceholder classic={embedVisualizations} startedMs={liveStartedMs} />
+        ) : null}
       </div>
     </div>
   );

@@ -37,6 +37,8 @@ export interface AIWSMessage {
   type: string;
   content?: any;
   data?: any;     // some events use 'data' instead of 'content'
+  /** Session id for session-scoped events (token_stats, stream, …) */
+  sid?: string;
 }
 
 /** Token stats payload */
@@ -114,9 +116,8 @@ class AIWebSocketService {
   // doesn't match are silently dropped before reaching any handler.
   private activeSessionId: string | null = null;
 
-  // Reconnection
+  // Reconnection — keep retrying until intentional disconnect / auth failure
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 30;
   private reconnectDelay = 300;   // base delay (ms) — startup phase should retry quickly
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -175,7 +176,7 @@ class AIWebSocketService {
     content: string,
     images?: string[],
     attachments?: any[],
-    opts?: { client_id?: string },
+    opts?: { client_id?: string; session_id?: string },
   ) {
     const msg: any = { type: 'chat', content };
     if (images && images.length > 0) {
@@ -188,6 +189,9 @@ class AIWebSocketService {
       msg.client_id = opts.client_id;
       msg.message_id = opts.client_id;
     }
+    if (opts?.session_id) {
+      msg.session_id = opts.session_id;
+    }
     this._send(msg);
   }
 
@@ -196,9 +200,17 @@ class AIWebSocketService {
     this._sendCommand('new_session');
   }
 
-  /** Stop current task */
-  stopTask() {
-    this._sendCommand('stop_task');
+  /** Stop current task (optionally a single session, or all). */
+  stopTask(opts?: { session_id?: string; all?: boolean }) {
+    const data: Record<string, unknown> = {};
+    if (opts?.all) data.all = true;
+    if (opts?.session_id) data.session_id = opts.session_id;
+    this._sendCommand('stop_task', Object.keys(data).length ? data : undefined);
+  }
+
+  /** Mark a session as the primary ingress target for external channels. */
+  setPrimarySession(sessionId: string) {
+    this._sendCommand('set_primary_session', { session_id: sessionId });
   }
 
   /** Withdraw a user turn (truncate session from timestamp) after file revert. */
@@ -218,8 +230,11 @@ class AIWebSocketService {
    * model_cards directory.  The switch is confirmed asynchronously via the
    * `model_card_switched` info event, which the chat UI already renders.
    */
-  switchModel(cardName: string) {
-    this._sendCommand('switch_model', { card: cardName });
+  switchModel(cardName: string, sessionId?: string) {
+    this._sendCommand('switch_model', {
+      card: cardName,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    });
   }
 
   /**
@@ -236,16 +251,33 @@ class AIWebSocketService {
   }
 
   /** Set Cursor-style reasoning effort (low | medium | high) on the running agent. */
-  setReasoningEffort(effort: 'low' | 'medium' | 'high') {
-    this._sendCommand('set_reasoning_effort', { effort });
+  setReasoningEffort(effort: 'low' | 'medium' | 'high', sessionId?: string) {
+    this._sendCommand('set_reasoning_effort', {
+      effort,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    });
   }
 
-  /** Set Plan / Build agent mode. Optionally pass approval request id. */
-  setAgentMode(mode: 'plan' | 'build', approvedRequestId?: string) {
+  /** Set Plan / Build agent mode. Optionally pass approval request id and session scope. */
+  setAgentMode(mode: 'plan' | 'build', approvedRequestId?: string, sessionId?: string) {
     this._sendCommand('set_agent_mode', {
       mode,
       id: approvedRequestId,
       approved_request_id: approvedRequestId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    });
+  }
+
+  /** Codex-style /goal lifecycle: set | pause | resume | clear | status. */
+  setGoal(data: {
+    action: 'set' | 'pause' | 'resume' | 'clear' | 'status' | 'start';
+    objective?: string;
+    nudge?: boolean;
+  }) {
+    this._sendCommand('set_goal', {
+      action: data.action,
+      objective: data.objective || '',
+      nudge: data.nudge !== false,
     });
   }
 
@@ -326,14 +358,30 @@ class AIWebSocketService {
   }
 
   /**
-   * Switch to a session and send a message.
-   * If content is empty, just switches to the session without sending a message.
+   * Switch to a session and optionally send a message.
+   * With parallel multi-session backend, prefer sendMessage({session_id}) for new turns.
+   * switch_and_reply remains for focus switches / empty content.
    */
-  switchAndReply(sessionId: string, content: string = '') {
-    this._sendCommand('stop_task');
-    setTimeout(() => {
-      this._sendCommand('switch_and_reply', { session_id: sessionId, content });
-    }, 100);
+  switchAndReply(
+    sessionId: string,
+    content: string = '',
+    opts?: { stopCurrent?: boolean },
+  ) {
+    const stopCurrent = opts?.stopCurrent !== false;
+    const send = () => {
+      if (content) {
+        // Parallel path: deliver directly to session inbox (no global stop).
+        this.sendMessage(content, undefined, undefined, { session_id: sessionId });
+        return;
+      }
+      this._sendCommand('switch_and_reply', { session_id: sessionId, content: '' });
+    };
+    if (stopCurrent && content) {
+      this._sendCommand('stop_task', { session_id: sessionId });
+      setTimeout(send, 100);
+    } else {
+      send();
+    }
   }
 
   /** Register handler for a specific message type (or '*' for all) */
@@ -588,22 +636,19 @@ class AIWebSocketService {
 
   private _scheduleReconnect(startupFast: boolean = false) {
     if (!this.agentId) return;  // was intentionally disconnected
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.warn('[AIWebSocket] Max reconnect attempts reached');
-      return;
-    }
+    if (this.intentionalDisconnect) return;
 
     // Prevent duplicate reconnect timers
     if (this.reconnectTimer) return;
 
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    const delay = this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 4));
     const jitter = Math.random() * 250;
     const totalDelay = startupFast
       ? Math.min(1200, 200 + Math.random() * 200) // aggressive retry for agent startup
       : Math.min(delay + jitter, 5000);
 
-    console.log(`[AIWebSocket] Reconnecting in ${Math.round(totalDelay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    console.log(`[AIWebSocket] Reconnecting in ${Math.round(totalDelay)}ms (attempt ${this.reconnectAttempts})`);
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

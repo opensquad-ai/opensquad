@@ -5,7 +5,6 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Trash2,
-  RefreshCw,
   ChevronLeft,
   Check,
   X,
@@ -28,6 +27,7 @@ import {
   type SessionProjectMeta,
 } from '../../utils/sessionProjectMeta';
 import { pathsEqual } from '../../utils/workspaceStore';
+import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
 
 const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
@@ -159,10 +159,12 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     setMetaMap(loadSessionProjectMeta(agentId));
   }, [agentId]);
 
-  const loadSessions = useCallback(async (): Promise<AgentSession[]> => {
+  const loadSessions = useCallback(async (opts?: { silent?: boolean }): Promise<AgentSession[]> => {
     if (!agentId) return [];
-    setLoading(true);
-    setError(null);
+    if (!opts?.silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const resp = await agentSessionAPI.getSessionList(agentId);
       const list = resp.sessions || [];
@@ -170,22 +172,51 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       reloadMeta();
       return list;
     } catch (err: any) {
-      setError(err.message || t('aiChat.sessionSidebar.loadSessionsFailed'));
+      if (!opts?.silent) {
+        setError(err.message || t('aiChat.sessionSidebar.loadSessionsFailed'));
+      }
       return sessionsRef.current;
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
   }, [agentId, reloadMeta, t]);
 
   useEffect(() => {
-    if (isOpen) void loadSessions();
+    if (isOpen) void loadSessions({ silent: false });
   }, [isOpen, loadSessions, workspaceRootPath, workspaceId]);
+
+  // Silent keep-alive refresh — no manual button; reconnect/list changes stay fresh
+  useEffect(() => {
+    if (!isOpen || !agentId) return;
+    const tick = () => void loadSessions({ silent: true });
+    const id = window.setInterval(tick, 6000);
+    const onFocus = () => tick();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [isOpen, agentId, loadSessions]);
 
   useEffect(() => {
     if (!isOpen) {
       setConfirmingDeleteId(null);
       setEditingId(null);
     }
+  }, [isOpen]);
+
+  const { mounted: softMounted, visible: softVisible } = useSoftPresence(isOpen, SOFT_PRESENCE_MS);
+  const [railToggling, setRailToggling] = useState(false);
+
+  useEffect(() => {
+    setRailToggling(true);
+    const t = window.setTimeout(() => setRailToggling(false), SOFT_PRESENCE_MS);
+    return () => window.clearTimeout(t);
   }, [isOpen]);
 
   useEffect(() => {
@@ -257,8 +288,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         ...prev.map((s) => ({ ...s, current: false })),
       ];
     });
-    const t1 = window.setTimeout(() => void loadSessions(), 200);
-    const t2 = window.setTimeout(() => void loadSessions(), 900);
+    const t1 = window.setTimeout(() => void loadSessions({ silent: true }), 200);
+    const t2 = window.setTimeout(() => void loadSessions({ silent: true }), 900);
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -282,7 +313,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     const onMeta = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.agentId !== agentId) return;
-      void loadSessions();
+      void loadSessions({ silent: true });
     };
     window.addEventListener(SESSION_META_EVENT, onMeta);
     window.addEventListener(SESSION_LIST_REFRESH_EVENT, onMeta);
@@ -529,11 +560,16 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     </div>
   );
 
-  if (!isOpen) return null;
+  if (!softMounted) return null;
 
   return (
     <div
-      className="relative flex-shrink-0 h-full flex flex-col os-depth-card"
+      className={`os-soft-rail ${softVisible ? 'is-open' : ''} ${railToggling ? 'is-toggling' : ''}`}
+      style={{ width: softVisible ? sidebarWidth : 0 }}
+      aria-hidden={!softVisible}
+    >
+    <div
+      className="relative h-full flex flex-col os-depth-card os-soft-rail-inner"
       style={{ width: sidebarWidth }}
     >
       <div
@@ -554,14 +590,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           <ChevronLeft size={14} className="text-textMuted" />
         </button>
         <div className="flex-1 min-w-0 text-[12px] font-medium text-textMuted truncate">会话</div>
-        <button
-          type="button"
-          onClick={() => void loadSessions()}
-          className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
-          title="刷新"
-        >
-          <RefreshCw size={13} className={`text-textMuted ${loading ? 'animate-spin' : ''}`} />
-        </button>
       </div>
 
       <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">
@@ -615,6 +643,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </>
         )}
       </div>
+    </div>
     </div>
   );
 };

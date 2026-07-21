@@ -1,11 +1,19 @@
 /**
- * PlanBlock - displays AI task plan with step status indicators.
+ * PlanBlock - workflow-style task plan (shared by timeline + composer dock).
  *
- * Each step can be: pending, running, done, or failed.
- * Steps are parsed from the plan content.
+ * Header: Plan · done/total · chevron
+ * Steps: green check (done+strike) · primary arrow (running) · dashed circle (pending)
  */
-import React, { useState } from 'react';
-import { ListChecks, ChevronDown, ChevronRight, Circle, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  ListTodo,
+  ChevronDown,
+  ChevronRight,
+  CircleDashed,
+  ArrowRightCircle,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 
 export interface PlanStep {
   content: string;
@@ -16,59 +24,89 @@ interface PlanBlockProps {
   steps: PlanStep[];
   title?: string;
   className?: string;
+  /** Keep expanded while a step is running */
+  defaultOpen?: boolean;
 }
 
 const StepIcon: React.FC<{ status: PlanStep['status'] }> = ({ status }) => {
+  const muted = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
   switch (status) {
     case 'done':
-      return <CheckCircle2 size={12} className="text-emerald-500 flex-shrink-0" />;
+      return <CheckCircle2 size={14} className="text-emerald-500/80 flex-shrink-0 mt-0.5" />;
     case 'running':
-      return <Loader2 size={12} className="text-primary animate-spin flex-shrink-0" />;
+      return <ArrowRightCircle size={14} className="text-primary/80 flex-shrink-0 mt-0.5" />;
     case 'failed':
-      return <XCircle size={12} className="text-red-500 flex-shrink-0" />;
+      return <XCircle size={14} className="text-red-500/80 flex-shrink-0 mt-0.5" />;
     default:
-      return <Circle size={12} className="text-textMuted flex-shrink-0" />;
+      return <CircleDashed size={14} className="flex-shrink-0 mt-0.5" style={{ color: muted }} strokeWidth={1.5} />;
   }
 };
 
-export const PlanBlock: React.FC<PlanBlockProps> = ({ steps, title, className }) => {
-  const [isOpen, setIsOpen] = useState(true);
+export const PlanBlock: React.FC<PlanBlockProps> = ({
+  steps,
+  title,
+  className,
+  defaultOpen = true,
+}) => {
+  const hasRunning = steps.some((s) => s.status === 'running');
+  const [isOpen, setIsOpen] = useState(defaultOpen || hasRunning);
+
+  useEffect(() => {
+    if (defaultOpen || hasRunning) setIsOpen(true);
+  }, [defaultOpen, hasRunning]);
 
   if (!steps || steps.length === 0) return null;
 
-  const doneCount = steps.filter(s => s.status === 'done').length;
+  const doneCount = steps.filter((s) => s.status === 'done').length;
   const total = steps.length;
 
   return (
-    <div className={className || "mb-3 ml-9 border border-border rounded-lg overflow-hidden bg-panel/50"}>
-      {/* Header */}
-      <div
-        className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-bgLight/50 transition-colors select-none"
+    <div
+      className={
+        className ||
+        'mb-3 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]'
+      }
+    >
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors select-none text-left bg-transparent border-0"
         onClick={() => setIsOpen(!isOpen)}
       >
-        <ListChecks size={14} className="text-primary" />
-        <span className="text-xs text-textMain font-medium flex-1 truncate">
+        <ListTodo size={14} className="text-primary/85 flex-shrink-0" />
+        <span className="text-[13px] text-textMain font-medium flex-1 truncate">
           {title || 'Plan'}
         </span>
-        <span className="text-[10px] text-textMuted">{doneCount}/{total}</span>
-        {isOpen
-          ? <ChevronDown size={14} className="text-textMuted" />
-          : <ChevronRight size={14} className="text-textMuted" />
-        }
-      </div>
+        <span className="text-[11px] text-textMuted tabular-nums">
+          {doneCount}/{total}
+        </span>
+        {isOpen ? (
+          <ChevronDown size={14} className="text-textMuted flex-shrink-0" />
+        ) : (
+          <ChevronRight size={14} className="text-textMuted flex-shrink-0" />
+        )}
+      </button>
 
-      {/* Steps */}
       {isOpen && (
-        <div className="border-t border-border px-3 py-2 space-y-1.5">
+        <div className="border-t border-border/50 px-3 py-2 space-y-1.5">
           {steps.map((step, i) => (
             <div key={i} className="flex items-start gap-2">
               <StepIcon status={step.status} />
-              <span className={`text-[11px] leading-tight ${
-                step.status === 'done' ? 'text-textMuted line-through' :
-                step.status === 'running' ? 'text-textMain font-medium' :
-                step.status === 'failed' ? 'text-red-500' :
-                'text-textMuted'
-              }`}>
+              <span
+                className={`text-[12.5px] leading-snug break-words ${
+                  step.status === 'done'
+                    ? 'line-through'
+                    : step.status === 'running'
+                      ? 'font-medium text-textMain/90'
+                      : step.status === 'failed'
+                        ? 'text-red-500/90'
+                        : ''
+                }`}
+                style={
+                  step.status === 'done' || step.status === 'pending'
+                    ? { color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }
+                    : undefined
+                }
+              >
                 {step.content}
               </span>
             </div>
@@ -114,7 +152,12 @@ export function parsePlanContent(content: any): PlanStep[] {
 
       if (/\[x\]/i.test(line) || /\[done\]/i.test(line) || /\[completed\]/i.test(line)) {
         status = 'done';
-      } else if (/\[running\]/i.test(line) || /\[in.?progress\]/i.test(line) || /\[current\]/i.test(line) || /\[>\]/.test(line)) {
+      } else if (
+        /\[running\]/i.test(line) ||
+        /\[in.?progress\]/i.test(line) ||
+        /\[current\]/i.test(line) ||
+        /\[>\]/.test(line)
+      ) {
         status = 'running';
       } else if (/\[failed\]/i.test(line) || /\[error\]/i.test(line)) {
         status = 'failed';

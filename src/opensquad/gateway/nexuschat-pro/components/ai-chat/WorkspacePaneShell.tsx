@@ -4,6 +4,7 @@
 import React, { useMemo } from 'react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
+import { ComposerLandingDock } from './ComposerLandingDock';
 import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
 
@@ -22,6 +23,8 @@ export type PaneShellHandlers = {
   renderComposer?: (sessionId: string) => React.ReactNode;
   /** Rich timeline for session tabs that do not host the live chatSlot. */
   renderSessionChat?: (sessionId: string) => React.ReactNode;
+  /** Empty live session → center composer + greeting (smooth dock on first send). */
+  isComposerLanding?: (sessionId: string) => boolean;
 };
 
 interface WorkspacePaneShellProps {
@@ -66,6 +69,11 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   }, [tabs.open, tabTitles, fileDirtyMap]);
 
   const active = parseContentTabKey(tabs.activeKey);
+  const landing =
+    !!active &&
+    active.kind === 'session' &&
+    !!handlers.renderComposer &&
+    (handlers.isComposerLanding?.(active.id) ?? false);
 
   return (
     <div
@@ -129,8 +137,10 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             onDirtyChange={(dirty) => handlers.onFileDirty?.(active.id, dirty)}
           />
         ) : (
-          <>
-            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div
+            className={`os-chat-session-shell ${landing ? 'is-landing' : 'is-docked'}`}
+          >
+            <div className="os-chat-session-messages">
               {chatSlot
                 ? chatSlot
                 : handlers.renderSessionChat
@@ -144,8 +154,12 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                     </div>
                   )}
             </div>
-            {handlers.renderComposer ? handlers.renderComposer(active.id) : null}
-          </>
+            {handlers.renderComposer ? (
+              <ComposerLandingDock landing={landing} seedKey={active.id}>
+                {handlers.renderComposer(active.id)}
+              </ComposerLandingDock>
+            ) : null}
+          </div>
         )}
       </div>
     </div>
