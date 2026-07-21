@@ -370,7 +370,7 @@ const CodePreview: React.FC<{ fileName: string; content: string }> = ({ fileName
       <style>{HLJS_THEME_CSS}</style>
       <div className="min-w-full inline-block">
         {lines.map((line, i) => (
-          <div key={i} className="flex items-start hover:bg-white/[0.03]">
+          <div key={i} className="flex items-start hover:bg-primary/10">
             <span className="select-none w-10 shrink-0 text-right pr-2 text-gray-600 tabular-nums text-[10px] border-r border-gray-800">
               {i + 1}
             </span>
@@ -1800,14 +1800,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           <>
             <button
               type="button"
-              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => void startCreate('file', isRoot ? browsePath : target.path)}
             >
               新建文档
             </button>
             <button
               type="button"
-              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => void startCreate('dir', isRoot ? browsePath : target.path)}
             >
               新建文件夹
@@ -1817,21 +1817,21 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         ) : null}
         <button
           type="button"
-          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doReveal(target.path)}
         >
           打开所在目录
         </button>
         <button
           type="button"
-          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doTerminal(target)}
         >
           在终端中打开
         </button>
         <button
           type="button"
-          className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+          className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doCopyPath(target.path)}
         >
           复制路径
@@ -1841,14 +1841,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <div className="my-1 h-px bg-black/8 dark:bg-white/10" />
             <button
               type="button"
-              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => startRename(target.path)}
             >
               重命名
             </button>
             <button
               type="button"
-              className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10 text-red-500"
+              className="w-full px-3 py-1.5 text-left hover:bg-primary/10 text-red-500"
               onClick={() => void doDelete(target.path)}
             >
               删除
@@ -2043,7 +2043,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       </button>
                       <button
                         type="button"
-                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0 disabled:opacity-40"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 shrink-0 disabled:opacity-40"
                         title="撤回此文件"
                         disabled={isReverting || isKeeping}
                         onClick={(ev) => {
@@ -2059,7 +2059,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       </button>
                       <button
                         type="button"
-                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 shrink-0"
                         title="Copy Path"
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -2267,7 +2267,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     {!isRenaming ? (
                       <button
                         type="button"
-                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 shrink-0 border-0 bg-transparent cursor-pointer"
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 shrink-0 border-0 bg-transparent cursor-pointer"
                         title="更多"
                         onClick={(ev) =>
                           openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
@@ -2309,20 +2309,19 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         className="absolute left-0 top-0 bottom-0 w-1.5 -ml-0.5 cursor-col-resize z-10 hover:bg-primary/30"
       />
 
-      {/* Header */}
-      <div className="px-2.5 pt-2.5 pb-1.5 border-b border-border box-border flex-shrink-0">
-        <div className="flex items-start gap-1">
-          <div className="flex-1 min-w-0">
-            <div className="text-[13px] font-medium text-textMuted leading-tight">工作区文件</div>
-            <div className="text-[10px] text-textMuted/55 truncate mt-0.5" title={rootPath || undefined}>
-              {projectLabel}
-            </div>
+      {/* Header — same h-11 band as L1 / session sidebar */}
+      <div className="h-11 px-2.5 border-b border-border box-border flex-shrink-0 flex items-center gap-1">
+          <div
+            className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
+            title={rootPath || projectLabel || undefined}
+          >
+            工作区文件
           </div>
           <div className="flex items-center gap-0.5 shrink-0">
             <button
               type="button"
               onClick={() => setShowSearch((v) => !v)}
-              className={`p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+              className={`p-1.5 rounded-md hover:bg-primary/10 ${
                 showSearch ? 'bg-black/[0.06] dark:bg-white/10' : ''
               }`}
               title="搜索"
@@ -2337,7 +2336,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                   setNewMenuOpen((v) => !v);
                 }}
                 disabled={!rootPath}
-                className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
+                className="p-1.5 rounded-md hover:bg-primary/10 disabled:opacity-40"
                 title="新建"
               >
                 <Plus size={13} className="text-textMuted" />
@@ -2346,7 +2345,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] os-soft-pop is-open">
                   <button
                     type="button"
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
                     onClick={() => void startCreate('file')}
                   >
                     <FileText size={12} className="text-neutral-400" />
@@ -2354,7 +2353,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                   </button>
                   <button
                     type="button"
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"
                     onClick={() => void startCreate('dir')}
                   >
                     <FolderPlus size={12} className="text-neutral-400" />
@@ -2366,7 +2365,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <button
               type="button"
               onClick={() => setShowPreview((v) => !v)}
-              className={`p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+              className={`p-1.5 rounded-md hover:bg-primary/10 ${
                 treeOnly ? 'hidden' : ''
               }`}
               title={showPreview ? '隐藏预览' : '显示预览'}
@@ -2380,13 +2379,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+              className="p-1.5 rounded-md hover:bg-primary/10"
               title="关闭"
             >
               <X size={13} className="text-textMuted" />
             </button>
           </div>
-        </div>
       </div>
 
       <div className="flex-1 min-h-0 flex">
@@ -2416,7 +2414,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     <button
                       type="button"
                       onClick={() => setMdRaw((v) => !v)}
-                      className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-border/70 text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/10 hover:text-textMain"
+                      className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-border/70 text-textMuted hover:bg-primary/10 hover:text-textMain"
                       title={mdRaw ? '渲染预览' : '原始源码'}
                     >
                       {mdRaw ? '预览' : '源码'}

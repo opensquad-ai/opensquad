@@ -1,82 +1,66 @@
 /**
- * StatusBadge - displays agent connection/activity status.
- *
- * Shows: connected, disconnected, connecting, thinking, error.
+ * StatusBadge — compact agent connection light (no label text).
+ * Green breathing when online; amber when disconnected / connecting.
  */
 import React from 'react';
-import { Wifi, WifiOff, Loader2, AlertCircle } from 'lucide-react';
 
-export type AgentStatus = 'connected' | 'disconnected' | 'connecting' | 'agent-starting' | 'thinking' | 'working' | 'sleeping' | 'error' | 'idle' | 'awaiting_reply';
+export type AgentStatus =
+  | 'connected'
+  | 'disconnected'
+  | 'connecting'
+  | 'agent-starting'
+  | 'thinking'
+  | 'working'
+  | 'sleeping'
+  | 'error'
+  | 'idle'
+  | 'awaiting_reply';
 
 interface StatusBadgeProps {
   status: AgentStatus;
-  agentName?: string;
+  /** Optional accessible / hover label */
+  title?: string;
+  className?: string;
 }
 
-const STATUS_CONFIG: Record<AgentStatus, {
-  label: string;
-  dotClass: string;
-  icon: React.ReactNode;
-}> = {
-  connected: {
-    label: 'Connected',
-    dotClass: 'bg-emerald-500',
-    icon: <Wifi size={12} />,
-  },
-  idle: {
-    label: 'Ready',
-    dotClass: 'bg-emerald-500',
-    icon: <Wifi size={12} />,
-  },
-  working: {
-    label: 'Working',
-    dotClass: 'bg-blue-500 animate-pulse',
-    icon: <Loader2 size={12} className="animate-spin" />,
-  },
-  sleeping: {
-    label: 'Sleeping',
-    dotClass: 'bg-gray-400',
-    icon: <WifiOff size={12} />,
-  },
-  disconnected: {
-    label: 'Disconnected',
-    dotClass: 'bg-gray-400',
-    icon: <WifiOff size={12} />,
-  },
-  connecting: {
-    label: 'Connecting...',
-    dotClass: 'bg-amber-500 animate-pulse',
-    icon: <Loader2 size={12} className="animate-spin" />,
-  },
-  'agent-starting': {
-    label: 'Agent starting...',
-    dotClass: 'bg-yellow-400 animate-pulse',
-    icon: <Loader2 size={12} className="animate-spin" />,
-  },
-  thinking: {
-    label: 'Thinking...',
-    dotClass: 'bg-primary animate-pulse',
-    icon: <Loader2 size={12} className="animate-spin" />,
-  },
-  error: {
-    label: 'Error',
-    dotClass: 'bg-red-500',
-    icon: <AlertCircle size={12} />,
-  },
-  awaiting_reply: {
-    label: 'Awaiting reply',
-    dotClass: 'bg-violet-500 animate-pulse',
-    icon: <Loader2 size={12} className="animate-spin" />,
-  },
+const STATUS_TITLE: Record<AgentStatus, string> = {
+  connected: 'Connected',
+  idle: 'Ready',
+  working: 'Working',
+  sleeping: 'Sleeping',
+  disconnected: 'Disconnected',
+  connecting: 'Connecting…',
+  'agent-starting': 'Agent starting…',
+  thinking: 'Thinking…',
+  error: 'Error',
+  awaiting_reply: 'Awaiting reply',
 };
 
-export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, agentName }) => {
-  const config = STATUS_CONFIG[status] || STATUS_CONFIG.disconnected;
-
+function isOfflineStatus(status: AgentStatus): boolean {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className={`w-1.5 h-1.5 rounded-full ${config.dotClass}`} />
-      <span className="text-[10px] text-textMuted">{config.label}</span>
-    </div>
+    status === 'disconnected' ||
+    status === 'connecting' ||
+    status === 'agent-starting' ||
+    status === 'error'
+  );
+}
+
+export const StatusBadge: React.FC<StatusBadgeProps> = ({
+  status,
+  title,
+  className = '',
+}) => {
+  const offline = isOfflineStatus(status);
+  return (
+    <span
+      className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+        offline
+          ? 'bg-amber-400 animate-pulse'
+          : 'bg-emerald-500 animate-breathe-idle'
+      } ${className}`}
+      title={title || STATUS_TITLE[status] || STATUS_TITLE.disconnected}
+      aria-label={title || STATUS_TITLE[status] || STATUS_TITLE.disconnected}
+      role="status"
+    />
   );
 };

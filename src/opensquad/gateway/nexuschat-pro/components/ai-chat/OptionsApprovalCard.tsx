@@ -182,7 +182,7 @@ export const OptionsApprovalCard: React.FC<OptionsApprovalCardProps> = ({
                   ? 'border-primary bg-primary/10'
                   : isSelected
                     ? 'border-amber-400 bg-amber-500/10'
-                    : 'border-border bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+                    : 'border-border bg-transparent hover:bg-primary/10'
               } ${resolved ? 'cursor-default opacity-80' : 'cursor-pointer'}`}
             >
               <div className="flex items-start gap-2.5">
@@ -232,7 +232,7 @@ export const OptionsApprovalCard: React.FC<OptionsApprovalCardProps> = ({
                   : 'border-border opacity-80'
                 : customMode
                   ? 'border-amber-400 bg-amber-500/10'
-                  : 'border-border bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/[0.04]'
+                  : 'border-border bg-transparent hover:bg-primary/10'
             }`}
           >
             <button

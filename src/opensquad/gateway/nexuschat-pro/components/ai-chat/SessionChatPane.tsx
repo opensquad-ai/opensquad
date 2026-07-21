@@ -11,6 +11,7 @@ import {
   type TimelineEntry,
   type WorkflowBlock,
 } from '../../utils/aiChatTimeline';
+import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
@@ -21,7 +22,8 @@ export interface SessionChatPaneProps {
   /** When set, render this instead of fetching history (same-session mirror of live pane). */
   liveTimeline?: TimelineEntry[] | null;
   isSolo?: boolean;
-  expandDetails?: boolean;
+  /** @deprecated Prefer reading Settings → General; kept for optional override. */
+  expandLevel?: WorkflowExpandLevel;
   columnClass?: string;
   userName?: string;
   agentName?: string;
@@ -34,12 +36,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   sessionId,
   liveTimeline,
   isSolo = true,
-  expandDetails = false,
+  expandLevel: expandLevelProp,
   columnClass = 'max-w-3xl mx-auto w-full',
   userName,
   agentName,
   onFocus,
 }) => {
+  const [prefLevel] = useWorkflowExpandLevel();
+  const expandLevel = expandLevelProp ?? prefLevel;
   const [loading, setLoading] = useState(!liveTimeline);
   const [error, setError] = useState<string | null>(null);
   const [fetched, setFetched] = useState<TimelineEntry[]>([]);
@@ -150,7 +154,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                 <button
                   type="button"
                   onClick={scrollToTop}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
                   title="滚动到顶部"
                 >
                   <ChevronUp size={18} className="text-gray-500" />
@@ -160,7 +164,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                 <button
                   type="button"
                   onClick={scrollToBottom}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
                   title="滚动到底部"
                 >
                   <ChevronDown size={18} className="text-gray-500" />
@@ -197,7 +201,6 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   );
                 }
                 if (entry.kind === 'workflow') {
-                  if (!isSolo && !expandDetails) return null;
                   const curBlock = entry.data as WorkflowBlock;
                   if (
                     i > 0 &&
@@ -224,7 +227,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     <SoloActivityRow
                       key={entryKey}
                       block={merged}
-                      expandDetails={expandDetails}
+                      expandLevel={expandLevel}
                       embedVisualizations={false}
                     />
                   );
@@ -244,7 +247,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             <button
               type="button"
               onClick={scrollToBottom}
-              className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-gray-50 dark:hover:bg-[#333] transition-opacity duration-300 cursor-pointer"
+              className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
               style={{ opacity: scrollActive ? 1 : 0.55 }}
               title="滚动到底部"
             >

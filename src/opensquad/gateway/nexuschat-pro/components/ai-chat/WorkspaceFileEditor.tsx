@@ -290,7 +290,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
                   className={`px-1.5 py-0.5 flex items-center gap-0.5 border-0 ${
                     viewMode === id
                       ? 'bg-black/[0.08] dark:bg-white/15 text-textMain'
-                      : 'bg-transparent text-textMuted hover:bg-black/[0.04]'
+                      : 'bg-transparent text-textMuted hover:bg-primary/10'
                   }`}
                 >
                   <Icon size={11} />

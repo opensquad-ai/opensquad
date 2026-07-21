@@ -603,7 +603,7 @@ const ReadContentPane: React.FC<{ content: string; lang: string }> = ({ content,
         return (
           <div
             key={i}
-            className="flex items-start font-mono text-[11px] leading-5 min-w-0 hover:bg-white/[0.03]"
+            className="flex items-start font-mono text-[11px] leading-5 min-w-0 hover:bg-primary/10"
           >
             <span className="select-none w-10 shrink-0 text-right pr-2 leading-5 tabular-nums text-[10px] text-gray-600 border-r border-gray-700/30 bg-gray-900/30">
               {startLine + i}

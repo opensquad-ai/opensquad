@@ -43,7 +43,7 @@ export const SessionChangesBar: React.FC<SessionChangesBarProps> = ({
         disabled={busy}
         className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium
           bg-black/[0.04] dark:bg-white/[0.08] border border-border/60
-          text-textMain hover:bg-black/[0.07] dark:hover:bg-white/[0.12] transition-colors
+          text-textMain hover:bg-primary/15 transition-colors
           disabled:opacity-50"
         title="查看变动文件"
       >
@@ -57,7 +57,7 @@ export const SessionChangesBar: React.FC<SessionChangesBarProps> = ({
         disabled={busy}
         className="inline-flex items-center gap-1 rounded-full px-3 py-1 text-[12px] font-medium
           bg-black/[0.04] dark:bg-white/[0.08] border border-border/60
-          text-textMain hover:bg-black/[0.07] dark:hover:bg-white/[0.12] transition-colors
+          text-textMain hover:bg-primary/15 transition-colors
           disabled:opacity-50"
         title="发送 Commit & Push：让 Agent 提交并推送当前改动"
       >

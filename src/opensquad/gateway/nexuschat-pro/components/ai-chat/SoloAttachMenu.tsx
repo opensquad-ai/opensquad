@@ -88,7 +88,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             ? 'bg-primary/15 text-primary'
             : autoSpeechEnabled
               ? 'bg-primary/10 text-primary'
-              : 'bg-black/[0.05] dark:bg-white/[0.08] text-textMuted hover:bg-black/[0.08] dark:hover:bg-white/[0.12] hover:text-textMain'
+              : 'bg-black/[0.05] dark:bg-white/[0.08] text-textMuted hover:bg-primary/15 hover:text-textMain'
         }`}
         title={autoSpeechEnabled ? 'Attach (Auto speech on)' : 'Attach'}
       >
@@ -111,7 +111,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                   key={item.key}
                   type="button"
                   onClick={() => run(item.onClick)}
-                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors border-0 bg-transparent cursor-pointer"
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
                 >
                   <Icon size={15} className="text-textMuted" />
                   <span>{item.label}</span>
@@ -127,7 +127,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                   className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     autoSpeechEnabled
                       ? 'bg-primary/10 text-primary'
-                      : 'bg-transparent text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                      : 'bg-transparent text-textMain hover:bg-primary/10'
                   }`}
                   title="Automatically speak each final agent reply"
                 >
@@ -151,7 +151,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
               className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                 skillsOpen
                   ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                  : 'bg-transparent text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                  : 'bg-transparent text-textMain hover:bg-primary/10'
               }`}
             >
               <BookOpen size={15} className="text-textMuted" />
@@ -176,7 +176,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                       key={id}
                       type="button"
                       onClick={() => run(() => onSelectSkill(skill))}
-                      className="w-full text-left px-3 py-2 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors border-0 bg-transparent cursor-pointer"
+                      className="w-full text-left px-3 py-2 hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
                       title={desc || title}
                     >
                       <div className="text-[13px] font-medium text-textMain truncate">{title}</div>

@@ -48,7 +48,7 @@ export const ModePicker: React.FC<ModePickerProps> = ({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium text-textMain bg-black/[0.05] dark:bg-white/[0.08] hover:bg-black/[0.08] dark:hover:bg-white/[0.12] transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
+        className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium text-textMain bg-black/[0.05] dark:bg-white/[0.08] hover:bg-primary/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
         title={current.hint}
       >
         <span>{current.label}</span>
@@ -79,7 +79,7 @@ export const ModePicker: React.FC<ModePickerProps> = ({
                   className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     selected
                       ? 'bg-primary/10 text-primary'
-                      : 'bg-transparent text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                      : 'bg-transparent text-textMain hover:bg-primary/10'
                   }`}
                 >
                   <div className="flex-1 min-w-0">

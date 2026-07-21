@@ -5,7 +5,6 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next';
 import {
   Trash2,
-  ChevronLeft,
   Check,
   X,
   Pin,
@@ -16,6 +15,8 @@ import {
   Archive,
   ChevronDown,
   ChevronRight,
+  BookOpen,
+  Code2,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import {
@@ -79,7 +80,6 @@ interface SessionSidebarProps {
   onSwitchAndReply: (sessionId: string) => void;
   onOpenSkills?: () => void;
   isOpen: boolean;
-  onClose: () => void;
   sessionTitleUpdate?: { id: string; title: string } | null;
   agentBusy?: boolean;
   /** Session ids currently running a parallel turn */
@@ -88,6 +88,9 @@ interface SessionSidebarProps {
   onSetPrimarySession?: (sessionId: string) => void;
   /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
   onSessionsChange?: (sessions: AgentSession[]) => void;
+  /** Chat layout mode: classic (Work) | solo (Code). */
+  uiMode?: 'classic' | 'solo';
+  onUiModeChange?: (mode: 'classic' | 'solo') => void;
 }
 
 const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
@@ -130,13 +133,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onSwitchAndReply,
   onOpenSkills,
   isOpen,
-  onClose,
   sessionTitleUpdate,
   agentBusy = false,
   busySessionIds = [],
   primarySessionId = null,
   onSetPrimarySession,
   onSessionsChange,
+  uiMode = 'classic',
+  onUiModeChange,
 }) => {
   const { t, i18n } = useTranslation();
   const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
@@ -461,7 +465,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
               <button
                 type="button"
                 title="设为主会话（外界消息接入）"
-                className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+                className="p-0.5 rounded hover:bg-primary/10"
                 onClick={(e) => {
                   e.stopPropagation();
                   onSetPrimarySession(session.id);
@@ -472,7 +476,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             ) : null}
             <button
               type="button"
-              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              className="p-0.5 rounded hover:bg-primary/15"
               title={pinned ? '取消置顶' : '置顶'}
               onClick={(e) => {
                 e.stopPropagation();
@@ -484,7 +488,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             </button>
             <button
               type="button"
-              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              className="p-0.5 rounded hover:bg-primary/15"
               title={archived ? '取消归档' : '归档'}
               onClick={(e) => {
                 e.stopPropagation();
@@ -496,7 +500,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             </button>
             <button
               type="button"
-              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              className="p-0.5 rounded hover:bg-primary/15"
               title="重命名"
               onClick={(e) => startRename(e, session)}
             >
@@ -526,7 +530,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             </button>
             <button
               type="button"
-              className="p-0.5 rounded hover:bg-black/10"
+              className="p-0.5 rounded hover:bg-primary/15"
               onClick={(e) => {
                 e.stopPropagation();
                 setConfirmingDeleteId(null);
@@ -580,16 +584,47 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         onPointerUp={onResizePointerUp}
         className="absolute right-0 top-0 bottom-0 w-1.5 translate-x-1/2 cursor-col-resize z-10 hover:bg-primary/30"
       />
-      <div className="h-11 px-2 border-b border-border box-border flex items-center gap-1 shrink-0">
-        <button
-          type="button"
-          onClick={onClose}
-          className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
-          title="收起"
+      <div className="h-11 px-2 border-b border-border box-border flex items-center shrink-0">
+        <div
+          className="flex min-w-0 flex-1 items-center rounded-xl bg-black/[0.055] p-[3px] dark:bg-white/[0.08]"
+          role="tablist"
+          aria-label={t('aiChat.uiModeLabel')}
         >
-          <ChevronLeft size={14} className="text-textMuted" />
-        </button>
-        <div className="flex-1 min-w-0 text-[12px] font-medium text-textMuted truncate">会话</div>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uiMode === 'classic'}
+            onClick={() => onUiModeChange?.('classic')}
+            title={t('aiChat.uiModeClassicHint')}
+            className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-[9px] px-1.5 py-[5px] text-[11px] font-medium transition-all duration-150 ${
+              uiMode === 'classic'
+                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
+                : 'text-textMuted hover:text-textMain'
+            }`}
+          >
+            {uiMode === 'classic' ? (
+              <BookOpen size={13} strokeWidth={1.75} className="shrink-0 opacity-80" />
+            ) : null}
+            <span className="truncate">{t('aiChat.uiModeClassic')}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={uiMode === 'solo'}
+            onClick={() => onUiModeChange?.('solo')}
+            title={t('aiChat.uiModeSoloHint')}
+            className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-[9px] px-1.5 py-[5px] text-[11px] font-medium transition-all duration-150 ${
+              uiMode === 'solo'
+                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
+                : 'text-textMuted hover:text-textMain'
+            }`}
+          >
+            {uiMode === 'solo' ? (
+              <Code2 size={13} strokeWidth={1.75} className="shrink-0 opacity-80" />
+            ) : null}
+            <span className="truncate">{t('aiChat.uiModeSolo')}</span>
+          </button>
+        </div>
       </div>
 
       <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">

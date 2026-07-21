@@ -79,7 +79,7 @@ function ToolBtn({
       className={`p-1 rounded border-0 bg-transparent ${
         active
           ? 'bg-black/[0.08] dark:bg-white/15 text-textMain'
-          : 'text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 hover:text-textMain'
+          : 'text-textMuted hover:bg-primary/10 hover:text-textMain'
       } disabled:opacity-40 disabled:pointer-events-none`}
     >
       {children}
@@ -130,7 +130,7 @@ const PreviewPane: React.FC<{ fileName: string; content: string; isMarkdown: boo
       <style>{HLJS_THEME_CSS}</style>
       <div className="min-w-full inline-block">
         {lines.map((line, i) => (
-          <div key={i} className="flex items-start hover:bg-white/[0.03]">
+          <div key={i} className="flex items-start hover:bg-primary/10">
             <span className="select-none w-10 shrink-0 text-right pr-2 text-gray-600 tabular-nums text-[10px] border-r border-gray-800">
               {i + 1}
             </span>

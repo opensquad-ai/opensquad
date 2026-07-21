@@ -650,9 +650,11 @@
   },
   "aiChat": {
     "newSession": "New Session",
-    "uiModeClassic": "Classic",
-    "uiModeClassicHint": "Classic chat bubbles",
-    "uiModeSoloHint": "Solo document stream (Codex / Cursor Agent style)",
+    "uiModeLabel": "UI mode",
+    "uiModeClassic": "Work",
+    "uiModeSolo": "Code",
+    "uiModeClassicHint": "Work: classic chat bubbles",
+    "uiModeSoloHint": "Code: document stream (Codex / Cursor Agent style)",
     "sessions": "Sessions",
     "sendMessage": "Send Message",
     "stopGenerating": "Stop",
@@ -689,6 +691,8 @@
     "creatingSession": "Creating session...",
     "planPanel": "Plan Panel",
     "contextDetails": "Context Details",
+    "contextUsage": "Context Usage",
+    "tokenStatsPending": "Waiting for token stats…",
     "hideTokenStats": "Hide Token Stats",
     "showTokenStats": "Show Token Stats",
     "noPlanYet": "No plan yet, waiting for plan event...",
@@ -812,6 +816,7 @@
   "systemConfig": {
     "title": "System Config",
     "tabs": {
+      "general": "General",
       "theme": "Theme",
       "workspace": "Workspace",
       "services": "Services",
@@ -819,6 +824,18 @@
       "interface": "Interface",
       "advanced": "Advanced",
       "about": "About"
+    },
+    "general": {
+      "workflowExpand": {
+        "title": "Workflow detail level",
+        "hint": "Controls how far thinking, plan, and tool-call folds auto-expand in chat. Manual expand/collapse is never overridden.",
+        "collapsed": "Minimal",
+        "collapsedDesc": "Do not auto-expand thinking, plan, or tool folds.",
+        "thoughts": "Thinking",
+        "thoughtsDesc": "Auto-expand thinking and plan; keep tool calls collapsed.",
+        "full": "Full",
+        "fullDesc": "Auto-expand thinking, plan, and tool-call folds."
+      }
     },
     "toggleEnabled": "Enabled",
     "toggleDisabled": "Disabled",

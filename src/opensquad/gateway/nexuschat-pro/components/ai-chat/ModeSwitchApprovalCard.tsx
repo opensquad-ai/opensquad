@@ -49,7 +49,7 @@ export const ModeSwitchApprovalCard: React.FC<ModeSwitchApprovalCardProps> = ({
           <button
             type="button"
             onClick={() => onDeny(request.id)}
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-border cursor-pointer bg-transparent"
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium text-textMuted hover:bg-primary/10 border border-border cursor-pointer bg-transparent"
           >
             <X size={13} />
             Deny

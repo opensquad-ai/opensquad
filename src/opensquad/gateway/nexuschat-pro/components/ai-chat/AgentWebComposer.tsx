@@ -63,13 +63,16 @@ export interface AgentWebComposerProps {
   cwd: string | null;
   tokenStats: SoloTokenStats | null;
   onViewReport?: () => void;
+  onCompressContext?: () => void;
+  compressing?: boolean;
+  compressDisabled?: boolean;
   sessionChanges?: SessionChangesSummary | null;
   changesBusy?: boolean;
   onOpenChanges?: () => void;
   onCommitPush?: () => void | Promise<void>;
-  /** Workflow-style Plan card — below Changes, above pending / input */
+  /** Independent Plan card — sits behind the input with a slight overlap */
   planPanel?: React.ReactNode;
-  /** Queued outbound messages — below Plan, above input */
+  /** Queued outbound messages — below Changes, above Plan/input stack */
   pendingPanel?: React.ReactNode;
   availableSkills: SkillInfo[];
   skillsLoading?: boolean;
@@ -102,6 +105,9 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
   cwd,
   tokenStats,
   onViewReport,
+  onCompressContext,
+  compressing = false,
+  compressDisabled = false,
   sessionChanges,
   changesBusy = false,
   onOpenChanges,
@@ -246,13 +252,7 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
         </div>
       ) : null}
 
-      {/* Order: Changes → Plan → pending → input */}
-      {planPanel ? (
-        <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
-          <div className={columnClass}>{planPanel}</div>
-        </div>
-      ) : null}
-
+      {/* Order: Changes → pending → Plan (behind) overlapping input (front) */}
       {pendingPanel ? (
         <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
           <div className={columnClass}>{pendingPanel}</div>
@@ -268,7 +268,7 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
       ) : null}
 
       {(images.length > 0 || attachments.length > 0 || isUploading) && (
-        <div className="px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0 border-t border-border/20">
+        <div className="px-2 sm:px-4 py-2 flex gap-2 flex-wrap items-center flex-shrink-0">
           <div className={`${columnClass} flex gap-2 flex-wrap items-center`}>
             {images.map((img, i) => (
               <div key={`img-${i}`} className="relative group">
@@ -324,17 +324,22 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
 
       <div
         className={`flex-shrink-0 overflow-visible px-2 sm:px-4 ${
-          landing ? 'py-2 sm:py-3 border-t-0' : 'py-3 sm:py-4 border-t border-border/20'
+          landing ? 'py-2 sm:py-3' : 'pt-2 pb-3 sm:pb-4'
         }`}
       >
         <div className={`${columnClass}${disabled ? ' opacity-50 pointer-events-none' : ''}`}>
-          <div
-            className={`w-full flex flex-col rounded-[22px] border border-border/60 focus-within:ring-1 focus-within:ring-primary/40 relative ${
-              landing
-                ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
-                : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
-            } ${disabled ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'}`}
-          >
+          <div className={`os-composer-overlap ${planPanel ? 'has-plan' : ''}`}>
+            {planPanel ? (
+              <div className="os-composer-plan-layer">{planPanel}</div>
+            ) : null}
+
+            <div
+              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-border/60 focus-within:ring-1 focus-within:ring-primary/40 relative ${
+                landing
+                  ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
+                  : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
+              } ${disabled ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'}`}
+            >
             {pendingSkill ? (
               <div className="px-3.5 pt-3 pb-0">
                 <button
@@ -429,7 +434,7 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
                     };
                     input.click();
                   }}
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50"
+                  className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50"
                   title="上传文件"
                 >
                   <FileText size={16} strokeWidth={1.75} />
@@ -473,7 +478,7 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
                 <button
                   type="button"
                   disabled={disabled}
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] bg-transparent border-0 cursor-pointer disabled:opacity-50"
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 bg-transparent border-0 cursor-pointer disabled:opacity-50"
                   title="语音（请在焦点窗格使用完整语音面板）"
                   onClick={onActivate}
                 >
@@ -513,12 +518,16 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
               </div>
             </div>
           </div>
+          </div>
 
           <SoloContextFooter
             cwd={cwd}
             tokenStats={tokenStats}
             locked
             onViewReport={onViewReport}
+            onCompressContext={onCompressContext}
+            compressing={compressing}
+            compressDisabled={compressDisabled}
           />
         </div>
       </div>

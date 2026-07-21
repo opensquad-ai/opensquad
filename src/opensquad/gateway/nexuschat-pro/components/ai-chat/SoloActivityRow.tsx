@@ -26,6 +26,10 @@ import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
 import { extractHtmlEmbed, isVisualizationToolName } from './HtmlEmbedBlock';
 import { PulseDotsStatus, pulseKindFromFlags } from './PulseDotsStatus';
+import {
+  type WorkflowExpandLevel,
+  workflowExpandFlags,
+} from '../../utils/workflowExpandPref';
 
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
@@ -33,8 +37,11 @@ const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
-  /** When true, expand outer + thought folds only (Header lightbulb in Solo; tools stay collapsed). */
-  expandDetails?: boolean;
+  /**
+   * Progressive auto-expand for thought / plan / tool folds.
+   * Only seeds defaults; never overrides a fold the user has toggled.
+   */
+  expandLevel?: WorkflowExpandLevel;
   turnStartedMs?: number;
   /** Live shell job stdout keyed by tool call_id */
   shellStreams?: Record<string, ShellStreamState>;
@@ -668,6 +675,8 @@ const SoloEventLine: React.FC<{
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
   const [open, setOpen] = useState(defaultOpen || !!(isSummary && line.running));
+  /** Once the user toggles this fold, preference changes must not fight them. */
+  const userTouchedRef = useRef(false);
   const isThought = line.kind === 'thought';
   const isFileEdit = !!(line.fileEdit && (line.fileEdit.kind === 'edit' || line.fileEdit.kind === 'write'));
   const isFileRead = line.fileEdit?.kind === 'read';
@@ -678,14 +687,19 @@ const SoloEventLine: React.FC<{
       isVisualizationToolName(line.toolName));
 
   useEffect(() => {
-    // Lightbulb / defaultOpen drives thoughts both ways; tools only auto-open when
-    // their own defaultOpen is true (never via the Solo lightbulb).
-    if (isThought) {
-      setOpen(!!defaultOpen);
+    if (userTouchedRef.current) return;
+    // Preference only seeds defaults: open when asked, never force-close.
+    if (defaultOpen) {
+      setOpen(true);
       return;
     }
-    if (defaultOpen || (isSummary && line.running) || (isFileEdit && line.running)) setOpen(true);
-  }, [defaultOpen, isSummary, isThought, isFileEdit, line.running]);
+    if ((isSummary && line.running) || (isFileEdit && line.running)) setOpen(true);
+  }, [defaultOpen, isSummary, isFileEdit, line.running]);
+
+  const toggleOpen = () => {
+    userTouchedRef.current = true;
+    setOpen((v) => !v);
+  };
 
   const added = line.fileEdit?.addedLines;
   const removed = line.fileEdit?.removedLines;
@@ -736,7 +750,7 @@ const SoloEventLine: React.FC<{
         primary={line.primary}
         secondary={line.secondary}
         open={open}
-        onToggle={() => setOpen((v) => !v)}
+        onToggle={toggleOpen}
         running={line.running}
         shimmer={!!line.running && (line.kind === 'tool' || line.kind === 'thought' || line.kind === 'summary')}
         depth={1}
@@ -868,12 +882,13 @@ export function mergeWorkflowBlocks(blocks: WorkflowBlock[]): WorkflowBlock {
 
 export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   block,
-  expandDetails = false,
+  expandLevel = 'thoughts',
   turnStartedMs,
   shellStreams = {},
   onOpenFile,
   embedVisualizations = false,
 }) => {
+  const expand = workflowExpandFlags(expandLevel);
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
     (e) => e.type === 'tool_call' && !e.result && !block.completed,
@@ -900,8 +915,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   // flip the header to "Worked" and auto-collapse while the agent is still going.
   const isLiveTurn = !block.completed || hasLiveCompression || hasRunning;
 
-  const [outerOpen, setOuterOpen] = useState(isLiveTurn || expandDetails);
-  const prevExpandRef = useRef(expandDetails);
+  const [outerOpen, setOuterOpen] = useState(isLiveTurn);
   const wasLiveRef = useRef(isLiveTurn);
   /** User pin: 'open' | 'closed' | null (follow auto open/collapse). */
   const userOverrideRef = useRef<'open' | 'closed' | null>(null);
@@ -917,23 +931,6 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   };
 
   useEffect(() => {
-    if (expandDetails) {
-      setOuterOpen(true);
-      userOverrideRef.current = null;
-      prevExpandRef.current = expandDetails;
-      wasLiveRef.current = isLiveTurn;
-      return;
-    }
-    // User just turned expandDetails off → collapse
-    if (prevExpandRef.current && !expandDetails) {
-      setOuterOpen(false);
-      userOverrideRef.current = null;
-      prevExpandRef.current = expandDetails;
-      wasLiveRef.current = isLiveTurn;
-      return;
-    }
-    prevExpandRef.current = expandDetails;
-
     if (isLiveTurn && !wasLiveRef.current) {
       // New live turn → reset pin and auto-open
       userOverrideRef.current = null;
@@ -945,7 +942,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
       setOuterOpen(false);
     }
     wasLiveRef.current = isLiveTurn;
-  }, [isLiveTurn, expandDetails]);
+  }, [isLiveTurn]);
 
   useEffect(() => {
     if (!isLiveTurn && !hasRunning && !hasLiveCompression) return;
@@ -1268,11 +1265,12 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
             onOpenFile={onOpenFile}
             embedVisualizations={embedVisualizations}
             defaultOpen={
-              (line.kind === 'thought' && expandDetails) ||
+              (line.kind === 'thought' && expand.thoughts) ||
+              (line.kind === 'plan' && expand.plan) ||
+              (line.kind === 'tool' && expand.tools) ||
               !!(line.kind === 'summary' && line.running) ||
               !!(line.kind === 'tool' && line.running && line.fileEdit &&
-                (line.fileEdit.kind === 'write' || line.fileEdit.kind === 'edit')) ||
-              line.kind === 'plan'
+                (line.fileEdit.kind === 'write' || line.fileEdit.kind === 'edit'))
             }
           />
         ))}

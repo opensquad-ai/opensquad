@@ -650,9 +650,11 @@
   },
   "aiChat": {
     "newSession": "新建会话",
-    "uiModeClassic": "经典",
-    "uiModeClassicHint": "经典聊天气泡",
-    "uiModeSoloHint": "Solo 文档流（Codex / Cursor Agent 风格）",
+    "uiModeLabel": "界面模式",
+    "uiModeClassic": "Work",
+    "uiModeSolo": "Code",
+    "uiModeClassicHint": "Work：经典聊天气泡布局",
+    "uiModeSoloHint": "Code：文档流布局（Codex / Cursor Agent 风格）",
     "sessions": "会话列表",
     "sendMessage": "发送消息",
     "stopGenerating": "停止生成",
@@ -689,6 +691,8 @@
     "creatingSession": "创建会话中...",
     "planPanel": "规划面板",
     "contextDetails": "上下文详情",
+    "contextUsage": "上下文用量",
+    "tokenStatsPending": "暂无 Token 统计…",
     "hideTokenStats": "隐藏 Token 统计",
     "showTokenStats": "显示 Token 统计",
     "noPlanYet": "暂无规划，等待 plan 事件…",
@@ -812,6 +816,7 @@
   "systemConfig": {
     "title": "系统配置",
     "tabs": {
+      "general": "通用",
       "theme": "主题",
       "workspace": "工作区",
       "services": "服务控制",
@@ -819,6 +824,18 @@
       "interface": "界面",
       "advanced": "高级",
       "about": "关于"
+    },
+    "general": {
+      "workflowExpand": {
+        "title": "工作流信息展示程度",
+        "hint": "控制对话中思考、Plan、工具调用等折叠的默认展开程度。你随时可手动展开或折叠，设置不会覆盖你的操作。",
+        "collapsed": "精简",
+        "collapsedDesc": "不主动展开思考、Plan 与工具调用折叠。",
+        "thoughts": "思考",
+        "thoughtsDesc": "主动展开思考与 Plan，工具调用保持折叠。",
+        "full": "完整",
+        "fullDesc": "主动展开思考、Plan 与工具调用折叠。"
+      }
     },
     "toggleEnabled": "已启用",
     "toggleDisabled": "已禁用",

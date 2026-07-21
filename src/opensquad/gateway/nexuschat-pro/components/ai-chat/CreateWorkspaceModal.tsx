@@ -82,7 +82,7 @@ export const CreateWorkspaceModal: React.FC<CreateWorkspaceModalProps> = ({
         <button
           type="button"
           onClick={onCancel}
-          className="p-1 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+          className="p-1 rounded-md hover:bg-primary/10"
           title="关闭"
         >
           <X size={16} className="text-textMuted" />
@@ -106,7 +106,7 @@ export const CreateWorkspaceModal: React.FC<CreateWorkspaceModalProps> = ({
             type="button"
             onClick={() => void handlePick()}
             disabled={picking}
-            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] rounded-lg border border-border bg-bgLight text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04] disabled:opacity-50"
+            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] rounded-lg border border-border bg-bgLight text-left hover:bg-primary/10 disabled:opacity-50"
           >
             <Folder size={14} className="text-neutral-400 shrink-0" />
             <span className={`truncate ${rootPath ? 'text-textMain' : 'text-textMuted'}`}>
@@ -122,7 +122,7 @@ export const CreateWorkspaceModal: React.FC<CreateWorkspaceModalProps> = ({
               reset();
               onCancel();
             }}
-            className="px-3 py-1.5 rounded-lg text-[13px] border border-border text-textMain hover:bg-black/[0.04] dark:hover:bg-white/10"
+            className="px-3 py-1.5 rounded-lg text-[13px] border border-border text-textMain hover:bg-primary/10"
           >
             取消
           </button>

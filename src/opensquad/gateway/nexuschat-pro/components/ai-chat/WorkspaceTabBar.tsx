@@ -112,7 +112,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
                       key={ws.id}
                       type="button"
                       role="menuitem"
-                      className={`w-full flex items-start gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10 ${
+                      className={`w-full flex items-start gap-2 px-3 py-1.5 text-left hover:bg-primary/10 ${
                         isActive ? 'bg-black/[0.03] dark:bg-white/[0.04]' : ''
                       }`}
                       onClick={() => {
@@ -144,7 +144,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
             <button
               type="button"
               role="menuitem"
-              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-primary/10"
               onClick={() => void handleOpenFolder()}
             >
               <Folder size={13} className="text-sky-500" />
@@ -153,7 +153,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
             <button
               type="button"
               role="menuitem"
-              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-primary/10"
               onClick={() => {
                 setMenuOpen(false);
                 onCreateNew();
@@ -168,26 +168,33 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
       : null;
 
   return (
-    <div className="flex items-stretch gap-0.5 min-w-0 flex-1 overflow-visible">
-      <div className="flex items-stretch gap-0.5 min-w-0 flex-1 overflow-x-auto scrollbar-thin">
+    <div className="flex items-stretch gap-0.5 min-w-0 flex-1 h-full overflow-visible">
+      <div className="os-ws-tab-scroll relative flex items-end gap-0.5 min-w-0 flex-1 overflow-x-auto scrollbar-thin">
         {openList.map((ws) => {
           const active = ws.id === activeId;
           return (
             <div
               key={ws.id}
-              className={`group relative flex items-center gap-1.5 max-w-[200px] px-2.5 h-8 rounded-t-lg text-[12px] cursor-pointer border border-b-0 shrink-0 ${
+              className={`group relative flex items-center gap-1.5 max-w-[180px] px-2.5 h-8 text-[12px] leading-none cursor-pointer shrink-0 ${
                 active
-                  ? 'bg-stage text-textMain border-border'
-                  : 'bg-transparent text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-transparent'
+                  ? 'os-ws-tab-active text-textMain z-[2]'
+                  : 'os-ws-tab-idle text-textMuted hover:text-textMain/80'
               }`}
               onClick={() => onSelect(ws.id)}
               title={ws.rootPath}
             >
-              <Folder size={13} className={active ? 'text-amber-500' : 'text-textMuted'} />
-              <span className="truncate font-medium">{workspaceDisplayName(ws)}</span>
+              <Folder
+                size={13}
+                className={`shrink-0 ${active ? 'text-amber-500' : 'text-textMuted/70'}`}
+              />
+              <span className="os-ws-tab-label truncate font-medium">
+                {workspaceDisplayName(ws)}
+              </span>
               <button
                 type="button"
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+                className={`p-0.5 rounded hover:bg-primary/15 shrink-0 ${
+                  active ? 'opacity-0 group-hover:opacity-100' : 'opacity-0 group-hover:opacity-70'
+                }`}
                 title="关闭工作区"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -200,12 +207,12 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
           );
         })}
       </div>
-      <div className="relative shrink-0 self-center">
+      <div className="relative shrink-0 self-end flex h-8 items-center">
         <button
           ref={plusBtnRef}
           type="button"
           onClick={() => setMenuOpen((v) => !v)}
-          className={`p-1.5 rounded-md text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+          className={`p-1.5 rounded-md text-textMuted hover:bg-primary/10 ${
             menuOpen ? 'bg-black/[0.06] dark:bg-white/10' : ''
           }`}
           title="打开或创建工作区"

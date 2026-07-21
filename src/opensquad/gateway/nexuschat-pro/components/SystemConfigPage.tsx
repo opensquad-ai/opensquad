@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
-import { X, Save, RefreshCw, ToggleLeft, ToggleRight, Plus, FolderOpen, ExternalLink, CheckCircle, AlertCircle } from 'lucide-react';
+import {
+  X, Save, RefreshCw, ToggleLeft, ToggleRight, Plus, FolderOpen, ExternalLink,
+  CheckCircle, AlertCircle, Palette, Info, SlidersHorizontal, Cable, Settings2,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { systemConfigAPI, versionAPI } from '../services/api';
 import { getSystemConfigCached, peekSystemConfig, setSystemConfigCache } from '../services/configCache';
@@ -9,22 +12,41 @@ import {
   failDesktopUpdate,
 } from '../services/desktopUpdateOverlay';
 import WorkspaceManager from './WorkspaceManager';
+import { ThemeSettingsPanel } from './ThemeSettingsModal';
+import { SoftOverlay } from './SoftOverlay';
+import {
+  type WorkflowExpandLevel,
+  useWorkflowExpandLevel,
+} from '../utils/workflowExpandPref';
 
 interface SystemConfigPageProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Optional tab to open when modal becomes visible */
+  initialTab?: TabKey;
 }
 
-type TabKey = 'workspace' | 'ports' | 'advanced' | 'about';
+type TabKey = 'general' | 'theme' | 'workspace' | 'ports' | 'advanced' | 'about';
 
-const TAB_LABELS: { key: TabKey; i18nKey: string }[] = [
-  { key: 'about', i18nKey: 'systemConfig.tabs.about' },
-  { key: 'workspace', i18nKey: 'systemConfig.tabs.workspace' },
-  { key: 'ports', i18nKey: 'systemConfig.tabs.ports' },
-  { key: 'advanced', i18nKey: 'systemConfig.tabs.advanced' },
+const NAV_ITEMS: { key: TabKey; i18nKey: string; icon: React.ReactNode }[] = [
+  { key: 'general', i18nKey: 'systemConfig.tabs.general', icon: <Settings2 size={16} strokeWidth={1.75} /> },
+  { key: 'theme', i18nKey: 'systemConfig.tabs.theme', icon: <Palette size={16} strokeWidth={1.75} /> },
+  { key: 'workspace', i18nKey: 'systemConfig.tabs.workspace', icon: <FolderOpen size={16} strokeWidth={1.75} /> },
+  { key: 'ports', i18nKey: 'systemConfig.tabs.ports', icon: <Cable size={16} strokeWidth={1.75} /> },
+  { key: 'advanced', i18nKey: 'systemConfig.tabs.advanced', icon: <SlidersHorizontal size={16} strokeWidth={1.75} /> },
+  { key: 'about', i18nKey: 'systemConfig.tabs.about', icon: <Info size={16} strokeWidth={1.75} /> },
 ];
 
 const SETTINGS_TAB_KEY = 'opensquad_settings_tab';
+const VALID_TABS = new Set<TabKey>(['general', 'theme', 'workspace', 'ports', 'advanced', 'about']);
+
+function readSavedTab(): TabKey {
+  try {
+    const saved = localStorage.getItem(SETTINGS_TAB_KEY);
+    if (saved && VALID_TABS.has(saved as TabKey)) return saved as TabKey;
+  } catch {}
+  return 'general';
+}
 
 // ---------- small reusable bits ----------
 
@@ -63,6 +85,82 @@ const TextInput: React.FC<{
     className="w-full px-3 py-1.5 bg-bgLight border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
   />
 );
+
+// ---------- Tab: General ----------
+
+const WORKFLOW_EXPAND_OPTIONS: {
+  id: WorkflowExpandLevel;
+  titleKey: string;
+  descKey: string;
+}[] = [
+  {
+    id: 'collapsed',
+    titleKey: 'systemConfig.general.workflowExpand.collapsed',
+    descKey: 'systemConfig.general.workflowExpand.collapsedDesc',
+  },
+  {
+    id: 'thoughts',
+    titleKey: 'systemConfig.general.workflowExpand.thoughts',
+    descKey: 'systemConfig.general.workflowExpand.thoughtsDesc',
+  },
+  {
+    id: 'full',
+    titleKey: 'systemConfig.general.workflowExpand.full',
+    descKey: 'systemConfig.general.workflowExpand.fullDesc',
+  },
+];
+
+const GeneralTab: React.FC = () => {
+  const { t } = useTranslation();
+  const [level, setLevel] = useWorkflowExpandLevel();
+
+  return (
+    <div className="space-y-6">
+      <section>
+        <h4 className="text-sm font-semibold text-textMain">
+          {t('systemConfig.general.workflowExpand.title')}
+        </h4>
+        <p className="mt-1 text-xs leading-relaxed text-textMuted">
+          {t('systemConfig.general.workflowExpand.hint')}
+        </p>
+        <div className="mt-3 space-y-2">
+          {WORKFLOW_EXPAND_OPTIONS.map((opt) => {
+            const active = level === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setLevel(opt.id)}
+                className={`flex w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-all duration-soft ease-soft ${
+                  active
+                    ? 'border-primary/45 bg-primary/8 shadow-soft'
+                    : 'border-border bg-bgLight/60 hover:border-border hover:bg-panel/70'
+                }`}
+              >
+                <span
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                    active ? 'border-primary' : 'border-border'
+                  }`}
+                  aria-hidden
+                >
+                  {active ? <span className="h-2 w-2 rounded-full bg-primary" /> : null}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className={`block text-sm font-medium ${active ? 'text-textMain' : 'text-textMain/90'}`}>
+                    {t(opt.titleKey)}
+                  </span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-textMuted">
+                    {t(opt.descKey)}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+};
 
 // ---------- Tab: Ports ----------
 
@@ -505,17 +603,9 @@ const AboutTab: React.FC = () => {
 
 // ---------- Main Modal ----------
 
-export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onClose }) => {
+export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onClose, initialTab }) => {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<TabKey>(() => {
-    try {
-      const saved = localStorage.getItem(SETTINGS_TAB_KEY);
-      if (saved && ['about', 'workspace', 'ports', 'advanced'].includes(saved)) {
-        return saved as TabKey;
-      }
-    } catch {}
-    return 'about';
-  });
+  const [activeTab, setActiveTab] = useState<TabKey>(() => initialTab && VALID_TABS.has(initialTab) ? initialTab : readSavedTab());
   const [config, setConfig] = useState<Record<string, any> | null>(() => peekSystemConfig());
 
   const [loading, setLoading] = useState(false);
@@ -539,6 +629,9 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
 
   useEffect(() => {
     if (!isOpen) return;
+    if (initialTab && VALID_TABS.has(initialTab)) {
+      setActiveTab(initialTab);
+    }
     const cached = peekSystemConfig();
     if (cached) {
       setConfig(cached);
@@ -546,9 +639,8 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
       return;
     }
     void load();
-  }, [isOpen, load]);
+  }, [isOpen, initialTab, load]);
 
-  // Persist active tab to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(SETTINGS_TAB_KEY, activeTab);
@@ -577,98 +669,153 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
     }
   };
 
-  if (!isOpen) return null;
+  const needsServerConfig = activeTab === 'workspace' || activeTab === 'ports' || activeTab === 'advanced';
+  const showSave = needsServerConfig;
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-panel rounded-2xl shadow-2xl w-full max-w-2xl mx-4 border border-border flex flex-col" style={{ height: '80vh', minHeight: '500px' }}>
-        {/* Header */}
-        <div className="bg-primary px-6 py-4 flex justify-between items-center text-white rounded-t-2xl shrink-0">
-          <h3 className="font-semibold text-lg">{t('systemConfig.title')}</h3>
-          <div className="flex items-center gap-2">
-            <button onClick={() => void load({ force: true })} disabled={loading} className="p-1.5 hover:text-white/80 transition-colors" title={t('systemConfig.reload')}>
-              <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-            </button>
-            <button onClick={onClose} className="hover:text-white/80 transition-colors">
-              <X size={20} />
-            </button>
-          </div>
+    <SoftOverlay
+      open={isOpen}
+      onBackdrop={onClose}
+      zClass="z-[100]"
+      className="backdrop-blur-[2px]"
+    >
+      <div
+        className="os-modal-shell mx-4 flex w-full max-w-3xl flex-col overflow-hidden"
+        style={{ height: 'min(82vh, 720px)', minHeight: '480px' }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+      >
+        {/* Title row */}
+        <div className="os-modal-header shrink-0 rounded-t-[1rem]">
+          <h3 id="settings-title" className="text-base font-semibold tracking-tight text-textMain">
+            {t('systemConfig.title')}
+          </h3>
+          <button type="button" onClick={onClose} className="os-icon-btn" aria-label={t('common.close')}>
+            <X size={18} />
+          </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-border bg-bgLight shrink-0">
-          {TAB_LABELS.map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`px-5 py-3 text-sm font-medium transition-colors border-b-2 ${
-                activeTab === tab.key
-                  ? 'border-primary text-primary'
-                  : 'border-transparent text-textMuted hover:text-textMain'
-              }`}
-            >
-              {t(tab.i18nKey)}
-            </button>
-          ))}
-        </div>
+        {/* Body: left nav + right content */}
+        <div className="flex min-h-0 flex-1">
+          <nav className="flex w-[148px] shrink-0 flex-col gap-0.5 border-r border-border bg-bgLight/70 p-2 sm:w-[168px]">
+            {NAV_ITEMS.map((item) => {
+              const active = activeTab === item.key;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setActiveTab(item.key)}
+                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
+                    active
+                      ? 'bg-panel text-textMain shadow-soft'
+                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
+                  }`}
+                >
+                  <span className={active ? 'text-primary' : ''}>{item.icon}</span>
+                  <span className="truncate font-medium">{t(item.i18nKey)}</span>
+                </button>
+              );
+            })}
+          </nav>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:bg-border [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent">
-          {error && (
-            <div className="mb-3 px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{error}</div>
-          )}
-          <div style={{ display: activeTab === 'about' ? 'block' : 'none' }}>
-            <AboutTab />
-          </div>
-          {loading && activeTab !== 'about' && !config && (
-            <div className="flex items-center justify-center h-40">
-              <RefreshCw size={24} className="animate-spin text-primary" />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
+              {error && (
+                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
+                  {error}
+                </div>
+              )}
+
+              {activeTab === 'general' && <GeneralTab />}
+
+              {activeTab === 'theme' && <ThemeSettingsPanel />}
+
+              {activeTab === 'about' && <AboutTab />}
+
+              {loading && needsServerConfig && !config && (
+                <div className="flex h-40 items-center justify-center">
+                  <RefreshCw size={22} className="animate-spin text-primary" />
+                </div>
+              )}
+
+              {config && (
+                <>
+                  <div style={{ display: activeTab === 'workspace' ? 'block' : 'none' }}>
+                    <WorkspaceManager />
+                  </div>
+                  <div style={{ display: activeTab === 'ports' ? 'block' : 'none' }}>
+                    <PortsTab
+                      ports={config.ports || {}}
+                      hosts={config.hosts || {}}
+                      onChange={(ports, hosts) => patch({ ports, hosts })}
+                    />
+                  </div>
+                  <div style={{ display: activeTab === 'advanced' ? 'block' : 'none' }}>
+                    <AdvancedTab ref={advancedTabRef} config={config} onChange={patch} />
+                  </div>
+                </>
+              )}
             </div>
-          )}
-          {config && (
-            <>
-              <div style={{ display: activeTab === 'workspace' ? 'block' : 'none' }}>
-                <WorkspaceManager />
-              </div>
-              <div style={{ display: activeTab === 'ports' ? 'block' : 'none' }}>
-                <PortsTab
-                  ports={config.ports || {}}
-                  hosts={config.hosts || {}}
-                  onChange={(ports, hosts) => patch({ ports, hosts })}
-                />
-              </div>
-              <div style={{ display: activeTab === 'advanced' ? 'block' : 'none' }}>
-                <AdvancedTab ref={advancedTabRef} config={config} onChange={patch} />
-              </div>
-            </>
-          )}
-        </div>
 
-        {/* Footer */}
-        <div className="px-5 py-4 border-t border-border flex justify-between items-center shrink-0 bg-bgLight rounded-b-2xl">
-          {saved ? (
-            <span className="text-sm text-green-600 font-medium">{t('systemConfig.saved')}</span>
-          ) : (
-            <span className="text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
-          )}
-          <div className="flex gap-3">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-textMuted border border-border rounded-lg hover:bg-bgLight hover:text-textMain transition-colors"
-            >
-              {t('common.cancel')}
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={saving || !config}
-              className="px-5 py-2 bg-primary text-white text-sm rounded-lg font-semibold hover:opacity-90 transition-colors flex items-center gap-2 disabled:opacity-60"
-            >
-              {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-              {t('common.save')}
-            </button>
+            {/* Footer */}
+            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-bgLight/50 px-5 py-3.5">
+              <div className="min-w-0">
+                {showSave ? (
+                  saved ? (
+                    <span className="text-sm font-medium text-green-600">{t('systemConfig.saved')}</span>
+                  ) : (
+                    <span className="text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
+                  )
+                ) : (
+                  <span className="text-xs text-textMuted">{t('systemConfig.liveHint')}</span>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {showSave && (
+                  <button
+                    type="button"
+                    onClick={() => void load({ force: true })}
+                    disabled={loading}
+                    className="os-icon-btn"
+                    title={t('systemConfig.reload')}
+                  >
+                    <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                  </button>
+                )}
+                {showSave ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="rounded-full border border-border px-4 py-2 text-sm text-textMuted transition-colors hover:bg-panel hover:text-textMain"
+                    >
+                      {t('common.cancel')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSave}
+                      disabled={saving || !config}
+                      className="flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+                    >
+                      {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                      {t('common.save')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                  >
+                    {t('themeSettings.done')}
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </SoftOverlay>
   );
 };

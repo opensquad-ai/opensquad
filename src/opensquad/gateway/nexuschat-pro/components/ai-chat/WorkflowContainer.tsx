@@ -134,7 +134,7 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
     <div className="mb-3 ml-2 sm:ml-9 border border-border rounded-lg overflow-hidden bg-panel/50">
       {/* Header */}
       <div
-        className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-bgLight/50 transition-colors select-none"
+        className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-primary/10 transition-colors select-none"
         onClick={handleToggle}
       >
         {icon}

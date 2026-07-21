@@ -29,7 +29,7 @@ export const CloseWorkspaceModal: React.FC<CloseWorkspaceModalProps> = ({
         <button
           type="button"
           onClick={onCancel}
-          className="p-1 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+          className="p-1 rounded-md hover:bg-primary/10"
           title="关闭"
         >
           <X size={16} className="text-textMuted" />
@@ -42,7 +42,7 @@ export const CloseWorkspaceModal: React.FC<CloseWorkspaceModalProps> = ({
         <button
           type="button"
           onClick={onCancel}
-          className="px-3 py-1.5 rounded-lg text-[13px] border border-border text-textMain hover:bg-black/[0.04] dark:hover:bg-white/10"
+          className="px-3 py-1.5 rounded-lg text-[13px] border border-border text-textMain hover:bg-primary/10"
         >
           取消
         </button>

@@ -270,7 +270,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
               } ${
                 active
                   ? 'bg-black/[0.08] dark:bg-white/15 text-textMain'
-                  : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                  : 'text-textMuted hover:bg-primary/10'
               } ${isDragging ? 'opacity-45 scale-[0.97] shadow-sm z-10' : 'opacity-100 scale-100'} ${
                 isOver ? 'ring-1 ring-primary/40 bg-primary/10' : ''
               }`}
@@ -294,7 +294,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
               <button
                 type="button"
                 draggable={false}
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15 transition-opacity"
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 transition-opacity"
                 title="关闭"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -310,7 +310,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
         <button
           type="button"
           onClick={onNewSession}
-          className="p-1 rounded-md text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 shrink-0"
+          className="p-1 rounded-md text-textMuted hover:bg-primary/10 shrink-0"
           title="新建对话"
         >
           <Plus size={14} />
@@ -327,7 +327,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             e.stopPropagation();
             onSplitRow?.();
           }}
-          className="p-1 rounded-md text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-30"
+          className="p-1 rounded-md text-textMuted hover:bg-primary/10 disabled:opacity-30"
           title="左右分屏"
         >
           <Columns2 size={14} />
@@ -341,7 +341,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             e.stopPropagation();
             onSplitCol?.();
           }}
-          className="p-1 rounded-md text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-30"
+          className="p-1 rounded-md text-textMuted hover:bg-primary/10 disabled:opacity-30"
           title="上下分屏"
         >
           <Rows2 size={14} />
@@ -354,7 +354,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
               e.stopPropagation();
               setMenuOpen((v) => !v);
             }}
-            className={`p-1 rounded-md text-textMuted hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+            className={`p-1 rounded-md text-textMuted hover:bg-primary/10 ${
               menuOpen ? 'bg-black/[0.06] dark:bg-white/10' : ''
             }`}
             title="更多"
@@ -365,7 +365,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             <div className="absolute right-0 top-full mt-1 z-[90] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/10 dark:border-white/10 shadow-xl text-[12px]">
               <button
                 type="button"
-                className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
                 onClick={() => {
                   setMenuOpen(false);
                   onCloseAll?.();
@@ -376,7 +376,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
               {canClosePane ? (
                 <button
                   type="button"
-                  className="w-full px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/10"
+                  className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
                   onClick={() => {
                     setMenuOpen(false);
                     onClosePane?.();

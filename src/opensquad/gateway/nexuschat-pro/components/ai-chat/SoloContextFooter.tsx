@@ -3,7 +3,8 @@
  * One line: project cwd | Mode (children) | … | Model/Effort (trailing) | token ring %.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Folder, FolderOpen, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { Check, ChevronDown, Folder, FolderOpen, List, Scissors, X } from 'lucide-react';
 import {
   folderLabel,
   loadCwdRecents,
@@ -39,6 +40,10 @@ interface SoloContextFooterProps {
   /** Apply a chosen working directory path */
   onSelectCwd?: (path: string) => void | Promise<void>;
   onViewReport?: () => void;
+  /** Manual context compression (same as former L1 scissors) */
+  onCompressContext?: () => void;
+  compressing?: boolean;
+  compressDisabled?: boolean;
   /** Controls after folder (e.g. Mode) */
   children?: React.ReactNode;
   /** Controls immediately before the token ring (e.g. Model / Effort) */
@@ -115,9 +120,13 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   locked = false,
   onSelectCwd,
   onViewReport,
+  onCompressContext,
+  compressing = false,
+  compressDisabled = false,
   children,
   trailing,
 }) => {
+  const { t } = useTranslation();
   const [tokenOpen, setTokenOpen] = useState(false);
   const [cwdOpen, setCwdOpen] = useState(false);
   const [recents, setRecents] = useState<string[]>(() => loadCwdRecents());
@@ -202,90 +211,144 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
   }, [recents, cwd]);
 
   const canPick = !locked && !!onSelectCwd;
+  const canOpenTokenPanel = max > 0 || !!onViewReport || !!onCompressContext;
 
   return (
     <div className="relative mt-1.5 w-full">
-      {tokenOpen && max > 0 && (
+      {tokenOpen && canOpenTokenPanel && (
         <div className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-40 rounded-xl border border-border bg-panel shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
           <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/70">
-            <span className="text-[13px] font-semibold text-textMain">Context Usage</span>
-            <div className="flex items-center gap-1">
-              {onViewReport && (
-                <button
-                  type="button"
-                  onClick={onViewReport}
-                  className="text-[12px] text-textMuted hover:text-primary px-2 py-1 rounded-md hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-0 bg-transparent cursor-pointer"
-                >
-                  View Report
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setTokenOpen(false)}
-                className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-0 bg-transparent cursor-pointer"
-                title="Close"
-              >
-                <X size={14} />
-              </button>
-            </div>
-          </div>
-
-          <div className="px-3.5 pt-2.5 pb-1 flex items-baseline justify-between gap-3">
-            <span className="text-[13px] font-medium text-textMain">{pct}% Full</span>
-            <span className="text-[12px] font-mono text-textMuted">
-              ~{fmtTokens(used)} / {fmtTokens(max)} Tokens
+            <span className="text-[13px] font-semibold text-textMain">
+              {t('aiChat.contextUsage', { defaultValue: 'Context Usage' })}
             </span>
+            <button
+              type="button"
+              onClick={() => setTokenOpen(false)}
+              className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 border-0 bg-transparent cursor-pointer"
+              title={t('common.close')}
+            >
+              <X size={14} />
+            </button>
           </div>
 
-          <div className="px-3.5 pb-2">
-            <div className="flex h-1.5 rounded-full overflow-hidden bg-black/[0.06] dark:bg-white/[0.08]">
-              {segments.map((s) => (
-                <div
-                  key={s.key}
-                  className={`${s.bar} transition-all`}
-                  style={{ width: `${(s.val / barMax) * 100}%` }}
-                  title={`${s.label}: ${fmtTokens(s.val)}`}
-                />
-              ))}
-            </div>
-          </div>
+          {max > 0 ? (
+            <>
+              <div className="px-3.5 pt-2.5 pb-1 flex items-baseline justify-between gap-3">
+                <span className="text-[13px] font-medium text-textMain">{pct}% Full</span>
+                <span className="text-[12px] font-mono text-textMuted">
+                  ~{fmtTokens(used)} / {fmtTokens(max)} Tokens
+                </span>
+              </div>
 
-          <div className="px-3.5 pb-3 space-y-1.5 max-h-[220px] overflow-y-auto">
-            {segments.length === 0 ? (
-              <div className="text-[12px] text-textMuted py-2">No breakdown yet</div>
-            ) : (
-              segments.map((s) => (
-                <div key={s.key} className="flex items-center gap-2 text-[12px]">
-                  <span
-                    className="w-2 h-2 rounded-[3px] shrink-0"
-                    style={{ backgroundColor: s.color }}
-                  />
-                  <span className="flex-1 min-w-0 truncate text-textMuted">{s.label}</span>
-                  <span className="font-mono text-textMain/80 tabular-nums shrink-0">{fmtTokens(s.val)}</span>
-                  {s.key === 'overhead' && tokenStats?.session && (
+              <div className="px-3.5 pb-2">
+                <div className="flex h-1.5 rounded-full overflow-hidden bg-black/[0.06] dark:bg-white/[0.08]">
+                  {segments.map((s) => (
+                    <div
+                      key={s.key}
+                      className={`${s.bar} transition-all`}
+                      style={{ width: `${(s.val / barMax) * 100}%` }}
+                      title={`${s.label}: ${fmtTokens(s.val)}`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="px-3.5 pb-3 space-y-1.5 max-h-[220px] overflow-y-auto">
+                {segments.length === 0 ? (
+                  <div className="text-[12px] text-textMuted py-2">No breakdown yet</div>
+                ) : (
+                  segments.map((s) => (
+                    <div key={s.key} className="flex items-center gap-2 text-[12px]">
+                      <span
+                        className="w-2 h-2 rounded-[3px] shrink-0"
+                        style={{ backgroundColor: s.color }}
+                      />
+                      <span className="flex-1 min-w-0 truncate text-textMuted">{s.label}</span>
+                      <span className="font-mono text-textMain/80 tabular-nums shrink-0">{fmtTokens(s.val)}</span>
+                      {s.key === 'overhead' && tokenStats?.session && (
+                        <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
+                          · Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
+                          {tokenStats.session.total_requests != null
+                            ? ` · ${tokenStats.session.total_requests} req`
+                            : ''}
+                        </span>
+                      )}
+                    </div>
+                  ))
+                )}
+                {tokenStats?.session && !segments.some((s) => s.key === 'overhead') && (
+                  <div className="flex items-center gap-2 text-[12px]">
+                    <span className="w-2 h-2 rounded-[3px] shrink-0 bg-slate-500" />
+                    <span className="flex-1 min-w-0 truncate text-textMuted">Other</span>
                     <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
-                      · Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
+                      Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
                       {tokenStats.session.total_requests != null
                         ? ` · ${tokenStats.session.total_requests} req`
                         : ''}
                     </span>
-                  )}
-                </div>
-              ))
-            )}
-            {tokenStats?.session && !segments.some((s) => s.key === 'overhead') && (
-              <div className="flex items-center gap-2 text-[12px]">
-                <span className="w-2 h-2 rounded-[3px] shrink-0 bg-slate-500" />
-                <span className="flex-1 min-w-0 truncate text-textMuted">Other</span>
-                <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
-                  Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
-                  {tokenStats.session.total_requests != null
-                    ? ` · ${tokenStats.session.total_requests} req`
-                    : ''}
-                </span>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </>
+          ) : (
+            <div className="px-3.5 py-3 text-[12px] text-textMuted">
+              {t('aiChat.tokenStatsPending', { defaultValue: 'Waiting for token stats…' })}
+            </div>
+          )}
+
+          {/* Outside token breakdown: context details + compress */}
+          {(onViewReport || onCompressContext) && (
+            <div className="px-3.5 py-2.5 border-t border-border/70 bg-black/[0.015] dark:bg-white/[0.03] space-y-2">
+              {onViewReport ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTokenOpen(false);
+                    onViewReport();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium
+                    border border-border/60 bg-panel text-textMain
+                    hover:bg-primary/10
+                    transition-colors cursor-pointer"
+                  title={t('aiChat.contextDetails')}
+                >
+                  <List size={14} className="text-textMuted" />
+                  <span>{t('aiChat.contextDetails')}</span>
+                </button>
+              ) : null}
+              {onCompressContext ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (compressDisabled || compressing) return;
+                      onCompressContext();
+                    }}
+                    disabled={compressDisabled || compressing}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium
+                      border border-border/60 bg-panel text-textMain
+                      hover:bg-primary/10
+                      disabled:opacity-50 disabled:cursor-not-allowed
+                      transition-colors cursor-pointer"
+                    title={
+                      compressing
+                        ? '正在压缩上下文…'
+                        : '总结并压缩当前会话上下文'
+                    }
+                  >
+                    <Scissors
+                      size={14}
+                      className={compressing ? 'text-primary animate-pulse' : 'text-textMuted'}
+                    />
+                    <span>{compressing ? '正在压缩…' : '压缩上下文'}</span>
+                  </button>
+                  <p className="text-[10px] leading-relaxed text-textMuted/75 text-center">
+                    将较早对话归档摘要，释放上下文空间
+                  </p>
+                </>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
 
@@ -342,7 +405,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                         key={path}
                         type="button"
                         onClick={() => void applyPath(path)}
-                        className="w-full flex items-center gap-2.5 px-3 py-2 text-left border-0 bg-transparent cursor-pointer hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                        className="w-full flex items-center gap-2.5 px-3 py-2 text-left border-0 bg-transparent cursor-pointer hover:bg-primary/10 transition-colors"
                         title={path}
                       >
                         <Folder size={14} className="text-textMuted/70 shrink-0" />
@@ -361,7 +424,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                   type="button"
                   onClick={() => void handleOpenFolder()}
                   disabled={picking || !onSelectCwd}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left border-0 bg-transparent cursor-pointer hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors disabled:opacity-50"
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left border-0 bg-transparent cursor-pointer hover:bg-primary/10 transition-colors disabled:opacity-50"
                 >
                   <FolderOpen size={14} className="text-textMuted/70 shrink-0" />
                   <span className="text-[12px] text-textMain font-medium">
@@ -389,9 +452,9 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
             setCwdOpen(false);
             setTokenOpen((v) => !v);
           }}
-          disabled={!max}
+          disabled={!canOpenTokenPanel}
           className="flex items-center gap-1.5 shrink-0 border-0 bg-transparent p-0 cursor-pointer disabled:opacity-40 disabled:cursor-default hover:opacity-90"
-          title={max ? 'Context usage' : 'Waiting for token stats'}
+          title={canOpenTokenPanel ? t('aiChat.contextUsage', { defaultValue: 'Context usage' }) : 'Waiting for token stats'}
         >
           <TokenRing pct={pct} />
           <span className="text-[11px] font-medium text-textMuted tabular-nums">

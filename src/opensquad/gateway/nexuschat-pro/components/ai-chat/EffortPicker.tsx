@@ -69,7 +69,7 @@ export const EffortPicker: React.FC<EffortPickerProps> = ({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-[12px] text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 bg-transparent cursor-pointer"
+        className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-[12px] text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 bg-transparent cursor-pointer"
         title="Reasoning effort"
       >
         <span className="font-medium tabular-nums">{current.label}</span>
@@ -103,7 +103,7 @@ export const EffortPicker: React.FC<EffortPickerProps> = ({
                   className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     selected
                       ? 'bg-primary/10 text-primary'
-                      : 'bg-transparent text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+                      : 'bg-transparent text-textMain hover:bg-primary/10'
                   }`}
                 >
                   <span className="flex-1 font-medium">{level.label}</span>

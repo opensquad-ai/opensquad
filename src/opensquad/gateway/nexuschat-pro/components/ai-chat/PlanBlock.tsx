@@ -69,7 +69,7 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
     >
       <button
         type="button"
-        className="w-full flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors select-none text-left bg-transparent border-0"
+        className="w-full flex items-center gap-2 px-3.5 py-2 cursor-pointer hover:bg-primary/10 transition-colors select-none text-left bg-transparent border-0"
         onClick={() => setIsOpen(!isOpen)}
       >
         <ListTodo size={14} className="text-primary/85 flex-shrink-0" />
@@ -87,7 +87,7 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
       </button>
 
       {isOpen && (
-        <div className="border-t border-border/50 px-3 py-2 space-y-1.5">
+        <div className="border-t border-border/50 px-3.5 py-2 space-y-1.5">
           {steps.map((step, i) => (
             <div key={i} className="flex items-start gap-2">
               <StepIcon status={step.status} />

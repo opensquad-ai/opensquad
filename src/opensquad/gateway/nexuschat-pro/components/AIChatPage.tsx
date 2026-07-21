@@ -17,10 +17,10 @@
  */
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  Bot, ArrowLeft, Send, Square,
+  Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
-  ChevronUp, ChevronDown, Lightbulb, List, Moon, Zap, Bell, ClipboardList, Gauge, Scissors,
-  Loader2, Clock, AlignLeft, MessageSquare, Mic,
+  ChevronUp, ChevronDown, Moon, Zap, Bell,
+  Loader2, Clock, Mic,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
@@ -112,7 +112,7 @@ import {
   AgentWebComposer,
   type ComposerSendPayload,
 } from './ai-chat/AgentWebComposer';
-import { PulseDotsStatus } from './ai-chat/PulseDotsStatus';
+import { useWorkflowExpandLevel } from '../utils/workflowExpandPref';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -142,7 +142,6 @@ import { DelegateFold } from './ai-chat/DelegateFold';
 import { ShellJobFold } from './ai-chat/ShellJobFold';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
-import { TokenProgressBar } from './ai-chat/TokenProgressBar';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
 import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
@@ -179,21 +178,6 @@ interface UploadedFile {
   type?: string;
   duration?: number;
 }
-
-// ---- Agent Working Indicator (classic, workflow details hidden) ----
-const AgentWorkingIndicator: React.FC<{
-  kind?: 'preparing' | 'thinking' | 'working';
-  startedMs?: number;
-  stepCount?: number;
-}> = ({ kind = 'preparing', startedMs, stepCount }) => (
-  <div className="mb-4 pl-0.5">
-    <PulseDotsStatus
-      kind={kind}
-      startedMs={startedMs}
-      stepCount={stepCount}
-    />
-  </div>
-);
 
 // ---- Workflow Block with event pagination ----
 const WORKFLOW_EVENTS_PAGE_SIZE = 10;
@@ -1073,6 +1057,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamingTextRef = useRef('');   // mirror of streamingText for WS callbacks
   const finalizingRef = useRef(false);   // guard against duplicate finalization
+  /** After user hits Stop, ignore late stream/tool/thought until the next send. */
+  const userStoppedRef = useRef(false);
   const diskSessionLoadedRef = useRef(false); // true after we loaded disk session (skip bare WS history)
   const dragCounterRef = useRef(0);      // counter for nested drag enter/leave events
   const messagesContainerRef = useRef<HTMLDivElement>(null); // messages scroll container
@@ -1138,22 +1124,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     ).length;
   }, [timeline]);
   const [showContextViewer, setShowContextViewer] = useState(false);
-  const [showPlanViewer, setShowPlanViewer] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('ai_chat_show_plan_viewer') === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [showTokenStats, setShowTokenStats] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem('ai_chat_show_token_stats');
-      // Backward-compatible default: visible when no setting exists.
-      return stored === null ? true : stored === 'true';
-    } catch {
-      return true;
-    }
-  });
   const [isCompressingContext, setIsCompressingContext] = useState(false);
 
   // Lazy loading state
@@ -1306,25 +1276,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     } catch { /* ignore quota */ }
   }, [pendingMessages, agentId, pendingQueueStorageKey]);
 
-  // Workflow visibility toggle (persisted to localStorage, default: visible)
-  const [showWorkflow, setShowWorkflow] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem('ai_chat_show_workflow');
-      // Missing key → visible. Only hide when explicitly stored as "false".
-      return stored !== 'false';
-    } catch { return true; }
-  });
-
-  const toggleWorkflow = useCallback(() => {
-    setShowWorkflow(prev => {
-      const next = !prev;
-      try { localStorage.setItem('ai_chat_show_workflow', String(next)); } catch {}
-      return next;
-    });
-  }, []);
-
-  // Solo: expand-all is session-only and defaults OFF so refresh keeps folds collapsed.
-  const [soloExpandDetails, setSoloExpandDetails] = useState(false);
+  // Workflow fold auto-expand level (Settings → General); does not override manual toggles.
+  const [workflowExpandLevel] = useWorkflowExpandLevel();
   /** Live stdout for system.start_job / run_session_job (keyed by tool call_id) */
   const [shellStreams, setShellStreams] = useState<Record<string, ShellStreamState>>({});
 
@@ -1370,35 +1323,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const top = eRect.top - cRect.top + container.scrollTop - 12;
     container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
   }, []);
-
-  // Derived: is there an active (incomplete) workflow in the timeline?
-  // A workflow is considered "active" only if it has unresolved tool_calls
-  // (agent is currently processing) OR has recent event activity (< 15s).
-  // This prevents the agent working animation from staying on indefinitely
-  // when the agent is idling (e.g. system.wait with all tools resolved).
-  const hasActiveWorkflow = useMemo(() => {
-    const now = Date.now();
-    for (let i = timeline.length - 1; i >= 0; i--) {
-      const e = timeline[i];
-      if (e.kind !== 'workflow') continue;
-      const wf = (e as { kind: 'workflow'; data: WorkflowBlock }).data;
-      if (wf.completed) continue;
-
-      // Unresolved tool_call → agent is actively waiting for a result
-      const hasOpenToolCall = wf.events.some(evt => evt.type === 'tool_call' && !evt.result);
-      if (hasOpenToolCall) return true;
-
-      // No open tool_calls — check if the last event is recent enough
-      // to consider the workflow still active (within 15 seconds).
-      // This covers the case where the agent is thinking (thought events
-      // without tool_calls) or has just finished a tool.
-      const lastTs = wf.events.reduce((max, evt) =>
-        evt.timestamp && evt.timestamp > max ? evt.timestamp : max, 0
-      );
-      if (lastTs > 0 && (now - lastTs < 15000)) return true;
-    }
-    return false;
-  }, [timeline]);
 
   const latestPlanStepsFromTimeline = useMemo<PlanStep[]>(() => {
     for (let i = timeline.length - 1; i >= 0; i--) {
@@ -1851,7 +1775,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Stream — accumulate chunks via ref, then sync to state
     const streamSeqRef = { current: 0 };
     const unsubStream = aiWsService.on('stream', (msg: AIWSMessage) => {
-      if (finalizingRef.current) return;
+      if (userStoppedRef.current || finalizingRef.current) return;
       const text = _extractContent(msg);
       if (text) {
         streamSeqRef.current += 1;
@@ -1869,7 +1793,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       console.log('[AIChatPage] 📨 handleFinal called!', JSON.stringify(msg).substring(0, 200));
       // Guard: prevent duplicate finalization (both 'message' and 'response'
       // may fire for the same reply)
-      if (finalizingRef.current) return;
+      if (userStoppedRef.current || finalizingRef.current) return;
       finalizingRef.current = true;
 
       const text = _extractContent(msg);
@@ -2067,6 +1991,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Thought — accumulate consecutive chunks into a single thought block
     const unsubThought = aiWsService.on('thought', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const text = _extractContent(msg);
       if (text) {
         const raw = msg.content ?? msg.data;
@@ -2103,6 +2028,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Tool call
     const unsubToolCall = aiWsService.on('tool_call', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
       const isSubAgent = typeof data === 'object' && !!data.sub_agent;
@@ -2132,6 +2058,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Live Native-FC tool arguments (file write/edit code streaming into tool fold)
     const unsubToolCallDelta = aiWsService.on('tool_call_delta', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       if (!data || typeof data !== 'object') return;
       const toolName = data.name || data.tool || 'Tool';
@@ -2164,6 +2091,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Tool result — merge into matching tool_call
     const unsubToolResult = aiWsService.on('tool_result', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
       const event: WorkflowEvent = {
@@ -2227,6 +2155,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Plan — Runner sends {id, text} after parsing <plan> tag
     const unsubPlan = aiWsService.on('plan', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       // data is usually {id: "plan_XXXX", text: "..."} from Runner
       const planContent = typeof data === 'object' ? (data.text || data.content || data) : data;
@@ -2422,17 +2351,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const handleStatus = (msg: AIWSMessage) => {
       const data = msg.content || msg.data;
       if (typeof data === 'string') {
+        const lower = data.toLowerCase();
+        // Always allow idle / stopped so the Stop button releases.
+        if (
+          data === 'idle' ||
+          data === 'ready' ||
+          lower.includes('task stopped') ||
+          lower.includes('response complete') ||
+          lower.includes('idle') ||
+          lower.includes('ready') ||
+          lower.includes('complete')
+        ) {
+          setAgentStatus('idle');
+          if (lower.includes('task stopped')) {
+            setIsStreaming(false);
+          }
+          return;
+        }
+        if (userStoppedRef.current) return;
         if (data === 'thinking' || data === 'processing') {
           setAgentStatus('thinking');
         } else if (data === 'working') {
           setAgentStatus('working');
         } else if (data === 'sleeping') {
           setAgentStatus('sleeping');
-        } else if (data === 'idle' || data === 'ready') {
-          setAgentStatus('idle');
-         } else if (data.includes('Response complete') || data.includes('idle') || data.includes('ready') || data.includes('complete')) {
-           // Catch status strings like "Response complete" and "Continuous mode - State: idle"
-           setAgentStatus('idle');
         }
       }
     };
@@ -2735,6 +2677,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Turn start — reset streaming state and record workflow start timestamp (first turn only)
     const unsubTurnStart = aiWsService.on('turn_start', (msg: AIWSMessage) => {
+      if (userStoppedRef.current) return;
       const data = msg.content ?? msg.data;
       // turn=1 means the very first LLM call for this user message.
       // turn>=2 means the agent is re-entering the loop after a tool call (same workflow).
@@ -4641,6 +4584,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // save it to the timeline BEFORE clearing — otherwise it disappears the moment
     // the user hits Send. The turn_start salvage logic can't help here because
     // handleSend clears streamingTextRef before turn_start arrives.
+    userStoppedRef.current = false;
     if (salvageStream && streamingTextRef.current && !finalizingRef.current) {
       const salvaged = streamingTextRef.current;
       if (salvaged.trim().length > 0) {
@@ -4731,6 +4675,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 duration: typeof a.duration === 'number' ? a.duration : undefined,
               };
             }),
+          sessionId: sid || undefined,
         };
         setPendingMessages((prev) => [...prev, snapshot]);
         setInputText('');
@@ -5047,7 +4992,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleStop = () => {
-    wsServiceRef.current?.stopTask();
+    userStoppedRef.current = true;
+    // Agent-wide stop + cancel parallel turns immediately (backend request_stop).
+    wsServiceRef.current?.stopTask({
+      all: true,
+      session_id: currentSessionIdRef.current || undefined,
+    });
     const currentText = streamingTextRef.current;
     const stoppedMsg: ChatMessage = {
       role: 'assistant',
@@ -5108,6 +5058,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // otherwise orphaned delegates keep streaming into the new timeline.
     wsServiceRef.current?.stopTask();
     newSessionPendingRef.current = true;
+    userStoppedRef.current = false;
     setIsLoadingSession(true);
     setSessionLoadingLabel(t('aiChat.creatingSession'));
     // Clear session filter so responses with the new sid are not dropped while
@@ -5675,27 +5626,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       pendingMessagesRef.current.some((m) => m.sessionId === sessionId);
 
     if (shouldQueue) {
-      // Same session mid-turn: backend input_hub can accept — don't park if no pending for sid.
-      if (
-        !pendingMessagesRef.current.some((m) => m.sessionId === sessionId) &&
-        sessionId === currentSessionIdRef.current &&
-        !viewingHistorySessionRef.current
-      ) {
-        armOutboundTurnPending(sessionId);
-        deliverMessage(
-          {
-            text: payload.text,
-            images: payload.images,
-            attachments: payload.attachments as UploadedFile[],
-            skillDir: payload.skillDir,
-            skillName: payload.skillName,
-            sessionId,
-          },
-          { clearInputState: false, salvageStream: true },
-        );
-        return;
-      }
-      // Same session already has queued work: park.
+      // Always park visually when this session is busy / already queued.
+      // Do not mid-turn deliverMessage — that puts the bubble in the timeline
+      // and makes continuous sends look "already sent" instead of 待发送.
       const snapshot: PendingMessage = {
         id: genUID(),
         text: payload.text,
@@ -5773,7 +5706,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           sessionId={sessionId}
           liveTimeline={mirrorLive ? flattenArchivedSections(timeline) : null}
           isSolo={isSolo}
-          expandDetails={isSolo ? soloExpandDetails : showWorkflow}
+          expandLevel={workflowExpandLevel}
           columnClass={soloColumnClass}
           userName={currentUser?.name || undefined}
           agentName={agentProfile?.agent_name || undefined}
@@ -5819,8 +5752,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         cwd={agentCwd || defaultCwd}
         tokenStats={tokenStatsBySession[sessionId] ?? null}
         onViewReport={() => setShowContextViewer(true)}
+        onCompressContext={handleCompressContext}
+        compressing={isCompressingContext}
+        compressDisabled={isLoadingSession || isCompressingContext}
         sessionChanges={
-          focusedPaneId === paneId && currentSessionId === sessionId ? sessionChanges : null
+          isSolo && focusedPaneId === paneId && currentSessionId === sessionId
+            ? sessionChanges
+            : null
         }
         changesBusy={changesBusy}
         onOpenChanges={() => {
@@ -5875,17 +5813,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSend={(payload) => handlePaneComposerSend(paneId, sessionId, payload)}
         onStop={handleStop}
         planPanel={
-          sessionId === currentSessionId && showPlanViewer ? (
-            effectivePlanSteps.length > 0 ? (
-              <PlanBlock
-                steps={effectivePlanSteps}
-                className="mb-0 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]"
-              />
-            ) : (
-              <div className="text-xs text-textMuted border border-border/55 rounded-lg px-3 py-2 bg-black/[0.02] dark:bg-white/[0.03]">
-                {t('aiChat.noPlanYet')}
-              </div>
-            )
+          sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
+            <PlanBlock
+              steps={effectivePlanSteps}
+              defaultOpen={false}
+              className="mb-0 border border-border/50 rounded-2xl overflow-hidden bg-rail/70 dark:bg-white/[0.06]"
+            />
           ) : null
         }
         pendingPanel={(() => {
@@ -5905,7 +5838,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <button
                   type="button"
                   onClick={handleSendNextPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors"
                   title={t('aiChat.sendNext')}
                 >
                   <Zap size={10} />
@@ -5914,7 +5847,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <button
                   type="button"
                   onClick={handleCancelAllPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
                   title={t('aiChat.pendingClearAll')}
                 >
                   <X size={10} />
@@ -5923,7 +5856,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <button
                   type="button"
                   onClick={() => setPendingCollapsed((c) => !c)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
                   title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
                 >
                   {pendingCollapsed ? '▴' : '▾'}
@@ -5938,7 +5871,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     return (
                       <div
                         key={pm.id}
-                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-primary/10 transition-colors"
                       >
                         <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
                           {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
@@ -5963,7 +5896,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           <button
                             type="button"
                             onClick={() => handleSendPendingNow(pm.id)}
-                            className="p-1 rounded text-primary hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                            className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
                             title={t('aiChat.sendNow')}
                           >
                             <Zap size={12} />
@@ -5971,7 +5904,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           <button
                             type="button"
                             onClick={() => handleCancelPending(pm.id)}
-                            className="p-1 rounded text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain transition-colors"
+                            className="p-1 rounded text-textMuted hover:bg-primary/10 hover:text-textMain transition-colors"
                             title={t('aiChat.cancelPending')}
                           >
                             <X size={12} />
@@ -6221,7 +6154,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSwitchAndReply={handleSwitchAndReply}
         onOpenSkills={handleOpenSkills}
         isOpen={sessionSidebarOpen}
-        onClose={() => setSessionSidebarOpen(false)}
         sessionTitleUpdate={sessionTitleUpdate}
         agentBusy={
           isStreaming ||
@@ -6236,6 +6168,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           setPrimarySessionId(sid);
         }}
         onSessionsChange={handleSessionsChange}
+        uiMode={uiMode}
+        onUiModeChange={setUiModePersisted}
       />
 
       {showContextViewer && (
@@ -6254,18 +6188,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       )}
 
       <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
-        {/* Single top row: agent left | workspace tabs | ops right (Manus-style) */}
-        <div className="flex-shrink-0 bg-panel border-b border-border/70">
-          <div className="h-11 px-2 sm:px-2.5 box-border flex items-center gap-1.5 sm:gap-2 min-w-0">
-            <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 shrink-0">
-              <button
-                type="button"
-                onClick={onBack}
-                className="p-1 sm:p-1.5 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
-                title="返回"
-              >
-                <ArrowLeft size={18} className="text-textMuted" />
-              </button>
+        {/* L1 nest chrome — active workspace tab is panel and joins L2 with no seam */}
+        <div className="flex-shrink-0 bg-nest">
+          <div className="h-11 px-2 sm:px-2.5 box-border flex items-end gap-1.5 sm:gap-2 min-w-0 pb-0">
+            <div className="flex h-8 items-center gap-1 sm:gap-1.5 min-w-0 shrink-0">
               <button
                 type="button"
                 onClick={() => setSessionSidebarOpen(!sessionSidebarOpen)}
@@ -6278,11 +6204,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   <PanelLeftOpen size={16} className="text-textMuted" />
                 )}
               </button>
-              <div className="w-6 h-6 sm:w-7 sm:h-7 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                <Bot size={14} className="text-primary" />
-              </div>
-              <div className="min-w-0 max-w-[120px] sm:max-w-[160px]">
-                <h2 className="font-bold text-textMain text-sm truncate leading-tight">
+              <div className="flex min-w-0 max-w-[140px] sm:max-w-[180px] items-center gap-1.5">
+                <StatusBadge status={agentStatus} />
+                <h2 className="min-w-0 truncate text-sm font-bold leading-none text-textMain">
                   {agentProfile?.agent_name || modelName || agentId}
                   {switchingModel ? (
                     <span className="ml-1 text-[10px] font-normal text-textMuted animate-pulse">
@@ -6290,11 +6214,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     </span>
                   ) : null}
                 </h2>
-                <StatusBadge status={agentStatus} />
               </div>
             </div>
 
-            <div className="flex-1 min-w-0 overflow-visible">
+            <div className="flex-1 min-w-0 overflow-visible self-stretch flex items-end">
               <WorkspaceTabBar
                 workspaces={wsSnap.workspaces}
                 openIds={wsSnap.chrome.openWorkspaceIds}
@@ -6309,54 +6232,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               />
             </div>
 
-            <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-              <div
-                className="flex items-center rounded-md border border-border overflow-hidden flex-shrink-0"
-                title="Chat UI mode"
-              >
-                <button
-                  type="button"
-                  onClick={() => setUiModePersisted('classic')}
-                  className={`px-1.5 sm:px-2 py-1 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 ${
-                    !isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
-                  }`}
-                  title={t('aiChat.uiModeClassicHint')}
-                >
-                  <MessageSquare size={13} />
-                  <span className="hidden sm:inline">{t('aiChat.uiModeClassic')}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUiModePersisted('solo')}
-                  className={`px-1.5 sm:px-2 py-1 text-[10px] sm:text-[11px] font-medium transition-colors flex items-center gap-1 border-l border-border ${
-                    isSolo ? 'bg-primary/15 text-primary' : 'text-textMuted hover:bg-primary/10'
-                  }`}
-                  title={t('aiChat.uiModeSoloHint')}
-                >
-                  <AlignLeft size={13} />
-                  <span className="hidden sm:inline">Solo</span>
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowPlanViewer((v) => {
-                    const next = !v;
-                    try {
-                      localStorage.setItem('ai_chat_show_plan_viewer', String(next));
-                    } catch {
-                      /* ignore */
-                    }
-                    return next;
-                  });
-                }}
-                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                  showPlanViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-                }`}
-                title={t('aiChat.planPanel')}
-              >
-                <ClipboardList size={16} className={showPlanViewer ? 'text-primary' : 'text-textMuted'} />
-              </button>
+            <div className="flex h-8 items-center gap-0.5 sm:gap-1 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -6381,91 +6257,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   <PanelRightOpen size={16} className="text-textMuted" />
                 )}
               </button>
-              <button
-                type="button"
-                onClick={() => setShowContextViewer((v) => !v)}
-                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                  showContextViewer ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-                }`}
-                title={t('aiChat.contextDetails')}
-              >
-                <List size={16} className={showContextViewer ? 'text-primary' : 'text-textMuted'} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowTokenStats((v) => {
-                    const next = !v;
-                    try {
-                      localStorage.setItem('ai_chat_show_token_stats', String(next));
-                    } catch {
-                      /* ignore */
-                    }
-                    return next;
-                  });
-                }}
-                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                  showTokenStats ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
-                }`}
-                title={showTokenStats ? t('aiChat.hideTokenStats') : t('aiChat.showTokenStats')}
-              >
-                <Gauge size={16} className={showTokenStats ? 'text-primary' : 'text-textMuted'} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (isSolo) setSoloExpandDetails((v) => !v);
-                  else toggleWorkflow();
-                }}
-                className={`p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 ${
-                  (isSolo ? soloExpandDetails : showWorkflow)
-                    ? 'bg-primary/15 hover:bg-primary/20'
-                    : 'hover:bg-primary/10'
-                }`}
-                title={
-                  isSolo
-                    ? soloExpandDetails
-                      ? 'Collapse all thinking'
-                      : 'Expand all thinking'
-                    : showWorkflow
-                      ? 'Hide workflow details'
-                      : 'Show workflow details'
-                }
-              >
-                <Lightbulb
-                  size={16}
-                  className={
-                    (isSolo ? soloExpandDetails : showWorkflow) ? 'text-primary' : 'text-textMuted'
-                  }
-                />
-              </button>
-              <button
-                type="button"
-                onClick={handleCompressContext}
-                disabled={isLoadingSession || isCompressingContext}
-                className="p-1 sm:p-1.5 rounded-lg transition-colors flex-shrink-0 hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed"
-                title={
-                  isCompressingContext
-                    ? 'Summarizing session...'
-                    : 'Summarize/compress current session context'
-                }
-              >
-                <Scissors
-                  size={16}
-                  className={isCompressingContext ? 'text-primary' : 'text-textMuted'}
-                />
-              </button>
             </div>
           </div>
-
-          {showTokenStats && tokenStats && tokenStats.max > 0 && (
-            <TokenProgressBar
-              used={tokenStats.used}
-              max={tokenStats.max}
-              breakdown={tokenStats.breakdown}
-              session={tokenStats.session}
-            />
-          )}
         </div>
 
       {activeWorkspace && workspaceLayout ? (
@@ -6523,7 +6316,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               {showScrollTop && (
                 <button
                   onClick={scrollToTop}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
                   title="Scroll to top"
                 >
                   <ChevronUp size={18} className="text-gray-500" />
@@ -6532,7 +6325,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               {showScrollBottom && (
                 <button
                   onClick={scrollToBottom}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-gray-50 transition-colors"
+                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
                   title="Scroll to bottom"
                 >
                   <ChevronDown size={18} className="text-gray-500" />
@@ -6622,7 +6415,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 return -1;
               })();
               // Classic + Solo: document-style activity rows (thinking / tools)
-              if (!isSolo && !showWorkflow) return null;
               const curBlock = (entry as { kind: 'workflow'; data: WorkflowBlock }).data;
               if (
                 i > 0 &&
@@ -6653,7 +6445,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 <SoloActivityRow
                   key={entryKey}
                   block={merged}
-                  expandDetails={isSolo ? soloExpandDetails : showWorkflow}
+                  expandLevel={workflowExpandLevel}
                   turnStartedMs={turnMs}
                   shellStreams={shellStreams}
                   onOpenFile={openProjectFile}
@@ -6745,12 +6537,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       );
                     }
                     if (nested.kind === 'workflow') {
-                      if (!isSolo && !showWorkflow) return null;
                       return (
                         <SoloActivityRow
                           key={nestedKey}
                           block={nested.data}
-                          expandDetails={isSolo ? soloExpandDetails : showWorkflow}
+                          expandLevel={workflowExpandLevel}
                           turnStartedMs={undefined}
                           shellStreams={shellStreams}
                           onOpenFile={openProjectFile}
@@ -6792,31 +6583,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             return null;
           })}
-
-          {/* Agent working indicator (classic only when workflow hidden) */}
-          {!isSolo && !showWorkflow && hasActiveWorkflow && (
-            <div className="mb-1">
-              <AgentWorkingIndicator
-                kind={
-                  agentStatus === 'thinking'
-                    ? 'thinking'
-                    : agentStatus === 'working'
-                      ? 'working'
-                      : 'preparing'
-                }
-                startedMs={turnStartedMs}
-                stepCount={(() => {
-                  for (let i = timeline.length - 1; i >= 0; i--) {
-                    const e = timeline[i];
-                    if (e.kind !== 'workflow' || e.data.completed) continue;
-                    const n = e.data.events?.length || 0;
-                    return n > 0 ? n : undefined;
-                  }
-                  return undefined;
-                })()}
-              />
-            </div>
-          )}
 
           {/* Streaming message (always at the very bottom) */}
           {(streamingText || isStreaming) && (
@@ -6917,7 +6683,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               <button
                 type="button"
                 onClick={scrollToBottom}
-                className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-gray-50 dark:hover:bg-[#333] transition-opacity duration-300 cursor-pointer"
+                className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
                 style={{ opacity: scrollActive ? 1 : 0.55 }}
                 title="滚动到底部"
               >

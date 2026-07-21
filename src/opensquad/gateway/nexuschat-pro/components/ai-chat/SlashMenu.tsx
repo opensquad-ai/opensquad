@@ -63,7 +63,7 @@ export const SlashMenu: React.FC<SlashMenuProps> = (props) => {
     `w-full text-left px-3 py-2 transition-colors border-0 cursor-pointer ${
       active
         ? 'bg-black/[0.06] dark:bg-white/[0.10]'
-        : 'bg-transparent hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+        : 'bg-transparent hover:bg-primary/10'
     }`;
 
   if (props.mode === 'commands') {

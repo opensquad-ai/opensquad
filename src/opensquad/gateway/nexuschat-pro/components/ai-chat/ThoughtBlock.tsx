@@ -30,7 +30,7 @@ export const ThoughtBlock: React.FC<ThoughtBlockProps> = ({ content, defaultOpen
   return (
     <div className="rounded-md border border-gray-200 bg-white/80 overflow-hidden">
       <div
-        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-gray-50 transition-colors"
+        className="flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-primary/10 transition-colors"
         onClick={() => {
           const next = !isOpen;
           setIsOpen(next);
