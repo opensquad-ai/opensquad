@@ -92,7 +92,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     setError(null);
     void (async () => {
       try {
-        const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sessionId, 0, 80);
+        // Full history — paged endpoints truncate messages/events and drop tool
+        // context when opening a session tab.
+        const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
         if (cancelled) return;
         const session = resp.session as
           | { messages?: any[]; events?: any[]; archived_messages?: any[]; archived_events?: any[] }

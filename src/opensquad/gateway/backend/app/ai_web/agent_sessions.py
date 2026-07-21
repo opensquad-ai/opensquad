@@ -67,6 +67,7 @@ class AgentSessionReader:
         self.save_dir = save_dir
         self.history_dir = history_dir
         self.current_session_file = os.path.join(save_dir, "current_session.json")
+        self.primary_session_file = os.path.join(save_dir, "primary_session.json")
         self.session_data: dict[str, Any] = {
             "id": None,
             "title": None,
@@ -173,6 +174,18 @@ class AgentSessionReader:
     def get_current_session_id(self) -> str:
         self._reload()
         return self.session_data.get("id", "unknown")
+
+    def _read_primary_session_id(self) -> str | None:
+        try:
+            if os.path.isfile(self.primary_session_file):
+                with open(self.primary_session_file, encoding="utf-8") as f:
+                    meta = json.load(f)
+                if isinstance(meta, dict):
+                    sid = str(meta.get("primary_session_id") or "").strip()
+                    return sid or None
+        except Exception:
+            pass
+        return self.session_data.get("id")
 
     def get_session_list(self) -> list[dict[str, Any]]:
         """Return list of all sessions (current + history), newest first."""
@@ -289,6 +302,7 @@ class AgentSessionReader:
 
         # 1. Current session
         curr_id = self.session_data.get("id")
+        primary_id = self._read_primary_session_id()
         if curr_id:
             messages = self.session_data.get("messages", [])
             title = self.session_data.get("title") or _extract_title(messages, curr_id)
@@ -300,6 +314,7 @@ class AgentSessionReader:
                     "title": title,
                     "preview": preview,
                     "current": True,
+                    "primary": curr_id == primary_id,
                     "created_at": created_at,
                     "last_updated": last_updated,
                 }
@@ -352,6 +367,7 @@ class AgentSessionReader:
                             "title": title,
                             "preview": preview,
                             "current": False,
+                            "primary": sid == primary_id,
                             "created_at": created_at,
                             "last_updated": last_updated,
                         }
@@ -632,6 +648,21 @@ class AgentSessionReader:
                 paged_events = []
         else:
             paged_events = []
+
+        # Latest page: once we have any matched event, keep every subsequent
+        # event through end-of-file. Timestamp/round_id windows otherwise drop
+        # mid-turn tool_call_delta / thoughts that lack matching metadata.
+        if offset == 0 and total_events > 0 and paged_events:
+            matched_ids = {id(e) for e in paged_events}
+            first_idx = next(
+                (i for i, e in enumerate(all_events) if id(e) in matched_ids),
+                None,
+            )
+            if first_idx is not None:
+                paged_events = all_events[first_idx:]
+        elif offset == 0 and total_events > 0 and len(paged_messages) >= total_messages:
+            # Full message set on first page — return all events.
+            paged_events = list(all_events)
 
         has_more = (total_messages - offset - limit) > 0
 

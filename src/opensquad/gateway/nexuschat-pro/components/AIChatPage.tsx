@@ -51,7 +51,7 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
-import { putCachedSessionTimeline } from '../utils/sessionTimelineCache';
+import { putCachedSessionTimeline, getCachedSessionTimeline } from '../utils/sessionTimelineCache';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -3008,7 +3008,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             setSessionLoadingLabel(t('aiChat.loadingSession'));
           }
           const resp = await Promise.race([
-            agentSessionAPI.getCurrentSession(agentId, 0, 50),
+            // Large limit ≈ full history; paged API still returns archived_* in full.
+            agentSessionAPI.getCurrentSession(agentId, 0, 10000),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
             ),
@@ -3067,6 +3068,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               session.archived_messages,
               session.archived_events,
             );
+            if (currentSid) {
+              putCachedSessionTimeline(agentId, currentSid, entries);
+            }
             _logMediaDebug('timeline-built-from-current', {
               entryCount: entries.length,
               messageSample: entries
@@ -4132,7 +4136,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       isStreaming ||
       agentStatus === 'working' ||
       agentStatus === 'thinking' ||
-      agentStatus === 'sleeping' ||
       (!!currentSessionId && busySessions.includes(currentSessionId)),
     [isStreaming, agentStatus, busySessions, currentSessionId],
   );
@@ -4142,11 +4145,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (!sid) return isAgentBusy;
       if (busySessionsRef.current.includes(sid)) return true;
       if (sid === currentSessionIdRef.current) {
+        // Do not treat sleeping as busy — otherwise pending queue never drains
+        // and the agent never receives a wake/chat to leave sleep.
         return (
           isStreaming ||
           agentStatus === 'working' ||
-          agentStatus === 'thinking' ||
-          agentStatus === 'sleeping'
+          agentStatus === 'thinking'
         );
       }
       return false;
@@ -4834,17 +4838,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setCurrentSessionId(sid);
       setViewingHistorySession(false);
       try {
-        const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sid, 0, 50);
+        const resp = await agentSessionAPI.getSessionHistory(agentId, sid);
         const session = resp.session;
         if (session) {
           const entries = buildTimelineFromSession(
             session.messages || [],
             session.events || [],
+            session.archived_messages,
+            session.archived_events,
           );
+          putCachedSessionTimeline(agentId, sid, entries);
           setTimeline(entries);
           setShellStreams(rebuildShellStreamsFromTimeline(entries));
           historyOffsetRef.current = session.messages?.length || 0;
-          setHasMoreHistory(session.has_more ?? false);
+          setHasMoreHistory(false);
         }
       } catch (err: any) {
         console.error('[AIChatPage] Failed to reload session before pending flush:', err);
@@ -5208,12 +5215,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setSessionLoadingLabel(t('aiChat.loadingSession'));
     pendingFilePushesRef.current = [];
     try {
-      const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sessionId, 0, 50);
+      // Full history so opened sessions keep complete dialogue + tool streams.
+      const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
       const session = resp.session;
       if (session) {
         const entries = buildTimelineFromSession(
           session.messages || [],
           session.events || [],
+          session.archived_messages,
+          session.archived_events,
         );
         putCachedSessionTimeline(agentId, sessionId, entries);
         setTimeline(entries);
@@ -5224,10 +5234,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setViewingHistorySession(true); // mark as viewing history (not the agent's current session)
         setStreamingText('');
         setIsStreaming(false);
-        // Set up lazy loading state
+        // Full snapshot loaded — no further pages.
         loadingSessionIdRef.current = sessionId;
         historyOffsetRef.current = session.messages?.length || 0;
-        setHasMoreHistory(session.has_more ?? false);
+        setHasMoreHistory(false);
         const meta = getSessionMeta(agentId, sessionId);
         if (meta?.projectPath) setAgentCwd(meta.projectPath);
         else if (pendingProjectPathRef.current?.trim()) setAgentCwd(pendingProjectPathRef.current.trim());
@@ -5256,17 +5266,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Still reload history for empty switches so the pane shows prior messages.
     if (content) return;
     try {
-      const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sessionId, 0, 50);
+      const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
       const session = resp.session;
       if (session) {
         const entries = buildTimelineFromSession(
           session.messages || [],
           session.events || [],
+          session.archived_messages,
+          session.archived_events,
         );
+        putCachedSessionTimeline(agentId, sessionId, entries);
         setTimeline(entries);
         setShellStreams(rebuildShellStreamsFromTimeline(entries));
         historyOffsetRef.current = session.messages?.length || 0;
-        setHasMoreHistory(session.has_more ?? false);
+        setHasMoreHistory(false);
         const meta = getSessionMeta(agentId, sessionId);
         if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
         else if (defaultCwd) setAgentCwd(defaultCwd);
@@ -5283,7 +5296,46 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setViewingHistorySession(false);
       return;
     }
-    await handleSwitchAndReply(sessionId, { stopCurrent: false });
+    // Focus locally only — never send empty switch_and_reply. Parallel dispatcher
+    // used to start a blank LLM turn for that, which occupied busy and blocked
+    // the real chat message that follows.
+    pendingFilePushesRef.current = [];
+    currentSessionIdRef.current = sessionId;
+    viewingHistorySessionRef.current = false;
+    setCurrentSessionId(sessionId);
+    setViewingHistorySession(false);
+    wsServiceRef.current?.setActiveSession(sessionId);
+
+    try {
+      const cached = getCachedSessionTimeline(agentId, sessionId);
+      if (cached && cached.length > 0) {
+        setTimeline(cached);
+        setShellStreams(rebuildShellStreamsFromTimeline(cached));
+        historyOffsetRef.current = cached.filter((e) => e.kind === 'message').length;
+        setHasMoreHistory(false);
+      } else {
+        const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
+        const session = resp.session;
+        if (session) {
+          const entries = buildTimelineFromSession(
+            session.messages || [],
+            session.events || [],
+            session.archived_messages,
+            session.archived_events,
+          );
+          putCachedSessionTimeline(agentId, sessionId, entries);
+          setTimeline(entries);
+          setShellStreams(rebuildShellStreamsFromTimeline(entries));
+          historyOffsetRef.current = session.messages?.length || 0;
+          setHasMoreHistory(false);
+        }
+      }
+      const meta = getSessionMeta(agentId, sessionId);
+      if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
+      else if (defaultCwd) setAgentCwd(defaultCwd);
+    } catch (err: any) {
+      console.error('[AIChatPage] Failed to prepare session for send:', err);
+    }
   };
 
   // ---- Workspace chrome (L1 / L2) ----
