@@ -812,6 +812,7 @@
   "systemConfig": {
     "title": "系统配置",
     "tabs": {
+      "theme": "主题",
       "workspace": "工作区",
       "services": "服务控制",
       "ports": "端口",
@@ -888,7 +889,8 @@
     "saveFailed": "保存失败",
     "reload": "重新加载",
     "saved": "已保存",
-    "restartHint": "修改后需重启相关服务生效"
+    "restartHint": "修改后需重启相关服务生效",
+    "liveHint": "主题与外观会即时生效"
   },
   "market": {
     "install": "安装",
@@ -1192,5 +1194,53 @@
   },
   "toolCall": {
     "deliveryWarning": "文件已上传但未投递到任何在线 Web 客户端。请确认已打开该 agent 的 AI Chat 页面并保持连接后重试。"
+  },
+  "themeSettings": {
+    "title": "主题",
+    "openFromSettings": "打开主题外观设置",
+    "appearanceMode": "外观模式",
+    "colorThemes": "颜色主题",
+    "customization": "自定义",
+    "primary": "主色",
+    "hue": "色相",
+    "purity": "鲜艳度",
+    "contrast": "对比度",
+    "chatFont": "对话字体",
+    "serif": "衬线体",
+    "fontSmall": "小",
+    "fontLarge": "大",
+    "fontPreview": "这是对话中的预览文字效果。The quick brown fox jumps over the lazy dog.",
+    "done": "完成",
+    "mode": {
+      "light": "浅色",
+      "dark": "深色",
+      "system": "跟随系统"
+    },
+    "presets": {
+      "random": {
+        "name": "随机",
+        "desc": "每次点击生成一套柔和配色"
+      },
+      "inkGreen": {
+        "name": "墨绿",
+        "desc": "经典深青绿，暖米色背景"
+      },
+      "lakeBlue": {
+        "name": "霁青",
+        "desc": "克制中性色 × 湖蓝色调"
+      },
+      "minimal": {
+        "name": "极简",
+        "desc": "清爽专业的深蓝商务风格"
+      },
+      "violet": {
+        "name": "紫虹",
+        "desc": "低饱和紫调，细腻含蓄"
+      },
+      "luxury": {
+        "name": "奢华",
+        "desc": "沉稳金棕，极简贵气"
+      }
+    }
   }
 }

@@ -154,7 +154,26 @@ export function loadThemePrefs(): ThemePrefs {
     }
     const raw = localStorage.getItem(THEME_STORAGE_KEY);
     if (raw) {
-      cachedPrefs = sanitizePrefs(JSON.parse(raw));
+      const parsed = sanitizePrefs(JSON.parse(raw));
+      // One-shot lift from prior overly-muted defaults (purity 18 / dark primary)
+      let next = parsed;
+      if (parsed.purity === 18) {
+        next = { ...next, purity: DEFAULT_THEME_PREFS.purity };
+      }
+      if (
+        parsed.preset === 'ink-green' &&
+        normalizeHex(parsed.primary) === '#2D4739'
+      ) {
+        next = { ...next, primary: DEFAULT_THEME_PREFS.primary };
+      }
+      if (next !== parsed) {
+        try {
+          localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(next));
+        } catch {
+          /* ignore */
+        }
+      }
+      cachedPrefs = next;
       return cachedPrefs;
     }
   } catch {

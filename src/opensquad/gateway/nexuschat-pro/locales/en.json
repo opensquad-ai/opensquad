@@ -812,6 +812,7 @@
   "systemConfig": {
     "title": "System Config",
     "tabs": {
+      "theme": "Theme",
       "workspace": "Workspace",
       "services": "Services",
       "ports": "Ports",
@@ -888,7 +889,8 @@
     "saveFailed": "Failed to save",
     "reload": "Reload",
     "saved": "Saved",
-    "restartHint": "Changes require restarting related services to take effect"
+    "restartHint": "Changes require restarting related services to take effect",
+    "liveHint": "Theme and appearance apply instantly"
   },
   "market": {
     "install": "Install",
@@ -1192,5 +1194,53 @@
   },
   "toolCall": {
     "deliveryWarning": "File uploaded but not delivered to any online web client. Please confirm you have opened the agent's AI Chat page and kept the connection active, then try again."
+  },
+  "themeSettings": {
+    "title": "Theme",
+    "openFromSettings": "Open theme & appearance",
+    "appearanceMode": "Appearance",
+    "colorThemes": "Color themes",
+    "customization": "Customize",
+    "primary": "Primary",
+    "hue": "Hue",
+    "purity": "Vibrance",
+    "contrast": "Contrast",
+    "chatFont": "Conversation font",
+    "serif": "Serif",
+    "fontSmall": "S",
+    "fontLarge": "L",
+    "fontPreview": "Preview of conversation text. The quick brown fox jumps over the lazy dog.",
+    "done": "Done",
+    "mode": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    },
+    "presets": {
+      "random": {
+        "name": "Random",
+        "desc": "Generate a soft palette on each click"
+      },
+      "inkGreen": {
+        "name": "Ink Green",
+        "desc": "Classic deep green with warm beige surfaces"
+      },
+      "lakeBlue": {
+        "name": "Lake Blue",
+        "desc": "Restrained neutrals with a calm lake-blue accent"
+      },
+      "minimal": {
+        "name": "Minimal",
+        "desc": "Clean professional deep-blue style"
+      },
+      "violet": {
+        "name": "Violet",
+        "desc": "Soft muted violet, refined and quiet"
+      },
+      "luxury": {
+        "name": "Luxury",
+        "desc": "Steady gold-brown, understated elegance"
+      }
+    }
   }
 }
