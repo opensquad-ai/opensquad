@@ -1,25 +1,35 @@
 /**
- * SessionSidebar — Agent session list grouped by project folder (last path segment).
- * Cursor-like: folder hierarchy, status dots, inline rename, new session beside folder.
+ * SessionSidebar — sessions for the active workspace, grouped by 置顶 / 最近 / 归档.
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Plus, Trash2, RefreshCw, ChevronLeft, Check, X,
-  Folder, Pin, PinOff, ChevronDown, ChevronRight, Pencil, MessageSquarePlus,
+  Trash2,
+  RefreshCw,
+  ChevronLeft,
+  Check,
+  X,
+  Pin,
+  PinOff,
+  Pencil,
+  MessageSquarePlus,
+  Sparkles,
+  Archive,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import {
   loadSessionProjectMeta,
-  projectFolderName,
   setSessionPinned,
+  setSessionArchived,
   SESSION_META_EVENT,
   SESSION_LIST_REFRESH_EVENT,
   type SessionProjectMeta,
 } from '../../utils/sessionProjectMeta';
+import { pathsEqual } from '../../utils/workspaceStore';
 import { formatRelativeAge } from '../../utils/time';
 
-/** Classic-mode workflow spinner — theme primary arc. */
 const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
   size = 12,
   className = 'text-primary',
@@ -32,7 +42,6 @@ const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
       height={size}
       viewBox="0 0 32 32"
       fill="none"
-      xmlns="http://www.w3.org/2000/svg"
       className={`shrink-0 ${className}`}
       aria-hidden
     >
@@ -62,18 +71,25 @@ const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
 interface SessionSidebarProps {
   agentId: string;
   currentSessionId: string | null;
+  /** Active workspace absolute path — filters the list. */
+  workspaceRootPath: string | null;
+  workspaceId: string | null;
   onViewSession: (sessionId: string) => void;
-  /** Optional projectPath binds the new session to that folder/cwd. */
   onNewSession: (projectPath?: string) => void;
   onSwitchAndReply: (sessionId: string) => void;
+  onOpenSkills?: () => void;
   isOpen: boolean;
   onClose: () => void;
   sessionTitleUpdate?: { id: string; title: string } | null;
-  /** True when the agent's current session is actively working/thinking. */
   agentBusy?: boolean;
+  /** Session ids currently running a parallel turn */
+  busySessionIds?: string[];
+  primarySessionId?: string | null;
+  onSetPrimarySession?: (sessionId: string) => void;
+  /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
+  onSessionsChange?: (sessions: AgentSession[]) => void;
 }
 
-const SEE_MORE_LIMIT = 5;
 const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
 const SIDEBAR_WIDTH_DEFAULT = 256;
 const SIDEBAR_WIDTH_MIN = 200;
@@ -91,16 +107,36 @@ function loadSidebarWidth(): number {
   }
 }
 
+function belongsToWorkspace(
+  meta: SessionProjectMeta | undefined,
+  workspaceRootPath: string | null,
+  workspaceId: string | null,
+): boolean {
+  if (!workspaceRootPath && !workspaceId) return true;
+  if (workspaceId && meta?.workspaceId && meta.workspaceId === workspaceId) return true;
+  const p = (meta?.projectPath || '').trim();
+  if (!workspaceRootPath) return !p;
+  if (!p) return false;
+  return pathsEqual(p, workspaceRootPath);
+}
+
 export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   agentId,
   currentSessionId,
+  workspaceRootPath,
+  workspaceId,
   onViewSession,
   onNewSession,
   onSwitchAndReply,
+  onOpenSkills,
   isOpen,
   onClose,
   sessionTitleUpdate,
   agentBusy = false,
+  busySessionIds = [],
+  primarySessionId = null,
+  onSetPrimarySession,
+  onSessionsChange,
 }) => {
   const { t, i18n } = useTranslation();
   const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
@@ -109,11 +145,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
-  const [showAllFolders, setShowAllFolders] = useState<Record<string, boolean>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [renaming, setRenaming] = useState(false);
+  const [sectionOpen, setSectionOpen] = useState({ pinned: true, recent: true, archive: true });
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const editInputRef = useRef<HTMLInputElement>(null);
   const sessionsRef = React.useRef(sessions);
@@ -135,7 +170,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       reloadMeta();
       return list;
     } catch (err: any) {
-      console.error('[SessionSidebar] Failed to load sessions:', err);
       setError(err.message || t('aiChat.sessionSidebar.loadSessionsFailed'));
       return sessionsRef.current;
     } finally {
@@ -144,8 +178,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   }, [agentId, reloadMeta, t]);
 
   useEffect(() => {
-    if (isOpen) loadSessions();
-  }, [isOpen, loadSessions]);
+    if (isOpen) void loadSessions();
+  }, [isOpen, loadSessions, workspaceRootPath, workspaceId]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -161,23 +195,25 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     }
   }, [editingId]);
 
-  const onResizePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
-    const target = e.currentTarget;
-    target.setPointerCapture(e.pointerId);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }, [sidebarWidth]);
+  const onResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      dragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [sidebarWidth],
+  );
 
   const onResizePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current) return;
-    const next = Math.min(
-      SIDEBAR_WIDTH_MAX,
-      Math.max(SIDEBAR_WIDTH_MIN, Math.round(dragRef.current.startWidth + (e.clientX - dragRef.current.startX))),
+    setSidebarWidth(
+      Math.min(
+        SIDEBAR_WIDTH_MAX,
+        Math.max(SIDEBAR_WIDTH_MIN, Math.round(dragRef.current.startWidth + (e.clientX - dragRef.current.startX))),
+      ),
     );
-    setSidebarWidth(next);
   }, []);
 
   const onResizePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -186,7 +222,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {
-      /* already released */
+      /* */
     }
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
@@ -194,24 +230,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       try {
         localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
       } catch {
-        /* ignore quota / private mode */
+        /* */
       }
       return w;
     });
   }, []);
 
   useEffect(() => {
-    return () => {
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, []);
-
-  // New / switched session id — always re-fetch so the list stays in sync
-  // without requiring a manual Refresh click.
-  useEffect(() => {
     if (!isOpen || !currentSessionId) return;
-    // Optimistic row so the user sees the new session immediately.
     setSessions((prev) => {
       if (prev.some((s) => s.id === currentSessionId)) {
         return prev.map((s) =>
@@ -231,68 +257,66 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         ...prev.map((s) => ({ ...s, current: false })),
       ];
     });
-    const t = window.setTimeout(() => {
-      void loadSessions();
-    }, 200);
-    const t2 = window.setTimeout(() => {
-      void loadSessions();
-    }, 900);
+    const t1 = window.setTimeout(() => void loadSessions(), 200);
+    const t2 = window.setTimeout(() => void loadSessions(), 900);
     return () => {
-      window.clearTimeout(t);
+      window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
   }, [isOpen, currentSessionId, loadSessions]);
 
   useEffect(() => {
     if (!sessionTitleUpdate) return;
-    setSessions((prev) => {
-      const exists = prev.some((session) => session.id === sessionTitleUpdate.id);
-      if (!exists) {
-        void loadSessions();
-        return prev;
-      }
-      return prev.map((session) =>
-        session.id === sessionTitleUpdate.id
-          ? { ...session, title: sessionTitleUpdate.title }
-          : session,
-      );
-    });
-  }, [sessionTitleUpdate, loadSessions]);
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionTitleUpdate.id ? { ...s, title: sessionTitleUpdate.title } : s,
+      ),
+    );
+  }, [sessionTitleUpdate]);
 
   useEffect(() => {
-    let retryTimer: number | undefined;
+    onSessionsChange?.(sessions);
+  }, [sessions, onSessionsChange]);
+
+  useEffect(() => {
     const onMeta = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail?.agentId !== agentId) return;
-      const sid = typeof detail?.sessionId === 'string' ? detail.sessionId : null;
-      void (async () => {
-        const list = await loadSessions();
-        // First message may race the backend list write — retry once if still missing.
-        if (sid && !list.some((s) => s.id === sid)) {
-          retryTimer = window.setTimeout(() => {
-            void loadSessions();
-          }, 700);
-        }
-      })();
-    };
-    const onListRefresh = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.agentId && detail.agentId !== agentId) return;
       void loadSessions();
     };
     window.addEventListener(SESSION_META_EVENT, onMeta);
-    window.addEventListener(SESSION_LIST_REFRESH_EVENT, onListRefresh);
+    window.addEventListener(SESSION_LIST_REFRESH_EVENT, onMeta);
     return () => {
       window.removeEventListener(SESSION_META_EVENT, onMeta);
-      window.removeEventListener(SESSION_LIST_REFRESH_EVENT, onListRefresh);
-      if (retryTimer) window.clearTimeout(retryTimer);
+      window.removeEventListener(SESSION_LIST_REFRESH_EVENT, onMeta);
     };
   }, [agentId, loadSessions]);
 
-  const handleDeleteClick = (e: React.MouseEvent, sessionId: string) => {
-    e.stopPropagation();
-    setConfirmingDeleteId(sessionId);
-  };
+  const filtered = useMemo(() => {
+    return sessions.filter((s) => belongsToWorkspace(metaMap[s.id], workspaceRootPath, workspaceId));
+  }, [sessions, metaMap, workspaceRootPath, workspaceId]);
+
+  const sections = useMemo(() => {
+    // 置顶 / 最近 / 归档 are independent filters (not mutually exclusive):
+    // - 置顶: pinned flag
+    // - 最近: not archived (includes pinned sessions)
+    // - 归档: archived flag (may also be pinned)
+    const pinned: AgentSession[] = [];
+    const recent: AgentSession[] = [];
+    const archive: AgentSession[] = [];
+    for (const s of filtered) {
+      const m = metaMap[s.id];
+      if (m?.pinned) pinned.push(s);
+      if (!m?.archived) recent.push(s);
+      if (m?.archived) archive.push(s);
+    }
+    const byUpdated = (a: AgentSession, b: AgentSession) =>
+      String(b.last_updated || '').localeCompare(String(a.last_updated || ''));
+    pinned.sort(byUpdated);
+    recent.sort(byUpdated);
+    archive.sort(byUpdated);
+    return { pinned, recent, archive };
+  }, [filtered, metaMap]);
 
   const handleDeleteConfirm = async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
@@ -301,387 +325,295 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       await agentSessionAPI.deleteSession(agentId, sessionId);
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     } catch (err: any) {
-      console.error('[SessionSidebar] Delete failed:', err);
       setError(err.message || t('aiChat.sessionSidebar.deleteSessionFailed'));
     }
   };
 
-  const handleDeleteCancel = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setConfirmingDeleteId(null);
-  };
-
-  const togglePin = (e: React.MouseEvent, sessionId: string, pinned: boolean) => {
-    e.stopPropagation();
-    setSessionPinned(agentId, sessionId, pinned);
-  };
-
   const startRename = (e: React.MouseEvent, session: AgentSession) => {
     e.stopPropagation();
-    setConfirmingDeleteId(null);
     setEditingId(session.id);
-    setEditingTitle(session.title || session.id);
+    setEditingTitle(session.title || '');
   };
 
-  const cancelRename = (e?: React.SyntheticEvent) => {
-    e?.stopPropagation();
-    setEditingId(null);
-    setEditingTitle('');
-  };
-
-  const commitRename = async (e?: React.SyntheticEvent) => {
-    e?.stopPropagation();
+  const commitRename = async () => {
     if (!editingId || renaming) return;
-    const next = editingTitle.trim();
-    const prev = sessionsRef.current.find((s) => s.id === editingId);
-    if (!next || !prev || next === (prev.title || prev.id)) {
-      cancelRename();
+    const title = editingTitle.trim();
+    if (!title) {
+      setEditingId(null);
       return;
     }
     setRenaming(true);
-    const sid = editingId;
-    setSessions((list) => list.map((s) => (s.id === sid ? { ...s, title: next } : s)));
-    setEditingId(null);
     try {
-      await agentSessionAPI.renameSession(agentId, sid, next);
+      await agentSessionAPI.renameSession(agentId, editingId, title);
+      setSessions((prev) => prev.map((s) => (s.id === editingId ? { ...s, title } : s)));
+      setEditingId(null);
     } catch (err: any) {
-      console.error('[SessionSidebar] Rename failed:', err);
-      setError(err.message || t('aiChat.sessionSidebar.renameSessionFailed'));
-      setSessions((list) =>
-        list.map((s) => (s.id === sid ? { ...s, title: prev.title || prev.id } : s)),
-      );
+      setError(err.message || 'Rename failed');
     } finally {
       setRenaming(false);
-      setEditingTitle('');
     }
   };
 
-  const { pinnedSessions, folderGroups } = useMemo(() => {
-    const pinned: AgentSession[] = [];
-    const groups = new Map<string, { path: string; sessions: AgentSession[] }>();
-
-    for (const session of sessions) {
-      const meta = metaMap[session.id];
-      if (meta?.pinned) pinned.push(session);
-
-      // Always keep every session under its project folder (even when pinned).
-      const path = meta?.projectPath || '';
-      const name = projectFolderName(path || null);
-      const existing = groups.get(name);
-      if (existing) existing.sessions.push(session);
-      else groups.set(name, { path, sessions: [session] });
-    }
-
-    const folderGroups = Array.from(groups.entries())
-      .map(([name, g]) => ({ name, path: g.path, sessions: g.sessions }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    return { pinnedSessions: pinned, folderGroups };
-  }, [sessions, metaMap]);
-
-  useEffect(() => {
-    setExpandedFolders((prev) => {
-      const next = { ...prev };
-      for (const g of folderGroups) {
-        if (next[g.name] === undefined) next[g.name] = true;
-      }
-      return next;
-    });
-  }, [folderGroups]);
-
-  if (!isOpen) return null;
-
-  const renderSessionRow = (session: AgentSession, nested = false) => {
-    const isActive = session.id === currentSessionId;
-    const isCurrent = session.current;
-    const isConfirming = confirmingDeleteId === session.id;
-    const isEditing = editingId === session.id;
+  const renderRow = (session: AgentSession, rowKey: string) => {
+    const isCurrent = session.id === currentSessionId || !!session.current;
+    const isPrimary = !!session.primary || session.id === primarySessionId;
     const meta = metaMap[session.id];
     const pinned = !!meta?.pinned;
-    const ageLabel = formatRelativeAge(session.last_updated || session.created_at, {
-      locale: ageLocale,
-    });
+    const archived = !!meta?.archived;
+    const busy = (isCurrent && agentBusy) || busySessionIds.includes(session.id);
+    const confirming = confirmingDeleteId === session.id;
+    const editing = editingId === session.id;
 
     return (
       <div
-        key={session.id}
-        className={`${nested ? 'pl-7' : 'pl-2'} pr-2 py-1 cursor-pointer transition-colors group rounded-md mx-1 ${
-          isActive ? 'bg-primary/10' : ''
-        } hover:bg-black/[0.06] dark:hover:bg-white/[0.08]`}
-        onClick={() => !isConfirming && !isEditing && onViewSession(session.id)}
-        onDoubleClick={() => !isConfirming && !isEditing && onSwitchAndReply(session.id)}
-        title={session.created_at || session.last_updated || undefined}
+        key={rowKey}
+        className={`group flex items-center gap-1 px-2 py-1.5 mx-1 rounded-md cursor-pointer text-[12px] ${
+          isCurrent
+            ? 'bg-primary/15 text-textMain'
+            : 'text-textMuted hover:bg-black/[0.04] dark:hover:bg-white/[0.06] hover:text-textMain'
+        }`}
+        onClick={() => {
+          if (editing || confirming) return;
+          onViewSession(session.id);
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          onSwitchAndReply(session.id);
+        }}
       >
-        <div className="flex items-center gap-1.5 min-h-[22px]">
-          <div className="flex-shrink-0 w-3 flex items-center justify-center">
-            {isCurrent && agentBusy ? (
-              <OpensquadWorkingDot size={12} className="text-primary" />
-            ) : (
-              <span
-                className={`block w-1.5 h-1.5 rounded-full ${
-                  isCurrent ? 'bg-primary' : 'bg-textMuted/45'
-                }`}
-                aria-hidden
-              />
-            )}
-          </div>
-          <div className="flex-1 min-w-0">
-            {isEditing ? (
-              <input
-                ref={editInputRef}
-                value={editingTitle}
-                onChange={(e) => setEditingTitle(e.target.value)}
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    void commitRename(e);
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    cancelRename(e);
-                  }
-                }}
-                onBlur={() => void commitRename()}
-                maxLength={200}
-                className="w-full text-[12px] leading-snug px-1.5 py-0.5 rounded border border-primary/40 bg-panel text-textMain outline-none"
-                disabled={renaming}
-              />
-            ) : (
-              <div className="text-[12px] text-textMain truncate leading-snug">
-                {session.title || session.id}
-              </div>
-            )}
-          </div>
-          {/* Fixed right column: age stays right-aligned; hover actions overlay so they never shift time. */}
-          <div className="relative flex-shrink-0 min-w-[3.25rem] h-[18px] flex items-center justify-end">
-            {isEditing ? (
-              <div className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={(e) => void commitRename(e)}
-                  className="p-0.5 rounded bg-primary/15 hover:bg-primary/25 transition-colors"
-                  title={t('common.save')}
-                >
-                  <Check size={11} className="text-primary" />
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelRename}
-                  className="p-0.5 rounded hover:bg-bgLight transition-colors"
-                  title={t('common.cancel')}
-                >
-                  <X size={11} className="text-textMuted" />
-                </button>
-              </div>
-            ) : isConfirming ? (
-              <div className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={(e) => handleDeleteConfirm(e, session.id)}
-                  className="p-0.5 rounded bg-red-500/15 hover:bg-red-500/30 transition-colors"
-                  title={t('aiChat.sessionSidebar.confirmDelete')}
-                >
-                  <Check size={11} className="text-red-500" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDeleteCancel}
-                  className="p-0.5 rounded hover:bg-bgLight transition-colors"
-                  title={t('common.cancel')}
-                >
-                  <X size={11} className="text-textMuted" />
-                </button>
-              </div>
-            ) : (
-              <>
-                {ageLabel && (
-                  <span className="text-[10px] text-textMuted tabular-nums select-none text-right group-hover:opacity-0 transition-opacity">
-                    {ageLabel}
+        {busy ? (
+          <OpensquadWorkingDot size={11} />
+        ) : (
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+              isCurrent ? 'bg-emerald-500' : 'bg-transparent border border-border'
+            }`}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <input
+              ref={editInputRef}
+              value={editingTitle}
+              onChange={(e) => setEditingTitle(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void commitRename();
+                if (e.key === 'Escape') setEditingId(null);
+              }}
+              onBlur={() => void commitRename()}
+              className="w-full px-1 py-0.5 text-[12px] rounded border border-primary/40 bg-bgLight outline-none"
+              disabled={renaming}
+            />
+          ) : (
+            <>
+              <div className="truncate font-medium flex items-center gap-1">
+                <span className="truncate">{session.title || session.id}</span>
+                {isPrimary ? (
+                  <span
+                    className="shrink-0 text-[9px] px-1 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                    title="外界消息（群聊/飞书/Telegram 等）默认接入此主会话"
+                  >
+                    主
                   </span>
-                )}
-                <div className="absolute inset-y-0 right-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    type="button"
-                    onClick={(e) => startRename(e, session)}
-                    className="p-0.5 hover:bg-primary/10 rounded transition-colors"
-                    title={t('aiChat.sessionSidebar.rename')}
-                  >
-                    <Pencil size={11} className="text-textMuted" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => togglePin(e, session.id, !pinned)}
-                    className="p-0.5 hover:bg-primary/10 rounded transition-colors"
-                    title={pinned ? t('aiChat.sessionSidebar.unpin') : t('aiChat.sessionSidebar.pin')}
-                  >
-                    {pinned ? (
-                      <PinOff size={11} className="text-primary" />
-                    ) : (
-                      <Pin size={11} className="text-textMuted" />
-                    )}
-                  </button>
-                  {!isCurrent && (
-                    <button
-                      type="button"
-                      onClick={(e) => handleDeleteClick(e, session.id)}
-                      className="p-0.5 hover:bg-red-500/10 rounded transition-colors"
-                      title={t('aiChat.sessionSidebar.deleteSession')}
-                    >
-                      <Trash2 size={11} className="text-red-500" />
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
+                ) : null}
+              </div>
+              <div className="truncate text-[10px] opacity-70">
+                {formatRelativeAge(session.last_updated || session.created_at, { locale: ageLocale })}
+              </div>
+            </>
+          )}
         </div>
+        {!editing && !confirming ? (
+          <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 shrink-0">
+            {!isPrimary && onSetPrimarySession ? (
+              <button
+                type="button"
+                title="设为主会话（外界消息接入）"
+                className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSetPrimarySession(session.id);
+                }}
+              >
+                <Sparkles size={12} />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              title={pinned ? '取消置顶' : '置顶'}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSessionPinned(agentId, session.id, !pinned);
+                reloadMeta();
+              }}
+            >
+              {pinned ? <PinOff size={11} /> : <Pin size={11} />}
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              title={archived ? '取消归档' : '归档'}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSessionArchived(agentId, session.id, !archived);
+                reloadMeta();
+              }}
+            >
+              <Archive size={11} />
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/15"
+              title="重命名"
+              onClick={(e) => startRename(e, session)}
+            >
+              <Pencil size={11} />
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-rose-500/20 text-rose-500"
+              title="删除"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmingDeleteId(session.id);
+              }}
+            >
+              <Trash2 size={11} />
+            </button>
+          </div>
+        ) : null}
+        {confirming ? (
+          <div className="flex items-center gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="p-0.5 rounded bg-rose-500 text-white"
+              onClick={(e) => void handleDeleteConfirm(e, session.id)}
+            >
+              <Check size={11} />
+            </button>
+            <button
+              type="button"
+              className="p-0.5 rounded hover:bg-black/10"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmingDeleteId(null);
+              }}
+            >
+              <X size={11} />
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   };
 
+  const Section: React.FC<{
+    id: keyof typeof sectionOpen;
+    title: string;
+    count: number;
+    children: React.ReactNode;
+  }> = ({ id, title, count, children }) => (
+    <div className="mb-1">
+      <button
+        type="button"
+        className="w-full flex items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
+        onClick={() => setSectionOpen((s) => ({ ...s, [id]: !s[id] }))}
+      >
+        {sectionOpen[id] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className="flex-1 text-left">{title}</span>
+        <span className="tabular-nums opacity-70">{count}</span>
+      </button>
+      {sectionOpen[id] ? children : null}
+    </div>
+  );
+
+  if (!isOpen) return null;
+
   return (
     <div
-      className="relative h-full border-r border-border bg-bgLight flex flex-col flex-shrink-0"
+      className="relative flex-shrink-0 h-full flex flex-col bg-rail border-r border-border"
       style={{ width: sidebarWidth }}
     >
-      <div className="h-11 px-3 border-b border-border box-border flex items-center justify-between flex-shrink-0">
-        <h3 className="text-sm font-medium text-textMain">{t('aiChat.sessionSidebar.repositories')}</h3>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={loadSessions}
-            disabled={loading}
-            className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title={t('common.refresh')}
-          >
-            <RefreshCw size={14} className={`text-textMuted ${loading ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            type="button"
-            onClick={() => onNewSession()}
-            className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title={t('aiChat.newSession')}
-          >
-            <Plus size={14} className="text-primary" />
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 hover:bg-primary/10 rounded-md transition-colors"
-            title={t('common.close')}
-          >
-            <ChevronLeft size={14} className="text-textMuted" />
-          </button>
-        </div>
-      </div>
-
-      {/* Drag handle — resize session list vs chat */}
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize session sidebar"
-        title="Drag to resize"
         onPointerDown={onResizePointerDown}
         onPointerMove={onResizePointerMove}
         onPointerUp={onResizePointerUp}
-        onPointerCancel={onResizePointerUp}
-        className="absolute top-0 right-0 z-20 h-full w-2 cursor-col-resize touch-none group"
-      >
-        <div className="pointer-events-none absolute inset-y-0 right-0 w-px bg-transparent group-hover:bg-primary/45 group-active:bg-primary/70 transition-colors" />
+        className="absolute right-0 top-0 bottom-0 w-1.5 translate-x-1/2 cursor-col-resize z-10 hover:bg-primary/30"
+      />
+      <div className="h-11 px-2 border-b border-border box-border flex items-center gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={onClose}
+          className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+          title="收起"
+        >
+          <ChevronLeft size={14} className="text-textMuted" />
+        </button>
+        <div className="flex-1 min-w-0 text-[12px] font-semibold text-textMain truncate">会话</div>
+        <button
+          type="button"
+          onClick={() => void loadSessions()}
+          className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+          title="刷新"
+        >
+          <RefreshCw size={13} className={`text-textMuted ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
-      {error && (
-        <div className="px-3 py-2 text-[11px] text-red-500 bg-red-500/10">{error}</div>
-      )}
+      <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">
+        <button
+          type="button"
+          disabled={!workspaceRootPath}
+          onClick={() => onNewSession(workspaceRootPath || undefined)}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMain hover:bg-black/[0.05] dark:hover:bg-white/10 disabled:opacity-40"
+        >
+          <MessageSquarePlus size={14} className="text-sky-500" />
+          新建对话
+        </button>
+        <button
+          type="button"
+          onClick={() => onOpenSkills?.()}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMain hover:bg-black/[0.05] dark:hover:bg-white/10"
+        >
+          <Sparkles size={14} className="text-violet-500" />
+          Skill 库
+        </button>
+      </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
-        {sessions.length === 0 && !loading && (
-          <div className="px-3 py-6 text-center text-xs text-textMuted">{t('aiChat.noSessions')}</div>
-        )}
-
-        <div className="mb-1">
-          <div className="w-full flex items-center gap-1.5 px-3 py-1.5">
-            <Pin size={13} className="text-textMuted/70 shrink-0" />
-            <span className="text-[12px] font-medium text-textMain truncate">{t('aiChat.sessionSidebar.pinned')}</span>
-            <span className="text-[10px] text-textMuted/45 ml-auto shrink-0">
-              {pinnedSessions.length}
-            </span>
-          </div>
-          {pinnedSessions.length === 0 ? (
-            <div className="px-3 pb-2 ml-1 text-[11px] text-textMuted/45">{t('aiChat.sessionSidebar.noPinnedSessions')}</div>
-          ) : (
-            <div className="pb-1">{pinnedSessions.map((s) => renderSessionRow(s, false))}</div>
-          )}
-        </div>
-
-        {folderGroups.map((group) => {
-          const open = expandedFolders[group.name] !== false;
-          const showAll = !!showAllFolders[group.name];
-          const visible = showAll
-            ? group.sessions
-            : group.sessions.slice(0, SEE_MORE_LIMIT);
-          const hasMore = group.sessions.length > SEE_MORE_LIMIT;
-          const canNewInFolder = !!(group.path && group.path.trim());
-
-          return (
-            <div key={group.name} className="mb-1">
-              <div className="group/folder flex items-center gap-0.5 pl-0.5 pr-1 py-1 hover:bg-black/[0.06] dark:hover:bg-white/[0.08] rounded-md mx-0.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExpandedFolders((prev) => ({ ...prev, [group.name]: !open }))
-                  }
-                  className="flex-1 flex items-center gap-1 text-left border-0 bg-transparent cursor-pointer min-w-0 py-0.5 px-0"
-                  title={group.path || group.name}
-                >
-                  {open ? (
-                    <ChevronDown size={12} className="text-textMuted/50 shrink-0" />
-                  ) : (
-                    <ChevronRight size={12} className="text-textMuted/50 shrink-0" />
-                  )}
-                  <Folder size={13} className="text-textMuted/70 shrink-0" />
-                  <span className="text-[12px] font-medium text-textMain truncate">
-                    {group.name === 'Default'
-                      ? t('aiChat.sessionSidebar.defaultFolder')
-                      : group.name}
-                  </span>
-                  <span className="text-[10px] text-textMuted/45 ml-auto shrink-0">
-                    {group.sessions.length}
-                  </span>
-                </button>
-                {canNewInFolder && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onNewSession(group.path);
-                    }}
-                    className="p-1 opacity-0 group-hover/folder:opacity-100 hover:bg-primary/10 rounded transition-all shrink-0"
-                    title={`${t('aiChat.sessionSidebar.newInFolder')}\n${group.path}`}
-                  >
-                    <MessageSquarePlus size={13} className="text-primary" />
-                  </button>
-                )}
-              </div>
-              {open && (
-                <div className="pb-1">
-                  {visible.map((s) => renderSessionRow(s, true))}
-                  {hasMore && !showAll && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setShowAllFolders((prev) => ({ ...prev, [group.name]: true }))
-                      }
-                      className="ml-10 px-2 py-1 text-[11px] text-textMuted hover:text-primary border-0 bg-transparent cursor-pointer"
-                    >
-                      {t('aiChat.sessionSidebar.seeMore')}
-                    </button>
-                  )}
-                </div>
+      <div className="flex-1 min-h-0 overflow-y-auto py-1">
+        {!workspaceRootPath ? (
+          <div className="px-3 py-4 text-[11px] text-textMuted/70">请先打开或创建一个工作区</div>
+        ) : error ? (
+          <div className="px-3 py-2 text-[11px] text-rose-500">{error}</div>
+        ) : (
+          <>
+            <Section id="pinned" title="置顶" count={sections.pinned.length}>
+              {sections.pinned.length === 0 ? (
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+              ) : (
+                sections.pinned.map((s) => renderRow(s, `pinned:${s.id}`))
               )}
-            </div>
-          );
-        })}
+            </Section>
+            <Section id="recent" title="最近" count={sections.recent.length}>
+              {sections.recent.length === 0 ? (
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+              ) : (
+                sections.recent.map((s) => renderRow(s, `recent:${s.id}`))
+              )}
+            </Section>
+            <Section id="archive" title="归档" count={sections.archive.length}>
+              {sections.archive.length === 0 ? (
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+              ) : (
+                sections.archive.map((s) => renderRow(s, `archive:${s.id}`))
+              )}
+            </Section>
+          </>
+        )}
       </div>
     </div>
   );

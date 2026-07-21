@@ -52,16 +52,67 @@ import {
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
 import { formatElapsed } from '../utils/formatElapsed';
-import { setSessionProjectPath, getSessionMeta, requestSessionListRefresh } from '../utils/sessionProjectMeta';
+import {
+  setSessionProjectPath,
+  setSessionWorkspaceId,
+  getSessionMeta,
+  requestSessionListRefresh,
+} from '../utils/sessionProjectMeta';
+import {
+  loadWorkspaceStore,
+  migrateProjectPathsToWorkspaces,
+  ensureWorkspace,
+  openWorkspaceTab,
+  closeWorkspaceTab,
+  openContentTab,
+  closeContentTab,
+  setActiveContentTab,
+  reorderContentTabs,
+  contentTabKey,
+  parseContentTabKey,
+  workspaceDisplayName,
+  pathsEqual,
+  WORKSPACES_CHANGED_EVENT,
+  splitPane,
+  applySplitToLayout,
+  commitWorkspaceLayout,
+  closePane,
+  closeAllTabsInPane,
+  setFocusedPane,
+  resizeSplit,
+  collectLeaves,
+  findLeaf,
+  type WorkspaceStoreSnapshot,
+  type ContentTab,
+  type Workspace,
+  type SplitNode,
+  type SplitDirection,
+} from '../utils/workspaceStore';
 
 // AI Chat sub-components
 import { MessageBubble, ChatMessage, FileAttachment } from './ai-chat/MessageBubble';
 import { StreamingMessage } from './ai-chat/StreamingMessage';
 import { SoloMessage } from './ai-chat/SoloMessage';
 import { SoloActivityRow, mergeWorkflowBlocks } from './ai-chat/SoloActivityRow';
+import {
+  collectHtmlEmbedsPrecedingMessage,
+  HtmlEmbedBlock,
+  type HtmlEmbedPayload,
+} from './ai-chat/HtmlEmbedBlock';
 import { ProjectFilesPanel, type ProjectFileOpenRequest } from './ai-chat/ProjectFilesPanel';
 import { SessionChangesBar, COMMIT_PUSH_MESSAGE, type SessionChangesSummary } from './ai-chat/SessionChangesBar';
 import { RestoreCheckpointModal } from './ai-chat/RestoreCheckpointModal';
+import { WorkspaceTabBar } from './ai-chat/WorkspaceTabBar';
+import { CloseWorkspaceModal } from './ai-chat/CloseWorkspaceModal';
+import { CreateWorkspaceModal } from './ai-chat/CreateWorkspaceModal';
+import { confirmDiscardFileDirty, prefetchWorkspaceFile } from './ai-chat/WorkspaceFileEditor';
+import { PaneSplitLayout } from './ai-chat/PaneSplitLayout';
+import type { PaneShellHandlers } from './ai-chat/WorkspacePaneShell';
+import { SessionChatPane } from './ai-chat/SessionChatPane';
+import {
+  AgentWebComposer,
+  type ComposerSendPayload,
+} from './ai-chat/AgentWebComposer';
 import { SoloUserNavRail, previewUserMessage } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
@@ -70,6 +121,17 @@ import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
 import { ModeSwitchApprovalCard, type ModeSwitchApproval } from './ai-chat/ModeSwitchApprovalCard';
 import { OptionsApprovalCard, type OptionsProposal, hydrateOptionsProposalsFromEvents } from './ai-chat/OptionsApprovalCard';
 import { SoloAttachMenu } from './ai-chat/SoloAttachMenu';
+import { SlashMenu } from './ai-chat/SlashMenu';
+import {
+  filterGoalSubcommands,
+  filterSkillsForSlash,
+  filterSlashCommands,
+  parseGoalSendQuery,
+  parseSlashInput,
+  slashCommandTriggerText,
+  type GoalSubcommandDef,
+  type SlashCommandDef,
+} from './ai-chat/slashCommands';
 import { VoicePanel } from './ai-chat/VoicePanel';
 import { VoiceRecordPill } from './ai-chat/VoiceRecordPill';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
@@ -568,11 +630,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [wsStatus, setWsStatus] = useState<AIWebSocketStatus>('disconnected');
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('disconnected');
   const [inputText, setInputText] = useState('');
-  /** Skill selected from the + menu; shown as /name chip until send/clear. */
+  /** Skill selected from the + menu or /skill; shown as /name chip until send/clear. */
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
+  /** Active /goal from server (sticky across turns). */
+  const [activeGoal, setActiveGoal] = useState<{
+    objective: string;
+    status: string;
+    last_progress?: string;
+    blocked_reason?: string;
+  } | null>(null);
   const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const skillsLoadedRef = useRef(false);
+  /** Keyboard highlight index for the `/` command or arg picker. */
+  const [slashHighlight, setSlashHighlight] = useState(0);
   const [images, setImages] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -912,19 +983,40 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const speakFinalReplyRef = useRef(speakFinalReply);
   speakFinalReplyRef.current = speakFinalReply;
-  // Token stats
-  const [tokenStats, setTokenStats] = useState<{
+
+  // Session id first — token % is keyed per session for parallel panes.
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
+  // Token stats — per session (parallel panes must not share one global %).
+  type TokenStatsState = {
     used: number; max: number;
     breakdown?: { user: number; thought: number; tool: number; tool_defs?: number; response: number };
-    session?: any;   // 本会话统计（后端已重置，直接使用）
-    cumulative?: any; // 全量累计统计（本会话 + 历史）
-  } | null>(null);
-  // Ref that always reflects the latest tokenStats (to read in effects without stale closure)
+    session?: any;
+    cumulative?: any;
+  };
+  const [tokenStatsBySession, setTokenStatsBySession] = useState<Record<string, TokenStatsState>>({});
+  const tokenStatsBySessionRef = useRef(tokenStatsBySession);
+  useEffect(() => { tokenStatsBySessionRef.current = tokenStatsBySession; }, [tokenStatsBySession]);
+  /** Focused / live session stats (header ring, ContextViewer). */
+  const tokenStats = currentSessionId ? (tokenStatsBySession[currentSessionId] ?? null) : null;
   const tokenStatsRef = useRef(tokenStats);
   useEffect(() => { tokenStatsRef.current = tokenStats; }, [tokenStats]);
 
+  const applyTokenStats = useCallback((sid: string | null | undefined, next: TokenStatsState | null) => {
+    const key = (sid || '').trim();
+    if (!key) return;
+    setTokenStatsBySession((prev) => {
+      if (next === null) {
+        if (!(key in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[key];
+        return copy;
+      }
+      return { ...prev, [key]: next };
+    });
+  }, []);
+
   // Session management
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
     // Sync the active session filter on the WebSocket service so that
@@ -938,24 +1030,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     viewingHistorySessionRef.current = viewingHistorySession;
   }, [viewingHistorySession]);
   const [sessionTitleUpdate, setSessionTitleUpdate] = useState<{ id: string; title: string } | null>(null);
-  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false);
+  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(true);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
     try {
-      return localStorage.getItem('opensquad.filesPanel.open') === 'true';
+      const raw = localStorage.getItem('opensquad.filesPanel.open');
+      if (raw === null) return true;
+      return raw === 'true';
     } catch {
-      return false;
+      return true;
     }
   });
   const [filesPanelWidth, setFilesPanelWidth] = useState(() => {
     try {
       const raw = localStorage.getItem('opensquad.filesPanel.width');
-      const n = raw ? parseInt(raw, 10) : 420;
-      return Number.isFinite(n) ? Math.min(720, Math.max(320, n)) : 420;
+      const n = raw ? parseInt(raw, 10) : 280;
+      return Number.isFinite(n) ? Math.min(720, Math.max(220, n)) : 280;
     } catch {
-      return 420;
+      return 280;
     }
   });
   const [fileOpenRequest, setFileOpenRequest] = useState<ProjectFileOpenRequest | null>(null);
+  const [wsSnap, setWsSnap] = useState<WorkspaceStoreSnapshot>(() =>
+    loadWorkspaceStore(typeof agentId === 'string' ? agentId : ''),
+  );
+  const [closeWorkspaceTarget, setCloseWorkspaceTarget] = useState<Workspace | null>(null);
+  const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  const [fileDirtyMap, setFileDirtyMap] = useState<Record<string, boolean>>({});
+  const [tabSessionTitles, setTabSessionTitles] = useState<Record<string, string>>({});
+  const pendingOpenSessionTabRef = useRef(false);
+  /** Explicit pane that should receive the next new-session tab (avoids focus race after split). */
+  const pendingTargetPaneIdRef = useRef<string | null>(null);
+  const wsMigratedRef = useRef(false);
   const [sessionChanges, setSessionChanges] = useState<SessionChangesSummary | null>(null);
   const [focusChangedNonce, setFocusChangedNonce] = useState(0);
   const [changesBusy, setChangesBusy] = useState(false);
@@ -985,7 +1090,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setSessionChanges(summary);
   }, []);
   const openProjectFile = useCallback((path: string) => {
-    const p = (path || '').trim();
+    const p = (path || '').trim().replace(/\\/g, '/');
     if (!p) return;
     setFilesPanelOpen(true);
     try {
@@ -994,7 +1099,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       /* ignore */
     }
     setFileOpenRequest({ path: p, nonce: Date.now() });
-  }, []);
+    const snap = loadWorkspaceStore(agentId);
+    const wsId = snap.chrome.activeWorkspaceId;
+    const ws = wsId ? snap.workspaces.find((w) => w.id === wsId) : null;
+    if (wsId && ws) {
+      void (async () => {
+        await prefetchWorkspaceFile(agentId, ws.rootPath, p);
+        openContentTab(agentId, wsId, { kind: 'file', id: p });
+        setWsSnap(loadWorkspaceStore(agentId));
+      })();
+    }
+  }, [agentId]);
 
   // Plan
   const [planSteps, setPlanSteps] = useState<PlanStep[]>([]);
@@ -1054,6 +1169,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   });
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
   const [agentMode, setAgentMode] = useState<AgentMode>('build');
+  /** Per-session overrides so split panes do not share Plan/Build or model. */
+  const [agentModeBySession, setAgentModeBySession] = useState<Record<string, AgentMode>>({});
+  const [cardNameBySession, setCardNameBySession] = useState<Record<string, string>>({});
+  const [modelNameBySession, setModelNameBySession] = useState<Record<string, string>>({});
+  const [reasoningBySession, setReasoningBySession] = useState<Record<string, ReasoningEffort>>({});
+  const [switchingModelBySession, setSwitchingModelBySession] = useState<Record<string, boolean>>({});
   const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
   const [optionsProposals, setOptionsProposals] = useState<OptionsProposal[]>([]);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
@@ -1109,11 +1230,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // Ref to the current per-agent WS service (set inside the WS useEffect, used by callbacks)
   const wsServiceRef = useRef<ReturnType<typeof getAiWsService> | null>(null);
 
-  // ---- Pending message queue ----
-  // When the agent is busy (or a turn was just released and we are waiting for
-  // busy→idle), new sends land here. Auto-drain sends ONE message at a time:
-  // release → wait for agent reply/task finish → release next. Queue is persisted
-  // per agent+session so refresh keeps the parked state.
+  // ---- Pending message queue (per-session only; other sessions run in parallel) ----
+  // When a *specific* session is busy, further sends to that same session park here.
+  // Different sessions send immediately (backend parallel turns).
   interface PendingMessage {
     id: string;
     text: string;
@@ -1122,92 +1241,124 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     fileAtts: FileAttachment[];
     skillDir?: string;
     skillName?: string;
+    /** Target session for multi-pane / multi-tab sends */
+    sessionId?: string;
+    paneId?: string;
   }
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [pendingCollapsed, setPendingCollapsed] = useState(false);
   const pendingMessagesRef = useRef<PendingMessage[]>([]);
   const isFlushingPendingRef = useRef(false);
-  /** Blocks rapid double-send until the backend acknowledges the outbound turn. */
-  const outboundTurnPendingRef = useRef(false);
-  const outboundTurnPendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Blocks rapid double-send per session until the backend acknowledges the turn. */
+  const outboundPendingBySessionRef = useRef<Record<string, boolean>>({});
+  const outboundPendingTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingQueueHydratedKeyRef = useRef<string | null>(null);
+  /** Session ids currently running a parallel turn (from busy_sessions events). */
+  const [busySessions, setBusySessions] = useState<string[]>([]);
+  const busySessionsRef = useRef<string[]>([]);
+  const [primarySessionId, setPrimarySessionId] = useState<string | null>(null);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
+  useEffect(() => { busySessionsRef.current = busySessions; }, [busySessions]);
 
-  const clearOutboundTurnPending = useCallback(() => {
-    outboundTurnPendingRef.current = false;
-    if (outboundTurnPendingTimerRef.current) {
-      clearTimeout(outboundTurnPendingTimerRef.current);
-      outboundTurnPendingTimerRef.current = null;
+  const clearOutboundTurnPending = useCallback((sid?: string) => {
+    if (sid) {
+      delete outboundPendingBySessionRef.current[sid];
+      const t = outboundPendingTimersRef.current[sid];
+      if (t) {
+        clearTimeout(t);
+        delete outboundPendingTimersRef.current[sid];
+      }
+      return;
     }
+    for (const key of Object.keys(outboundPendingTimersRef.current)) {
+      clearTimeout(outboundPendingTimersRef.current[key]);
+    }
+    outboundPendingTimersRef.current = {};
+    outboundPendingBySessionRef.current = {};
   }, []);
 
-  const armOutboundTurnPending = useCallback(() => {
-    outboundTurnPendingRef.current = true;
-    if (outboundTurnPendingTimerRef.current) {
-      clearTimeout(outboundTurnPendingTimerRef.current);
+  const armOutboundTurnPending = useCallback((sid: string) => {
+    const key = sid || '__default__';
+    outboundPendingBySessionRef.current[key] = true;
+    if (outboundPendingTimersRef.current[key]) {
+      clearTimeout(outboundPendingTimersRef.current[key]);
     }
     // Safety valve: never leave the send gate latched if status events were missed.
-    outboundTurnPendingTimerRef.current = setTimeout(() => {
-      outboundTurnPendingRef.current = false;
-      outboundTurnPendingTimerRef.current = null;
+    outboundPendingTimersRef.current[key] = setTimeout(() => {
+      delete outboundPendingBySessionRef.current[key];
+      delete outboundPendingTimersRef.current[key];
     }, 8000);
   }, []);
 
-  const pendingQueueStorageKey = useCallback((sid?: string | null) => {
-    const sessionPart = (sid || currentSessionId || 'nosession').trim() || 'nosession';
-    return `ai_chat_pending_queue:${agentId}:${sessionPart}`;
-  }, [agentId, currentSessionId]);
+  const isOutboundPending = useCallback((sid: string) => {
+    return !!outboundPendingBySessionRef.current[sid || '__default__'];
+  }, []);
 
-  // Hydrate pending queue when agent/session is known (or nosession before sid arrives).
+  /** One queue per agent so split panes can park messages for different sessions. */
+  const pendingQueueStorageKey = useCallback(() => {
+    return `ai_chat_pending_queue:${agentId}`;
+  }, [agentId]);
+
+  // Hydrate agent-level pending queue (migrate legacy per-session keys once).
   useEffect(() => {
     if (!agentId) return;
-    const key = pendingQueueStorageKey(currentSessionId);
+    const key = pendingQueueStorageKey();
     if (pendingQueueHydratedKeyRef.current === key) return;
-
-    // If we just learned the real session id, migrate any queue parked under nosession.
-    if (currentSessionId) {
-      const nosessionKey = pendingQueueStorageKey(null);
-      try {
-        const orphan = localStorage.getItem(nosessionKey);
-        if (orphan && !localStorage.getItem(key)) {
-          localStorage.setItem(key, orphan);
-          localStorage.removeItem(nosessionKey);
-        } else if (orphan && localStorage.getItem(key)) {
-          localStorage.removeItem(nosessionKey);
-        }
-      } catch { /* ignore */ }
-    }
-
     pendingQueueHydratedKeyRef.current = key;
     try {
+      let merged: PendingMessage[] = [];
       const raw = localStorage.getItem(key);
-      if (!raw) {
-        // Keep in-memory queue when switching nosession→sid if we already have items.
-        if (currentSessionId && pendingMessagesRef.current.length > 0) return;
-        setPendingMessages([]);
-        return;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          merged = parsed.filter((m) => m && typeof m.id === 'string');
+        }
       }
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        setPendingMessages(parsed.filter((m) => m && typeof m.id === 'string'));
-      } else {
-        setPendingMessages([]);
+      // Migrate legacy per-session queues into the agent-level key
+      const prefix = `ai_chat_pending_queue:${agentId}:`;
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k || !k.startsWith(prefix) || k === key) continue;
+        try {
+          const legacy = JSON.parse(localStorage.getItem(k) || '[]');
+          if (Array.isArray(legacy)) {
+            const sid = k.slice(prefix.length);
+            for (const m of legacy) {
+              if (m && typeof m.id === 'string') {
+                merged.push({
+                  ...m,
+                  sessionId: m.sessionId || (sid !== 'nosession' ? sid : undefined),
+                });
+              }
+            }
+          }
+          localStorage.removeItem(k);
+        } catch { /* ignore */ }
       }
+      // Dedupe by id
+      const seen = new Set<string>();
+      merged = merged.filter((m) => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      });
+      setPendingMessages(merged);
+      if (merged.length) localStorage.setItem(key, JSON.stringify(merged));
     } catch {
       setPendingMessages([]);
     }
-  }, [agentId, currentSessionId, pendingQueueStorageKey]);
+  }, [agentId, pendingQueueStorageKey]);
 
   // Persist pending queue for refresh recovery.
   useEffect(() => {
     if (!agentId) return;
     if (pendingQueueHydratedKeyRef.current == null) return;
-    const key = pendingQueueStorageKey(currentSessionId);
+    const key = pendingQueueStorageKey();
     try {
       if (pendingMessages.length === 0) localStorage.removeItem(key);
       else localStorage.setItem(key, JSON.stringify(pendingMessages));
     } catch { /* ignore quota */ }
-  }, [pendingMessages, agentId, currentSessionId, pendingQueueStorageKey]);
+  }, [pendingMessages, agentId, pendingQueueStorageKey]);
 
   // Workflow visibility toggle (persisted to localStorage, default: visible)
   const [showWorkflow, setShowWorkflow] = useState<boolean>(() => {
@@ -1391,15 +1542,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const found = res.agents.find(a => a.agent_id === agentId || a.dir_name === agentId);
         if (!found) return;
         setAgentProfile(found);
-        // 用 agentProfile 中的 token_stats 作为 WebSocket 前的初始值
+        // 用 agentProfile 中的 token_stats 作为 WebSocket 前的初始值（挂到当前会话）
         if (found.token_stats) {
-          setTokenStats(prev => prev ?? {
+          const sid = currentSessionIdRef.current;
+          const stats = {
             used: found.token_stats!.used,
             max: found.token_stats!.max,
             breakdown: found.token_stats!.breakdown,
             session: found.token_stats!.session,
             cumulative: found.token_stats!.cumulative,
-          });
+          };
+          if (sid) {
+            setTokenStatsBySession((prev) => (prev[sid] ? prev : { ...prev, [sid]: stats }));
+          }
         }
         // 拉取 config 获取 model_name / api_protocol / provider / runtime cwd
         return adminAPI.getConfig(found.dir_name).then(cfg => {
@@ -2301,18 +2456,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     });
 
-    // Token stats
+    // Token stats (per-session — parallel panes show their own %)
     const unsubTokenStats = aiWsService.on('token_stats', (msg: AIWSMessage) => {
       const data = msg.content || msg.data;
-      if (data) {
-        setTokenStats({
-          used: data.used || 0,
-          max: data.max || 0,
-          breakdown: data.breakdown,
-          session: data.session,
-          cumulative: data.cumulative,
-        });
-      }
+      if (!data || typeof data !== 'object') return;
+      const sid =
+        String(msg.sid || (data as any).session_id || currentSessionIdRef.current || '').trim();
+      if (!sid) return;
+      applyTokenStats(sid, {
+        used: (data as any).used || 0,
+        max: (data as any).max || 0,
+        breakdown: (data as any).breakdown,
+        session: (data as any).session,
+        cumulative: (data as any).cumulative,
+      });
     });
 
     // Status / state / wake / sleep / info
@@ -2392,9 +2549,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (evt === 'model_card_switched') {
           const switchedModel = (detailed as any).model;
           const switchedCard = (detailed as any).card;
-          if (typeof switchedModel === 'string' && switchedModel) setModelName(switchedModel);
-          if (typeof switchedCard === 'string' && switchedCard) setCurrentCardName(switchedCard);
-          setSwitchingModel(false);
+          const sid = String((detailed as any).session_id || '').trim();
+          if (sid) {
+            if (typeof switchedCard === 'string' && switchedCard) {
+              setCardNameBySession((prev) => ({ ...prev, [sid]: switchedCard }));
+            }
+            if (typeof switchedModel === 'string' && switchedModel) {
+              setModelNameBySession((prev) => ({ ...prev, [sid]: switchedModel }));
+            }
+            setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
+          } else {
+            if (typeof switchedModel === 'string' && switchedModel) setModelName(switchedModel);
+            if (typeof switchedCard === 'string' && switchedCard) setCurrentCardName(switchedCard);
+            setSwitchingModel(false);
+          }
         }
 
         if (evt === 'voice_config_updated') {
@@ -2409,14 +2577,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
 
         if (evt === 'model_card_switch_failed') {
-          setSwitchingModel(false);
+          const sid = String((detailed as any).session_id || '').trim();
+          if (sid) {
+            setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
+          } else {
+            setSwitchingModel(false);
+          }
           // Fall through so the failure shows in the timeline / system info
         }
 
         if (evt === 'reasoning_effort_changed') {
           const next = (detailed as any).effort;
+          const sid = String((detailed as any).session_id || '').trim();
           if (next === 'low' || next === 'medium' || next === 'high') {
-            setReasoningEffort(next);
+            if (sid) {
+              setReasoningBySession((prev) => ({ ...prev, [sid]: next }));
+            } else {
+              setReasoningEffort(next);
+            }
           }
           return; // don't spam timeline
         }
@@ -2443,7 +2621,29 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         if (evt === 'agent_mode_changed') {
           const next = (detailed as any).mode;
-          if (next === 'plan' || next === 'build') setAgentMode(next);
+          const sid = String((detailed as any).session_id || '').trim();
+          if (next === 'plan' || next === 'build') {
+            if (sid) {
+              setAgentModeBySession((prev) => ({ ...prev, [sid]: next }));
+            } else {
+              setAgentMode(next);
+            }
+          }
+          return;
+        }
+
+        if (evt === 'goal_changed') {
+          const g = (detailed as any).goal;
+          if (g && typeof g === 'object' && String(g.objective || '').trim()) {
+            setActiveGoal({
+              objective: String(g.objective || '').trim(),
+              status: String(g.status || 'pursuing'),
+              last_progress: g.last_progress ? String(g.last_progress) : undefined,
+              blocked_reason: g.blocked_reason ? String(g.blocked_reason) : undefined,
+            });
+          } else {
+            setActiveGoal(null);
+          }
           return;
         }
 
@@ -2457,7 +2657,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             );
           }
           if (status === 'approved' && (toMode === 'plan' || toMode === 'build')) {
-            setAgentMode(toMode);
+            const sid = String((detailed as any).session_id || '').trim();
+            if (sid) {
+              setAgentModeBySession((prev) => ({ ...prev, [sid]: toMode }));
+            } else {
+              setAgentMode(toMode);
+            }
           }
           // Fall through to update timeline card status via re-render of pending→resolved
         }
@@ -3599,8 +3804,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     });
 
-    const unsubSessionList = aiWsService.on('session_list', () => {
+    const unsubSessionList = aiWsService.on('session_list', (msg: AIWSMessage) => {
+      const data: any = (msg as any).content || (msg as any).data || msg;
+      const list = Array.isArray(data) ? data : Array.isArray(data?.sessions) ? data.sessions : null;
+      if (list) {
+        const primary = list.find((s: any) => s?.primary)?.id;
+        if (primary) setPrimarySessionId(String(primary));
+      }
       requestSessionListRefresh(agentId, currentSessionIdRef.current);
+    });
+
+    const unsubBusySessions = aiWsService.on('busy_sessions', (msg: AIWSMessage) => {
+      const data: any = (msg as any).content || (msg as any).data || msg;
+      const sessions = Array.isArray(data?.sessions)
+        ? data.sessions.map(String)
+        : Array.isArray(data)
+          ? data.map(String)
+          : [];
+      setBusySessions(sessions);
+    });
+
+    const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
+      const data: any = (msg as any).content || (msg as any).data || msg;
+      const sid = String(data?.primary_session_id || '').trim();
+      if (sid) setPrimarySessionId(sid);
     });
 
     // Use history_sync as a trigger to reload the canonical current session
@@ -3769,6 +3996,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubHistory();
       unsubCurrentSession();
       unsubSessionList();
+      unsubBusySessions();
+      unsubPrimarySession();
       unsubHistorySync();
       unsubFilePush();
       if (sessionReloadTimerRef.current) {
@@ -4006,16 +4235,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // ---- Actions ----
 
-  // Whether the agent is currently busy and cannot accept a message inline.
-  // Messages sent while busy are parked in the pending queue and auto-flushed
-  // once the agent returns to idle (or sent immediately via "Send now").
+  // Whether the focused session is busy (other sessions may still accept parallel sends).
   const isAgentBusy = useMemo(
     () =>
       isStreaming ||
       agentStatus === 'working' ||
       agentStatus === 'thinking' ||
-      agentStatus === 'sleeping',
-    [isStreaming, agentStatus],
+      agentStatus === 'sleeping' ||
+      (!!currentSessionId && busySessions.includes(currentSessionId)),
+    [isStreaming, agentStatus, busySessions, currentSessionId],
+  );
+
+  const isSessionBusy = useCallback(
+    (sid: string) => {
+      if (!sid) return isAgentBusy;
+      if (busySessionsRef.current.includes(sid)) return true;
+      if (sid === currentSessionIdRef.current) {
+        return (
+          isStreaming ||
+          agentStatus === 'working' ||
+          agentStatus === 'thinking' ||
+          agentStatus === 'sleeping'
+        );
+      }
+      return false;
+    },
+    [isAgentBusy, isStreaming, agentStatus],
   );
 
   /**
@@ -4052,6 +4297,104 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setSkillsLoading(false);
     }
   }, [skillsLoading]);
+
+  const slashMode = useMemo(() => parseSlashInput(inputText), [inputText]);
+  const slashResetKey = slashMode ? `${slashMode.kind}:${slashMode.query}` : null;
+  const slashCommandOptions = useMemo(
+    () => (slashMode?.kind === 'commands' ? filterSlashCommands(slashMode.query) : []),
+    [slashMode],
+  );
+  const slashGoalOptions = useMemo(
+    () => (slashMode?.kind === 'goal' ? filterGoalSubcommands(slashMode.query) : []),
+    [slashMode],
+  );
+  const slashSkillOptions = useMemo(
+    () => (slashMode?.kind === 'skill' ? filterSkillsForSlash(availableSkills, slashMode.query) : []),
+    [slashMode, availableSkills],
+  );
+  const slashOptionCount =
+    slashMode?.kind === 'skill'
+      ? slashSkillOptions.length
+      : slashMode?.kind === 'goal'
+        ? slashGoalOptions.length
+        : slashMode?.kind === 'plan'
+          ? 1
+          : slashCommandOptions.length;
+
+  useEffect(() => {
+    if (slashMode?.kind !== 'skill') return;
+    void loadSkillsIfNeeded();
+  }, [slashMode?.kind, loadSkillsIfNeeded]);
+
+  useEffect(() => {
+    setSlashHighlight(0);
+  }, [slashResetKey]);
+
+  useEffect(() => {
+    if (slashResetKey === null) return;
+    if (slashHighlight >= slashOptionCount) {
+      setSlashHighlight(Math.max(0, slashOptionCount - 1));
+    }
+  }, [slashResetKey, slashHighlight, slashOptionCount]);
+
+  const applyPendingSkill = useCallback((skill: SkillInfo) => {
+    const dir = (skill.dir || skill.name || '').trim();
+    if (!dir) return;
+    setPendingSkill({
+      dir,
+      name: skill.display_name || skill.name || dir,
+    });
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const selectSlashCommand = useCallback((cmd: SlashCommandDef) => {
+    setInputText(slashCommandTriggerText(cmd));
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    });
+  }, []);
+
+  const runGoalAction = useCallback(
+    (action: 'set' | 'pause' | 'resume' | 'clear' | 'status', objective?: string) => {
+      wsServiceRef.current?.setGoal({ action, objective, nudge: action === 'resume' });
+      if (action === 'set' && objective) {
+        setActiveGoal({ objective, status: 'pursuing' });
+      } else if (action === 'pause') {
+        setActiveGoal((prev) => (prev ? { ...prev, status: 'paused' } : prev));
+      } else if (action === 'resume') {
+        setActiveGoal((prev) => (prev ? { ...prev, status: 'pursuing' } : prev));
+      } else if (action === 'clear') {
+        setActiveGoal(null);
+      }
+    },
+    [],
+  );
+
+  const selectGoalSubcommand = useCallback(
+    (cmd: GoalSubcommandDef) => {
+      runGoalAction(cmd.id);
+      setInputText('');
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [runGoalAction],
+  );
+
+  const selectSkillFromSlash = useCallback(
+    (skill: SkillInfo) => {
+      applyPendingSkill(skill);
+      setInputText('');
+      requestAnimationFrame(() => {
+        if (inputRef.current) {
+          inputRef.current.style.height = 'auto';
+        }
+      });
+    },
+    [applyPendingSkill],
+  );
 
   const composerTextFromUserMessage = useCallback((message: ChatMessage): string => {
     let text = formatUserSkillDisplayContent(
@@ -4159,10 +4502,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       attachments: UploadedFile[];
       skillDir?: string;
       skillName?: string;
+      /** Target session for parallel multi-session sends */
+      sessionId?: string;
     },
     opts?: { clearInputState?: boolean; salvageStream?: boolean },
   ) => {
     const { text, images: imgState, attachments: attState, skillDir, skillName } = payload;
+    const targetSessionId = (payload.sessionId || currentSessionIdRef.current || '').trim();
     const clearInputState = opts?.clearInputState ?? true;
     const salvageStream = opts?.salvageStream ?? true;
     const skillId = (skillDir || '').trim();
@@ -4228,10 +4574,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       };
     });
 
-    // Display: show /skill chip text + user text (not the XML tag)
+    // Display: show /skill or /goal chip text (not XML tags)
     const displayText = skillId
       ? (text ? `/${skillId} ${text}` : `/${skillId}`)
-      : text;
+      : formatUserSkillDisplayContent(text);
 
     // Add user message to timeline (display text without [File: ...],
     // attachments stored separately for card rendering)
@@ -4317,15 +4663,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Send via WS (full text with [File: ...] so Agent gets file paths)
     if (viewingHistorySession && currentSessionId) {
-      // User is viewing a historical session — switch agent context to it first
-      wsServiceRef.current?.switchAndReply(currentSessionId, wsText);
+      // Align agent to this session without aborting an unrelated in-flight turn
+      // when possible — stopCurrent false lets idle/queue path stay cooperative.
+      wsServiceRef.current?.switchAndReply(currentSessionId, wsText, { stopCurrent: false });
       setViewingHistorySession(false); // now we're in this session
     } else {
       wsServiceRef.current?.sendMessage(
         wsText,
         allImages.length > 0 ? allImages : undefined,
         nonImageAttachments,
-        { client_id: userUid },
+        { client_id: userUid, session_id: targetSessionId || undefined },
       );
     }
 
@@ -4378,7 +4725,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   useEffect(() => {
     if (!currentSessionId) return;
     if (pendingProjectPathRef.current) {
-      setSessionProjectPath(agentId, currentSessionId, pendingProjectPathRef.current);
+      const path = pendingProjectPathRef.current;
+      setSessionProjectPath(agentId, currentSessionId, path);
+      try {
+        const ws = ensureWorkspace(agentId, path);
+        setSessionWorkspaceId(agentId, currentSessionId, ws.id, path);
+      } catch {
+        /* ignore */
+      }
       pendingProjectPathRef.current = null;
     }
     if (pendingSessionTitleRef.current) {
@@ -4387,14 +4741,129 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [currentSessionId, agentId]);
 
-  const cwdLocked = useMemo(() => {
-    if (viewingHistorySession) return true;
-    return timeline.some(
-      (e) => e.kind === 'message' && (e.data as ChatMessage).role === 'user',
-    );
-  }, [timeline, viewingHistorySession]);
-
   const handleSend = () => {
+    // /goal composer path (before normal send)
+    const slash = parseSlashInput(inputText);
+    if (slash?.kind === 'plan') {
+      const topic = slash.query.trim() || 'Plan the next change';
+      const tag = `<user_plan>${topic}</user_plan>`;
+      // Optimistic Plan mode — user explicitly started /plan (scoped to current session)
+      {
+        const sid = currentSessionIdRef.current || '';
+        if (sid) {
+          setAgentModeBySession((prev) => ({ ...prev, [sid]: 'plan' }));
+          wsServiceRef.current?.setAgentMode('plan', undefined, sid);
+        } else {
+          setAgentMode('plan');
+          wsServiceRef.current?.setAgentMode('plan');
+        }
+      }
+      if (autoSpeechEnabledRef.current) {
+        unlockAutoTtsAudio();
+      }
+      const sid = currentSessionIdRef.current || '';
+      const shouldQueue =
+        isSessionBusy(sid) ||
+        isOutboundPending(sid) ||
+        pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
+      if (shouldQueue) {
+        const snapshot: PendingMessage = {
+          id: genUID(),
+          text: tag,
+          images: [...images],
+          attachments: attachments.map((a) => ({ ...a })),
+          fileAtts: attachments
+            .filter((a) => !a.is_image)
+            .map((a) => {
+              const isVoice = a.type === 'voice' || a.type === 'audio' || !!a.is_audio;
+              return {
+                name: a.original_name,
+                size: _formatFileSize(a.size),
+                path: a.path,
+                url: a.url,
+                type: a.is_video && !isVoice ? 'video' : isVoice ? (a.type === 'voice' ? 'voice' : 'audio') : 'file',
+                duration: typeof a.duration === 'number' ? a.duration : undefined,
+              };
+            }),
+        };
+        setPendingMessages((prev) => [...prev, snapshot]);
+        setInputText('');
+        setImages([]);
+        setAttachments([]);
+        if (inputRef.current) inputRef.current.style.height = 'auto';
+        return;
+      }
+      armOutboundTurnPending(currentSessionIdRef.current || "");
+      deliverMessage(
+        { text: tag, images: [...images], attachments: [...attachments] },
+        { clearInputState: true, salvageStream: true },
+      );
+      return;
+    }
+    if (slash?.kind === 'goal') {
+      const parsed = parseGoalSendQuery(slash.query);
+      if (parsed.action === 'status') {
+        runGoalAction('status');
+        setInputText('');
+        return;
+      }
+      if (parsed.action === 'pause' || parsed.action === 'resume' || parsed.action === 'clear') {
+        runGoalAction(parsed.action);
+        setInputText('');
+        return;
+      }
+      const objective = (parsed.objective || '').trim();
+      if (!objective) {
+        runGoalAction('status');
+        setInputText('');
+        return;
+      }
+      runGoalAction('set', objective);
+      const tag = `<user_goal>${objective}</user_goal>`;
+      if (autoSpeechEnabledRef.current) {
+        unlockAutoTtsAudio();
+      }
+      const sid = currentSessionIdRef.current || '';
+      const shouldQueue =
+        isSessionBusy(sid) ||
+        isOutboundPending(sid) ||
+        pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
+      if (shouldQueue) {
+        const snapshot: PendingMessage = {
+          id: genUID(),
+          text: tag,
+          images: [...images],
+          attachments: attachments.map((a) => ({ ...a })),
+          fileAtts: attachments
+            .filter((a) => !a.is_image)
+            .map((a) => {
+              const isVoice = a.type === 'voice' || a.type === 'audio' || !!a.is_audio;
+              return {
+                name: a.original_name,
+                size: _formatFileSize(a.size),
+                path: a.path,
+                url: a.url,
+                type: a.is_video && !isVoice ? 'video' : isVoice ? (a.type === 'voice' ? 'voice' : 'audio') : 'file',
+                duration: typeof a.duration === 'number' ? a.duration : undefined,
+              };
+            }),
+          sessionId: sid || undefined,
+        };
+        setPendingMessages((prev) => [...prev, snapshot]);
+        setInputText('');
+        setImages([]);
+        setAttachments([]);
+        if (inputRef.current) inputRef.current.style.height = 'auto';
+        return;
+      }
+      armOutboundTurnPending(currentSessionIdRef.current || "");
+      deliverMessage(
+        { text: tag, images: [...images], attachments: [...attachments] },
+        { clearInputState: true, salvageStream: true },
+      );
+      return;
+    }
+
     const text = inputText.trim();
     const skillDir = pendingSkill?.dir || '';
     if (!text && images.length === 0 && attachments.length === 0 && !skillDir) return;
@@ -4405,13 +4874,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unlockAutoTtsAudio();
     }
 
-    // Park when agent is busy, OR an outbound turn is still being acknowledged, OR
-    // there are already queued messages (keep FIFO order).
+    // Park only when THIS session is busy / already has a parked queue.
+    // Other sessions run in parallel and must not force a global queue.
+    const sid = currentSessionIdRef.current || '';
     const shouldQueue =
-      isAgentBusy ||
-      outboundTurnPendingRef.current ||
-      isFlushingPendingRef.current ||
-      pendingMessagesRef.current.length > 0;
+      isSessionBusy(sid) ||
+      isOutboundPending(sid) ||
+      pendingMessagesRef.current.some((m) => (m.sessionId || '') === sid);
 
     if (shouldQueue) {
       const snapshot: PendingMessage = {
@@ -4434,6 +4903,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }),
         skillDir: pendingSkill?.dir,
         skillName: pendingSkill?.name,
+        sessionId: sid || undefined,
       };
       setPendingMessages(prev => [...prev, snapshot]);
       // Clear the composer only — do not touch streaming state (agent is busy).
@@ -4447,7 +4917,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return;
     }
 
-    armOutboundTurnPending();
+    armOutboundTurnPending(currentSessionIdRef.current || "");
     deliverMessage(
       {
         text,
@@ -4460,17 +4930,47 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     );
   };
 
-  // Send a queued pending message immediately, even while the agent is working.
-  // The backend input_hub already accumulates working-state messages and
-  // injects them into the next turn via event_pipeline (runner.py), so the
-  // agent will receive it without waiting for idle.
-  const handleSendPendingNow = useCallback((id: string) => {
-    const target = pendingMessagesRef.current.find(m => m.id === id);
-    if (!target) return;
-    // Remove from the pending queue first so it doesn't get double-sent by the
-    // idle auto-flush.
-    setPendingMessages(prev => prev.filter(m => m.id !== id));
-    armOutboundTurnPending();
+  // Flush one pending item: switch to its session without stop_task, then deliver.
+  const flushPendingMessage = useCallback(async (target: PendingMessage) => {
+    const sid = (target.sessionId || '').trim();
+    if (sid && sid !== currentSessionIdRef.current) {
+      wsServiceRef.current?.switchAndReply(sid, '', { stopCurrent: false });
+      pendingFilePushesRef.current = [];
+      currentSessionIdRef.current = sid;
+      viewingHistorySessionRef.current = false;
+      setCurrentSessionId(sid);
+      setViewingHistorySession(false);
+      try {
+        const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sid, 0, 50);
+        const session = resp.session;
+        if (session) {
+          const entries = buildTimelineFromSession(
+            session.messages || [],
+            session.events || [],
+          );
+          setTimeline(entries);
+          setShellStreams(rebuildShellStreamsFromTimeline(entries));
+          historyOffsetRef.current = session.messages?.length || 0;
+          setHasMoreHistory(session.has_more ?? false);
+        }
+      } catch (err: any) {
+        console.error('[AIChatPage] Failed to reload session before pending flush:', err);
+      }
+      if (target.paneId) {
+        const snap = loadWorkspaceStore(agentId);
+        const wsId = snap.chrome.activeWorkspaceId;
+        if (wsId) {
+          setFocusedPane(agentId, target.paneId);
+          openContentTab(agentId, wsId, { kind: 'session', id: sid }, target.paneId);
+          setWsSnap(loadWorkspaceStore(agentId));
+        }
+      }
+    } else {
+      viewingHistorySessionRef.current = false;
+      setViewingHistorySession(false);
+    }
+    const flushSid = sid || (currentSessionIdRef.current || '').trim();
+    armOutboundTurnPending(flushSid);
     deliverMessage(
       {
         text: target.text,
@@ -4478,10 +4978,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         attachments: target.attachments,
         skillDir: target.skillDir,
         skillName: target.skillName,
+        sessionId: flushSid || undefined,
       },
       { clearInputState: false, salvageStream: false },
     );
-  }, [deliverMessage]);
+  }, [agentId, armOutboundTurnPending, deliverMessage]);
+
+  const handleSendPendingNow = useCallback((id: string) => {
+    const target = pendingMessagesRef.current.find(m => m.id === id);
+    if (!target) return;
+    setPendingMessages(prev => prev.filter(m => m.id !== id));
+    void flushPendingMessage(target);
+  }, [flushPendingMessage]);
 
   // Cancel / remove a pending message without sending it.
   const handleCancelPending = useCallback((id: string) => {
@@ -4494,18 +5002,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (queue.length === 0) return;
     const next = queue[0];
     setPendingMessages(prev => prev.filter(m => m.id !== next.id));
-    armOutboundTurnPending();
-    deliverMessage(
-      {
-        text: next.text,
-        images: next.images,
-        attachments: next.attachments,
-        skillDir: next.skillDir,
-        skillName: next.skillName,
-      },
-      { clearInputState: false, salvageStream: false },
-    );
-  }, [deliverMessage]);
+    void flushPendingMessage(next);
+  }, [flushPendingMessage]);
 
   // Clear the entire queue without sending anything.
   const handleCancelAllPending = useCallback(() => {
@@ -4513,42 +5011,89 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     clearOutboundTurnPending();
   }, [clearOutboundTurnPending]);
 
-  // Auto-drain: when idle, release exactly ONE pending message, then wait until
-  // the agent picks up the turn before releasing the next.
+  // Auto-drain: when idle, release exactly ONE pending message (any session),
+  // switching without stop_task, then wait for that turn before the next.
   useEffect(() => {
-    if (isAgentBusy || isStreaming) {
-      clearOutboundTurnPending();
-      return;
-    }
+    // Drain per-session queues independently — do not block on other sessions.
     if (isFlushingPendingRef.current) return;
-    if (outboundTurnPendingRef.current) return;
     const queue = pendingMessagesRef.current;
     if (queue.length === 0) return;
+    const next = queue.find((m) => {
+      const sid = (m.sessionId || "").trim();
+      if (sid && isSessionBusy(sid)) return false;
+      if (sid && isOutboundPending(sid)) return false;
+      return true;
+    });
+    if (!next) return;
 
-    const next = queue[0];
     isFlushingPendingRef.current = true;
-    armOutboundTurnPending();
     setPendingMessages((prev) => prev.filter((m) => m.id !== next.id));
-    deliverMessage(
-      {
-        text: next.text,
-        images: next.images,
-        attachments: next.attachments,
-        skillDir: next.skillDir,
-        skillName: next.skillName,
-      },
-      { clearInputState: false, salvageStream: false },
-    );
-    setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
-  }, [isAgentBusy, isStreaming, pendingMessages.length, deliverMessage, armOutboundTurnPending, clearOutboundTurnPending]);
+    void (async () => {
+      try {
+        await flushPendingMessage(next);
+      } finally {
+        setTimeout(() => { isFlushingPendingRef.current = false; }, 0);
+      }
+    })();
+  }, [busySessions, isStreaming, agentStatus, pendingMessages.length, flushPendingMessage, isSessionBusy, isOutboundPending]);
 
   useEffect(() => () => {
-    if (outboundTurnPendingTimerRef.current) {
-      clearTimeout(outboundTurnPendingTimerRef.current);
+    for (const key of Object.keys(outboundPendingTimersRef.current)) {
+      clearTimeout(outboundPendingTimersRef.current[key]);
     }
+    outboundPendingTimersRef.current = {};
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (slashMode) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (slashOptionCount === 0) return;
+        setSlashHighlight((i) => (i + 1) % slashOptionCount);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (slashOptionCount === 0) return;
+        setSlashHighlight((i) => (i - 1 + slashOptionCount) % slashOptionCount);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setInputText('');
+        return;
+      }
+      // Goal: Enter submits objective / lifecycle text; Tab picks highlighted subcommand.
+      if (slashMode.kind === 'goal') {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const cmd = slashGoalOptions[slashHighlight];
+          if (cmd) selectGoalSubcommand(cmd);
+          return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          handleSend();
+          return;
+        }
+      } else if (slashMode.kind === 'plan') {
+        if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+          e.preventDefault();
+          handleSend();
+          return;
+        }
+      } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        e.preventDefault();
+        if (slashMode.kind === 'commands') {
+          const cmd = slashCommandOptions[slashHighlight];
+          if (cmd) selectSlashCommand(cmd);
+        } else {
+          const skill = slashSkillOptions[slashHighlight];
+          if (skill) selectSkillFromSlash(skill);
+        }
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -4612,6 +5157,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   const handleNewSession = (projectPath?: string) => {
     const previousSid = currentSessionIdRef.current;
+    pendingOpenSessionTabRef.current = true;
     // Stop parent + cancel in-flight sub-agents before switching sessions,
     // otherwise orphaned delegates keep streaming into the new timeline.
     wsServiceRef.current?.stopTask();
@@ -4629,6 +5175,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setShellStreams({});
     setOptionsProposals([]);
     setModeApprovals([]);
+    setActiveGoal(null);
+    setPendingSkill(null);
     setSessionChanges(null);
     setFocusChangedNonce(Date.now());
     streamingTextRef.current = '';
@@ -4643,7 +5191,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     viewingHistorySessionRef.current = false;
     setViewingHistorySession(false);
     setPlanSteps([]);
-    setTokenStats(null);
+    // New session starts at 0%; keyed when sid arrives via current_session / token_stats
+    setTokenStatsBySession((prev) => {
+      if (!previousSid) return prev;
+      const copy = { ...prev };
+      delete copy[previousSid];
+      return copy;
+    });
     setImages([]);
     setAttachments([]);
     // Drop parked sends for the previous session; new session starts empty.
@@ -4786,17 +5340,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   };
 
-  const handleSwitchAndReply = async (sessionId: string) => {
-    wsServiceRef.current?.switchAndReply(sessionId, '');
+  const handleSwitchAndReply = async (
+    sessionId: string,
+    opts?: { stopCurrent?: boolean; content?: string },
+  ) => {
+    const stopCurrent = opts?.stopCurrent !== false;
+    const content = opts?.content ?? '';
+    wsServiceRef.current?.switchAndReply(sessionId, content, { stopCurrent });
     pendingFilePushesRef.current = [];
     currentSessionIdRef.current = sessionId;
     viewingHistorySessionRef.current = false;
     setCurrentSessionId(sessionId);
-    setViewingHistorySession(false); // actively switched, no longer just "viewing"
-    // Reload the session's history so the timeline shows the agent's previous
-    // replies. Without this, switching back to a session leaves the timeline
-    // showing the *other* session's content (or empty), because the
-    // current_session WS event won't re-hydrate when sid === previousSid.
+    setViewingHistorySession(false);
+    // When content was sent with the switch, timeline will update via WS events.
+    // Still reload history for empty switches so the pane shows prior messages.
+    if (content) return;
     try {
       const resp = await agentSessionAPI.getSessionHistoryPaged(agentId, sessionId, 0, 50);
       const session = resp.session;
@@ -4815,6 +5373,580 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     } catch (err: any) {
       console.error('[AIChatPage] Failed to reload session after switch:', err);
+    }
+  };
+
+  /** Prepare UI/WS for sending into a session without aborting another pane's turn. */
+  const prepareSessionForSend = async (sessionId: string) => {
+    if (sessionId === currentSessionIdRef.current) {
+      viewingHistorySessionRef.current = false;
+      setViewingHistorySession(false);
+      return;
+    }
+    await handleSwitchAndReply(sessionId, { stopCurrent: false });
+  };
+
+  // ---- Workspace chrome (L1 / L2) ----
+  const refreshWsSnap = useCallback(() => {
+    setWsSnap(loadWorkspaceStore(agentId));
+  }, [agentId]);
+
+  useEffect(() => {
+    setWsSnap(loadWorkspaceStore(agentId));
+    wsMigratedRef.current = false;
+  }, [agentId]);
+
+  useEffect(() => {
+    const onCh = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.agentId && detail.agentId !== agentId) return;
+      refreshWsSnap();
+    };
+    window.addEventListener(WORKSPACES_CHANGED_EVENT, onCh);
+    return () => window.removeEventListener(WORKSPACES_CHANGED_EVENT, onCh);
+  }, [agentId, refreshWsSnap]);
+
+  useEffect(() => {
+    if (!agentId) return;
+    const def = (defaultCwd || agentCwd || '').trim();
+    migrateProjectPathsToWorkspaces(agentId, def || null);
+    wsMigratedRef.current = true;
+    refreshWsSnap();
+  }, [agentId, defaultCwd, refreshWsSnap]);
+
+  const activeWorkspace = useMemo(() => {
+    const id = wsSnap.chrome.activeWorkspaceId;
+    if (!id) return null;
+    return wsSnap.workspaces.find((w) => w.id === id) || null;
+  }, [wsSnap]);
+
+  const workspaceLayout: SplitNode | null = useMemo(() => {
+    if (!activeWorkspace) return null;
+    return wsSnap.chrome.layoutByWorkspace?.[activeWorkspace.id] || null;
+  }, [wsSnap, activeWorkspace]);
+
+  const focusedPaneId = wsSnap.chrome.focusedPaneId;
+
+  // Ensure project files panel is open when a workspace is active (recover from prior close/clip)
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    try {
+      const raw = localStorage.getItem('opensquad.filesPanel.open');
+      if (raw === null) {
+        setFilesPanelOpen(true);
+      }
+    } catch {
+      setFilesPanelOpen(true);
+    }
+  }, [activeWorkspace?.id]);
+
+  useEffect(() => {
+    if (!activeWorkspace || !agentId) return;
+    const path = activeWorkspace.rootPath;
+    setAgentCwd((prev) => (pathsEqual(prev || '', path) ? prev : path));
+    // Wait for profile — agentId alone may not match the on-disk agent directory.
+    const dirName = agentProfile?.dir_name;
+    if (!dirName || !path) return;
+    void adminAPI.setWorkingDirectory(dirName, path).catch((err: any) => {
+      console.error('[AIChatPage] Failed to set cwd for workspace:', err);
+    });
+  }, [activeWorkspace?.id, activeWorkspace?.rootPath, agentId, agentProfile?.dir_name]);
+
+  useEffect(() => {
+    if (!currentSessionId || !activeWorkspace) return;
+    if (!pendingOpenSessionTabRef.current) return;
+    pendingOpenSessionTabRef.current = false;
+    const targetPane =
+      pendingTargetPaneIdRef.current || focusedPaneId || null;
+    pendingTargetPaneIdRef.current = null;
+    openContentTab(
+      agentId,
+      activeWorkspace.id,
+      { kind: 'session', id: currentSessionId },
+      targetPane,
+    );
+    if (targetPane) setFocusedPane(agentId, targetPane);
+    refreshWsSnap();
+  }, [currentSessionId, activeWorkspace?.id, agentId, refreshWsSnap, focusedPaneId]);
+
+  useEffect(() => {
+    if (!sessionTitleUpdate) return;
+    setTabSessionTitles((prev) => ({
+      ...prev,
+      [sessionTitleUpdate.id]: sessionTitleUpdate.title,
+    }));
+  }, [sessionTitleUpdate]);
+
+  /** Keep L2 tab labels in sync with sidebar session titles (not truncated session ids). */
+  const handleSessionsChange = useCallback((sessions: Array<{ id: string; title?: string }>) => {
+    setTabSessionTitles((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const s of sessions) {
+        const title = (s.title || '').trim();
+        if (!title) continue;
+        if (next[s.id] !== title) {
+          next[s.id] = title;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  // Also refresh titles when workspace/agent changes (sidebar may be closed).
+  useEffect(() => {
+    if (!agentId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await agentSessionAPI.getSessionList(agentId);
+        if (cancelled) return;
+        handleSessionsChange(resp.sessions || []);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, activeWorkspace?.id, handleSessionsChange]);
+
+  const handleSelectWorkspace = (id: string) => {
+    openWorkspaceTab(agentId, id);
+    refreshWsSnap();
+    const snap = loadWorkspaceStore(agentId);
+    const ws = snap.workspaces.find((w) => w.id === id);
+    if (ws) {
+      setAgentCwd(ws.rootPath);
+      pendingProjectPathRef.current = ws.rootPath;
+    }
+    const layout = snap.chrome.layoutByWorkspace[id];
+    if (layout) {
+      const leaves = collectLeaves(layout);
+      const focusId = snap.chrome.focusedPaneId;
+      const leaf = leaves.find((l) => l.id === focusId) || leaves[0];
+      const active = parseContentTabKey(leaf?.tabs.activeKey || null);
+      if (active?.kind === 'session') {
+        void handleViewSession(active.id);
+      }
+    }
+  };
+
+  const handleOpenExistingWorkspace = (rootPath: string) => {
+    const ws = ensureWorkspace(agentId, rootPath);
+    openWorkspaceTab(agentId, ws.id);
+    refreshWsSnap();
+    setAgentCwd(ws.rootPath);
+    pendingProjectPathRef.current = ws.rootPath;
+  };
+
+  const handleCreateWorkspace = (name: string, rootPath: string) => {
+    const ws = ensureWorkspace(agentId, rootPath, name);
+    openWorkspaceTab(agentId, ws.id);
+    refreshWsSnap();
+    setAgentCwd(ws.rootPath);
+    pendingProjectPathRef.current = ws.rootPath;
+    setCreateWorkspaceOpen(false);
+  };
+
+  const handleConfirmCloseWorkspace = () => {
+    if (!closeWorkspaceTarget) return;
+    closeWorkspaceTab(agentId, closeWorkspaceTarget.id);
+    refreshWsSnap();
+    setCloseWorkspaceTarget(null);
+  };
+
+  const handleOpenFileInTab = (relPath: string) => {
+    if (!activeWorkspace) return;
+    const p = (relPath || '').replace(/\\/g, '/');
+    if (!p) return;
+    const agentDir = agentProfile?.dir_name || agentId;
+    const root = activeWorkspace.rootPath;
+    const wsId = activeWorkspace.id;
+    // Always open into the anchored (focused) pane — never touch other panes
+    const pane = focusedPaneId;
+    void (async () => {
+      await prefetchWorkspaceFile(agentDir, root, p);
+      openContentTab(agentId, wsId, { kind: 'file', id: p }, pane);
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+    })();
+  };
+
+  const handleContentTabSelect = (tab: ContentTab, paneId?: string) => {
+    if (!activeWorkspace) return;
+    const pid = paneId || focusedPaneId;
+    setActiveContentTab(agentId, activeWorkspace.id, tab, pid);
+    if (pid) setFocusedPane(agentId, pid);
+    refreshWsSnap();
+    if (tab.kind === 'session') {
+      // Same live session: only update pane focus/tabs. Reloading via
+      // handleViewSession remounts chatSlot and makes sibling panes jump.
+      if (tab.id === currentSessionIdRef.current) return;
+      void handleViewSession(tab.id);
+    }
+  };
+
+  const handleContentTabClose = (tab: ContentTab, paneId?: string) => {
+    if (!activeWorkspace) return;
+    if (tab.kind === 'file' && fileDirtyMap[tab.id]) {
+      if (!confirmDiscardFileDirty(true)) return;
+    }
+    closeContentTab(agentId, activeWorkspace.id, tab, paneId || focusedPaneId);
+    refreshWsSnap();
+    if (tab.kind === 'file') {
+      setFileDirtyMap((prev) => {
+        const next = { ...prev };
+        delete next[tab.id];
+        return next;
+      });
+    }
+  };
+
+  const handleContentTabReorder = (from: ContentTab, to: ContentTab, paneId?: string) => {
+    if (!activeWorkspace) return;
+    reorderContentTabs(
+      agentId,
+      activeWorkspace.id,
+      contentTabKey(from),
+      contentTabKey(to),
+      paneId || focusedPaneId,
+    );
+    refreshWsSnap();
+  };
+
+  /** Open / continue a session in the currently anchored pane only. */
+  const handleSidebarViewSession = (sessionId: string) => {
+    if (activeWorkspace) {
+      const pane = focusedPaneId;
+      openContentTab(
+        agentId,
+        activeWorkspace.id,
+        { kind: 'session', id: sessionId },
+        pane,
+      );
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+    }
+    void handleViewSession(sessionId);
+  };
+
+  const handleNewSessionInWorkspace = (projectPath?: string) => {
+    const path = (projectPath || activeWorkspace?.rootPath || '').trim();
+    // Sidebar / global new-session → anchored pane
+    if (!pendingTargetPaneIdRef.current && focusedPaneId) {
+      pendingTargetPaneIdRef.current = focusedPaneId;
+    }
+    pendingOpenSessionTabRef.current = true;
+    handleNewSession(path || undefined);
+  };
+
+  const handleSplitPane = (paneId: string, direction: SplitDirection) => {
+    if (!activeWorkspace) {
+      console.warn('[AIChatPage] split ignored: no active workspace');
+      return;
+    }
+    const layout = workspaceLayout;
+    const applied = layout
+      ? applySplitToLayout(layout, paneId, direction, focusedPaneId)
+      : null;
+    let newLeafId: string | null = null;
+    if (applied) {
+      commitWorkspaceLayout(
+        agentId,
+        activeWorkspace.id,
+        applied.tree,
+        applied.newLeafId,
+      );
+      newLeafId = applied.newLeafId;
+    } else {
+      const result = splitPane(agentId, activeWorkspace.id, paneId, direction);
+      if (!result) {
+        console.warn('[AIChatPage] split failed', {
+          paneId,
+          direction,
+          ws: activeWorkspace.id,
+          leafIds: layout ? collectLeaves(layout).map((l) => l.id) : [],
+          focusedPaneId,
+        });
+        return;
+      }
+      newLeafId = result.newLeafId;
+    }
+    refreshWsSnap();
+    // New leaf is anchored and gets a fresh session (other panes untouched)
+    pendingTargetPaneIdRef.current = newLeafId;
+    pendingOpenSessionTabRef.current = true;
+    handleNewSession(activeWorkspace.rootPath || undefined);
+  };
+
+  const handleCloseAllInPane = (paneId: string) => {
+    if (!activeWorkspace) return;
+    if (!window.confirm('关闭该窗格内全部标签？本地会话与文件不会删除。')) return;
+    closeAllTabsInPane(agentId, activeWorkspace.id, paneId);
+    setFocusedPane(agentId, paneId);
+    refreshWsSnap();
+    pendingTargetPaneIdRef.current = paneId;
+    pendingOpenSessionTabRef.current = true;
+    handleNewSession(activeWorkspace.rootPath || undefined);
+  };
+
+  const handleClosePane = (paneId: string) => {
+    if (!activeWorkspace) return;
+    closePane(agentId, activeWorkspace.id, paneId);
+    refreshWsSnap();
+  };
+
+  const handleResizeSplit = (splitId: string, ratio: number) => {
+    if (!activeWorkspace) return;
+    resizeSplit(agentId, activeWorkspace.id, splitId, ratio);
+    refreshWsSnap();
+  };
+
+  const handlePaneComposerSend = async (
+    paneId: string,
+    sessionId: string,
+    payload: ComposerSendPayload,
+  ) => {
+    if (!activeWorkspace) return;
+    setFocusedPane(agentId, paneId);
+    openContentTab(
+      agentId,
+      activeWorkspace.id,
+      { kind: 'session', id: sessionId },
+      paneId,
+    );
+    refreshWsSnap();
+
+    if (autoSpeechEnabledRef.current) {
+      unlockAutoTtsAudio();
+    }
+
+    const shouldQueue =
+      isSessionBusy(sessionId) ||
+      isOutboundPending(sessionId) ||
+      pendingMessagesRef.current.some((m) => m.sessionId === sessionId);
+
+    if (shouldQueue) {
+      // Same session mid-turn: backend input_hub can accept — don't park if no pending for sid.
+      if (
+        !pendingMessagesRef.current.some((m) => m.sessionId === sessionId) &&
+        sessionId === currentSessionIdRef.current &&
+        !viewingHistorySessionRef.current
+      ) {
+        armOutboundTurnPending(sessionId);
+        deliverMessage(
+          {
+            text: payload.text,
+            images: payload.images,
+            attachments: payload.attachments as UploadedFile[],
+            skillDir: payload.skillDir,
+            skillName: payload.skillName,
+            sessionId,
+          },
+          { clearInputState: false, salvageStream: true },
+        );
+        return;
+      }
+      // Same session already has queued work: park.
+      const snapshot: PendingMessage = {
+        id: genUID(),
+        text: payload.text,
+        images: [...payload.images],
+        attachments: payload.attachments.map((a) => ({ ...a })) as UploadedFile[],
+        fileAtts: payload.attachments
+          .filter((a) => !a.is_image)
+          .map((a) => {
+            const isVoice = a.type === 'voice' || a.type === 'audio' || !!a.is_audio;
+            return {
+              name: a.original_name,
+              size: _formatFileSize(a.size),
+              path: a.path,
+              url: a.url,
+              type: a.is_video && !isVoice ? 'video' : isVoice ? (a.type === 'voice' ? 'voice' : 'audio') : 'file',
+              duration: typeof a.duration === 'number' ? a.duration : undefined,
+            };
+          }) as FileAttachment[],
+        skillDir: payload.skillDir,
+        skillName: payload.skillName,
+        sessionId,
+        paneId,
+      };
+      setPendingMessages((prev) => [...prev, snapshot]);
+      return;
+    }
+
+    // Other sessions may be busy — still send immediately (true parallel).
+    await prepareSessionForSend(sessionId);
+    armOutboundTurnPending(sessionId);
+    deliverMessage(
+      {
+        text: payload.text,
+        images: payload.images,
+        attachments: payload.attachments as UploadedFile[],
+        skillDir: payload.skillDir,
+        skillName: payload.skillName,
+        sessionId,
+      },
+      { clearInputState: false, salvageStream: true },
+    );
+  };
+
+  const makePaneHandlers = (paneId: string): PaneShellHandlers => ({
+    onSelectTab: (tab) => handleContentTabSelect(tab, paneId),
+    onCloseTab: (tab) => handleContentTabClose(tab, paneId),
+    onReorderTabs: (from, to) => handleContentTabReorder(from, to, paneId),
+    onNewSession: () => {
+      // New session only in this pane — other panes keep their tabs
+      setFocusedPane(agentId, paneId);
+      pendingTargetPaneIdRef.current = paneId;
+      pendingOpenSessionTabRef.current = true;
+      refreshWsSnap();
+      handleNewSession(activeWorkspace?.rootPath || undefined);
+    },
+    onSplitRow: () => handleSplitPane(paneId, 'row'),
+    onSplitCol: () => handleSplitPane(paneId, 'col'),
+    onCloseAll: () => handleCloseAllInPane(paneId),
+    onClosePane: () => handleClosePane(paneId),
+    onFocus: () => {
+      // Click = only change the anchor (focusedPaneId). Do NOT switch the global
+      // live session — that remounted chatSlot/history and made sibling panes'
+      // conversation content jump (see split-pane focus bug).
+      if (focusedPaneId !== paneId) {
+        setFocusedPane(agentId, paneId);
+        refreshWsSnap();
+      }
+    },
+    renderSessionChat: (sessionId: string) => {
+      const mirrorLive = sessionId === currentSessionId;
+      return (
+        <SessionChatPane
+          key={`session-chat-${paneId}-${sessionId}`}
+          agentId={agentId}
+          sessionId={sessionId}
+          liveTimeline={mirrorLive ? flattenArchivedSections(timeline) : null}
+          isSolo={isSolo}
+          expandDetails={isSolo ? soloExpandDetails : showWorkflow}
+          columnClass={soloColumnClass}
+          userName={currentUser?.name || undefined}
+          agentName={agentProfile?.agent_name || undefined}
+          onFocus={() => {
+            if (focusedPaneId !== paneId) {
+              setFocusedPane(agentId, paneId);
+              refreshWsSnap();
+            }
+          }}
+        />
+      );
+    },
+    renderComposer: (sessionId: string) => (
+      <AgentWebComposer
+        key={`composer-${paneId}`}
+        agentId={agentId}
+        columnClass={soloColumnClass}
+        disabled={isLoadingSession}
+        busy={isSessionBusy(sessionId)}
+        agentMode={agentModeBySession[sessionId] ?? agentMode}
+        onModeChange={(mode) => {
+          setAgentModeBySession((prev) => ({ ...prev, [sessionId]: mode }));
+          wsServiceRef.current?.setAgentMode(mode, undefined, sessionId);
+        }}
+        modelCards={modelCards}
+        currentCardName={cardNameBySession[sessionId] ?? currentCardName}
+        modelName={modelNameBySession[sessionId] ?? modelName ?? ''}
+        fallbackLabel={agentProfile?.agent_name || agentId}
+        switchingModel={!!switchingModelBySession[sessionId]}
+        onSelectModel={(cardName) => {
+          setSwitchingModelBySession((prev) => ({ ...prev, [sessionId]: true }));
+          setCardNameBySession((prev) => ({ ...prev, [sessionId]: cardName }));
+          wsServiceRef.current?.switchModel(cardName, sessionId);
+        }}
+        reasoningEffort={reasoningBySession[sessionId] ?? reasoningEffort}
+        onEffortChange={(effort) => {
+          setReasoningBySession((prev) => ({ ...prev, [sessionId]: effort }));
+          wsServiceRef.current?.setReasoningEffort(effort, sessionId);
+        }}
+        cwd={agentCwd || defaultCwd}
+        tokenStats={tokenStatsBySession[sessionId] ?? null}
+        onViewReport={() => setShowContextViewer(true)}
+        sessionChanges={
+          focusedPaneId === paneId && currentSessionId === sessionId ? sessionChanges : null
+        }
+        changesBusy={changesBusy}
+        onOpenChanges={() => {
+          setFilesPanelOpen(true);
+          try {
+            localStorage.setItem('opensquad.filesPanel.open', 'true');
+          } catch {
+            /* ignore */
+          }
+          setFocusChangedNonce(Date.now());
+        }}
+        onCommitPush={async () => {
+          const root = projectRoot;
+          const dirName = fsAgentName;
+          setChangesBusy(true);
+          try {
+            if (dirName && root) {
+              await adminAPI.commitSessionChanges(dirName, root).catch(() => {});
+            }
+            setSessionChanges({ additions: 0, deletions: 0, count: 0 });
+            setFilesLiveChanges({
+              nonce: Date.now(),
+              additions: 0,
+              deletions: 0,
+              count: 0,
+              files: [],
+            });
+            setFocusChangedNonce(Date.now());
+            await handlePaneComposerSend(paneId, sessionId, {
+              text: COMMIT_PUSH_MESSAGE,
+              images: [],
+              attachments: [],
+            });
+          } catch (err) {
+            console.warn('[SessionChanges] Commit & Push failed', err);
+          } finally {
+            setChangesBusy(false);
+          }
+        }}
+        availableSkills={availableSkills}
+        skillsLoading={skillsLoading}
+        onOpenSkills={loadSkillsIfNeeded}
+        autoSpeechEnabled={autoSpeechEnabled}
+        onToggleAutoSpeech={toggleAutoSpeech}
+        onActivate={() => {
+          // Focus this pane only — do not switch global live session (avoids content jump).
+          if (focusedPaneId !== paneId) {
+            setFocusedPane(agentId, paneId);
+            refreshWsSnap();
+          }
+        }}
+        onSend={(payload) => handlePaneComposerSend(paneId, sessionId, payload)}
+        onStop={handleStop}
+        statusHint={(() => {
+          const n = pendingMessages.filter((m) => m.sessionId === sessionId).length;
+          if (n > 0) {
+            return `本会话已排队 ${n} 条 — 当前回合结束后自动发送`;
+          }
+          return null;
+        })()}
+      />
+    ),
+    onFileDirty: (relPath, dirty) => {
+      setFileDirtyMap((prev) => {
+        if (!!prev[relPath] === dirty) return prev;
+        return { ...prev, [relPath]: dirty };
+      });
+    },
+  });
+
+  const handleOpenSkills = () => {
+    try {
+      window.dispatchEvent(new CustomEvent('switchView', { detail: 'skills' }));
+    } catch {
+      /* ignore */
     }
   };
 
@@ -4850,34 +5982,48 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // ---- Drag & Drop upload ----
 
+  const isFileUploadDrag = useCallback((e: React.DragEvent) => {
+    const types = Array.from(e.dataTransfer?.types || []);
+    // Tab reorder uses a custom MIME; never treat it as a file drop.
+    if (types.includes('application/x-opensquad-tab')) return false;
+    // OS / browser file drags expose "Files"
+    return types.includes('Files');
+  }, []);
+
   const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!isFileUploadDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current++;
     if (dragCounterRef.current === 1) {
       setIsDragOver(true);
     }
-  }, []);
+  }, [isFileUploadDrag]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
+    if (!isFileUploadDrag(e) && dragCounterRef.current === 0) return;
     e.preventDefault();
     e.stopPropagation();
-    dragCounterRef.current--;
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
     if (dragCounterRef.current === 0) {
       setIsDragOver(false);
     }
-  }, []);
+  }, [isFileUploadDrag]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!isFileUploadDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
-  }, []);
+  }, [isFileUploadDrag]);
 
   const handleDrop = useCallback(async (e: React.DragEvent) => {
+    // Always reset overlay counter; ignore non-file drops (e.g. tab reorder).
+    const isFile = isFileUploadDrag(e);
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current = 0;
     setIsDragOver(false);
+    if (!isFile) return;
 
     const droppedFiles = e.dataTransfer.files;
     if (!droppedFiles || droppedFiles.length === 0) return;
@@ -4911,7 +6057,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     } finally {
       setIsUploading(false);
     }
-  }, [agentId]);
+  }, [agentId, isFileUploadDrag]);
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
     const files = Array.from(e.clipboardData.items)
@@ -4978,7 +6124,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // ---- Render ----
   return (
     <div
-      className="flex-1 flex h-full w-full bg-bgLight overflow-hidden relative"
+      className="flex-1 flex flex-col h-full w-full bg-stage overflow-hidden relative"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -4997,7 +6143,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
       {/* Agent starting overlay */}
       {(agentStatus === 'agent-starting' || wsStatus === 'agent-starting') && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-bgLight/80 backdrop-blur-sm">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-stage/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3 p-6 bg-panel border border-border rounded-2xl shadow-xl">
             <Loader2 size={40} className="text-yellow-500 animate-spin" />
             <p className="text-base font-medium text-textMain">{t('chat.agentStarting')}</p>
@@ -5006,21 +6152,91 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         </div>
       )}
 
+      {/* Top chrome: L1 workspaces + L2 content tabs */}
+      <div className="flex-shrink-0 bg-stage border-b border-border relative z-30 overflow-visible">
+        <div className="h-9 px-2 flex items-center gap-2 border-b border-border/60 min-w-0 overflow-visible">
+          <button
+            type="button"
+            onClick={onBack}
+            className="p-1 hover:bg-primary/10 rounded-lg transition-colors flex-shrink-0"
+            title="返回"
+          >
+            <ArrowLeft size={16} className="text-textMuted" />
+          </button>
+          <div className="flex items-center gap-1.5 min-w-0 max-w-[160px] shrink-0">
+            <div className="w-5 h-5 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+              <Bot size={12} className="text-primary" />
+            </div>
+            <span className="text-[11px] font-semibold text-textMain truncate">
+              {agentProfile?.agent_name || modelName || agentId}
+            </span>
+          </div>
+          <WorkspaceTabBar
+            workspaces={wsSnap.workspaces}
+            openIds={wsSnap.chrome.openWorkspaceIds}
+            activeId={wsSnap.chrome.activeWorkspaceId}
+            onSelect={handleSelectWorkspace}
+            onRequestClose={(id) => {
+              const ws = wsSnap.workspaces.find((w) => w.id === id);
+              if (ws) setCloseWorkspaceTarget(ws);
+            }}
+            onOpenExisting={handleOpenExistingWorkspace}
+            onCreateNew={() => setCreateWorkspaceOpen(true)}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setFilesPanelOpen((v) => {
+                const next = !v;
+                try {
+                  localStorage.setItem('opensquad.filesPanel.open', String(next));
+                } catch {
+                  /* ignore */
+                }
+                return next;
+              });
+            }}
+            className={`ml-auto p-1.5 rounded-lg transition-colors flex-shrink-0 ${
+              filesPanelOpen ? 'bg-primary/15 hover:bg-primary/20' : 'hover:bg-primary/10'
+            }`}
+            title={filesPanelOpen ? '隐藏项目文件' : '显示项目文件'}
+          >
+            {filesPanelOpen ? (
+              <PanelRightClose size={16} className="text-primary" />
+            ) : (
+              <PanelRightOpen size={16} className="text-textMuted" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 flex min-h-0 overflow-hidden">
       {/* Session Sidebar */}
       <SessionSidebar
         agentId={agentId}
         currentSessionId={currentSessionId}
-        onViewSession={handleViewSession}
-        onNewSession={handleNewSession}
+        workspaceRootPath={activeWorkspace?.rootPath || null}
+        workspaceId={activeWorkspace?.id || null}
+        onViewSession={handleSidebarViewSession}
+        onNewSession={handleNewSessionInWorkspace}
         onSwitchAndReply={handleSwitchAndReply}
+        onOpenSkills={handleOpenSkills}
         isOpen={sessionSidebarOpen}
         onClose={() => setSessionSidebarOpen(false)}
         sessionTitleUpdate={sessionTitleUpdate}
         agentBusy={
           isStreaming ||
           agentStatus === 'working' ||
-          agentStatus === 'thinking'
+          agentStatus === 'thinking' ||
+          (!!currentSessionId && busySessions.includes(currentSessionId))
         }
+        busySessionIds={busySessions}
+        primarySessionId={primarySessionId}
+        onSetPrimarySession={(sid) => {
+          wsServiceRef.current?.setPrimarySession(sid);
+          setPrimarySessionId(sid);
+        }}
+        onSessionsChange={handleSessionsChange}
       />
 
       {showContextViewer && (
@@ -5038,10 +6254,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         />
       )}
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col h-full min-w-0">
-        {/* Header — same h-11+border-b box as SessionSidebar so the split-line aligns */}
-        <div className="flex-shrink-0 bg-bgLight">
+      {activeWorkspace && workspaceLayout ? (
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
+        {/* Shared agent chrome — outside panes so focus never swaps it left/right */}
+        <div className="flex-shrink-0 bg-stage border-b border-border">
+{/* Header — same h-11+border-b box as SessionSidebar so the split-line aligns */}
+        <div className="flex-shrink-0 bg-stage">
           <div className="h-11 px-2 sm:px-3 border-b border-border box-border flex items-center">
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-1 sm:gap-2 min-w-0">
@@ -5224,6 +6442,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
+        </div>
+
+        <PaneSplitLayout
+          layout={workspaceLayout}
+          focusedPaneId={focusedPaneId}
+          liveSessionId={currentSessionId}
+          agentId={agentProfile?.dir_name || agentId}
+          sessionAgentId={agentId}
+          rootPath={activeWorkspace.rootPath}
+          tabTitles={tabSessionTitles}
+          fileDirtyMap={fileDirtyMap}
+          onResizeSplit={handleResizeSplit}
+          handlers={{ makePaneHandlers }}
+          renderChatSlot={() => (
+      /* Main Chat Area — live messages only (agent chrome is above the split) */
+      <div className="flex-1 flex flex-col h-full min-w-0">
         {/* Messages Area */}
         <div className="flex-1 relative min-h-0" style={{ minHeight: 0 }}>
         {/* Solo: pin jump rail + top/bottom scroll to panel far-right (outside padded scroll / max-w column) */}
@@ -5319,9 +6553,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     ? () => requestWithdrawUserMessage(entryKey, entry.data)
                     : undefined,
               };
-              return isSolo
+              // Classic: visualization iframes sit below the final assistant reply
+              // (tool stream keeps the normal tool_call row only).
+              const replyEmbeds: HtmlEmbedPayload[] =
+                !isSolo && entry.data.role === 'assistant'
+                  ? collectHtmlEmbedsPrecedingMessage(displayTimeline, i)
+                  : [];
+              const bubble = isSolo
                 ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
                 : <MessageBubble key={entryKey} {...msgProps} />;
+              if (replyEmbeds.length === 0) return bubble;
+              return (
+                <React.Fragment key={entryKey}>
+                  {isSolo
+                    ? <SoloMessage {...msgProps} anchorId={entryKey} />
+                    : <MessageBubble {...msgProps} />}
+                  <div className="w-full mt-1 mb-4" data-html-embeds-below-reply="1">
+                    {replyEmbeds.map((payload, ei) => (
+                      <HtmlEmbedBlock
+                        key={payload.id || payload.filename || `viz-${ei}`}
+                        payload={payload}
+                        variant="seamless"
+                        className="my-0"
+                      />
+                    ))}
+                  </div>
+                </React.Fragment>
+              );
             }
             if (entry.kind === 'workflow') {
               const lastIncompleteIdx = (() => {
@@ -5366,7 +6624,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   turnStartedMs={turnMs}
                   shellStreams={shellStreams}
                   onOpenFile={openProjectFile}
-                  embedVisualizations={!isSolo}
+                  embedVisualizations={false}
                 />
               );
             }
@@ -5427,9 +6685,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                             ? () => requestWithdrawUserMessage(nestedKey, nested.data)
                             : undefined,
                       };
-                      return isSolo
+                      const replyEmbeds: HtmlEmbedPayload[] =
+                        !isSolo && nested.data.role === 'assistant'
+                          ? collectHtmlEmbedsPrecedingMessage(fold.entries, ni)
+                          : [];
+                      const bubble = isSolo
                         ? <SoloMessage key={nestedKey} {...msgProps} anchorId={nestedKey} />
                         : <MessageBubble key={nestedKey} {...msgProps} />;
+                      if (replyEmbeds.length === 0) return bubble;
+                      return (
+                        <React.Fragment key={nestedKey}>
+                          {isSolo
+                            ? <SoloMessage {...msgProps} anchorId={nestedKey} />
+                            : <MessageBubble {...msgProps} />}
+                          <div className="w-full mt-1 mb-4" data-html-embeds-below-reply="1">
+                            {replyEmbeds.map((payload, ei) => (
+                              <HtmlEmbedBlock
+                                key={payload.id || payload.filename || `viz-${ei}`}
+                                payload={payload}
+                                variant="seamless"
+                                className="my-0"
+                              />
+                            ))}
+                          </div>
+                        </React.Fragment>
+                      );
                     }
                     if (nested.kind === 'workflow') {
                       if (!isSolo && !showWorkflow) return null;
@@ -5441,7 +6721,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           turnStartedMs={undefined}
                           shellStreams={shellStreams}
                           onOpenFile={openProjectFile}
-                          embedVisualizations={!isSolo}
+                          embedVisualizations={false}
                         />
                       );
                     }
@@ -5596,7 +6876,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               └────────────────────────────────────────────────────────────┘
         */}
         {pendingMessages.length > 0 && (
-          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-bgLight flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 pb-1 border-t border-border/40 bg-stage flex-shrink-0">
             <div className={soloColumnClass}>
             <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
               {/* Header bar: status + actions */}
@@ -5704,7 +6984,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
         {/* Inline Plan Panel (docked above input) */}
         {showPlanViewer && (
-          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-bgLight flex-shrink-0">
+          <div className="px-2 sm:px-3 pt-2 border-t border-border/40 bg-stage flex-shrink-0">
             <div className={soloColumnClass}>
             {effectivePlanSteps.length > 0 ? (
               <PlanBlock
@@ -5735,535 +7015,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         )}
 
-        {/* Session file-change stats above composer */}
-        {sessionChanges && (sessionChanges.count > 0 || sessionChanges.additions > 0 || sessionChanges.deletions > 0) ? (
-          <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
-            <div className={soloColumnClass}>
-              <SessionChangesBar
-                summary={sessionChanges}
-                busy={changesBusy}
-                onOpenChanges={() => {
-                  setFilesPanelOpen(true);
-                  try {
-                    localStorage.setItem('opensquad.filesPanel.open', 'true');
-                  } catch {
-                    /* ignore */
-                  }
-                  setFocusChangedNonce(Date.now());
-                }}
-                onCommitPush={async () => {
-                  const root = projectRoot;
-                  const dirName = fsAgentName;
-                  setChangesBusy(true);
-                  try {
-                    // Clear session change stats (accepted locally); agent performs real git commit+push.
-                    if (dirName && root) {
-                      await adminAPI.commitSessionChanges(dirName, root).catch(() => {});
-                    }
-                    setSessionChanges({ additions: 0, deletions: 0, count: 0 });
-                    setFilesLiveChanges({
-                      nonce: Date.now(),
-                      additions: 0,
-                      deletions: 0,
-                      count: 0,
-                      files: [],
-                    });
-                    setFocusChangedNonce(Date.now());
-                    deliverMessage(
-                      { text: COMMIT_PUSH_MESSAGE, images: [], attachments: [] },
-                      { clearInputState: false, salvageStream: true },
-                    );
-                  } catch (err) {
-                    console.warn('[SessionChanges] Commit & Push failed', err);
-                  } finally {
-                    setChangesBusy(false);
-                  }
-                }}
-              />
-            </div>
-          </div>
-        ) : null}
-
-        {/* Input Area — shared Solo-style composer for classic + solo */}
-        <div
-          className={`flex-shrink-0 overflow-visible px-2 sm:px-4 py-3 sm:py-4 ${
-            isSolo ? 'bg-transparent' : 'bg-transparent border-t border-border/20'
-          }`}
-        >
-          <div className={`${soloColumnClass}${isLoadingSession ? ' opacity-50 pointer-events-none' : ''}`}>
-              {modeApprovals.filter((a) => a.status === 'pending').map((req) => (
-                <ModeSwitchApprovalCard
-                  key={req.id}
-                  request={req}
-                  onApprove={(reqId, mode) => {
-                    setModeApprovals((prev) =>
-                      prev.map((a) => (a.id === reqId ? { ...a, status: 'approved' } : a)),
-                    );
-                    setAgentMode(mode);
-                    wsServiceRef.current?.setAgentMode(mode, reqId);
-                  }}
-                  onDeny={(reqId) => {
-                    setModeApprovals((prev) =>
-                      prev.map((a) => (a.id === reqId ? { ...a, status: 'denied' } : a)),
-                    );
-                    wsServiceRef.current?.denyModeSwitch(reqId);
-                  }}
-                />
-              ))}
-              {optionsProposals.filter((p) => p.status === 'pending').map((proposal) => (
-                <OptionsApprovalCard
-                  key={proposal.id}
-                  proposal={proposal}
-                  onSubmit={(reqId, optionIds) => {
-                    setOptionsProposals((prev) =>
-                      prev.map((p) =>
-                        p.id === reqId
-                          ? {
-                              ...p,
-                              status: 'chosen',
-                              chosen_option_id: optionIds[0],
-                              chosen_option_ids: optionIds,
-                            }
-                          : p,
-                      ),
-                    );
-                    wsServiceRef.current?.resolveProposedOptions(reqId, optionIds);
-                  }}
-                  onCustom={(reqId, answer) => {
-                    setOptionsProposals((prev) =>
-                      prev.map((p) =>
-                        p.id === reqId ? { ...p, status: 'custom', custom_answer: answer } : p,
-                      ),
-                    );
-                    wsServiceRef.current?.resolveProposedOptionsCustom(reqId, answer);
-                  }}
-                  onIgnore={(reqId) => {
-                    setOptionsProposals((prev) =>
-                      prev.map((p) => (p.id === reqId ? { ...p, status: 'ignored' } : p)),
-                    );
-                    wsServiceRef.current?.ignoreProposedOptions(reqId);
-                  }}
-                />
-              ))}
-              <div
-                className={`w-full flex flex-col rounded-[22px] border border-border/60 focus-within:ring-1 focus-within:ring-primary/40 shadow-[0_4px_24px_rgba(0,0,0,0.06)] relative ${
-                  isLoadingSession ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'
-                }`}
-              >
-                <VoicePanel
-                  open={voicePanelOpen}
-                  onClose={() => {
-                    // Collapse UI only — active realtime call keeps running in background.
-                    setVoicePanelOpen(false);
-                  }}
-                  onOpen={() => setVoicePanelOpen(true)}
-                  disabled={isLoadingSession}
-                  realtimeStatus={voiceRealtimeStatus}
-                  realtimeError={voiceRealtimeError}
-                  transcript={voiceTranscript}
-                  dictating={sttDictating}
-                  modelCards={modelCards}
-                  voiceBindings={voiceBindings}
-                  onVoiceBindingsChange={async (next) => {
-                    setVoiceBindings(next);
-                    wsServiceRef.current?.setVoiceConfig(next);
-                    // Also persist via admin config so Agent Manager stays in sync
-                    const dir = agentProfile?.dir_name || agentId;
-                    if (dir) {
-                      try {
-                        const cfg = await adminAPI.getConfig(dir);
-                        const full = { ...(cfg.config || {}) };
-                        full.voice = { ...(full.voice || {}), ...next };
-                        await adminAPI.updateConfig(dir, full);
-                      } catch (e) {
-                        console.warn('[AIChatPage] persist voice config failed', e);
-                      }
-                    }
-                  }}
-                  onSendVoiceMessage={async (blob, _durationSec) => {
-                    // Always STT into composer; user presses Send as normal text.
-                    try {
-                      setSttDictating(true);
-                      const file = await blobToWavFile(blob, `voice_${Date.now()}.wav`);
-                      const res = await agentSessionAPI.transcribe(agentId, file, {
-                        filename: file.name,
-                        language: 'zh',
-                      });
-                      const text = (res.text || '').trim();
-                      if (!text) {
-                        console.warn('[AIChatPage] STT returned empty text');
-                        return;
-                      }
-                      setInputText((prev) => {
-                        const cur = prev.trimEnd();
-                        if (!cur) return text;
-                        const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
-                        return `${prev}${joiner}${text}`;
-                      });
-                      setVoicePanelOpen(false);
-                      requestAnimationFrame(() => {
-                        inputRef.current?.focus();
-                        if (inputRef.current) {
-                          inputRef.current.style.height = 'auto';
-                          inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 200)}px`;
-                        }
-                      });
-                    } catch (err) {
-                      console.error('[AIChatPage] STT failed', err);
-                      throw err instanceof Error ? err : new Error(String(err));
-                    } finally {
-                      setSttDictating(false);
-                    }
-                  }}
-                  onRealtimeStart={(opts) => {
-                    setVoiceTranscript('');
-                    voiceCaptionRef.current = [];
-                    setVoiceRealtimeError('');
-                    setVoiceRealtimeStatus('connecting');
-                    writeVoiceCallPersist(agentId, opts?.forceAskAgent !== false);
-                    armVoiceConnectTimeout();
-                    wsServiceRef.current?.startVoiceRealtime({
-                      force_ask_agent: opts?.forceAskAgent !== false,
-                    });
-                  }}
-                  onRealtimeStop={() => {
-                    clearVoiceConnectTimer();
-                    clearVoiceCallPersist(agentId);
-                    wsServiceRef.current?.stopVoiceRealtime();
-                    setVoiceRealtimeStatus('idle');
-                    setVoiceRealtimeError('');
-                  }}
-                  onForceAskAgentChange={(force) => {
-                    wsServiceRef.current?.setVoiceRealtimeOptions({ force_ask_agent: force });
-                  }}
-                  onAudioChunk={(b64) => {
-                    wsServiceRef.current?.sendVoiceAudioIn(b64);
-                  }}
-                  onMouthpieceUtterance={(b64, sampleRate) => {
-                    wsServiceRef.current?.sendMouthpieceUtterance(b64, sampleRate);
-                  }}
-                  onCaptureStateChange={setVoiceCapture}
-                  captureApiRef={voiceCaptureApiRef}
-                />
-                {pendingSkill ? (
-                  <div className="px-3.5 pt-3 pb-0">
-                    <button
-                      type="button"
-                      onClick={() => setPendingSkill(null)}
-                      className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[13px] font-medium border-0 cursor-pointer"
-                      style={{ color: '#b08d57', background: 'color-mix(in srgb, #b08d57 12%, transparent)' }}
-                      title={`Remove skill /${pendingSkill.dir}`}
-                    >
-                      <span>/{pendingSkill.dir}</span>
-                      <X size={12} className="opacity-70" />
-                    </button>
-                  </div>
-                ) : null}
-                <textarea
-                  ref={inputRef}
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onPaste={handlePaste}
-                  placeholder={
-                    isLoadingSession
-                      ? sessionLoadingLabel
-                      : pendingSkill
-                        ? 'Add details for this skill…'
-                        : '输入消息... (输入 / 召唤 Skill)'
-                  }
-                  disabled={isLoadingSession}
-                  className={`w-full border-0 px-3.5 pt-3.5 pb-2 text-[15px] text-textMain placeholder-textMuted resize-none focus:outline-none min-h-[72px] max-h-[200px] bg-transparent leading-6 ${
-                    isLoadingSession ? 'text-textMuted cursor-not-allowed' : ''
-                  }`}
-                  rows={2}
-                  style={{ height: 'auto' }}
-                  onInput={(e) => {
-                    const target = e.target as HTMLTextAreaElement;
-                    target.style.height = 'auto';
-                    target.style.height = Math.min(target.scrollHeight, 200) + 'px';
-                  }}
-                />
-                {/* Bottom control bar: attach left · model + mic + send right */}
-                <div className="flex items-center gap-1.5 px-2.5 pb-2.5 pt-0.5">
-                  <div className="flex items-center gap-0.5 shrink-0">
-                    <SoloAttachMenu
-                      disabled={isLoadingSession}
-                      skills={availableSkills}
-                      skillsLoading={skillsLoading}
-                      onOpenSkills={loadSkillsIfNeeded}
-                      autoSpeechEnabled={autoSpeechEnabled}
-                      onToggleAutoSpeech={toggleAutoSpeech}
-                      onSelectSkill={(skill) => {
-                        const dir = (skill.dir || skill.name || '').trim();
-                        if (!dir) return;
-                        setPendingSkill({
-                          dir,
-                          name: skill.display_name || skill.name || dir,
-                        });
-                        requestAnimationFrame(() => inputRef.current?.focus());
-                      }}
-                      onUploadFiles={() => {
-                        const input = document.createElement('input');
-                        input.type = 'file';
-                        input.multiple = true;
-                        input.onchange = async (e) => {
-                          const files = (e.target as HTMLInputElement).files;
-                          if (!files) return;
-                          setIsUploading(true);
-                          try {
-                            const fileArray = Array.from(files) as File[];
-                            if (fileArray.length === 1) {
-                              const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
-                              if (resp.is_image) setImages((prev) => [...prev, resp.url]);
-                              else setAttachments((prev) => [...prev, resp]);
-                            } else {
-                              const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                              for (const f of resp.files) {
-                                if (f.is_image) setImages((prev) => [...prev, f.url]);
-                                else setAttachments((prev) => [...prev, f]);
-                              }
-                            }
-                          } catch (err: any) {
-                            console.error('[AIChatPage] File upload failed:', err);
-                          } finally {
-                            setIsUploading(false);
-                          }
-                        };
-                        input.click();
-                      }}
-                      onUploadFolder={() => {
-                        const input = document.createElement('input');
-                        input.type = 'file';
-                        (input as any).webkitdirectory = true;
-                        (input as any).directory = true;
-                        input.multiple = true;
-                        input.onchange = async (e) => {
-                          const files = (e.target as HTMLInputElement).files;
-                          if (!files || files.length === 0) return;
-                          setIsUploading(true);
-                          try {
-                            const fileArray = Array.from(files) as File[];
-                            const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                            for (const f of resp.files) {
-                              if (f.is_image) setImages((prev) => [...prev, f.url]);
-                              else setAttachments((prev) => [...prev, f]);
-                            }
-                          } catch (err: any) {
-                            console.error('[AIChatPage] Folder upload failed:', err);
-                          } finally {
-                            setIsUploading(false);
-                          }
-                        };
-                        input.click();
-                      }}
-                      onUploadImages={() => fileInputRef.current?.click()}
-                    />
-                    <button
-                      type="button"
-                      disabled={isLoadingSession}
-                      onClick={() => {
-                        const input = document.createElement('input');
-                        input.type = 'file';
-                        input.multiple = true;
-                        input.onchange = async (e) => {
-                          const files = (e.target as HTMLInputElement).files;
-                          if (!files) return;
-                          setIsUploading(true);
-                          try {
-                            const fileArray = Array.from(files) as File[];
-                            if (fileArray.length === 1) {
-                              const resp = await agentSessionAPI.uploadFile(agentId, fileArray[0]);
-                              if (resp.is_image) setImages((prev) => [...prev, resp.url]);
-                              else setAttachments((prev) => [...prev, resp]);
-                            } else {
-                              const resp = await agentSessionAPI.uploadFiles(agentId, fileArray);
-                              for (const f of resp.files) {
-                                if (f.is_image) setImages((prev) => [...prev, f.url]);
-                                else setAttachments((prev) => [...prev, f]);
-                              }
-                            }
-                          } catch (err: any) {
-                            console.error('[AIChatPage] File upload failed:', err);
-                          } finally {
-                            setIsUploading(false);
-                          }
-                        };
-                        input.click();
-                      }}
-                      className="w-7 h-7 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors border-0 bg-transparent cursor-pointer disabled:opacity-50"
-                      title="上传文件"
-                    >
-                      <FileText size={16} strokeWidth={1.75} />
-                    </button>
-                    <ModePicker
-                      mode={agentMode}
-                      disabled={isLoadingSession}
-                      onSelect={(mode) => {
-                        setAgentMode(mode);
-                        wsServiceRef.current?.setAgentMode(mode);
-                      }}
-                    />
-                  </div>
-
-                  <div className="flex-1 min-w-0" />
-
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <SoloModelPicker
-                      cards={modelCards}
-                      currentCardName={currentCardName}
-                      modelName={modelName}
-                      fallbackLabel={agentProfile?.agent_name || agentId}
-                      switching={switchingModel}
-                      disabled={isLoadingSession}
-                      onSelect={(cardName) => {
-                        setSwitchingModel(true);
-                        wsServiceRef.current?.switchModel(cardName);
-                      }}
-                      onAddModels={() => {
-                        window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
-                      }}
-                    />
-                    {(() => {
-                      const selected =
-                        (currentCardName && modelCards.find((c) => c.name === currentCardName)) ||
-                        (modelName && modelCards.find((c) => c.model_name === modelName)) ||
-                        null;
-                      if (!selected?.is_think) return null;
-                      const deepseekish = /deepseek/i.test(
-                        `${selected.model_name || ''} ${selected.base_url || ''} ${selected.name || ''}`,
-                      );
-                      return (
-                        <EffortPicker
-                          effort={reasoningEffort}
-                          deepseekStyle={deepseekish}
-                          disabled={isLoadingSession || switchingModel}
-                          onSelect={(effort) => {
-                            setReasoningEffort(effort);
-                            wsServiceRef.current?.setReasoningEffort(effort);
-                          }}
-                        />
-                      );
-                    })()}
-                    {voiceCapture.recording || sttDictating ? (
-                      <VoiceRecordPill
-                        durationSec={voiceCapture.durationSec}
-                        level={voiceCapture.level}
-                        dictating={sttDictating}
-                        disabled={isLoadingSession}
-                        onClick={() => {
-                          if (sttDictating) return;
-                          voiceCaptureApiRef.current?.stopRecord();
-                        }}
-                        title={
-                          sttDictating
-                            ? '正在转写…'
-                            : '点击停止并转写'
-                        }
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={isLoadingSession}
-                        onClick={() => setVoicePanelOpen((v) => !v)}
-                        className={`w-8 h-8 rounded-full flex items-center justify-center relative border-0 cursor-pointer transition-colors ${
-                          voicePanelOpen
-                            ? 'bg-primary/20 text-primary'
-                            : voiceRealtimeStatus === 'connected' ||
-                                voiceRealtimeStatus === 'tool_running' ||
-                                voiceRealtimeStatus === 'connecting'
-                              ? 'bg-emerald-500/20 text-emerald-500'
-                              : 'text-textMuted hover:text-textMain hover:bg-black/[0.05] dark:hover:bg-white/[0.08] bg-transparent'
-                        }`}
-                        title={
-                          voiceRealtimeStatus === 'connected' ||
-                          voiceRealtimeStatus === 'tool_running' ||
-                          voiceRealtimeStatus === 'connecting'
-                            ? '实时通话进行中（点击展开/折叠）'
-                            : '语音消息 / 实时通话'
-                        }
-                      >
-                        <Mic size={18} strokeWidth={1.75} />
-                        {(voiceRealtimeStatus === 'connected' ||
-                          voiceRealtimeStatus === 'tool_running' ||
-                          voiceRealtimeStatus === 'connecting') && (
-                          <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                        )}
-                      </button>
-                    )}
-                    {isStreaming || agentStatus === 'working' || agentStatus === 'thinking' ? (
-                      <>
-                        <button
-                          onClick={handleSend}
-                          disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
-                          className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                          title={t('aiChat.queueMessage')}
-                        >
-                          <Send size={14} className="text-white" />
-                        </button>
-                        <button
-                          onClick={handleStop}
-                          className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
-                          title="Stop"
-                        >
-                          <Square size={14} className="text-white" />
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={handleSend}
-                        disabled={isLoadingSession || (!inputText.trim() && images.length === 0 && attachments.length === 0 && !pendingSkill)}
-                        className="w-8 h-8 rounded-full bg-primary hover:bg-primary/90 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                        title="Send"
-                      >
-                        <Send size={14} className="text-white" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-              {/* Status row: Folder | Token ring (model moved into composer) */}
-              <SoloContextFooter
-                cwd={agentCwd || defaultCwd}
-                tokenStats={tokenStats}
-                locked={cwdLocked}
-                onViewReport={() => setShowContextViewer(true)}
-                onSelectCwd={async (pickedPath) => {
-                  try {
-                    const dirName = agentProfile?.dir_name || agentId;
-                    await adminAPI.setWorkingDirectory(dirName, pickedPath);
-                    pushCwdRecent(pickedPath);
-                    setAgentCwd(pickedPath);
-                    pendingProjectPathRef.current = pickedPath;
-                  } catch (err: any) {
-                    console.error('[AIChatPage] Failed to set working directory:', err);
-                    alert(`Failed to set working directory: ${err.message || err}`);
-                    throw err;
-                  }
-                }}
-              />
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={handleImageUpload}
-              className="hidden"
-            />
-          </div>
-        </div>
       </div>
+          )}
+        />
+        </div>
+      ) : (
+        <div className="flex-1 min-w-0 flex items-center justify-center text-[12px] text-textMuted px-4 text-center">
+          打开或创建一个工作区以开始
+        </div>
+      )}
 
-      <RestoreCheckpointModal
-        open={!!restoreConfirm}
-        busy={changesBusy}
-        onCancel={() => {
-          if (!changesBusy) setRestoreConfirm(null);
-        }}
-        onConfirm={handleWithdrawUserMessage}
-      />
-
+      <div className="flex-shrink-0 h-full min-w-[200px]">
       <ProjectFilesPanel
         isOpen={filesPanelOpen}
         onClose={() => {
@@ -6275,7 +7037,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
         }}
         agentId={agentProfile?.dir_name || agentId}
-        rootPath={(agentCwd || defaultCwd || '').trim()}
+        rootPath={(activeWorkspace?.rootPath || agentCwd || defaultCwd || '').trim()}
         openRequest={fileOpenRequest}
         width={filesPanelWidth}
         onWidthChange={(w) => {
@@ -6289,6 +7051,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         focusChangedNonce={focusChangedNonce}
         liveChanges={filesLiveChanges}
         onSessionChanges={onSessionChangesStable}
+        treeOnly
+        onOpenFile={handleOpenFileInTab}
+      />
+      </div>
+      </div>
+
+      <RestoreCheckpointModal
+        open={!!restoreConfirm}
+        busy={changesBusy}
+        onCancel={() => {
+          if (!changesBusy) setRestoreConfirm(null);
+        }}
+        onConfirm={handleWithdrawUserMessage}
+      />
+
+      <CloseWorkspaceModal
+        open={!!closeWorkspaceTarget}
+        workspaceName={
+          closeWorkspaceTarget ? workspaceDisplayName(closeWorkspaceTarget) : ''
+        }
+        onCancel={() => setCloseWorkspaceTarget(null)}
+        onConfirm={handleConfirmCloseWorkspace}
+      />
+
+      <CreateWorkspaceModal
+        open={createWorkspaceOpen}
+        onCancel={() => setCreateWorkspaceOpen(false)}
+        onCreate={handleCreateWorkspace}
       />
     </div>
   );

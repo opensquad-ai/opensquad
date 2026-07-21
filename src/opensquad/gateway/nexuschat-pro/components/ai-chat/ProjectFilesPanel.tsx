@@ -178,6 +178,10 @@ interface ProjectFilesPanelProps {
     deletions: number;
     count: number;
   }) => void;
+  /** Tree-only mode: no inline preview; open files via onOpenFile. */
+  treeOnly?: boolean;
+  /** Called when user opens a file (treeOnly or when provided). */
+  onOpenFile?: (relPath: string) => void;
 }
 
 const WIDTH_MIN = 320;
@@ -421,6 +425,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   focusChangedNonce,
   liveChanges,
   onSessionChanges,
+  treeOnly = false,
+  onOpenFile,
 }) => {
   const [browsePath, setBrowsePath] = useState('');
   const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([]);
@@ -1134,6 +1140,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const openFile = useCallback(
     async (relPath: string, opts?: { force?: boolean }) => {
       if (!agentId || !relPath || !rootPath) return;
+      if (treeOnly && onOpenFile) {
+        setActiveFile(relPath);
+        setBrowsePath(parentRel(relPath));
+        expandToPath(relPath);
+        onOpenFile(relPath);
+        return;
+      }
       setShowPreview(true);
       setDiffLines(null);
       setDiffMeta(null);
@@ -1216,7 +1229,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setFileLoading(false);
       }
     },
-    [agentId, rootPath, expandToPath, prefetchFileContent],
+    [agentId, rootPath, expandToPath, prefetchFileContent, treeOnly, onOpenFile],
   );
 
   /** Show red tombstone preview for files deleted by withdraw/revert. */
@@ -1242,6 +1255,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   /** All-files: dirty (session-changed, not kept) → same red/green diff as 变动文件. */
   const openFileOrDiff = useCallback(
     async (relPath: string) => {
+      if (treeOnly && onOpenFile) {
+        const norm = (relPath || '').replace(/\\/g, '/');
+        setActiveFile(norm);
+        expandToPath(norm);
+        onOpenFile(norm);
+        return;
+      }
       const norm = (relPath || '').replace(/\\/g, '/');
       const ch = changedByPath.get(norm) || changedByPath.get(relPath);
       if (ch && (ch.missing || ch.status === 'D')) {
@@ -1254,7 +1274,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       }
       await openFile(relPath, { force: true });
     },
-    [changedByPath, openDiff, openFile, openUnavailable],
+    [changedByPath, openDiff, openFile, openUnavailable, treeOnly, onOpenFile, expandToPath],
   );
 
   // Reset when root / open changes — load full tree once
@@ -1819,7 +1839,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     );
   };
 
-  const useSplitPreview = showPreview && tab !== 'changed';
+  const useSplitPreview = !treeOnly && showPreview && tab !== 'changed';
 
   const listPane = (
     <div
@@ -2249,7 +2269,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   return (
     <div
       ref={panelRef}
-      className="relative h-full border-l border-border bg-[#f8f8f8] dark:bg-bgLight flex flex-col flex-shrink-0"
+      className="relative h-full border-l border-border bg-rail flex flex-col flex-shrink-0 min-w-[200px]"
       style={{ width }}
     >
       {/* Left drag handle (widen by dragging left) */}
@@ -2319,7 +2339,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <button
               type="button"
               onClick={() => setShowPreview((v) => !v)}
-              className="p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10"
+              className={`p-1.5 rounded-md hover:bg-black/[0.05] dark:hover:bg-white/10 ${
+                treeOnly ? 'hidden' : ''
+              }`}
               title={showPreview ? '隐藏预览' : '显示预览'}
             >
               {showPreview ? (
