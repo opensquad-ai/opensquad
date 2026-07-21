@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  RefreshCw, Plus, UserCircle, Users2, Star, Search,
+  RefreshCw, Plus, UserCircle, Users2, Star, Search, ArrowLeft,
   X, Save, Trash2, Users, Check, Loader2, AlertCircle, FileText, BookOpen,
   Eye, Pencil, Menu, LayoutGrid, List,
 } from 'lucide-react';
@@ -301,6 +301,15 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
       <div className={`${adminHeaderBar} justify-between`}>
         <div className="flex items-center gap-2 md:gap-2.5 flex-1 min-w-0">
           <button
+            type="button"
+            onClick={onBack}
+            className={adminHeaderNavBtn}
+            title={t('common.back', { defaultValue: 'Back' })}
+            aria-label={t('common.back', { defaultValue: 'Back' })}
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}
             aria-label="Navigation menu"
@@ -362,12 +371,6 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
             className={adminHeaderGhostBtn}
           >
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          </button>
-          <button
-            onClick={onBack}
-            className={`${adminHeaderGhostBtn} px-2.5 text-xs font-medium`}
-          >
-            Back
           </button>
         </div>
       </div>

@@ -825,7 +825,14 @@
       "advanced": "Advanced",
       "about": "About"
     },
+    "navGroup": {
+      "app": "Apps"
+    },
     "general": {
+      "language": {
+        "title": "Language",
+        "hint": "Switch the UI language. Takes effect immediately."
+      },
       "workflowExpand": {
         "title": "Workflow detail level",
         "hint": "Controls how far thinking, plan, and tool-call folds auto-expand in chat. Manual expand/collapse is never overridden.",

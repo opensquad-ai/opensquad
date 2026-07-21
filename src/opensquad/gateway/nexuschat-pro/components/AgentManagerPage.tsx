@@ -26,6 +26,8 @@ import {
 interface AgentManagerPageProps {
   onBack: () => void;
   onChat?: (agentId: string) => void;
+  /** Jump to group chat (business switch outside settings). */
+  onOpenGroupChat?: () => void;
 }
 
 const LAYOUT_KEY = 'agent_manager_layout';
@@ -146,7 +148,7 @@ function fmtTokens(n: number): string {
 
 // ---- 主组件 ----
 
-export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat }) => {
+export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat }) => {
   const { t, i18n } = useTranslation();
   const [agents, setAgents] = useState<AdminAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1339,12 +1341,32 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       <div className={`${adminHeaderBar} justify-between`}>
         <div className="flex items-center gap-2 md:gap-2.5">
           <button
+            type="button"
+            onClick={onBack}
+            className={adminHeaderNavBtn}
+            title={t('common.back', { defaultValue: 'Back' })}
+            aria-label={t('common.back', { defaultValue: 'Back' })}
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}
-            aria-label="Navigation menu"
+            aria-label={t('nav.settings')}
           >
             <Menu size={16} />
           </button>
+          {onOpenGroupChat ? (
+            <button
+              type="button"
+              onClick={onOpenGroupChat}
+              className={`${adminHeaderGhostBtn} gap-1.5 px-2.5 text-xs font-medium`}
+              title={t('nav.chats')}
+            >
+              <MessageSquare size={14} />
+              <span className="hidden sm:inline">{t('nav.chats')}</span>
+            </button>
+          ) : null}
           <div className={`hidden md:flex ${adminHeaderIconBox}`}>
             <LayoutGrid size={14} className={adminHeaderIcon} />
           </div>
@@ -1392,12 +1414,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             className={adminHeaderGhostBtn}
           >
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          </button>
-          <button
-            onClick={onBack}
-            className={`${adminHeaderGhostBtn} px-2.5 text-xs font-medium`}
-          >
-            Back
           </button>
         </div>
       </div>

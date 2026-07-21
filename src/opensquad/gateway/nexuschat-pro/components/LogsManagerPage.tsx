@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   FileText, RefreshCw, Loader2, ChevronDown, Search, X,
   Activity, Server, Bot, AlertTriangle, AlertCircle, Info, Bug,
-  Download, Filter, Menu
+  Download, Filter, Menu, ArrowLeft
 } from 'lucide-react';
 import { adminAPI, logsAPI, AdminAgent, LogFileInfo } from '../services/api';
 import {
@@ -312,6 +312,15 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
       {/* ── Header ── */}
       <div className={`${adminHeaderBar} justify-between overflow-x-auto whitespace-nowrap no-scrollbar`}>
         <div className="flex items-center gap-2 md:gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={onBack}
+            className={adminHeaderNavBtn}
+            title="Back"
+            aria-label="Back"
+          >
+            <ArrowLeft size={16} />
+          </button>
           <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}

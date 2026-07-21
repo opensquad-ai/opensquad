@@ -4,7 +4,7 @@
  * 插件 Tab 直接渲染原 PluginMarketPage，其余 Tab 使用 GenericMarketPage
  */
 import React, { useState } from 'react';
-import { Package, Wrench, Users, Network, Menu } from 'lucide-react';
+import { Package, Wrench, Users, Network, Menu, ArrowLeft } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { PluginMarketPage } from './PluginMarketPage';
@@ -77,12 +77,23 @@ export default function MarketHubPage({ onBack }: Props) {
     <div className="flex flex-col w-full h-full bg-gray-50 dark:bg-gray-900 overflow-hidden">
       {/* Tab bar */}
       <div className="flex-shrink-0 flex items-center gap-1 px-4 pt-2 md:pt-3 pb-0 bg-panel border-b border-border overflow-x-auto whitespace-nowrap no-scrollbar">
+        {onBack ? (
+          <button
+            type="button"
+            onClick={onBack}
+            className="p-1.5 md:p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+            aria-label={t('common.back', { defaultValue: 'Back' })}
+            title={t('common.back', { defaultValue: 'Back' })}
+          >
+            <ArrowLeft size={18} />
+          </button>
+        ) : null}
         <button
           onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
           className="p-1.5 md:p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors md:hidden shrink-0"
           aria-label="Navigation menu"
         >
-          <Menu size={18} md:size={20} />
+          <Menu size={18} />
         </button>
         {TABS.map(tab => (
           <button

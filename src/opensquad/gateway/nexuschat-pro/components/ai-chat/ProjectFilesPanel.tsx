@@ -1933,7 +1933,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       ) : null}
 
       <div
-        className="flex-1 min-h-0 mx-2 mb-2 overflow-y-auto py-1 os-depth-nest"
+        className="flex-1 min-h-0 overflow-y-auto py-1 os-depth-nest os-depth-nest--flush"
         data-fs-empty="1"
         onContextMenu={(e) => {
           if ((e.target as HTMLElement).dataset?.fsEmpty === '1') {
@@ -1971,7 +1971,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 return (
                   <div key={`ch:${e.path}`} className="border-b border-border/40 last:border-b-0">
                     <div
-                      className={`group os-interactive flex items-center gap-1 px-1.5 py-[5px] text-[11px] rounded-md mx-0.5 ${
+                      className={`group os-interactive flex items-center gap-1 px-2 py-[5px] text-[11px] rounded-none ${
                         isOpenRow
                           ? 'is-active text-textMuted'
                           : 'text-textMuted/70'
@@ -2170,12 +2170,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 return (
                   <div
                     key={`${e.type}:${e.path}`}
-                    className={`group os-interactive relative flex items-center gap-0.5 pr-1 py-[4px] text-[11px] rounded-md mx-0.5 ${
+                    className={`group os-interactive relative flex items-center gap-0.5 pr-2 py-[4px] text-[11px] rounded-none ${
                       selected
                         ? 'is-active text-textMuted'
                         : 'text-textMuted/70'
                     } ${isMissing ? 'opacity-80' : ''}`}
-                    style={{ paddingLeft: 6 + e.depth * 12 }}
+                    style={{ paddingLeft: 8 + e.depth * 12 }}
                     onMouseEnter={() => {
                       if (e.type !== 'file' || isMissing) return;
                       void prefetchFileContent(e.path);

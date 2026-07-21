@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } fr
 
 import { MessageSquare, Sun, Moon, X, Camera, Save, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Sidebar } from './components/Sidebar';
 import { ChatList } from './components/ChatList';
 import { ChatWindow } from './components/ChatWindow';
 import { RightPanel } from './components/RightPanel';
@@ -10,12 +9,14 @@ import { AuthScreen } from './components/AuthScreen';
 import { LanguageSelectScreen } from './components/LanguageSelectScreen';
 import { ElectronShell } from './components/ElectronShell';
 import { DesktopUpdateOverlay } from './components/DesktopUpdateOverlay';
+import { SoftOverlay } from './components/SoftOverlay';
 import { ChatState, Message, MessageType, Attachment, Group, User } from './types';
 import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
 import { AvatarImg } from './components/AvatarImg';
 import { setLanguage } from './i18n';
+import { isAppModalView } from './utils/appNavItems';
 
 // First-launch wizard — driven by the BACKEND, not localStorage.
 //
@@ -58,6 +59,8 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('nexus_view') as any;
     // 兼容旧值 'agent' → 重定向到 'admin'
     if (saved === 'agent') return 'admin';
+    // 应用类页面改为弹窗，刷新时不要把主视图卡在全屏管理页
+    if (saved && isAppModalView(saved)) return 'chat';
     return saved || 'chat';
   });
   const [selectedAgentId, setSelectedAgentId] = useState<string>(() => {
@@ -111,19 +114,27 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleSwitchView = (e: any) => {
-      setCurrentView(e.detail);
-      setIsMobileSidebarOpen(false);
+      const view = e.detail;
+      if (typeof view !== 'string' || !view.trim()) return;
+      if (view === 'collab-board') {
+        setIsCollabBoardOpen(true);
+        return;
+      }
+      if (isAppModalView(view)) {
+        setAppModalView(view);
+        return;
+      }
+      setCurrentView(view);
     };
     const handleOpenAgentChat = (e: any) => {
       const agentId = e?.detail?.agentId;
       if (typeof agentId === 'string' && agentId.trim()) {
         openAgentChat(agentId);
       }
-      setIsMobileSidebarOpen(false);
     };
     window.addEventListener('switchView', handleSwitchView);
     window.addEventListener('openAgentChat', handleOpenAgentChat);
-    const handleOpenMobileNav = () => setIsMobileSidebarOpen(true);
+    const handleOpenMobileNav = () => setIsSettingsOpen(true);
     window.addEventListener('openMobileNav', handleOpenMobileNav);
     return () => {
       window.removeEventListener('switchView', handleSwitchView);
@@ -145,18 +156,9 @@ const App: React.FC = () => {
   //   3. 每批间隔 BATCH_DELAY ms，避免一次性打爆后端
   //   4. 已挂载的页面自动跳过
   //
-  // 加载顺序：agent管理 → 插件 → skill → mcp → 模型 → 角色/协作 → 日志 → 各商店
+  // 加载顺序：仅预挂载仍全屏的 Agent 管理（其它应用页改为弹窗按需加载）
   const PRELOAD_ORDER = [
     'admin',   // agent 管理面板
-    'plugins', // 插件管理
-    'services', // 服务管理
-    'skills',  // Skill 管理
-    'mcp',     // MCP 管理
-    'models',  // 模型管理（需要 model-presets 刷新，排在前几批末尾留出时间）
-    'roles',   // 角色卡 & 协作卡
-    'collab-board', // 协作看板
-    'logs',    // 日志
-    'market',  // 插件/协作卡/角色卡商店（最后加载）
   ] as const;
   const BATCH_SIZE  = 3;   // 每批并发挂载数量
   const BATCH_DELAY = 2000; // 批次间隔 ms（拉长，避免和群聊争 DB 连接）
@@ -207,7 +209,9 @@ const App: React.FC = () => {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isCollabBoardOpen, setIsCollabBoardOpen] = useState(false);
+  /** Settings「应用」入口：大弹窗（非全屏占页） */
+  const [appModalView, setAppModalView] = useState<string | null>(null);
 
   useEffect(() => {
     const openTheme = () => {
@@ -943,45 +947,6 @@ const App: React.FC = () => {
   return (
     <ElectronShell className="transition-colors duration-300">
     <div className={`h-full w-full flex overflow-hidden bg-stage`}>
-      <div className="hidden md:flex shrink-0 h-full py-2 pl-2">
-        <div className="h-full rounded-xl border border-border/70 overflow-hidden">
-        <Sidebar
-          currentUser={currentUser}
-          onUpdateUser={handleUpdateUser}
-          onLogout={handleLogout}
-          theme="default"
-          onToggleTheme={() => {}}
-          onOpenProfile={handleOpenProfile}
-          onOpenSettings={() => setIsSettingsOpen(true)}
-          currentView={currentView}
-        />
-        </div>
-      </div>
-
-      {/* Mobile: sidebar drawer overlay */}
-      {isMobileSidebarOpen && (
-        <div className="fixed inset-0 z-[55] md:hidden flex mobile-safe-fixed">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={() => setIsMobileSidebarOpen(false)}
-          />
-          {/* Sidebar panel */}
-          <div className="relative z-10 w-[220px] max-w-[85vw] h-full">
-            <Sidebar
-              currentUser={currentUser}
-
-              onUpdateUser={handleUpdateUser}
-              onLogout={handleLogout}
-              theme="default"
-              onToggleTheme={() => {}}
-              onOpenProfile={() => { setIsMobileSidebarOpen(false); handleOpenProfile(); }}
-              onOpenSettings={() => { setIsMobileSidebarOpen(false); setIsSettingsOpen(true); }}
-              currentView={currentView}
-            />
-          </div>
-        </div>
-      )}
 
       {/* === Group Chat View === */}
       <div style={{ display: currentView === 'chat' ? 'contents' : 'none' }}>
@@ -1074,6 +1039,8 @@ const App: React.FC = () => {
               onLogout={handleLogout}
               onSwitchView={setCurrentView}
               onPrefetchGroup={handlePrefetchGroup}
+              onOpenSettings={() => setIsSettingsOpen(true)}
+              onOpenCollabBoard={() => setIsCollabBoardOpen(true)}
             />
           </div>
           <div className={`${!state.activeGroupId ? 'hidden md:flex' : 'flex'} flex-1 h-full min-w-0`}>
@@ -1240,118 +1207,17 @@ const App: React.FC = () => {
           )}
       </div>
 
-      {/* === Agent Manager View === */}
+      {/* === Agent Manager View（业务全屏；设置「应用」项改为弹窗） === */}
       {mountedViews.has('admin') && (
         <div style={{ display: currentView === 'admin' ? 'contents' : 'none' }}>
           <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
             <AgentManagerPage
               onBack={() => setCurrentView('chat')}
               onChat={openAgentChat}
+              onOpenGroupChat={() => setCurrentView('chat')}
             />
           </Suspense>
         </div>
-      )}
-
-      {/* === Plugin Manager View === */}
-      {mountedViews.has('plugins') && (
-        <div style={{ display: currentView === 'plugins' ? 'contents' : 'none' }}>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
-            <PluginManagerPage onBack={() => setCurrentView('admin')} />
-          </Suspense>
-        </div>
-      )}
-
-      {/* === Service Manager View === */}
-      {mountedViews.has('services') && (
-        <div style={{ display: currentView === 'services' ? 'contents' : 'none' }}>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
-            <ServiceManagerPage onBack={() => setCurrentView('admin')} />
-          </Suspense>
-        </div>
-      )}
-
-      {/* === MCP Manager View === */}
-      {mountedViews.has('mcp') && (
-        <div style={{ display: currentView === 'mcp' ? 'contents' : 'none' }}>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
-            <McpManagerPage onBack={() => setCurrentView('admin')} />
-          </Suspense>
-        </div>
-      )}
-
-      {/* === Skill Manager View === */}
-      {mountedViews.has('skills') && (
-        <div style={{ display: currentView === 'skills' ? 'contents' : 'none' }}>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
-            <SkillManagerPage onBack={() => setCurrentView('admin')} />
-          </Suspense>
-        </div>
-      )}
-
-      {/* === Roles & Collab Manager View === */}
-      {mountedViews.has('roles') && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: currentView === 'roles' ? undefined : 'none' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <RolesPage onBack={() => setCurrentView('admin')} />
-            </Suspense>
-          </div>
-      )}
-
-      {/* === Model Cards View === */}
-      {mountedViews.has('models') && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: currentView === 'models' ? undefined : 'none' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <ModelsPage onBack={() => setCurrentView('admin')} />
-            </Suspense>
-          </div>
-      )}
-
-      {/* === Collaboration Board View === */}
-      {mountedViews.has('collab-board') && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: currentView === 'collab-board' ? 'flex' : 'none', flexDirection: 'column' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <CollabBoardPage onBack={() => setCurrentView('admin')} />
-            </Suspense>
-          </div>
-      )}
-
-      {/* === Logs View === */}
-      {mountedViews.has('logs') && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: currentView === 'logs' ? 'flex' : 'none', flexDirection: 'column' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <LogsManagerPage onBack={() => setCurrentView('admin')} />
-            </Suspense>
-          </div>
-      )}
-
-      {/* === Plugin Market View === */}
-      {mountedViews.has('market') && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: currentView === 'market' ? 'flex' : 'none' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <MarketHubPage />
-            </Suspense>
-          </div>
-      )}
-
-      {/* === Dynamic Plugin Views === */}
-      {!['chat', 'ai-chat', 'admin', 'plugins', 'services', 'mcp', 'skills', 'roles', 'collab-board', 'models', 'logs', 'market'].includes(currentView) && mountedViews.has(currentView) && (
-          <div className="flex-1 min-w-0 h-full overflow-hidden" style={{ display: 'flex', flexDirection: 'column' }}>
-            <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
-            }>
-            <PluginViewContainer viewKey={currentView} onBack={() => setCurrentView('plugins')} />
-            </Suspense>
-          </div>
       )}
 
       {/* === AI Chat View (keep-alive: 最多 3 个 agent，切换时隐藏而非卸载) === */}
@@ -1368,6 +1234,8 @@ const App: React.FC = () => {
               agentId={agentId}
               onBack={() => setCurrentView('admin')}
               currentUser={currentUser}
+              onOpenProfile={handleOpenProfile}
+              onOpenSettings={() => setIsSettingsOpen(true)}
             />
             </Suspense>
           </div>
@@ -1451,6 +1319,70 @@ const App: React.FC = () => {
           }}
         />
       </Suspense>
+
+      <SoftOverlay
+        open={!!appModalView}
+        onBackdrop={() => setAppModalView(null)}
+        zClass="z-[110]"
+        panelClassName="w-full max-w-6xl h-[min(88vh,900px)]"
+      >
+        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-textMuted">{t('common.loading')}</div>
+            }
+          >
+            {appModalView === 'plugins' ? (
+              <PluginManagerPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'services' ? (
+              <ServiceManagerPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'mcp' ? (
+              <McpManagerPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'skills' ? (
+              <SkillManagerPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'roles' ? (
+              <RolesPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'models' ? (
+              <ModelsPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'logs' ? (
+              <LogsManagerPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView === 'market' ? (
+              <MarketHubPage onBack={() => setAppModalView(null)} />
+            ) : null}
+            {appModalView && appModalView.includes(':') ? (
+              <PluginViewContainer
+                viewKey={appModalView}
+                onBack={() => setAppModalView(null)}
+              />
+            ) : null}
+          </Suspense>
+        </div>
+      </SoftOverlay>
+
+      <SoftOverlay
+        open={isCollabBoardOpen}
+        onBackdrop={() => setIsCollabBoardOpen(false)}
+        zClass="z-[110]"
+        panelClassName="w-full max-w-6xl h-[min(88vh,900px)]"
+      >
+        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-textMuted">{t('common.loading')}</div>
+            }
+          >
+            <CollabBoardPage onBack={() => setIsCollabBoardOpen(false)} />
+          </Suspense>
+        </div>
+      </SoftOverlay>
+
       <DesktopUpdateOverlay />
     </div>
     </ElectronShell>

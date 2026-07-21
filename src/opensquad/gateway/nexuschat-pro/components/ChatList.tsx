@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Search, Plus, AtSign, Volume2, VolumeX, X, Camera, Save, LogOut, Palette, Mail, Bell, Send, User as UserIcon, Paperclip, Image as ImageIcon, FileText, XCircle, Download, ZoomIn, ChevronLeft, ChevronRight, BotMessageSquare, Menu } from 'lucide-react';
+import { Search, Plus, AtSign, Volume2, VolumeX, X, Camera, Save, LogOut, Palette, Mail, Bell, Send, User as UserIcon, Paperclip, Image as ImageIcon, FileText, XCircle, Download, ZoomIn, ChevronLeft, ChevronRight, BotMessageSquare, Menu, LayoutGrid, KanbanSquare } from 'lucide-react';
 import { Group, User } from '../types';
 import { uploadAPI, directMessageAPI } from '../services/api';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { formatTime } from '../utils/time';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { parse } from 'marked';
+import { openThemeSettings } from '../utils/themeStore';
+import { AccountRailFooter } from './AccountRailFooter';
+import { navigateAppView } from '../utils/appNavItems';
 
 interface ChatListProps {
   groups: Group[];
@@ -23,15 +26,13 @@ interface ChatListProps {
   theme?: string;
   onToggleTheme?: () => void;
   onSwitchView?: (view: 'chat' | 'admin') => void;
-  // Hover-prefetch: called when the user hovers/taps a group row, giving App
-  // a chance to load the group's messages in the background before the user
-  // actually clicks. By the time the click happens, the messages are already
-  // in state and the new ChatWindow renders instantly with no flash.
   onPrefetchGroup?: (id: string) => void;
+  onOpenSettings?: () => void;
+  onOpenCollabBoard?: () => void;
 }
 
 export const ChatList: React.FC<ChatListProps> = ({
-    groups, activeGroupId, onSelectGroup, onCreateGroup, onJoinGroup, onToggleGroupSound, lastMessages, currentUser, onUpdateUser, onLogout, theme, onToggleTheme, onSwitchView, onPrefetchGroup
+    groups, activeGroupId, onSelectGroup, onCreateGroup, onJoinGroup, onToggleGroupSound, lastMessages, currentUser, onUpdateUser, onLogout, onSwitchView, onPrefetchGroup, onOpenSettings, onOpenCollabBoard
 }) => {
   const { t } = useTranslation();
   const [showCreateInput, setShowCreateInput] = useState(false);
@@ -47,10 +48,6 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [editAvatar, setEditAvatar] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Theme Menu State
-  const [showThemeMenu, setShowThemeMenu] = useState(false);
-  const themeMenuRef = useRef<HTMLDivElement>(null);
 
   // Notification State
   const [showNotifications, setShowNotifications] = useState(false);
@@ -288,50 +285,6 @@ export const ChatList: React.FC<ChatListProps> = ({
     }
   }, [showNotifications]);
 
-  // Theme list - same as Sidebar
-  const themeList = [
-    { id: 'default', name: 'Original Light' },
-    { id: 'warm', name: 'Warm Coral' },
-    { id: 'coffee', name: 'Coffee Cream' },
-    { id: 'coffee-dark', name: 'Coffee Dark' },
-    { id: 'red', name: 'Rose' },
-    { id: 'orange', name: 'Amber' },
-    { id: 'pink', name: 'Blush' },
-    { id: 'yellow', name: 'Sunshine' },
-    { id: 'green', name: 'Sage' },
-    { id: 'cyan', name: 'Mint' },
-    { id: 'blue', name: 'Sky' },
-    { id: 'purple', name: 'Lavender' },
-    { id: 'midnight', name: 'Midnight' },
-    { id: 'opencode', name: 'Dark' },
-    { id: 'tokyonight', name: 'Tokyo Night' },
-    { id: 'catppuccin', name: 'Catppuccin' },
-    { id: 'catppuccin-macchiato', name: 'Catppuccin Macchiato' },
-    { id: 'nord', name: 'Nord' },
-    { id: 'onedark', name: 'One Dark' },
-    { id: 'everforest', name: 'Everforest' },
-    { id: 'gruvbox', name: 'Gruvbox' },
-    { id: 'kanagawa', name: 'Kanagawa' },
-    { id: 'sakura', name: 'Sakura' },
-    { id: 'dracula', name: 'Dracula' },
-    { id: 'ayu', name: 'Ayu Mirage' },
-    { id: 'monokai', name: 'Monokai' },
-    { id: 'matrix', name: 'Matrix' }
-  ];
-
-  // Close theme menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (themeMenuRef.current && !themeMenuRef.current.contains(e.target as Node)) {
-        setShowThemeMenu(false);
-      }
-    };
-    if (showThemeMenu) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [showThemeMenu]);
-
   useEffect(() => {
       const handleClickOutside = (e: MouseEvent) => {
           if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -433,13 +386,13 @@ export const ChatList: React.FC<ChatListProps> = ({
                     <button
                         onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
                         className="p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors md:hidden shrink-0"
-                        aria-label="Navigation menu"
+                        aria-label={t('nav.settings')}
                     >
                         <Menu size={20} />
                     </button>
                     <button
                         onClick={() => onSwitchView?.('admin')}
-                        className="p-2 rounded-full transition-colors bg-primary/10 text-primary hover:bg-primary/20 md:hidden shrink-0"
+                        className="os-icon-btn md:hidden shrink-0 text-primary"
                         title={t('chatList.aiAgent')}
                     >
                         <BotMessageSquare size={20} />
@@ -449,7 +402,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                     <div className="relative shrink-0">
                         <button
                             onClick={() => setShowNotifications(!showNotifications)}
-                            className={`p-2 rounded-full transition-colors relative ${showNotifications ? 'bg-primary text-white' : 'bg-bgLight text-textMuted hover:bg-primary/10 hover:text-primary'}`}
+                            className={`os-icon-btn relative shrink-0 ${showNotifications ? 'is-active' : ''}`}
                             title={t('chatList.notifications')}
                         >
                             <Mail size={20} />
@@ -469,7 +422,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                             setSendSuccess(false);
                             setAttachments([]);
                         }}
-                        className="p-2 rounded-full transition-colors bg-bgLight text-textMuted hover:bg-primary/10 hover:text-primary shrink-0"
+                        className="os-icon-btn shrink-0"
                         title={t('chatList.sendMessage')}
                     >
                         <Send size={20} />
@@ -687,44 +640,20 @@ export const ChatList: React.FC<ChatListProps> = ({
                         </div>
                     )}
 
-                {/* Theme Toggle Button */}
-                <div className="relative shrink-0">
-                    <button
-                        onClick={() => setShowThemeMenu(!showThemeMenu)}
-                        className={`p-2 rounded-full transition-colors ${showThemeMenu ? 'bg-primary text-white' : 'bg-bgLight text-textMuted hover:bg-primary/10 hover:text-primary'} shrink-0`}
-                        title={t('chatList.changeTheme')}
-                    >
-                        <Palette size={20} />
-                    </button>
-
-                    {/* Theme Menu Dropdown */}
-                    {showThemeMenu && (
-                        <div
-                            ref={themeMenuRef}
-                            className="absolute top-full right-0 mt-2 w-48 bg-panel border border-border rounded-xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-200 max-h-80 overflow-y-auto"
-                        >
-                            <div className="text-xs font-bold text-textMuted px-2 py-1 mb-1 uppercase tracking-wider border-b border-border pb-1">{t('chatList.selectTheme')}</div>
-                            <div className="flex flex-col gap-1 mt-1">
-                                {themeList.map(t => (
-                                    <button
-                                        key={t.id}
-                                        onClick={() => {
-                                            window.dispatchEvent(new CustomEvent('setTheme', { detail: t.id }));
-                                            setShowThemeMenu(false);
-                                        }}
-                                        className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${theme === t.id ? 'bg-primary/20 text-primary font-bold' : 'text-textMain hover:bg-primary/10'}`}
-                                    >
-                                        {t.name}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
+                {/* Theme settings */}
+                <button
+                    type="button"
+                    onClick={() => openThemeSettings()}
+                    className="os-icon-btn shrink-0"
+                    title={t('chatList.changeTheme')}
+                    aria-label={t('chatList.changeTheme')}
+                >
+                    <Palette size={20} />
+                </button>
 
                 <button
                     onClick={() => setShowJoinInput(!showJoinInput)}
-                    className="p-2 bg-bgLight rounded-full text-textMuted hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+                    className="os-icon-btn shrink-0"
                     title={t('chatList.joinGroup')}
                 >
                     <span className="text-sm font-bold">+</span>
@@ -732,7 +661,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <button
                     onClick={() => setShowCreateInput(!showCreateInput)}
                     data-testid="chat-list-create"
-                    className="p-2 bg-bgLight rounded-full text-textMuted hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
+                    className="os-icon-btn shrink-0"
                     title={t('chatList.createGroup')}
                 >
                     <Plus size={20} className={showCreateInput ? "rotate-45 transition-transform" : "transition-transform"} />
@@ -874,6 +803,37 @@ export const ChatList: React.FC<ChatListProps> = ({
           </div>
         ))}
       </div>
+
+      <AccountRailFooter
+        currentUser={currentUser}
+        onOpenProfile={handleOpenProfile}
+        onOpenSettings={() => onOpenSettings?.()}
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                onSwitchView?.('admin');
+                navigateAppView('admin');
+              }}
+              className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+              title={t('nav.agents')}
+              aria-label={t('nav.agents')}
+            >
+              <LayoutGrid size={16} strokeWidth={1.75} />
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenCollabBoard?.()}
+              className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+              title={t('nav.collabBoard')}
+              aria-label={t('nav.collabBoard')}
+            >
+              <KanbanSquare size={16} strokeWidth={1.75} />
+            </button>
+          </>
+        }
+      />
 
       {/* Context Menu */}
       {contextMenu && (

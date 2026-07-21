@@ -203,6 +203,13 @@
 .os-depth-panel {
   border-radius: 0.875rem;
   border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+  /* Nest wash so L2/content rounded top corners read as arcs (not square against white) */
+  background: var(--color-nest);
+  overflow: hidden;
+}
+/* L2 tab row + session/file body: full-bleed width, soft top arcs into L1 nest */
+.os-depth-body {
+  border-radius: 0.75rem 0.75rem 0 0;
   background: var(--color-panel);
   overflow: hidden;
 }
@@ -247,6 +254,10 @@
 .os-depth-nest {
   border-radius: 0.625rem;
   background: var(--color-nest);
+}
+/* Flush to card sides/bottom; keep top arcs so list isn't square under the header */
+.os-depth-nest--flush {
+  border-radius: 0.625rem 0.625rem 0 0;
 }
 .os-interactive {
   transition: background-color var(--duration-soft) var(--ease-soft),
@@ -466,7 +477,7 @@
   }
 }
 
-/* ── Agent working: circular pulsing-dot constellation (classic) ────── */
+/* ── Agent working: circular fade-pulse dots (no rotation) ─────────── */
 .os-pulse-orbit {
   position: relative;
   width: 18px;
@@ -479,25 +490,23 @@
   height: 2.5px;
   border-radius: 999px;
   transform: translate(-50%, -50%);
-  background: color-mix(in srgb, var(--color-text-muted) 78%, transparent);
-  animation: os-pulse-cell 1.35s ease-in-out infinite;
+  background: color-mix(in srgb, var(--color-text-muted) 82%, transparent);
+  opacity: var(--pulse-base, 0.55);
+  animation: os-pulse-fade 1.8s ease-in-out infinite;
 }
-@keyframes os-pulse-cell {
+@keyframes os-pulse-fade {
   0%,
   100% {
-    opacity: 0.12;
+    opacity: calc(var(--pulse-base, 0.55) * 0.28);
   }
-  35% {
-    opacity: 1;
-  }
-  65% {
-    opacity: 0.28;
+  50% {
+    opacity: var(--pulse-base, 0.55);
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .os-pulse-orbit .os-pulse-cell {
     animation: none !important;
-    opacity: 0.55;
+    opacity: var(--pulse-base, 0.55);
   }
 }
 

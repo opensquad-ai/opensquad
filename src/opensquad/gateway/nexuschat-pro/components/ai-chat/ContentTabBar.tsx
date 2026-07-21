@@ -1,5 +1,6 @@
 /**
  * ContentTabBar — L2 session + file tabs + split / close-all actions.
+ * Many tabs shrink equally (browser-style) instead of horizontal scrolling.
  * Tabs support smooth drag-and-drop reordering (does not trigger file-upload overlay).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -159,7 +160,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
       onDragOver={stopPageDrag}
       onDrop={stopPageDrag}
     >
-      <div ref={rowRef} className="flex items-center gap-0.5 min-w-0 flex-1 overflow-x-auto">
+      <div ref={rowRef} className="flex items-center gap-0.5 min-w-0 flex-1 overflow-hidden">
         {displayKeys.map((key) => {
           const item = byKey.get(key);
           if (!item) return null;
@@ -265,7 +266,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                 didDragRef.current = true;
                 onReorder(fromTab, toTab);
               }}
-              className={`group flex items-center gap-1 max-w-[180px] px-2 h-7 rounded-md text-[11px] shrink-0 select-none will-change-transform ${
+              className={`group flex min-w-0 flex-1 items-center gap-1 max-w-[180px] px-1.5 sm:px-2 h-7 rounded-lg text-[11px] select-none will-change-transform ${
                 onReorder ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
               } ${
                 active
@@ -289,12 +290,12 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
               {tab.kind === 'file' && title.toLowerCase().endsWith('.md') ? (
                 <FileText size={11} className="text-blue-500 shrink-0" />
               ) : null}
-              <span className="truncate pointer-events-none">{title}</span>
+              <span className="min-w-0 flex-1 truncate pointer-events-none">{title}</span>
               {dirty ? <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" /> : null}
               <button
                 type="button"
                 draggable={false}
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 transition-opacity"
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 transition-opacity shrink-0"
                 title="关闭"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -307,15 +308,15 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             </div>
           );
         })}
-        <button
-          type="button"
-          onClick={onNewSession}
-          className="p-1 rounded-md text-textMuted hover:bg-primary/10 shrink-0"
-          title="新建对话"
-        >
-          <Plus size={14} />
-        </button>
       </div>
+      <button
+        type="button"
+        onClick={onNewSession}
+        className="p-1 rounded-md text-textMuted hover:bg-primary/10 shrink-0"
+        title="新建对话"
+      >
+        <Plus size={14} />
+      </button>
 
       <div className="flex items-center gap-0.5 shrink-0 pl-1 border-l border-border/50">
         <button

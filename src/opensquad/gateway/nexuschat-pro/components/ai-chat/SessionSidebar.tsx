@@ -17,6 +17,8 @@ import {
   ChevronRight,
   BookOpen,
   Code2,
+  MessageCircle,
+  LayoutGrid,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import {
@@ -30,44 +32,9 @@ import {
 import { pathsEqual } from '../../utils/workspaceStore';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
-
-const OpensquadWorkingDot: React.FC<{ size?: number; className?: string }> = ({
-  size = 12,
-  className = 'text-primary',
-}) => {
-  const rawId = React.useId().replace(/:/g, '');
-  const gradId = `osq-sb-arc-${rawId}`;
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      className={`shrink-0 ${className}`}
-      aria-hidden
-    >
-      <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-          <stop stopColor="currentColor" />
-          <stop offset="0.6" stopColor="currentColor" stopOpacity="0.45" />
-          <stop offset="1" stopColor="currentColor" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <g style={{ transformOrigin: '16px 16px', animation: 'osqSpin 1.4s linear infinite' }}>
-        <circle
-          cx="16"
-          cy="16"
-          r="13.5"
-          stroke={`url(#${gradId})`}
-          strokeWidth="3.5"
-          strokeLinecap="round"
-          strokeDasharray="53 33"
-        />
-      </g>
-      <style>{`@keyframes osqSpin { to { transform: rotate(360deg); } }`}</style>
-    </svg>
-  );
-};
+import { PulseDotsOrbit } from './PulseDotsStatus';
+import { AccountRailFooter, type AccountUser } from '../AccountRailFooter';
+import { navigateAppView } from '../../utils/appNavItems';
 
 interface SessionSidebarProps {
   agentId: string;
@@ -91,6 +58,9 @@ interface SessionSidebarProps {
   /** Chat layout mode: classic (Work) | solo (Code). */
   uiMode?: 'classic' | 'solo';
   onUiModeChange?: (mode: 'classic' | 'solo') => void;
+  currentUser?: AccountUser;
+  onOpenProfile?: () => void;
+  onOpenSettings?: () => void;
 }
 
 const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
@@ -141,6 +111,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onSessionsChange,
   uiMode = 'classic',
   onUiModeChange,
+  currentUser = null,
+  onOpenProfile,
+  onOpenSettings,
 }) => {
   const { t, i18n } = useTranslation();
   const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
@@ -402,7 +375,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return (
       <div
         key={rowKey}
-        className={`group os-interactive flex items-center gap-1 px-2 py-1.5 mx-1 rounded-lg cursor-pointer text-[12px] ${
+        className={`group os-interactive flex items-center gap-1 px-2.5 py-1.5 rounded-none cursor-pointer text-[12px] ${
           isCurrent
             ? 'is-active text-textMuted'
             : 'text-textMuted/75'
@@ -417,7 +390,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         }}
       >
         {busy ? (
-          <OpensquadWorkingDot size={11} />
+          <PulseDotsOrbit size={14} className="shrink-0" />
         ) : (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
@@ -553,7 +526,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     <div className="mb-1">
       <button
         type="button"
-        className="w-full flex items-center gap-1 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
+        className="w-full flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
         onClick={() => setSectionOpen((s) => ({ ...s, [id]: !s[id] }))}
       >
         {sectionOpen[id] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -647,7 +620,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto mx-1.5 mb-1.5 py-1 os-depth-nest">
+      <div className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush">
         {!workspaceRootPath ? (
           <div className="px-3 py-4 text-[11px] text-textMuted/70">请先打开或创建一个工作区</div>
         ) : error ? (
@@ -678,6 +651,36 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           </>
         )}
       </div>
+
+      {(onOpenProfile || onOpenSettings) && (
+        <AccountRailFooter
+          currentUser={currentUser}
+          onOpenProfile={() => onOpenProfile?.()}
+          onOpenSettings={() => onOpenSettings?.()}
+          actions={
+            <>
+              <button
+                type="button"
+                onClick={() => navigateAppView('chat')}
+                className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                title={t('nav.chats')}
+                aria-label={t('nav.chats')}
+              >
+                <MessageCircle size={16} strokeWidth={1.75} />
+              </button>
+              <button
+                type="button"
+                onClick={() => navigateAppView('admin')}
+                className="rounded-lg p-1.5 text-textMuted hover:bg-primary/10 hover:text-textMain"
+                title={t('nav.agents')}
+                aria-label={t('nav.agents')}
+              >
+                <LayoutGrid size={16} strokeWidth={1.75} />
+              </button>
+            </>
+          }
+        />
+      )}
     </div>
     </div>
   );

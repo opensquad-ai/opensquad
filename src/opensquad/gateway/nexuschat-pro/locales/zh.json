@@ -825,7 +825,14 @@
       "advanced": "高级",
       "about": "关于"
     },
+    "navGroup": {
+      "app": "应用"
+    },
     "general": {
+      "language": {
+        "title": "语言",
+        "hint": "切换界面显示语言，立即生效。"
+      },
       "workflowExpand": {
         "title": "工作流信息展示程度",
         "hint": "控制对话中思考、Plan、工具调用等折叠的默认展开程度。你随时可手动展开或折叠，设置不会覆盖你的操作。",

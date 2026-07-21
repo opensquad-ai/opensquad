@@ -12,6 +12,7 @@ import {
   Trash2,
   Menu,
   Plus,
+  X,
 } from 'lucide-react';
 import { marked } from 'marked';
 import { useTranslation } from 'react-i18next';
@@ -243,11 +244,11 @@ const normalizeStepStatus = (s?: string) => {
 
 /**
  * Parse task content into hierarchical steps.
- * 
+ *
  * Recognizes two formats:
  * 1. "## 主任务: ..." → main task (parent) with "### 子任务: ..." as children
  * 2. Flat "[ ] task" checklist items (no hierarchy)
- * 
+ *
  * Metadata fields (**负责人**, **文件范围**, etc.) are stripped, not rendered as steps.
  */
 const parseTaskSteps = (task: CollabBoardItem, t: (key: string, opts?: Record<string, any>) => string): ParsedStep[] => {
@@ -814,9 +815,11 @@ export const CollabBoardPage: React.FC<Props> = ({ onBack }) => {
           </button>
           <button
             onClick={onBack}
-            className={`${adminHeaderGhostBtn} px-2.5 text-xs font-medium`}
+            className={`${adminHeaderGhostBtn} px-2`}
+            title={t('common.close')}
+            aria-label={t('common.close')}
           >
-            Back
+            <X size={16} />
           </button>
         </div>
       </div>

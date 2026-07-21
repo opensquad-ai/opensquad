@@ -51,6 +51,7 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
+import { putCachedSessionTimeline } from '../utils/sessionTimelineCache';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -68,7 +69,6 @@ import {
   setActiveContentTab,
   reorderContentTabs,
   contentTabKey,
-  parseContentTabKey,
   workspaceDisplayName,
   pathsEqual,
   WORKSPACES_CHANGED_EVENT,
@@ -162,6 +162,8 @@ interface AIChatPageProps {
   onBack: () => void;
   /** The currently logged-in user (for avatar/name in user bubbles). */
   currentUser?: { id: string; name: string; avatar?: string | null } | null;
+  onOpenProfile?: () => void;
+  onOpenSettings?: () => void;
 }
 
 // ---- Uploaded file info ----
@@ -549,7 +551,7 @@ function flattenArchivedSections(entries: TimelineEntry[]): TimelineEntry[] {
   return out;
 }
 
-export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, currentUser }) => {
+export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, currentUser, onOpenProfile, onOpenSettings }) => {
   const { t } = useTranslation();
   // ---- State ----
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
@@ -5059,8 +5061,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     wsServiceRef.current?.stopTask();
     newSessionPendingRef.current = true;
     userStoppedRef.current = false;
-    setIsLoadingSession(true);
-    setSessionLoadingLabel(t('aiChat.creatingSession'));
+    // Show empty chat immediately — do not block the pane with「创建会话中」.
+    setIsLoadingSession(false);
     // Clear session filter so responses with the new sid are not dropped while
     // we wait for current_session / HTTP fallback to set the canonical id.
     currentSessionIdRef.current = null;
@@ -5130,7 +5132,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     loadingSessionIdRef.current = null;
 
     // Fallback: if Runner/Gateway WS ack (current_session) is delayed or lost,
-    // confirm via HTTP — but never reload the OLD session back into the UI.
+    // confirm via HTTP soon — UI stays interactive with an empty timeline.
     const fallbackSeq = ++newSessionFallbackSeqRef.current;
     const finishNewSession = () => {
       if (fallbackSeq !== newSessionFallbackSeqRef.current) return;
@@ -5188,7 +5190,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       } finally {
         window.clearTimeout(hardTimeout);
       }
-    }, 1500);
+    }, 280);
   };
 
   const handleViewSession = async (sessionId: string) => {
@@ -5213,6 +5215,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           session.messages || [],
           session.events || [],
         );
+        putCachedSessionTimeline(agentId, sessionId, entries);
         setTimeline(entries);
         setShellStreams(rebuildShellStreamsFromTimeline(entries));
         setCurrentSessionId(sessionId);
@@ -5418,16 +5421,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setAgentCwd(ws.rootPath);
       pendingProjectPathRef.current = ws.rootPath;
     }
-    const layout = snap.chrome.layoutByWorkspace[id];
-    if (layout) {
-      const leaves = collectLeaves(layout);
-      const focusId = snap.chrome.focusedPaneId;
-      const leaf = leaves.find((l) => l.id === focusId) || leaves[0];
-      const active = parseContentTabKey(leaf?.tabs.activeKey || null);
-      if (active?.kind === 'session') {
-        void handleViewSession(active.id);
-      }
-    }
+    // Session tabs load via SessionChatPane; do not call handleViewSession
+    // (avoids global「加载会话中」and remounting the live chatSlot).
   };
 
   const handleOpenExistingWorkspace = (rootPath: string) => {
@@ -5463,12 +5458,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const wsId = activeWorkspace.id;
     // Always open into the anchored (focused) pane — never touch other panes
     const pane = focusedPaneId;
-    void (async () => {
-      await prefetchWorkspaceFile(agentDir, root, p);
-      openContentTab(agentId, wsId, { kind: 'file', id: p }, pane);
-      if (pane) setFocusedPane(agentId, pane);
-      refreshWsSnap();
-    })();
+    // Open tab immediately; editor paints from cache or its own spinner.
+    openContentTab(agentId, wsId, { kind: 'file', id: p }, pane);
+    if (pane) setFocusedPane(agentId, pane);
+    refreshWsSnap();
+    void prefetchWorkspaceFile(agentDir, root, p);
   };
 
   const handleContentTabSelect = (tab: ContentTab, paneId?: string) => {
@@ -5477,12 +5471,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setActiveContentTab(agentId, activeWorkspace.id, tab, pid);
     if (pid) setFocusedPane(agentId, pid);
     refreshWsSnap();
-    if (tab.kind === 'session') {
-      // Same live session: only update pane focus/tabs. Reloading via
-      // handleViewSession remounts chatSlot and makes sibling panes jump.
-      if (tab.id === currentSessionIdRef.current) return;
-      void handleViewSession(tab.id);
-    }
+    // Session tabs: SessionChatPane loads history in-pane. Calling
+    // handleViewSession here forced global isLoadingSession + dual fetch.
   };
 
   const handleContentTabClose = (tab: ContentTab, paneId?: string) => {
@@ -5525,7 +5515,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       );
       if (pane) setFocusedPane(agentId, pane);
       refreshWsSnap();
+      // History loads in SessionChatPane; send path uses prepareSessionForSend.
+      return;
     }
+    // No workspace chrome — fall back to legacy full-pane session load.
     void handleViewSession(sessionId);
   };
 
@@ -6170,6 +6163,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSessionsChange={handleSessionsChange}
         uiMode={uiMode}
         onUiModeChange={setUiModePersisted}
+        currentUser={currentUser}
+        onOpenProfile={onOpenProfile}
+        onOpenSettings={onOpenSettings}
       />
 
       {showContextViewer && (
@@ -6261,6 +6257,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           </div>
         </div>
 
+      <div className="os-depth-body flex-1 min-h-0 flex flex-col">
       {activeWorkspace && workspaceLayout ? (
         <>
         {/* Auth expired banner */}
@@ -6336,9 +6333,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
         <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
           <div className={soloColumnClass}>
-          {/* Session loading overlay */}
+          {/* Session loading overlay — only for legacy full-pane history loads */}
           {isLoadingSession && (
-            <div className="flex flex-col items-center justify-center h-full text-textMuted">
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-panel/70 backdrop-blur-[1px] text-textMuted pointer-events-none">
               <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
               <p className="text-sm">{sessionLoadingLabel}</p>
             </div>
@@ -6702,6 +6699,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           打开或创建一个工作区以开始
         </div>
       )}
+      </div>
       </div>
 
       <div className="flex-shrink-0 h-full flex">

@@ -18,6 +18,9 @@ import {
   type WorkflowExpandLevel,
   useWorkflowExpandLevel,
 } from '../utils/workflowExpandPref';
+import { setLanguage } from '../i18n';
+import { navigateAppView, SETTINGS_APP_NAV_ITEMS } from '../utils/appNavItems';
+import { usePluginNavItems } from '../utils/usePluginNavItems';
 
 interface SystemConfigPageProps {
   isOpen: boolean;
@@ -111,11 +114,49 @@ const WORKFLOW_EXPAND_OPTIONS: {
 ];
 
 const GeneralTab: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [level, setLevel] = useWorkflowExpandLevel();
+  const isZh = i18n.language === 'zh' || i18n.language.startsWith('zh');
 
   return (
     <div className="space-y-6">
+      <section>
+        <h4 className="text-sm font-semibold text-textMain">
+          {t('systemConfig.general.language.title')}
+        </h4>
+        <p className="mt-1 text-xs leading-relaxed text-textMuted">
+          {t('systemConfig.general.language.hint')}
+        </p>
+        <div
+          className="mt-3 inline-flex rounded-xl bg-black/[0.055] p-[3px] dark:bg-white/[0.08]"
+          role="group"
+          aria-label={t('systemConfig.general.language.title')}
+        >
+          <button
+            type="button"
+            onClick={() => setLanguage('zh')}
+            className={`min-w-[72px] rounded-[9px] px-3 py-[6px] text-[12px] font-medium transition-all duration-150 ${
+              isZh
+                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
+                : 'text-textMuted hover:text-textMain'
+            }`}
+          >
+            {t('lang.zh')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setLanguage('en')}
+            className={`min-w-[72px] rounded-[9px] px-3 py-[6px] text-[12px] font-medium transition-all duration-150 ${
+              !isZh
+                ? 'bg-white text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.08)] dark:bg-panel dark:shadow-[0_1px_2px_rgba(0,0,0,0.35)]'
+                : 'text-textMuted hover:text-textMain'
+            }`}
+          >
+            {t('lang.en')}
+          </button>
+        </div>
+      </section>
+
       <section>
         <h4 className="text-sm font-semibold text-textMain">
           {t('systemConfig.general.workflowExpand.title')}
@@ -606,6 +647,13 @@ const AboutTab: React.FC = () => {
 export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onClose, initialTab }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<TabKey>(() => initialTab && VALID_TABS.has(initialTab) ? initialTab : readSavedTab());
+  const pluginNavItems = usePluginNavItems();
+
+  const goAppView = (view: string) => {
+    // Keep settings open underneath; app SoftOverlay is higher z-index.
+    // Back from the app modal should reveal settings again.
+    navigateAppView(view);
+  };
   const [config, setConfig] = useState<Record<string, any> | null>(() => peekSystemConfig());
 
   const [loading, setLoading] = useState(false);
@@ -678,10 +726,10 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
       onBackdrop={onClose}
       zClass="z-[100]"
       className="backdrop-blur-[2px]"
+      panelClassName="w-[min(56rem,calc(100vw-2rem))] h-[min(40rem,calc(100vh-2rem))] shrink-0"
     >
       <div
-        className="os-modal-shell mx-4 flex w-full max-w-3xl flex-col overflow-hidden"
-        style={{ height: 'min(82vh, 720px)', minHeight: '480px' }}
+        className="os-modal-shell flex h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -698,7 +746,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
 
         {/* Body: left nav + right content */}
         <div className="flex min-h-0 flex-1">
-          <nav className="flex w-[148px] shrink-0 flex-col gap-0.5 border-r border-border bg-bgLight/70 p-2 sm:w-[168px]">
+          <nav className="flex w-[148px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-bgLight/70 p-2 sm:w-[168px]">
             {NAV_ITEMS.map((item) => {
               const active = activeTab === item.key;
               return (
@@ -717,10 +765,47 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
                 </button>
               );
             })}
+
+            <div className="my-1.5 px-2">
+              <div className="h-px bg-border/70" />
+              <p className="mt-2 mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted/70">
+                {t('systemConfig.navGroup.app')}
+              </p>
+            </div>
+
+            {SETTINGS_APP_NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.view}
+                  type="button"
+                  onClick={() => goAppView(item.view)}
+                  className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm text-textMuted transition-all duration-soft ease-soft hover:bg-panel/70 hover:text-textMain"
+                >
+                  <Icon size={16} strokeWidth={1.75} className="shrink-0" />
+                  <span className="truncate font-medium">{t(item.i18nKey)}</span>
+                </button>
+              );
+            })}
+
+            {pluginNavItems.map((item) => (
+              <button
+                key={`plugin-nav-${item.name}-${item.view}`}
+                type="button"
+                onClick={() => goAppView(item.view)}
+                className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm text-textMuted transition-all duration-soft ease-soft hover:bg-panel/70 hover:text-textMain"
+                title={item.label}
+              >
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-primary/15 text-[9px] font-bold text-primary">
+                  {(item.label || item.name).charAt(0).toUpperCase()}
+                </span>
+                <span className="truncate font-medium">{item.label}</span>
+              </button>
+            ))}
           </nav>
 
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
               {error && (
                 <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
                   {error}

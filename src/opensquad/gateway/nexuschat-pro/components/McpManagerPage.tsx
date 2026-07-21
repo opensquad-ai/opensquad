@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Server, Plus, Trash2, Save, ChevronDown, ChevronUp,
-  ToggleLeft, ToggleRight, Loader2, AlertCircle, Check, Menu,
+  ToggleLeft, ToggleRight, Loader2, AlertCircle, Check, Menu, ArrowLeft,
 } from 'lucide-react';
 import { mcpAPI, McpServerConfig } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -282,6 +282,15 @@ export const McpManagerPage: React.FC<McpManagerPageProps> = ({ onBack }) => {
       <div className={`${adminHeaderBar} justify-between`}>
         <div className="flex items-center gap-2 md:gap-2.5">
           <button
+            type="button"
+            onClick={onBack}
+            className={adminHeaderNavBtn}
+            title={t('common.back', { defaultValue: 'Back' })}
+            aria-label={t('common.back', { defaultValue: 'Back' })}
+          >
+            <ArrowLeft size={16} />
+          </button>
+          <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}
             aria-label="Navigation menu"
@@ -316,12 +325,6 @@ export const McpManagerPage: React.FC<McpManagerPageProps> = ({ onBack }) => {
               <Save size={13} />
             )}
             {saveOk ? t('mcpManager.saveSuccess') : t('mcpManager.saveAll')}
-          </button>
-          <button
-            onClick={onBack}
-            className={`${adminHeaderGhostBtn} px-2.5 text-xs font-medium`}
-          >
-            Back
           </button>
         </div>
       </div>
