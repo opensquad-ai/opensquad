@@ -12,11 +12,22 @@ logger = logging.getLogger("plugins.self_learn.orchestrator")
 
 
 def _current_session_id() -> str:
+    """Anchor Self-Learn folds / host UI to the primary ingress session.
+
+    Same rule as external channels (Telegram/Feishu/group): only the primary
+    session receives Self-Learn host folds so other parallel panes stay clean.
+    """
     try:
         from opensquad import session_manager as sm_mod
 
         sm = getattr(sm_mod, "session_manager", None)
-        if sm is not None and hasattr(sm, "get_current_session_id"):
+        if sm is None:
+            return ""
+        if hasattr(sm, "get_primary_session_id"):
+            primary = sm.get_primary_session_id() or ""
+            if primary:
+                return primary
+        if hasattr(sm, "get_current_session_id"):
             return sm.get_current_session_id() or ""
     except Exception:
         pass
@@ -24,7 +35,11 @@ def _current_session_id() -> str:
 
 
 def _emit_session_event(etype: str, payload: dict, sid: str) -> None:
-    """Emit + persist an event so the chat UI can nest Self-Learn under a fold."""
+    """Emit + persist an event so the chat UI can nest Self-Learn under a fold.
+
+    Always target *sid* (primary) for both live bus and disk — never the focused
+    pane. Split-view focus must not steal Self-Learn host folds.
+    """
     try:
         from opensquad.events import bus
 
@@ -40,7 +55,8 @@ def _emit_session_event(etype: str, payload: dict, sid: str) -> None:
 
         sm = getattr(sm_mod, "session_manager", None)
         if sm is not None and hasattr(sm, "add_event"):
-            sm.add_event(etype, dict(payload))
+            # Critical for parallel panes: without sid=, events land on focused session.
+            sm.add_event(etype, dict(payload), sid=sid or None)
     except Exception:
         logger.debug("[self_learn] persist event failed", exc_info=True)
 
@@ -147,6 +163,21 @@ def _minutes_since(iso_ts: str | None) -> float | None:
 
 
 def is_agent_busy(meta: dict[str, Any] | None = None) -> bool:
+    """True when any parallel turn is in flight, or legacy global state is busy.
+
+    With split panes the global state machine can lag; prefer ParallelTurnScheduler.
+    """
+    try:
+        from opensquad import runner as runner_mod
+
+        active = getattr(runner_mod, "_active_runner", None)
+        sched = getattr(active, "_parallel_scheduler", None) if active else None
+        if sched is not None:
+            busy = getattr(sched, "busy_sessions", None)
+            if busy:
+                return True
+    except Exception:
+        pass
     state = (meta or {}).get("last_agent_state") or ""
     return state in ("working", "thinking", "sleeping", "awaiting_reply")
 
@@ -323,6 +354,10 @@ def start_learn(
         cfg["api_protocol"] = cfg["provider"]
 
     sid = _current_session_id()
+    if not sid:
+        logger.warning("[self_learn] no primary session id; host fold may attach to focused pane")
+    else:
+        logger.info("[self_learn] anchoring run to primary session %s", sid)
     label = f"Self-Learn {run['id']}"
     runner = SubAgentRunner(
         cfg,

@@ -91,6 +91,11 @@ def _agent_dir(plugin: SelfLearnPlugin) -> str:
     },
 )
 class SelfLearnPlugin(Plugin):
+    # Scheduler ↔ agent-loop bridge: retry then pause (split panes can starve the loop).
+    _LOOP_CALL_TIMEOUT_S = 30
+    _LOOP_CALL_MAX_ATTEMPTS = 3
+    _FORCE_STOP_COOLDOWN_S = 300
+
     def __init__(self, context):
         super().__init__(context)
         self._agent_dir_override: str | None = None
@@ -98,6 +103,8 @@ class SelfLearnPlugin(Plugin):
         self._scheduler_thread: threading.Thread | None = None
         self._current_run_id: str | None = None
         self._loop: Any = None
+        self._scheduler_paused_until: float = 0.0
+        self._force_stop_reason: str = ""
 
     def on_load(self) -> None:
         try:
@@ -145,9 +152,62 @@ class SelfLearnPlugin(Plugin):
             logger.debug("[self_learn] runtime cache skipped", exc_info=True)
         logger.info("[self_learn] plugin loaded")
 
+    def _force_stop_scheduler(self, reason: str) -> None:
+        """Pause scheduler after repeated loop failures; fail queued UI requests."""
+        import time
+
+        self._force_stop_reason = reason
+        self._scheduler_paused_until = time.monotonic() + self._FORCE_STOP_COOLDOWN_S
+        logger.error(
+            "[self_learn] force-stopped scheduler for %ss: %s",
+            self._FORCE_STOP_COOLDOWN_S,
+            reason,
+        )
+        try:
+            agent_dir = store.resolve_agent_dir(self._agent_dir_override)
+            if not agent_dir:
+                return
+            now = store._utc_now_iso()
+            err_payload = {"ok": False, "error": reason, "force_stopped": True}
+            for req in store.list_pending_requests(agent_dir):
+                store.update_request(
+                    agent_dir,
+                    req["id"],
+                    status="error",
+                    result=err_payload,
+                    finished_at=now,
+                )
+            runs = store.list_runs(agent_dir, limit=20).get("items") or []
+            for run in runs:
+                if run.get("status") not in ("queued", "running"):
+                    continue
+                job_id = run.get("job_id") or ""
+                if job_id:
+                    try:
+                        from opensquad.sub_agent_runner import job_manager
+
+                        job_manager.cleanup(job_id)
+                    except Exception:
+                        pass
+                store.update_run(
+                    agent_dir,
+                    run["id"],
+                    status="error",
+                    finished_at=now,
+                    error=reason,
+                )
+        except Exception:
+            logger.debug("[self_learn] force-stop cleanup failed", exc_info=True)
+
     def _run_on_loop(self, fn, *args, **kwargs):
-        """Execute callable on the agent asyncio loop (thread-safe)."""
+        """Execute callable on the agent asyncio loop (thread-safe).
+
+        Retries up to 3 times on timeout/failure (common when split panes keep the
+        loop busy), then force-stops the scheduler for a cooldown.
+        """
         import asyncio
+        import concurrent.futures
+        import time
 
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -162,12 +222,39 @@ class SelfLearnPlugin(Plugin):
                 return fn(*args, **kwargs)
         except RuntimeError:
             pass
-        fut = asyncio.run_coroutine_threadsafe(_async_call(fn, args, kwargs), loop)
-        try:
-            return fut.result(timeout=30)
-        except Exception as e:
-            logger.warning("[self_learn] loop call failed: %s", e)
-            return {"ok": False, "error": str(e)}
+
+        last_err = ""
+        for attempt in range(1, self._LOOP_CALL_MAX_ATTEMPTS + 1):
+            fut = asyncio.run_coroutine_threadsafe(_async_call(fn, args, kwargs), loop)
+            try:
+                result = fut.result(timeout=self._LOOP_CALL_TIMEOUT_S)
+                # Recover from a previous force-stop once a tick succeeds.
+                if self._scheduler_paused_until:
+                    self._scheduler_paused_until = 0.0
+                    self._force_stop_reason = ""
+                return result
+            except Exception as e:
+                # TimeoutError often has an empty str(); name it explicitly.
+                if isinstance(e, (TimeoutError, concurrent.futures.TimeoutError, asyncio.TimeoutError)):
+                    last_err = f"TimeoutError ({self._LOOP_CALL_TIMEOUT_S}s waiting for agent loop)"
+                else:
+                    last_err = str(e) or type(e).__name__
+                logger.warning(
+                    "[self_learn] loop call failed (attempt %s/%s): %s",
+                    attempt,
+                    self._LOOP_CALL_MAX_ATTEMPTS,
+                    last_err,
+                )
+                try:
+                    fut.cancel()
+                except Exception:
+                    pass
+                if attempt < self._LOOP_CALL_MAX_ATTEMPTS:
+                    time.sleep(min(2 * attempt, 5))
+                    continue
+
+        self._force_stop_scheduler(f"loop_call_failed_after_{self._LOOP_CALL_MAX_ATTEMPTS}_retries: {last_err}")
+        return {"ok": False, "error": last_err, "force_stopped": True}
 
     def on_unload(self) -> None:
         self._scheduler_stop.set()
@@ -182,8 +269,12 @@ class SelfLearnPlugin(Plugin):
         tick = int((self.context.config or {}).get("scheduler_tick_seconds", 60) or 60)
 
         def _loop():
+            import time
+
             while not self._scheduler_stop.wait(timeout=max(5, min(tick, 15))):
                 try:
+                    if time.monotonic() < self._scheduler_paused_until:
+                        continue
                     agent_dir = store.resolve_agent_dir(self._agent_dir_override)
                     if not agent_dir:
                         continue
@@ -191,7 +282,7 @@ class SelfLearnPlugin(Plugin):
                     pending = store.list_pending_requests(agent_dir)
                     # job_manager.submit needs the agent asyncio loop
                     self._run_on_loop(orchestrator.tick_scheduler, agent_dir)
-                    if pending:
+                    if pending and time.monotonic() >= self._scheduler_paused_until:
                         # Immediately try again next short cycle
                         continue
                 except Exception:
@@ -227,6 +318,9 @@ class SelfLearnPlugin(Plugin):
                 )
                 # If we just became idle and something was deferred, nudge scheduler.
                 if state in ("idle", "connected", "ready"):
+                    # Resume after a prior force-stop once the agent is actually idle.
+                    self._scheduler_paused_until = 0.0
+                    self._force_stop_reason = ""
                     try:
                         orchestrator.tick_scheduler(agent_dir)
                     except Exception:
@@ -452,16 +546,25 @@ class SelfLearnPlugin(Plugin):
 
     @tool(name="self_learn", description="Self-learning corpus and control APIs", level="extended")
     def sessions_recent_snippets(self, limit_messages: int = 30) -> dict:
-        """Fetch recent session message snippets (truncated) for learning context."""
+        """Fetch recent primary-session message snippets (truncated) for learning context."""
         try:
             from opensquad.session_manager import get_session_manager
 
             sm = get_session_manager()
-            msgs = sm.get_messages() or []
-            sid = sm.get_current_session_id() or ""
+            sid = ""
+            if hasattr(sm, "get_primary_session_id"):
+                sid = sm.get_primary_session_id() or ""
+            if not sid:
+                sid = sm.get_current_session_id() or ""
+            msgs = sm.get_messages(sid=sid) if sid and hasattr(sm, "get_messages") else (sm.get_messages() or [])
             title = ""
             try:
-                data = getattr(sm, "session_data", {}) or {}
+                if sid and hasattr(sm, "ensure_session_loaded"):
+                    data = sm.ensure_session_loaded(sid) or {}
+                elif sid and hasattr(sm, "_resolve_session_data"):
+                    data = sm._resolve_session_data(sid) or {}
+                else:
+                    data = getattr(sm, "session_data", {}) or {}
                 title = str(data.get("title") or "")
             except Exception:
                 pass
@@ -472,7 +575,7 @@ class SelfLearnPlugin(Plugin):
                 if len(content) > 800:
                     content = content[:800] + "…"
                 out.append({"role": role, "content": content, "type": m.get("type")})
-            return {"session_id": sid, "session_title": title, "messages": out}
+            return {"session_id": sid, "session_title": title, "messages": out, "primary": True}
         except Exception as e:
             return {"messages": [], "error": str(e)}
 

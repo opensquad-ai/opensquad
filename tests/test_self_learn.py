@@ -128,3 +128,56 @@ def test_runtime_missing_outside_agent():
     assert source in ("missing", "delegate", "active_runner", "self_learn")
     if source == "missing":
         assert cfg is None and registry is None
+
+
+def test_is_agent_busy_prefers_parallel_scheduler(monkeypatch):
+    from plugins.self_learn import orchestrator as orch
+
+    class _Sched:
+        busy_sessions = {"pane-b"}
+
+    class _Runner:
+        _parallel_scheduler = _Sched()
+
+    class _Mod:
+        _active_runner = _Runner()
+
+    monkeypatch.setitem(__import__("sys").modules, "opensquad.runner", _Mod())
+    # Force import path used inside is_agent_busy
+    import opensquad.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_active_runner", _Runner(), raising=False)
+    assert orch.is_agent_busy({"last_agent_state": "idle"}) is True
+
+    monkeypatch.setattr(runner_mod, "_active_runner", None, raising=False)
+    assert orch.is_agent_busy({"last_agent_state": "idle"}) is False
+    assert orch.is_agent_busy({"last_agent_state": "working"}) is True
+
+
+def test_emit_session_event_persists_with_sid(monkeypatch):
+    from plugins.self_learn import orchestrator as orch
+
+    calls = []
+
+    class _SM:
+        def add_event(self, etype, data, turn_id=None, round_id=None, *, sid=None):
+            calls.append({"etype": etype, "sid": sid, "data": data})
+
+    class _SmMod:
+        session_manager = _SM()
+
+    monkeypatch.setitem(__import__("sys").modules, "opensquad.session_manager", _SmMod())
+    import opensquad.session_manager as sm_mod
+
+    monkeypatch.setattr(sm_mod, "session_manager", _SM(), raising=False)
+
+    # Avoid real bus side effects
+    class _Bus:
+        def emit(self, *a, **k):
+            return None
+
+    monkeypatch.setitem(__import__("sys").modules, "opensquad.events", type("M", (), {"bus": _Bus()})())
+
+    orch._emit_session_event("tool_call", {"id": "self_learn_x"}, "primary-sid")
+    assert calls and calls[0]["sid"] == "primary-sid"
+    assert calls[0]["etype"] == "tool_call"

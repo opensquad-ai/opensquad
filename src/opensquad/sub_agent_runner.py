@@ -285,7 +285,8 @@ class SubAgentRunner:
 
             sm = getattr(_sm_module, "session_manager", None)
             if sm is not None and hasattr(sm, "add_event"):
-                sm.add_event(etype, dict(data))
+                # Anchor to this sub-agent's session (primary for Self-Learn), not focus.
+                sm.add_event(etype, dict(data), sid=self._sid or None)
         except Exception:
             logger.debug("[SubAgentRunner] persist sub event skipped", exc_info=True)
 
