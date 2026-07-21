@@ -11,6 +11,10 @@ import {
   type TimelineEntry,
   type WorkflowBlock,
 } from '../../utils/aiChatTimeline';
+import {
+  getCachedSessionTimeline,
+  putCachedSessionTimeline,
+} from '../../utils/sessionTimelineCache';
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble } from './MessageBubble';
@@ -44,9 +48,13 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
-  const [loading, setLoading] = useState(!liveTimeline);
+  const cached = !Array.isArray(liveTimeline)
+    ? getCachedSessionTimeline(agentId, sessionId)
+    : null;
+  const [loading, setLoading] = useState(!liveTimeline && !cached);
+  const [showSpinner, setShowSpinner] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fetched, setFetched] = useState<TimelineEntry[]>([]);
+  const [fetched, setFetched] = useState<TimelineEntry[]>(() => cached || []);
   const [showScrollTop, setShowScrollTop] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [scrollActive, setScrollActive] = useState(false);
@@ -58,13 +66,29 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const timeline = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
 
   useEffect(() => {
+    if (!loading) {
+      setShowSpinner(false);
+      return;
+    }
+    const t = window.setTimeout(() => setShowSpinner(true), 140);
+    return () => window.clearTimeout(t);
+  }, [loading]);
+
+  useEffect(() => {
     if (useLive) {
       setLoading(false);
       setError(null);
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    const hit = getCachedSessionTimeline(agentId, sessionId);
+    if (hit) {
+      setFetched(hit);
+      setLoading(false);
+    } else {
+      setLoading(true);
+      setFetched([]);
+    }
     setError(null);
     void (async () => {
       try {
@@ -73,14 +97,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
         const session = resp.session as
           | { messages?: any[]; events?: any[]; archived_messages?: any[]; archived_events?: any[] }
           | undefined;
-        setFetched(
-          buildTimelineFromSession(
-            session?.messages || [],
-            session?.events || [],
-            session?.archived_messages,
-            session?.archived_events,
-          ),
+        const entries = buildTimelineFromSession(
+          session?.messages || [],
+          session?.events || [],
+          session?.archived_messages,
+          session?.archived_events,
         );
+        putCachedSessionTimeline(agentId, sessionId, entries);
+        setFetched(entries);
       } catch (err: any) {
         if (!cancelled) setError(err?.message || '无法加载会话');
       } finally {
@@ -121,7 +145,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
 
   // Auto-follow bottom only when user hasn't scrolled away
   useEffect(() => {
-    if (loading) return;
+    if (loading && timeline.length === 0) return;
     if (userScrolledRef.current) {
       updateScrollButtons();
       return;
@@ -179,11 +203,15 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           onScroll={handleScroll}
         >
           <div className={columnClass}>
-            {loading ? (
-              <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
-                <Loader2 size={14} className="animate-spin" /> 加载中…
-              </div>
-            ) : error ? (
+            {loading && timeline.length === 0 ? (
+              showSpinner ? (
+                <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
+                  <Loader2 size={14} className="animate-spin" /> 加载中…
+                </div>
+              ) : (
+                <div className="py-12" />
+              )
+            ) : error && timeline.length === 0 ? (
               <div className="px-1 py-8 text-[12px] text-rose-400 text-center">{error}</div>
             ) : timeline.length === 0 ? null : (
               timeline.map((entry, i) => {

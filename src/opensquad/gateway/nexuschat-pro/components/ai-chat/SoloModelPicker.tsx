@@ -1,8 +1,9 @@
 /**
  * SoloModelPicker — two-level model selector (Provider → Model).
- * Trigger is a grey pill; open menu shows providers, with a flyout of models.
+ * Trigger is a grey pill; open menu shows providers, with a flyout of models
+ * vertically aligned to the active provider row.
  */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, Circle, Plus, Search } from 'lucide-react';
 import type { ModelCardInfo } from '../../services/api';
 
@@ -66,7 +67,12 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeVendor, setActiveVendor] = useState<string | null>(null);
+  const [flyoutTop, setFlyoutTop] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const flyoutRef = useRef<HTMLDivElement>(null);
+  const vendorListRef = useRef<HTMLDivElement>(null);
+  const vendorBtnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const searchRef = useRef<HTMLInputElement>(null);
 
   const selectedName = resolveSelectedName(cards, currentCardName, modelName);
@@ -143,6 +149,43 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
     setActiveVendor(groups[0]?.vendor ?? null);
   }, [open, groups, activeVendor]);
 
+  // Keep L2 flyout vertically aligned with the active provider row.
+  useLayoutEffect(() => {
+    if (!open || activeVendor == null) return;
+
+    const sync = () => {
+      const menu = menuRef.current;
+      const btn = vendorBtnRefs.current[activeVendor];
+      if (!menu || !btn) return;
+
+      const menuRect = menu.getBoundingClientRect();
+      const btnRect = btn.getBoundingClientRect();
+      let top = btnRect.top - menuRect.top;
+
+      const flyout = flyoutRef.current;
+      if (flyout) {
+        const flyoutH = flyout.offsetHeight;
+        const maxTop = Math.max(0, menuRect.height - flyoutH);
+        top = Math.max(0, Math.min(top, maxTop));
+      } else {
+        top = Math.max(0, top);
+      }
+      setFlyoutTop(top);
+    };
+
+    sync();
+    // Second pass after flyout mounts / height settles.
+    const raf = window.requestAnimationFrame(sync);
+    const list = vendorListRef.current;
+    list?.addEventListener('scroll', sync, { passive: true });
+    window.addEventListener('resize', sync);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      list?.removeEventListener('scroll', sync);
+      window.removeEventListener('resize', sync);
+    };
+  }, [open, activeVendor, activeGroup, groups, query]);
+
   const close = () => {
     setOpen(false);
     setQuery('');
@@ -170,12 +213,17 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
 
       {open && (
         <div
-          className="absolute bottom-[calc(100%+8px)] right-0 z-50 flex items-start gap-1.5"
+          ref={menuRef}
+          className="absolute bottom-[calc(100%+8px)] right-0 z-50"
           role="listbox"
         >
-          {/* Level 2: models (left flyout) */}
+          {/* Level 2: models — anchored beside the active provider row */}
           {activeGroup && (
-            <div className="w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+            <div
+              ref={flyoutRef}
+              className="absolute right-full mr-1.5 w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden"
+              style={{ top: flyoutTop }}
+            >
               <div className="max-h-[300px] overflow-y-auto py-1">
                 {activeGroup.items.length === 0 ? (
                   <div className="px-3 py-4 text-[12px] text-textMuted text-center">No models</div>
@@ -225,17 +273,21 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
               />
             </div>
 
-            <div className="max-h-[260px] overflow-y-auto py-1">
+            <div ref={vendorListRef} className="max-h-[260px] overflow-y-auto py-1">
               {groups.length === 0 ? (
                 <div className="px-3 py-4 text-[12px] text-textMuted text-center">未找到模型</div>
               ) : (
                 groups.map((g) => {
                   const active = g.vendor === activeVendor;
                   const isCurrent = selectedVendor === g.vendor;
+                  const refKey = g.vendor || '__other';
                   return (
                     <button
-                      key={g.vendor || '__other'}
+                      key={refKey}
                       type="button"
+                      ref={(el) => {
+                        vendorBtnRefs.current[g.vendor] = el;
+                      }}
                       onMouseEnter={() => setActiveVendor(g.vendor)}
                       onFocus={() => setActiveVendor(g.vendor)}
                       onClick={() => setActiveVendor(g.vendor)}
