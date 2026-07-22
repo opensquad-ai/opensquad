@@ -453,7 +453,7 @@ const NextPlanningPlaceholder: React.FC<{
   return (
     <div className="w-full select-none py-0.5">
       <ShimmerLabel color={faint} className="text-[13px] leading-relaxed font-normal">
-        next planing...
+        next planning...
       </ShimmerLabel>
     </div>
   );
@@ -960,8 +960,10 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   );
 
   // Active phase detection: while the latest step is still thought / plan /
-  // compression / a running tool, do NOT show "next planing…".
-  // That placeholder is only for the idle gap waiting on the agent's next move.
+  // compression / a running tool, do NOT show "next planning…".
+  // That placeholder is only for the idle gap *after* real work has settled,
+  // waiting on the agent's next move — never on an empty / lifecycle-only block
+  // (new session, mode switch, Workflow started with no thoughts yet).
   const lastActivity = useMemo(() => {
     for (let i = lines.length - 1; i >= 0; i--) {
       const l = lines[i];
@@ -1001,13 +1003,26 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     el.scrollTop = el.scrollHeight;
   }, [displayLines.length, outerOpen, useStepsScrollBox, isLiveTurn, tick]);
 
+  const hasSettledActivity = displayLines.some(
+    (l) =>
+      (l.kind === 'thought' ||
+        l.kind === 'tool' ||
+        l.kind === 'plan' ||
+        l.kind === 'summary' ||
+        l.kind === 'progress' ||
+        l.kind === 'delegation' ||
+        l.kind === 'shell_job') &&
+      !l.running,
+  );
+
   const showNextPlanning =
     isLiveTurn &&
     !hasRunning &&
     !hasLiveCompression &&
     !thinkingActive &&
     !planningActive &&
-    !displayLines.some((l) => !!l.running);
+    !displayLines.some((l) => !!l.running) &&
+    hasSettledActivity;
 
   const liveStartedMs =
     turnStartedMs ??
@@ -1029,17 +1044,10 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     );
   };
 
+  // Empty / lifecycle-only incomplete blocks: render nothing (matches classic
+  // WorkflowBlockView). Never show a lone "next planning…" on a blank session.
   if (!lines.length) {
-    if (!showNextPlanning) return null;
-    return (
-      <div className="my-1.5 w-full select-text">
-        <NextPlanningPlaceholder
-          depth={0}
-          classic={embedVisualizations}
-          startedMs={liveStartedMs}
-        />
-      </div>
-    );
+    return null;
   }
 
   // Thought-only (no tools / compression / delegate / plan): single fold → body text.
