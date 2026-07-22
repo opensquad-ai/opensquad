@@ -3,6 +3,7 @@ Extracted from routes.py."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -1235,10 +1236,39 @@ async def admin_delete_scheduled_task(name: str, task_id: str, current_user: Use
 
 @admin_router.post("/admin/agents/{name}/scheduled-tasks/{task_id}/run")
 async def admin_run_scheduled_task(name: str, task_id: str, current_user: User = Depends(get_current_user_dep)):
-    res = _task_mgr(name).run_now(task_id)
+    mgr = _task_mgr(name)
+    # run_now -> _execute -> _send_to_agent blocks on a registry.send_to_agent
+    # coroutine scheduled via run_coroutine_threadsafe(...).result(). Running
+    # that on the event-loop thread deadlocks the loop (the coroutine never
+    # gets to run) and times out after 10s -> "delegate agent not connected".
+    # Run it in a worker thread so the loop stays free to execute the send.
+    res = await asyncio.to_thread(mgr.run_now, task_id)
     if res is None:
         return JSONResponse({"error": "task not found"}, status_code=404)
+    if isinstance(res, dict) and res.get("already_running"):
+        return JSONResponse({"error": "already_running"}, status_code=409)
     return {"task": res}
+
+
+@admin_router.post("/admin/agents/{name}/scheduled-tasks/executions/{exec_id}/stop")
+async def admin_stop_scheduled_execution(name: str, exec_id: str, current_user: User = Depends(get_current_user_dep)):
+    mgr = _task_mgr(name)
+    # stop_execution -> _send_stop_to_agent has the same run_coroutine_threadsafe
+    # + blocking .result() pattern; keep it off the event-loop thread.
+    res = await asyncio.to_thread(mgr.stop_execution, exec_id)
+    if res is None:
+        return JSONResponse({"error": "execution not found"}, status_code=404)
+    return {"execution": res}
+
+
+@admin_router.delete("/admin/agents/{name}/scheduled-tasks/executions/{exec_id}")
+async def admin_delete_scheduled_execution(name: str, exec_id: str, current_user: User = Depends(get_current_user_dep)):
+    mgr = _task_mgr(name)
+    # May stop a running turn via WS; keep off the event-loop thread.
+    ok = await asyncio.to_thread(mgr.delete_execution, exec_id)
+    if not ok:
+        return JSONResponse({"error": "execution not found"}, status_code=404)
+    return {"ok": True}
 
 
 @admin_router.put("/admin/agents/{name}/scheduled-tasks/{task_id}/enabled")
@@ -1252,3 +1282,56 @@ async def admin_toggle_scheduled_task(name: str, task_id: str, body: dict = Body
 @admin_router.get("/admin/agents/{name}/scheduled-tasks/executions")
 async def admin_list_scheduled_executions(name: str, task_id: str | None = Query(default=None), current_user: User = Depends(get_current_user_dep)):
     return {"executions": _task_mgr(name).list_executions(task_id)}
+
+
+@admin_router.post("/admin/agents/{name}/scheduled-tasks/executions/{exec_id}/send")
+async def admin_send_scheduled_followup(
+    name: str,
+    exec_id: str,
+    body: dict = Body(default_factory=dict),
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Send a follow-up user message into the Agent session a scheduled execution runs in.
+
+    Routed over the Gateway WS to the delegated Agent (same path as web chat),
+    carrying the execution's session_id so the Agent binds the turn to that
+    exact session — the one the frontend reads. Going through the Agent process
+    (not gateway-local push_ingress) is what keeps the session in the Agent's
+    workspace and avoids "Session not found".
+    """
+    mgr = _task_mgr(name)
+    exec_rec = mgr.get_execution(exec_id)
+    if not exec_rec:
+        return JSONResponse({"error": "execution not found"}, status_code=404)
+    sid = (exec_rec.get("session_id") or "").strip()
+    if not sid:
+        return JSONResponse({"error": "execution has no session"}, status_code=400)
+    content = (body or {}).get("content") or ""
+    if not content.strip():
+        return JSONResponse({"error": "empty content"}, status_code=400)
+    delegate_agent = (exec_rec.get("delegate_agent") or name or "").strip() or name
+    model_card = (body or {}).get("model_card") or ""
+    try:
+        from ..registry import registry
+        from opensquad.scheduled_tasks import ScheduledTaskManager
+
+        # delegate_agent may be the on-disk dir_name (e.g. "agent305"); resolve
+        # to the registered WS agent_id (e.g. "agent305-001") before sending.
+        target = ScheduledTaskManager._resolve_registry_agent_id(delegate_agent)
+        message = {
+            "type": "chat",
+            "user_id": f"scheduled-task:{exec_id}",
+            "content": content,
+            "channel": "web",
+            "session_id": sid,
+        }
+        if model_card:
+            message["model_card"] = model_card
+        sent = await registry.send_to_agent(target, message)
+        if not sent:
+            return JSONResponse(
+                {"error": "delegate agent not connected"}, status_code=503
+            )
+    except Exception as e:  # pragma: no cover - defensive
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return {"ok": True, "session_id": sid}

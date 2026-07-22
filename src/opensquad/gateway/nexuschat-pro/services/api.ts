@@ -315,7 +315,7 @@ export interface GroupResponse {
   description: string | null;
   avatar: string | null;
   is_private: boolean;
-  members: Array<{ id: string; name: string; avatar: string | null; status: string; is_agent?: boolean }>;
+  members: Array<{ id: string; name: string; avatar: string | null; status: string; is_agent?: boolean; agent_id?: string }>;
   pinned_message_id: string | null;
   unread_count: number;
   has_unread_mention: boolean;
@@ -1733,7 +1733,7 @@ export interface ScheduledExecution {
   task_name: string;
   started_at: number;
   ended_at: number | null;
-  status: 'running' | 'success' | 'failed' | 'missed';
+  status: 'running' | 'success' | 'failed' | 'missed' | 'stopped';
   manual: boolean;
   session_id: string | null;
   error: string | null;
@@ -1774,6 +1774,27 @@ export const scheduledTaskAPI = {
   executions: async (agentName: string, taskId?: string) => {
     const q = taskId ? `?task_id=${encodeURIComponent(taskId)}` : '';
     return apiRequest<{ executions: ScheduledExecution[] }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/executions${q}`);
+  },
+  sendFollowup: async (agentName: string, execId: string, content: string, modelCard?: string) => {
+    return apiRequest<{ ok: boolean; session_id: string }>(
+      `/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/executions/${encodeURIComponent(execId)}/send`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ content, model_card: modelCard || '' }),
+      },
+    );
+  },
+  stopExecution: async (agentName: string, execId: string) => {
+    return apiRequest<{ execution: ScheduledExecution }>(
+      `/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/executions/${encodeURIComponent(execId)}/stop`,
+      { method: 'POST' },
+    );
+  },
+  removeExecution: async (agentName: string, execId: string) => {
+    return apiRequest<{ ok: boolean }>(
+      `/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/executions/${encodeURIComponent(execId)}`,
+      { method: 'DELETE' },
+    );
   },
 };
 

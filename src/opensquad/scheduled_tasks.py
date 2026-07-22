@@ -376,6 +376,36 @@ class ScheduledTaskManager:
             self._send_stop_to_agent(delegate_agent, exec_id, sid)
         return self.get_execution(exec_id)
 
+    def delete_execution(self, exec_id: str) -> bool:
+        """Remove an execution record from the list.
+
+        If the execution is still running, stop it first (best-effort) so the
+        agent turn does not keep running orphaned after the UI entry is gone.
+        """
+        if not exec_id:
+            return False
+        with self._lock:
+            target = None
+            for e in self._executions:
+                if e.get("id") == exec_id:
+                    target = e
+                    break
+            if target is None:
+                return False
+            was_running = target.get("status") == "running"
+            sid = (target.get("session_id") or "").strip()
+            delegate_agent = (target.get("delegate_agent") or self.agent_id or "").strip()
+            self._executions = [e for e in self._executions if e.get("id") != exec_id]
+            if was_running:
+                for t in self._tasks.values():
+                    if t.get("last_status") == "running":
+                        t["last_status"] = "stopped"
+                        break
+            self._save_persisted()
+        if was_running and sid and delegate_agent:
+            self._send_stop_to_agent(delegate_agent, exec_id, sid)
+        return True
+
     def set_execution_session(self, exec_id: str, session_id: str) -> bool:
         """Record the Agent-reported disk session_id for an execution.
 

@@ -35,6 +35,12 @@ export interface SessionChatPaneProps {
   agentName?: string;
   /** Focus this pane only — must NOT switch the global live session. */
   onFocus?: () => void;
+  /**
+   * Soft-poll session history every N ms without remounting / clearing the
+   * timeline. Used by scheduled-task workflow view while an execution is
+   * running (events land on disk; there is no live WS for the synthetic user).
+   */
+  pollIntervalMs?: number;
 }
 
 export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
@@ -47,6 +53,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   userName,
   agentName,
   onFocus,
+  pollIntervalMs,
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
@@ -145,6 +152,59 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
       cancelled = true;
     };
   }, [agentId, sessionId, useLive]);
+
+  // Soft poll: refresh timeline in place (no loading spinner, no remount).
+  // Skipped when liveTimeline is provided or pollIntervalMs is unset/<=0.
+  useEffect(() => {
+    if (useLive || !pollIntervalMs || pollIntervalMs <= 0) return;
+    let cancelled = false;
+    const softRefresh = async () => {
+      try {
+        const resp = await agentSessionAPI.getSessionHistoryPaged(
+          agentId,
+          sessionId,
+          0,
+          SESSION_HISTORY_PAGE_SIZE,
+        );
+        if (cancelled) return;
+        const session = resp.session as
+          | {
+              messages?: any[];
+              events?: any[];
+              archived_messages?: any[];
+              archived_events?: any[];
+              has_more?: boolean;
+              total_messages?: number;
+            }
+          | undefined;
+        const messages = session?.messages || [];
+        const entries = buildTimelineFromSession(
+          messages,
+          session?.events || [],
+          session?.archived_messages,
+          session?.archived_events,
+        );
+        putCachedSessionTimeline(agentId, sessionId, entries, {
+          // While polling a live turn, never mark complete — next tick must refetch.
+          complete: false,
+          messageCount: messages.length,
+          totalMessages: session?.total_messages,
+        });
+        setFetched(entries);
+        setError(null);
+      } catch {
+        // Keep showing the last good timeline; transient errors during a run
+        // should not blank the pane.
+      }
+    };
+    const id = window.setInterval(() => {
+      void softRefresh();
+    }, pollIntervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [agentId, sessionId, useLive, pollIntervalMs]);
 
   const updateScrollButtons = useCallback(() => {
     const el = listRef.current;
