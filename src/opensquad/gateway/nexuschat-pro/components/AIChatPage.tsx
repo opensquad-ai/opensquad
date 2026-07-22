@@ -558,9 +558,20 @@ function flattenArchivedSections(entries: TimelineEntry[]): TimelineEntry[] {
 export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, currentUser, onOpenProfile, onOpenSettings }) => {
   const { t } = useTranslation();
   // ---- State ----
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [timeline, setTimelineState] = useState<TimelineEntry[]>([]);
+  /** Per-session live timelines for split-pane parallel turns (sid → entries). */
+  const [liveTimelinesBySession, setLiveTimelinesBySession] = useState<Record<string, TimelineEntry[]>>({});
+  const liveTimelinesBySessionRef = useRef<Record<string, TimelineEntry[]>>({});
+  const timelineRef = useRef<TimelineEntry[]>([]);
+  /** Sid of the WS event currently being handled (routes setTimeline into the right bucket). */
+  const eventSidRef = useRef<string>('');
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  /** Per-session streaming preview (split panes must not share one global buffer). */
+  const streamingTextBySessionRef = useRef<Record<string, string>>({});
+  const [streamingTextBySession, setStreamingTextBySession] = useState<Record<string, string>>({});
+  const isStreamingBySessionRef = useRef<Record<string, boolean>>({});
+  const [isStreamingBySession, setIsStreamingBySession] = useState<Record<string, boolean>>({});
   const summaryStreamCacheRef = useRef<Record<string, string>>({});
   const SUMMARY_STREAM_DEBUG = true;
   const [wsStatus, setWsStatus] = useState<AIWebSocketStatus>('disconnected');
@@ -1103,6 +1114,44 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const currentSessionIdRef = useRef<string | null>(null);
   /** Agent's focused/current session id (from WS/HTTP), independent of UI tab focus. */
   const agentCurrentSessionIdRef = useRef<string | null>(null);
+
+  // Keep timelineRef in sync for per-sid routing reads.
+  useEffect(() => {
+    timelineRef.current = timeline;
+  }, [timeline]);
+  useEffect(() => {
+    liveTimelinesBySessionRef.current = liveTimelinesBySession;
+  }, [liveTimelinesBySession]);
+
+  /**
+   * Route timeline mutations into the correct per-session bucket.
+   * WS handlers set eventSidRef before mutating; local UI ops leave it empty
+   * (falls back to currentSessionId) so solo mode keeps working.
+   */
+  const setTimeline = useCallback((update: React.SetStateAction<TimelineEntry[]>) => {
+    const updater =
+      typeof update === 'function'
+        ? (update as (prev: TimelineEntry[]) => TimelineEntry[])
+        : ((_prev: TimelineEntry[]) => update as TimelineEntry[]);
+    const sid = (eventSidRef.current || currentSessionIdRef.current || '').trim();
+    if (sid) {
+      setLiveTimelinesBySession((prev) => {
+        const cur =
+          prev[sid]
+          ?? (sid === (currentSessionIdRef.current || '') ? timelineRef.current : []);
+        const next = updater(Array.isArray(cur) ? cur : []);
+        const out = { ...prev, [sid]: next };
+        liveTimelinesBySessionRef.current = out;
+        return out;
+      });
+    }
+    // Mirror into the focused solo timeline when this mutation is for the
+    // focused session (or has no explicit event sid — local UI ops).
+    if (!eventSidRef.current || eventSidRef.current === (currentSessionIdRef.current || '')) {
+      setTimelineState(updater);
+    }
+  }, []);
+
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
   /** Separate from sessionReloadSeqRef so connected/hydrate cannot invalidate New Session timers. */
@@ -1830,20 +1879,49 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // ---- Message handlers ----
+    // Route every live WS event into the correct per-session timeline bucket
+    // via eventSidRef (see setTimeline wrapper above). Without this, parallel
+    // pane B's events overwrite the global timeline while A is still running.
+    const onWs = (type: string, handler: (msg: AIWSMessage) => void) =>
+      aiWsService.on(type, (msg: AIWSMessage) => {
+        eventSidRef.current = String(
+          (msg as any).sid
+          || agentCurrentSessionIdRef.current
+          || currentSessionIdRef.current
+          || '',
+        ).trim();
+        try {
+          handler(msg);
+        } finally {
+          // Clear so subsequent local UI mutations (send/compress/…) fall back
+          // to currentSessionId instead of the last WS event's sid.
+          eventSidRef.current = '';
+        }
+      });
 
-    // Stream — accumulate chunks via ref, then sync to state
+    // Stream — accumulate chunks via ref, then sync to state (per-session)
     const streamSeqRef = { current: 0 };
-    const unsubStream = aiWsService.on('stream', (msg: AIWSMessage) => {
+    const unsubStream = onWs('stream', (msg: AIWSMessage) => {
       if (userStoppedRef.current || finalizingRef.current) return;
       const text = _extractContent(msg);
       if (text) {
         streamSeqRef.current += 1;
-        streamingTextRef.current += text;
-        setStreamingText(streamingTextRef.current);
-        setIsStreaming(true);
-        setAgentStatus('thinking');
-        // Start TTS on completed sentences while the reply is still streaming.
-        feedAutoTtsFromStreamRef.current(streamingTextRef.current);
+        const sid = eventSidRef.current || currentSessionIdRef.current || '';
+        if (sid) {
+          const next = (streamingTextBySessionRef.current[sid] || '') + text;
+          streamingTextBySessionRef.current = { ...streamingTextBySessionRef.current, [sid]: next };
+          setStreamingTextBySession({ ...streamingTextBySessionRef.current });
+          isStreamingBySessionRef.current = { ...isStreamingBySessionRef.current, [sid]: true };
+          setIsStreamingBySession({ ...isStreamingBySessionRef.current });
+        }
+        // Solo / focused pane still uses the global streaming fields.
+        if (!sid || sid === (currentSessionIdRef.current || '')) {
+          streamingTextRef.current += text;
+          setStreamingText(streamingTextRef.current);
+          setIsStreaming(true);
+          setAgentStatus('thinking');
+          feedAutoTtsFromStreamRef.current(streamingTextRef.current);
+        }
       }
     });
 
@@ -1924,11 +2002,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
       }
 
-      // Clear streaming
-      streamingTextRef.current = '';
-      setStreamingText('');
-      setIsStreaming(false);
-      setAgentStatus('connected');
+      // Clear streaming (global + per-session bucket for this event's sid)
+      const clearSid = eventSidRef.current || currentSessionIdRef.current || '';
+      if (clearSid) {
+        const st = { ...streamingTextBySessionRef.current };
+        delete st[clearSid];
+        streamingTextBySessionRef.current = st;
+        setStreamingTextBySession(st);
+        const ib = { ...isStreamingBySessionRef.current };
+        delete ib[clearSid];
+        isStreamingBySessionRef.current = ib;
+        setIsStreamingBySession(ib);
+      }
+      if (!clearSid || clearSid === (currentSessionIdRef.current || '')) {
+        streamingTextRef.current = '';
+        setStreamingText('');
+        setIsStreaming(false);
+        setAgentStatus('connected');
+      }
 
       // Fallback: clear new-session loading if a final message arrives before current_session
       if (newSessionPendingRef.current) {
@@ -1939,9 +2030,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // Reset guard after a short delay (allow next turn's final to work)
       setTimeout(() => { finalizingRef.current = false; }, 300);
     };
-    const unsubMessage = aiWsService.on('message', handleFinal);
-    const unsubResponse = aiWsService.on('response', handleFinal);
-    const unsubToUserReply = aiWsService.on('to_user_reply', (msg: AIWSMessage) => {
+    const unsubMessage = onWs('message', handleFinal);
+    const unsubResponse = onWs('response', handleFinal);
+    const unsubToUserReply = onWs('to_user_reply', (msg: AIWSMessage) => {
       // to_user_reply behaves like final text but expects user input afterward
       handleFinal(msg);
       setAgentStatus('awaiting_reply');
@@ -1961,11 +2052,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     });
 
-    const unsubToUserFinal = aiWsService.on('to_user_final', (msg: AIWSMessage) => {
+    const unsubToUserFinal = onWs('to_user_final', (msg: AIWSMessage) => {
       handleFinal(msg);
     });
 
-    const unsubToUserEndTask = aiWsService.on('to_user_end_task', (msg: AIWSMessage) => {
+    const unsubToUserEndTask = onWs('to_user_end_task', (msg: AIWSMessage) => {
       // Same as final text, then fold agent process since the last user message.
       if (finalizingRef.current) return;
       finalizingRef.current = true;
@@ -2049,7 +2140,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Thought — accumulate consecutive chunks into a single thought block
-    const unsubThought = aiWsService.on('thought', (msg: AIWSMessage) => {
+    const unsubThought = onWs('thought', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const text = _extractContent(msg);
       if (text) {
@@ -2086,7 +2177,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Tool call
-    const unsubToolCall = aiWsService.on('tool_call', (msg: AIWSMessage) => {
+    const unsubToolCall = onWs('tool_call', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
@@ -2116,7 +2207,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Live Native-FC tool arguments (file write/edit code streaming into tool fold)
-    const unsubToolCallDelta = aiWsService.on('tool_call_delta', (msg: AIWSMessage) => {
+    const unsubToolCallDelta = onWs('tool_call_delta', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       if (!data || typeof data !== 'object') return;
@@ -2149,7 +2240,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Tool result — merge into matching tool_call
-    const unsubToolResult = aiWsService.on('tool_result', (msg: AIWSMessage) => {
+    const unsubToolResult = onWs('tool_result', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       const toolName = typeof data === 'object' ? (data.name || data.tool || 'Tool') : 'Tool';
@@ -2203,17 +2294,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Live shell / background job stdout for CMD panel
     // Live shell / background job stdout for CMD panel
-    const unsubJobStdout = aiWsService.on('job_stdout', (msg: AIWSMessage) => {
+    const unsubJobStdout = onWs('job_stdout', (msg: AIWSMessage) => {
       const data = (msg.content || msg.data || {}) as Record<string, unknown>;
       setShellStreams((prev) => applyJobStdout(prev, data));
     });
-    const unsubJobStatus = aiWsService.on('job_status', (msg: AIWSMessage) => {
+    const unsubJobStatus = onWs('job_status', (msg: AIWSMessage) => {
       const data = (msg.content || msg.data || {}) as Record<string, unknown>;
       setShellStreams((prev) => applyJobStatus(prev, data));
     });
 
     // Plan — Runner sends {id, text} after parsing <plan> tag
-    const unsubPlan = aiWsService.on('plan', (msg: AIWSMessage) => {
+    const unsubPlan = onWs('plan', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const data = msg.content || msg.data;
       // data is usually {id: "plan_XXXX", text: "..."} from Runner
@@ -2228,7 +2319,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Summary stream (context compression)
-    const unsubSummaryStream = aiWsService.on('summary_stream', (msg: AIWSMessage) => {
+    const unsubSummaryStream = onWs('summary_stream', (msg: AIWSMessage) => {
       const data = msg.content || msg.data || {};
       const streamId = typeof data === 'object' ? (data.id || 'summary') : 'summary';
       const delta = typeof data === 'object' ? (data.delta || '') : '';
@@ -2317,7 +2408,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Compression progress (real-time progress updates from manual __COMPRESS_CONTEXT__)
-    const unsubCompressionProgress = aiWsService.on('compression_progress', (msg: AIWSMessage) => {
+    const unsubCompressionProgress = onWs('compression_progress', (msg: AIWSMessage) => {
       const data = msg.content || msg.data || {};
       const text = typeof data === 'object' ? (data.text || '') : '';
       const isFinal = typeof data === 'object' ? !!data.is_final : false;
@@ -2449,7 +2540,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       handleStatus(msg);
     });
     const unsubStatusEvt = aiWsService.on('status', handleStatus);
-    const unsubWake = aiWsService.on('wake', (msg: AIWSMessage) => {
+    const unsubWake = onWs('wake', (msg: AIWSMessage) => {
       setAgentStatus('connected');
       const data = msg.content || msg.data;
       if (data !== null && data !== undefined) {
@@ -2460,7 +2551,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }]);
       }
     });
-    const unsubSleep = aiWsService.on('sleep', (msg: AIWSMessage) => {
+    const unsubSleep = onWs('sleep', (msg: AIWSMessage) => {
       setAgentStatus('sleeping');
       const raw = msg.content ?? msg.data;
       const seconds = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
@@ -2470,7 +2561,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         _uid: genUID(),
       }]);
     });
-    const unsubInfo = aiWsService.on('info', (msg: AIWSMessage) => {
+    const unsubInfo = onWs('info', (msg: AIWSMessage) => {
       const raw = msg.content || msg.data;
       const detailed =
         typeof raw === 'string'
@@ -2751,7 +2842,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Turn start — reset streaming state and record workflow start timestamp (first turn only)
-    const unsubTurnStart = aiWsService.on('turn_start', (msg: AIWSMessage) => {
+    const unsubTurnStart = onWs('turn_start', (msg: AIWSMessage) => {
       if (userStoppedRef.current) return;
       const data = msg.content ?? msg.data;
       // turn=1 means the very first LLM call for this user message.
@@ -2847,7 +2938,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Turn elapsed — backend sends {started_ms, ended_ms} after to_user_final
-    const unsubTurnElapsed = aiWsService.on('turn_elapsed', (msg: AIWSMessage) => {
+    const unsubTurnElapsed = onWs('turn_elapsed', (msg: AIWSMessage) => {
       const data = msg.content ?? msg.data;
       if (typeof data !== 'object' || data === null) return;
       const { started_ms, ended_ms } = data as { started_ms?: number; ended_ms?: number };
@@ -2875,7 +2966,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Prompt update — insert/update prompt entry in timeline (first item = first prompt)
-    const unsubPromptUpdate = aiWsService.on('prompt_update', (msg: AIWSMessage) => {
+    const unsubPromptUpdate = onWs('prompt_update', (msg: AIWSMessage) => {
       const data: any = msg.content ?? msg.data ?? msg;
       const systemPrompt: string = data?.system_prompt ?? '';
       const dynamicPrefix: string = data?.dynamic_prefix ?? '';
@@ -2904,7 +2995,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // output_media — model-generated audio/images, patch onto last assistant message
-    const unsubOutputMedia = aiWsService.on('output_media', (msg: AIWSMessage) => {
+    const unsubOutputMedia = onWs('output_media', (msg: AIWSMessage) => {
       const items: Array<{ type: string; url: string; mime: string }> = msg.content ?? msg.data ?? [];
       if (!Array.isArray(items) || items.length === 0) return;
       const audioItems = items.filter(i => i.type === 'audio');
@@ -3536,7 +3627,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // (fields at top level, no content/data wrapper)
     // NOTE: If disk session was loaded successfully, skip these bare text messages
     // because the disk session already contains full data with events.
-    const unsubHistory = aiWsService.on('history', (msg: AIWSMessage) => {
+    const unsubHistory = onWs('history', (msg: AIWSMessage) => {
       const raw = msg as any;
       const role = raw.role || 'assistant';
       const content = raw.content || '';
@@ -3940,7 +4031,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Agent pushes files/attachments to chat (via HTTP push API -> WS forward)
-    const unsubFilePush = aiWsService.on('file_push', (msg: AIWSMessage) => {
+    const unsubFilePush = onWs('file_push', (msg: AIWSMessage) => {
       if (viewingHistorySessionRef.current) {
         return;
       }
@@ -4298,6 +4389,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     (sid: string) => {
       if (!sid) return isAgentBusy;
       if (busySessionsRef.current.includes(sid)) return true;
+      if (isStreamingBySessionRef.current[sid]) return true;
       if (sid === currentSessionIdRef.current) {
         // Do not treat sleeping as busy — otherwise pending queue never drains
         // and the agent never receives a wake/chat to leave sleep.
@@ -4309,7 +4401,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       return false;
     },
-    [isAgentBusy, isStreaming, agentStatus],
+    [isAgentBusy, isStreaming, agentStatus, isStreamingBySession],
   );
 
   /**
@@ -4644,6 +4736,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Mid-turn insert: seal previous Working → Worked above the new user bubble.
     // Do NOT cancel open tools (unlike Stop) — the runner will continue / interrupt
     // via the new message; UI just closes the old fold's live timer.
+    eventSidRef.current = targetSessionId;
     setTimeline((prev) => {
       const sealed = sealIncompleteWorkflows(prev, {
         fallbackStartedMs: turnStartedMsRef.current,
@@ -4657,6 +4750,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         },
       ];
     });
+    eventSidRef.current = '';
     setTurnStartedMs(undefined);
 
     // Checkpoint dirty files at send time (for per-message withdraw).
@@ -5183,14 +5277,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   };
 
-  const handleStop = () => {
+  const handleStop = (sessionId?: string | null) => {
+    const sid = (typeof sessionId === 'string' ? sessionId : currentSessionIdRef.current || '').trim();
     userStoppedRef.current = true;
-    // Agent-wide stop + cancel parallel turns immediately (backend request_stop).
-    wsServiceRef.current?.stopTask({
-      all: true,
-      session_id: currentSessionIdRef.current || undefined,
-    });
-    const currentText = streamingTextRef.current;
+    // Prefer per-session stop so a parallel pane's Stop does not cancel the other turn.
+    if (sid) {
+      wsServiceRef.current?.stopTask({ session_id: sid });
+    } else {
+      wsServiceRef.current?.stopTask({ all: true });
+    }
+    eventSidRef.current = sid;
+    const currentText = sid
+      ? (streamingTextBySessionRef.current[sid] || (sid === (currentSessionIdRef.current || '') ? streamingTextRef.current : ''))
+      : streamingTextRef.current;
     const stoppedMsg: ChatMessage = {
       role: 'assistant',
       content: (currentText ? `${currentText}\n\n` : '') + '[Stopped]',
@@ -5221,11 +5320,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       return finalizeWorkflowAndAddMessage(updated, stoppedMsg);
     });
-    streamingTextRef.current = '';
-    setStreamingText('');
-    setIsStreaming(false);
+    if (sid) {
+      const st = { ...streamingTextBySessionRef.current };
+      delete st[sid];
+      streamingTextBySessionRef.current = st;
+      setStreamingTextBySession(st);
+      const ib = { ...isStreamingBySessionRef.current };
+      delete ib[sid];
+      isStreamingBySessionRef.current = ib;
+      setIsStreamingBySession(ib);
+    }
+    if (!sid || sid === (currentSessionIdRef.current || '')) {
+      streamingTextRef.current = '';
+      setStreamingText('');
+      setIsStreaming(false);
+      setAgentStatus('connected');
+    }
     finalizingRef.current = false;
-    setAgentStatus('connected');
+    eventSidRef.current = '';
   };
 
   const handleCompressContext = () => {
@@ -5456,7 +5568,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         messageCount: messages.length,
         totalMessages: session.total_messages,
       });
+      eventSidRef.current = sessionId;
       setTimeline(entries);
+      eventSidRef.current = '';
       setShellStreams(rebuildShellStreamsFromTimeline(entries));
       loadingSessionIdRef.current = sessionId;
       historyOffsetRef.current = messages.length;
@@ -5477,7 +5591,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const meta = getCachedSessionTimelineMeta(agentId, sessionId);
       const cached = meta?.entries;
       if (cached && cached.length > 0 && !opts?.forceFetch) {
+        eventSidRef.current = sessionId;
         setTimeline(cached);
+        eventSidRef.current = '';
         setShellStreams(rebuildShellStreamsFromTimeline(cached));
         loadingSessionIdRef.current = sessionId;
         historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
@@ -5693,9 +5809,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setViewingHistorySession(false);
       return;
     }
-    // Focus locally only — never send empty switch_and_reply. Parallel dispatcher
-    // used to start a blank LLM turn for that, which occupied busy and blocked
-    // the real chat message that follows.
+    // Focus locally for outbound routing metadata, but do NOT wipe other
+    // panes' live timeline buckets. loadSessionTimelineFast writes into the
+    // per-sid map via setTimeline + eventSidRef.
     pendingFilePushesRef.current = [];
     currentSessionIdRef.current = sessionId;
     viewingHistorySessionRef.current = false;
@@ -5704,11 +5820,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     wsServiceRef.current?.setActiveSession(sessionId);
 
     try {
+      eventSidRef.current = sessionId;
       await loadSessionTimelineFast(sessionId);
+      eventSidRef.current = '';
       const meta = getSessionMeta(agentId, sessionId);
       if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
       else if (defaultCwd) setAgentCwd(defaultCwd);
     } catch (err: any) {
+      eventSidRef.current = '';
       console.error('[AIChatPage] Failed to prepare session for send:', err);
     }
   };
@@ -6162,13 +6281,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
     },
     renderSessionChat: (sessionId: string) => {
-      const mirrorLive = sessionId === currentSessionId;
+      const hasLiveBucket = Object.prototype.hasOwnProperty.call(liveTimelinesBySession, sessionId);
+      const live = hasLiveBucket
+        ? liveTimelinesBySession[sessionId]
+        : (sessionId === currentSessionId ? timeline : null);
       return (
         <SessionChatPane
           key={`session-chat-${paneId}-${sessionId}`}
           agentId={agentId}
           sessionId={sessionId}
-          liveTimeline={mirrorLive ? flattenArchivedSections(timeline) : null}
+          liveTimeline={live != null ? flattenArchivedSections(live) : null}
           isSolo={isSolo}
           expandLevel={workflowExpandLevel}
           columnClass={soloColumnClass}
@@ -6287,7 +6409,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
         }}
         onSend={(payload) => handlePaneComposerSend(paneId, sessionId, payload)}
-        onStop={handleStop}
+        onStop={() => handleStop(sessionId)}
         planPanel={
           sessionId === currentSessionId && effectivePlanSteps.length > 0 ? (
             <PlanBlock

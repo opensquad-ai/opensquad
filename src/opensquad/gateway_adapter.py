@@ -71,11 +71,14 @@ class GatewayAdapter(BaseAgent):
     def __init__(self, config: AgentConfig):
         super().__init__(config)
         self.current_user_id = None
-        # stream batch-processing buffer
-        self._stream_buffer: list = []
+        # Per-session user routing: parallel turns must not overwrite each
+        # other's outbound user_id via the single current_user_id field.
+        self._user_id_by_sid: dict[str, str] = {}
+        # Per-session stream debounce (sid -> chunks / flush task). A single
+        # shared buffer mixed A/B stream chunks under concurrent turns.
+        self._stream_buffers: dict[str, list] = {}
+        self._stream_flush_tasks: dict[str, asyncio.Task] = {}
         self._max_chunks = 1000  # P2: hard cap to prevent unbounded growth
-        self._stream_flush_task: asyncio.Task | None = None
-        self._stream_sid: str = ""
         # Bus subscription tracking — enables clean dispose()
         self._subscriptions: list[tuple[str, callable]] = []
 
@@ -140,9 +143,11 @@ class GatewayAdapter(BaseAgent):
             except Exception as e:
                 logger.warning(f"[GatewayAdapter] Failed to unsubscribe {event_type}: {e}")
         self._subscriptions.clear()
-        cancel_task = self._stream_flush_task
-        if cancel_task and not cancel_task.done():
-            cancel_task.cancel()
+        for _sid, cancel_task in list(self._stream_flush_tasks.items()):
+            if cancel_task and not cancel_task.done():
+                cancel_task.cancel()
+        self._stream_flush_tasks.clear()
+        self._stream_buffers.clear()
         logger.info(f"[GatewayAdapter] Disposed: unsubscribed {count} handlers")
 
     @staticmethod
@@ -171,9 +176,17 @@ class GatewayAdapter(BaseAgent):
         """
         Unified event dispatch: directed push when user_id is set, broadcast otherwise.
         Includes session_id so the frontend can filter cross-session messages.
+
+        Prefer the per-session user map (populated by _handle_chat) so parallel
+        turns do not steal each other's outbound routing via current_user_id.
         """
-        if self.current_user_id:
-            await self.send_response_to_user(self.current_user_id, content, msg_type, sid=sid)
+        uid = ""
+        if sid:
+            uid = (self._user_id_by_sid.get(sid) or "").strip()
+        if not uid:
+            uid = (self.current_user_id or "").strip() if self.current_user_id else ""
+        if uid:
+            await self.send_response_to_user(uid, content, msg_type, sid=sid)
         else:
             await self.send_response(content, msg_type, sid=sid)
 
@@ -238,6 +251,9 @@ class GatewayAdapter(BaseAgent):
         # Route session/control events back to the requesting web user (not broadcast).
         if user_id:
             self.current_user_id = user_id
+            stop_sid = str(cmd_data.get("session_id") or "").strip()
+            if stop_sid:
+                self._user_id_by_sid[stop_sid] = user_id
 
         logger.info(f"[Adapter] Command received from Gateway ({user_id}): {command}")
 
@@ -717,6 +733,11 @@ class GatewayAdapter(BaseAgent):
         except Exception as e:
             logger.debug("[Adapter] session routing skipped: %s", e)
 
+        # Bind this session's outbound events to the requesting user so parallel
+        # turns do not steal routing when current_user_id is overwritten.
+        if session_id and user_id:
+            self._user_id_by_sid[session_id] = user_id
+
         logger.info(
             f"[Adapter] Received from Gateway ({user_id}, channel={channel}, sid={session_id}): {content}"
             + (f" images={len(images)}" if images else "")
@@ -770,14 +791,14 @@ class GatewayAdapter(BaseAgent):
     async def on_runner_output(self, data):
         """When Runner finishes a reply (final text response; content should be a string)."""
         logger.info(f"[GatewayAdapter] on_runner_output called, connected={self.connected}, data={str(data)[:200]}")
+        sid = self._extract_sid(data)
         # Flush any pending stream debounce so clients don't keep a truncated preview.
-        await self._flush_stream_buffer_now()
+        await self._flush_stream_buffer_now(sid)
         if self.connected:
-            sid = self._extract_sid(data)
             content = self._unwrap(data)
             if content:
                 logger.info(
-                    f"[GatewayAdapter] Sending final response (user={self.current_user_id or 'broadcast'}), content_len={len(str(content))}, content_preview={str(content)[:100]}"
+                    f"[GatewayAdapter] Sending final response (user={self._user_id_by_sid.get(sid) or self.current_user_id or 'broadcast'}), content_len={len(str(content))}, content_preview={str(content)[:100]}"
                 )
                 await self._send_event(content, "message", sid=sid)
             else:
@@ -788,11 +809,11 @@ class GatewayAdapter(BaseAgent):
     async def on_runner_end_task(self, data):
         """Complex-task final report — distinct WS type so the UI can fold the process."""
         logger.info(f"[GatewayAdapter] on_runner_end_task called, connected={self.connected}, data={str(data)[:200]}")
-        await self._flush_stream_buffer_now()
+        sid = self._extract_sid(data)
+        await self._flush_stream_buffer_now(sid)
         if not self.connected:
             logger.warning("[GatewayAdapter] on_runner_end_task called but not connected, discarding response")
             return
-        sid = self._extract_sid(data)
         content = self._unwrap(data)
         if not content:
             logger.warning("[GatewayAdapter] on_runner_end_task called but content is empty")
@@ -810,54 +831,68 @@ class GatewayAdapter(BaseAgent):
         """When Runner streams output -- uses 30ms debounce batching to reduce WS frame count."""
         if not self.connected:
             return
-        sid = self._extract_sid(data)
+        sid = self._extract_sid(data) or ""
         content = self._unwrap(data)
         if not content:
             return
 
-        # Store latest sid for flush
-        self._stream_sid = sid
-
-        # Add chunk to buffer
-        self._stream_buffer.append(content)
+        buf = self._stream_buffers.setdefault(sid, [])
+        buf.append(content)
         # P2: enforce max_chunks limit — flush immediately if exceeded
-        if len(self._stream_buffer) >= self._max_chunks:
-            if self._stream_flush_task is None or self._stream_flush_task.done():
-                self._stream_flush_task = asyncio.create_task(self._flush_stream_buffer())
+        if len(buf) >= self._max_chunks:
+            task = self._stream_flush_tasks.get(sid)
+            if task is None or task.done():
+                self._stream_flush_tasks[sid] = asyncio.create_task(self._flush_stream_buffer(sid))
 
-        # Don't create a duplicate flush task if one is already pending
-        if self._stream_flush_task is not None and not self._stream_flush_task.done():
+        # Don't create a duplicate flush task if one is already pending for this sid
+        task = self._stream_flush_tasks.get(sid)
+        if task is not None and not task.done():
             return
 
         # Schedule a flush task after 30ms
-        self._stream_flush_task = asyncio.create_task(self._flush_stream_buffer())
+        self._stream_flush_tasks[sid] = asyncio.create_task(self._flush_stream_buffer(sid))
 
-    async def _flush_stream_buffer(self):
-        """Wait 30ms then send all buffered chunks merged into one frame."""
+    async def _flush_stream_buffer(self, sid: str = ""):
+        """Wait 30ms then send all buffered chunks for *sid* merged into one frame."""
         try:
             await asyncio.sleep(0.03)
         except asyncio.CancelledError:
             return
-        await self._emit_stream_buffer()
+        await self._emit_stream_buffer(sid)
 
-    async def _flush_stream_buffer_now(self) -> None:
-        """Immediately flush pending stream chunks (cancel debounce timer if any)."""
-        task = getattr(self, "_stream_flush_task", None)
+    async def _flush_stream_buffer_now(self, sid: str | None = None) -> None:
+        """Immediately flush pending stream chunks (cancel debounce timer if any).
+
+        If sid is given, flush only that session's buffer; otherwise flush all.
+        """
+        sids = [sid] if sid is not None else list(self._stream_flush_tasks.keys()) + list(self._stream_buffers.keys())
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for s in sids:
+            key = s or ""
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(key)
         current = asyncio.current_task()
-        if task is not None and not task.done() and task is not current:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-        self._stream_flush_task = None
-        await self._emit_stream_buffer()
+        for s in ordered:
+            task = self._stream_flush_tasks.get(s)
+            if task is not None and not task.done() and task is not current:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            self._stream_flush_tasks.pop(s, None)
+            await self._emit_stream_buffer(s)
 
-    async def _emit_stream_buffer(self) -> None:
-        """Send and clear whatever is currently in the stream debounce buffer."""
-        if not self._stream_buffer:
+    async def _emit_stream_buffer(self, sid: str = "") -> None:
+        """Send and clear whatever is currently in the stream debounce buffer for *sid*."""
+        buf = self._stream_buffers.get(sid) or []
+        if not buf:
             return
-        chunks = self._stream_buffer[:]
-        self._stream_buffer.clear()
-        sid = self._stream_sid
+        chunks = buf[:]
+        buf.clear()
+        self._stream_buffers[sid] = []
         combined = "".join(c for c in chunks if isinstance(c, str))
         if combined and self.connected:
             await self._send_event(combined, "stream", sid=sid)

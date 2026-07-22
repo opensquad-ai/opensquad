@@ -68,8 +68,9 @@ type StatusHandler = (status: AIWebSocketStatus) => void;
 // ---- Service ----
 
 // Message types that are session-management / system-level and must NOT be
-// filtered by activeSessionId.  Everything else is considered "session-scoped"
-// streaming data and will be dropped when it doesn't match the active session.
+// filtered by activeSessionId. Live chat/workflow events are NOT listed here —
+// multi-pane parallel turns need every sid's stream/thought/tool events to
+// reach AIChatPage, which routes them into per-session timeline buckets.
 const SESSION_PASSTHROUGH_TYPES = new Set([
   'connected',
   'current_session',
@@ -86,27 +87,10 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'token_stats',
   'busy_sessions',
   'primary_session',
-  // chat message types — must bypass session filter or messages disappear
-  'message',
-  'response',
-  'stream',
-  'to_user_final',
-  'to_user_reply',
-  'to_user_end_task',
   // System info (model switch confirm/fail, mode changes) must not be dropped
   // when sid ≠ activeSessionId — otherwise Switching… spinner never clears.
   'info',
-  // thought / tool_* are session-scoped: when they carry `sid` for an
-  // old session (e.g. orphaned sub-agent after new_session), drop them.
-  'plan',
-  'turn_start',
-  'turn_elapsed',
-  'output_media',
-  'prompt_update',
-  'file_push',
   'error',
-  'session_title',
-  'summary_stream',
   'voice_audio_out',
   'voice_transcript',
   'voice_realtime_status',
@@ -119,7 +103,10 @@ class AIWebSocketService {
 
   // Session-level filtering: when set, session-scoped messages whose sid
   // doesn't match are silently dropped before reaching any handler.
+  // Multi-pane mode keeps this false so all sids reach AIChatPage.
   private activeSessionId: string | null = null;
+  /** When true, drop non-active sid events (legacy single-pane filter). Default off. */
+  private filterToActiveSession = false;
 
   // Reconnection — keep retrying until intentional disconnect / auth failure
   private reconnectAttempts = 0;
@@ -611,10 +598,17 @@ class AIWebSocketService {
     }
 
     // ---- Session-scoped filtering ----
-    // Drop session-scoped streaming events that belong to a different session.
-    // System/management events (connected, current_session, session_list, etc.)
-    // always pass through so session switching continues to work.
-    if (this.activeSessionId && !SESSION_PASSTHROUGH_TYPES.has(msg.type)) {
+    // Multi-pane parallel turns: do NOT drop events whose sid ≠ activeSessionId.
+    // AIChatPage routes live events into per-session timeline buckets by msg.sid.
+    // Dropping here would freeze non-focused panes (no thought/tool updates) while
+    // passthrough types (formerly message/stream) bled into the global timeline.
+    // Only drop when the consumer explicitly opted into single-session mode via
+    // filterToActiveSession === true (legacy / tests). Default: deliver all.
+    if (
+      this.filterToActiveSession &&
+      this.activeSessionId &&
+      !SESSION_PASSTHROUGH_TYPES.has(msg.type)
+    ) {
       const msgSid = (msg as any).sid;
       if (msgSid && msgSid !== this.activeSessionId) {
         console.warn(
