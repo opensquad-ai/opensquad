@@ -8,6 +8,7 @@ import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { agentSessionAPI } from '../../services/api';
 import {
   buildTimelineFromSession,
+  rebaseTimelineUids,
   type TimelineEntry,
   type WorkflowBlock,
 } from '../../utils/aiChatTimeline';
@@ -190,7 +191,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           messageCount: messages.length,
           totalMessages: session?.total_messages,
         });
-        setFetched(entries);
+        // Keep React keys stable so expand/collapse state survives the poll.
+        setFetched((prev) => rebaseTimelineUids(prev, entries));
         setError(null);
       } catch {
         // Keep showing the last good timeline; transient errors during a run

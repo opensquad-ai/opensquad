@@ -1674,6 +1674,103 @@ export function buildTimelineFromSession(
   return applyEndTaskFolds(mergedTimeline);
 }
 
+/**
+ * Re-apply previous entry `_uid`s onto a freshly rebuilt timeline so React
+ * keys stay stable across soft-polls. Without this, every
+ * `buildTimelineFromSession` call allocates new UIDs → SoloActivityRow /
+ * MessageBubble remount → expand/collapse state snaps shut.
+ *
+ * Also rebases nested workflow event `_uid`s (SoloEventLine keys) the same way.
+ */
+export function rebaseTimelineUids(prev: TimelineEntry[], next: TimelineEntry[]): TimelineEntry[] {
+  if (!prev.length || !next.length) return next;
+  const used = new Set<string>();
+  const take = (uid?: string): string | undefined => {
+    if (uid && !used.has(uid)) {
+      used.add(uid);
+      return uid;
+    }
+    return undefined;
+  };
+
+  const prevMsgUid = new Map<string, string>();
+  for (const p of prev) {
+    if (p.kind !== 'message' || !p._uid) continue;
+    const mid = String((p.data as { id?: string; message_id?: string }).id
+      || (p.data as { message_id?: string }).message_id
+      || '').trim();
+    if (mid) prevMsgUid.set(mid, p._uid);
+  }
+
+  const rebaseEvents = (prevEvents: WorkflowEvent[] | undefined, nextEvents: WorkflowEvent[]): WorkflowEvent[] => {
+    if (!prevEvents?.length) return nextEvents;
+    const evtUsed = new Set<string>();
+    const takeEvt = (uid?: string): string | undefined => {
+      if (uid && !evtUsed.has(uid)) {
+        evtUsed.add(uid);
+        return uid;
+      }
+      return undefined;
+    };
+    return nextEvents.map((ne, i) => {
+      let uid = takeEvt(prevEvents[i]?._uid);
+      if (!uid) {
+        for (const pe of prevEvents) {
+          if (!pe._uid || evtUsed.has(pe._uid)) continue;
+          if (pe.type === ne.type && pe.timestamp === ne.timestamp) {
+            uid = takeEvt(pe._uid);
+            break;
+          }
+        }
+      }
+      return uid ? { ...ne, _uid: uid } : ne;
+    });
+  };
+
+  return next.map((entry, i) => {
+    let uid: string | undefined;
+    if (entry.kind === 'message') {
+      const mid = String((entry.data as { id?: string; message_id?: string }).id
+        || (entry.data as { message_id?: string }).message_id
+        || '').trim();
+      if (mid) uid = take(prevMsgUid.get(mid));
+    }
+    if (!uid && prev[i]?.kind === entry.kind) {
+      uid = take(prev[i]._uid);
+    }
+    if (!uid && entry.kind === 'workflow') {
+      const ne0 = entry.data.events?.[0];
+      if (ne0) {
+        for (const p of prev) {
+          if (p.kind !== 'workflow' || !p._uid || used.has(p._uid)) continue;
+          const pe0 = p.data.events?.[0];
+          if (pe0 && pe0.timestamp === ne0.timestamp && pe0.type === ne0.type) {
+            uid = take(p._uid);
+            break;
+          }
+        }
+      }
+    }
+
+    if (entry.kind === 'workflow') {
+      const prevWf =
+        (uid ? prev.find((p) => p.kind === 'workflow' && p._uid === uid) : null)
+        || (prev[i]?.kind === 'workflow' ? prev[i] : null);
+      const events = rebaseEvents(
+        prevWf && prevWf.kind === 'workflow' ? prevWf.data.events : undefined,
+        entry.data.events,
+      );
+      return {
+        ...entry,
+        _uid: uid || entry._uid,
+        data: { ...entry.data, events },
+      } as TimelineEntry;
+    }
+
+    return uid ? ({ ...entry, _uid: uid } as TimelineEntry) : entry;
+  });
+}
+
 export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[] {
   const result: WorkflowEvent[] = [];
 

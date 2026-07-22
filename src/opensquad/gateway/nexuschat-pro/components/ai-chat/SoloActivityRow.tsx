@@ -935,9 +935,11 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   useEffect(() => {
     if (isLiveTurn && !wasLiveRef.current) {
-      // New live turn → reset pin and auto-open
-      userOverrideRef.current = null;
-      setOuterOpen(true);
+      // Rising edge of a live turn: auto-open only when the user has not
+      // pinned open/closed. Do NOT clear the pin — soft-poll history rebuilds
+      // can flicker completed↔live and would otherwise wipe a deliberate
+      // collapse and snap the fold shut/open against the user.
+      if (userOverrideRef.current == null) setOuterOpen(true);
     } else if (isLiveTurn) {
       if (userOverrideRef.current !== 'closed') setOuterOpen(true);
     } else if (userOverrideRef.current !== 'open') {
