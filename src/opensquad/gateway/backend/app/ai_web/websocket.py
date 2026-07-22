@@ -186,6 +186,37 @@ class AgentWebSocketHandler:
                 ]:
                     # Agent's response message, forward to user
                     user_id = message.get("user_id")
+                    # Capture the disk session_id for a scheduled-task execution
+                    # from ANY event the Agent streams back (stream / state /
+                    # thought / current_session / message ...). Every forwarded
+                    # event carries `sid` = the turn's disk session_id (runner
+                    # sets _turn_sid = get_current_session_id()). Relying solely
+                    # on the `current_session` event is fragile: for external
+                    # ingress the turn runs on the PRIMARY session, and the runner
+                    # only emits `current_session` when sid == focused — so for
+                    # scheduled tasks it never fires and session_id stayed null
+                    # ("尚未创建会话"). Capturing from the first event with a
+                    # non-empty sid makes the workflow loadable immediately.
+                    if (
+                        user_id
+                        and isinstance(user_id, str)
+                        and user_id.startswith("scheduled-task:")
+                    ):
+                        _st_exec_id = user_id.split(":", 1)[1]
+                        _st_sess_id = str(message.get("sid") or "").strip()
+                        if not _st_sess_id:
+                            _st_c = message.get("content")
+                            if isinstance(_st_c, dict):
+                                _st_sess_id = str(_st_c.get("id") or "").strip()
+                        if _st_exec_id and _st_sess_id:
+                            try:
+                                from opensquad.scheduled_tasks import set_execution_session_by_exec_id
+
+                                set_execution_session_by_exec_id(_st_exec_id, _st_sess_id)
+                            except Exception as _st_e:
+                                logger.warning(
+                                    "[WS] scheduled-task session capture failed: %s", _st_e
+                                )
                     if msg_type == "info":
                         try:
                             info_payload = message.get("content") or message.get("data") or {}
@@ -252,6 +283,31 @@ class AgentWebSocketHandler:
                         # on reconnect.
                         with contextlib.suppress(Exception):
                             gateway_session_cache.invalidate(user_id, agent_id)
+                        # Correlate the Agent's disk session_id back to the
+                        # scheduled-task execution that triggered this turn.
+                        # user_id is "scheduled-task:{exec_id}" (set by
+                        # ScheduledTaskManager._send_to_agent).
+                        if (
+                            user_id
+                            and isinstance(user_id, str)
+                            and user_id.startswith("scheduled-task:")
+                        ):
+                            _exec_id = user_id.split(":", 1)[1]
+                            _sess_id = ""
+                            _c = message.get("content")
+                            if isinstance(_c, dict):
+                                _sess_id = str(_c.get("id") or "").strip()
+                            if not _sess_id:
+                                _sess_id = str(message.get("sid") or "").strip()
+                            if _exec_id and _sess_id:
+                                try:
+                                    from opensquad.scheduled_tasks import set_execution_session_by_exec_id
+
+                                    set_execution_session_by_exec_id(_exec_id, _sess_id)
+                                except Exception as e:
+                                    logger.warning(
+                                        "[WS] scheduled-task session capture failed: %s", e
+                                    )
 
                     # Persist final assistant replies in Gateway WS history so refresh
                     # still works when the disk-session HTTP API is slow or unavailable.
