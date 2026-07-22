@@ -141,3 +141,33 @@ def test_merge_serp_filters_ad_marker():
         ad_str_list=["选购"],
     )
     assert [r["url"] for r in results] == ["https://reviews.example.com/shoes"]
+
+
+def test_weather_degraded_serp_detection():
+    from web_crawler import _query_looks_like_weather, _results_look_like_weather
+
+    assert _query_looks_like_weather("福州 天气预报 今天")
+    assert not _query_looks_like_weather("福州旅游攻略")
+    assert not _results_look_like_weather(
+        [
+            {
+                "title": "福州市_百度百科",
+                "url": "https://baike.baidu.com/item/福州市/1",
+                "summary": "行政区划与人口",
+            },
+            {
+                "title": "福州10大好玩景点",
+                "url": "https://www.thepaper.cn/newsDetail_forward_1",
+                "summary": "三坊七巷旅游",
+            },
+        ]
+    )
+    assert _results_look_like_weather(
+        [
+            {
+                "title": "福州天气预报",
+                "url": "https://www.weather.com.cn/weather/101230101.shtml",
+                "summary": "今日气温",
+            }
+        ]
+    )

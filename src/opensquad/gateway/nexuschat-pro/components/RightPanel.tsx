@@ -23,6 +23,11 @@ interface RightPanelProps {
 export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, users, searchQuery, onSearchChange, onLeaveGroup, onToggleSound, onUpdateGroup, messages = [], onJumpToMessage }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
+  const [agentToast, setAgentToast] = useState<{show: boolean; message: string}>({show: false, message: ''});
+  const showAgentToast = (message: string) => {
+    setAgentToast({show: true, message});
+    setTimeout(() => setAgentToast({show: false, message: ''}), 2000);
+  };
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [showAddAgentModal, setShowAddAgentModal] = useState(false);
   const [availableAgents, setAvailableAgents] = useState<Array<{ id: string; name: string; avatar: string; dir_name: string }>>([]);
@@ -531,6 +536,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                         className="w-8 h-8 rounded-full object-cover bg-border"
                         alt=""
                         loading="lazy"
+                        onDoubleClick={user.is_agent ? () => {
+                          if (user.status === 'online') {
+                            window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: user.id } }));
+                          } else {
+                            showAgentToast(t('chat.agentOffline'));
+                          }
+                        } : undefined}
                         onError={(e) => {
                           const img = e.currentTarget;
                           if (img.dataset.fallbackApplied) return;
@@ -611,6 +623,13 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
           })()
         )}
       </div>
+
+      {/* Agent offline toast */}
+      {agentToast.show && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 px-4 py-2 bg-primary text-white rounded-lg shadow-lg z-[600] animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <span className="text-sm">{agentToast.message}</span>
+        </div>
+      )}
     </div>
   );
 };

@@ -231,6 +231,11 @@ class AIWebSocketService {
     this._sendCommand('compress_context');
   }
 
+  /** Ask the agent to rebroadcast latest context token stats. */
+  requestTokenStats() {
+    this._sendCommand('request_token_stats');
+  }
+
   /**
    * Switch the running agent's model at runtime.
    * Event-driven: only the card name is sent over the WebSocket; the agent

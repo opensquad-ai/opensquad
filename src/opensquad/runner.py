@@ -879,6 +879,13 @@ class AgentRunner:
             logger.info("[Runner] Stop handled (parallel) — latch cleared")
             return
         if content == "__REQUEST_TOKEN_STATS__":
+            try:
+                sm = _get_session_manager()
+                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                if sid and sid != "unknown":
+                    self._turn_sid = sid
+            except Exception:
+                pass
             await self._broadcast_token_stats()
             return
         if content == "__NEW_SESSION__":
@@ -1573,6 +1580,13 @@ class AgentRunner:
                 # New client connection: request immediate broadcast of current token stats
                 if initial_query == "__REQUEST_TOKEN_STATS__":
                     logger.info("[Runner] Command: Request token stats broadcast")
+                    try:
+                        sm = _get_session_manager()
+                        sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                        if sid and sid != "unknown":
+                            self._turn_sid = sid
+                    except Exception:
+                        pass
                     await self._broadcast_token_stats()
                     initial_query = None
                     continue
@@ -4589,19 +4603,50 @@ class AgentRunner:
         except Exception as e:
             logger.debug(f"[Runner] _broadcast_token_stats_sync: {e}")
 
+    def _resolve_token_stats_sid(self) -> str:
+        """Best-effort session id for token_stats WS routing."""
+        sid = (getattr(self, "_turn_sid", None) or "").strip()
+        if sid and sid != "unknown":
+            return sid
+        try:
+            sm = _get_session_manager()
+            for candidate in (sm.get_focused_session_id(), sm.get_current_session_id()):
+                cand = (candidate or "").strip()
+                if cand and cand != "unknown":
+                    return cand
+        except Exception:
+            pass
+        return ""
+
+    def _chat_api_for_token_stats(self, sid: str = ""):
+        """Prefer the per-session ChatAPI (parallel panes); fall back to active/root."""
+        sid = (sid or "").strip()
+        if sid:
+            apis = getattr(self, "_session_chat_apis", None)
+            if isinstance(apis, dict):
+                api = apis.get(sid)
+                if api is not None:
+                    return api
+        return self.chat_api
+
     async def _broadcast_token_stats(self):
         try:
             import json
 
             from opensquad.token_breakdown import compute_token_breakdown
 
+            sid = self._resolve_token_stats_sid()
+            if sid and not (getattr(self, "_turn_sid", None) or "").strip():
+                self._turn_sid = sid
+            chat_api = self._chat_api_for_token_stats(sid)
+
             tools = self._tools_for_token_stats()
-            total = self.chat_api._count_tokens(self.chat_api.req, tools)
+            total = chat_api._count_tokens(chat_api.req, tools)
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
-            encoding = getattr(self.chat_api, "encoding", None)
+            encoding = getattr(chat_api, "encoding", None)
             stats = compute_token_breakdown(
-                self.chat_api.req,
+                chat_api.req,
                 tools,
                 encoding=encoding,
                 total=total,
@@ -4613,21 +4658,23 @@ class AgentRunner:
             # The token_analytics plugin reads data.cumulative.* from the
             # 'token_stats' EventBus event; without these fields its DB rows
             # store zeros and the dashboard renders empty token numbers.
-            cumul_input = self._hist_input_tokens + getattr(self.chat_api, "total_input_tokens", 0)
-            cumul_output = self._hist_output_tokens + getattr(self.chat_api, "total_output_tokens", 0)
+            cumul_input = self._hist_input_tokens + getattr(chat_api, "total_input_tokens", 0)
+            cumul_output = self._hist_output_tokens + getattr(chat_api, "total_output_tokens", 0)
             cumul_total = cumul_input + cumul_output
-            cumul_requests = self._hist_requests + getattr(self.chat_api, "total_requests", 0)
-            cumul_cache_read = self._hist_cache_read_tokens + getattr(self.chat_api, "total_cache_read_tokens", 0)
+            cumul_requests = self._hist_requests + getattr(chat_api, "total_requests", 0)
+            cumul_cache_read = self._hist_cache_read_tokens + getattr(chat_api, "total_cache_read_tokens", 0)
             # cache_creation is only tracked by ClaudeAPI; other backends report 0.
             cumul_cache_creation = self._hist_cache_creation_tokens + getattr(
-                self.chat_api, "total_cache_creation_tokens", 0
+                chat_api, "total_cache_creation_tokens", 0
             )
 
+            token_max = int(getattr(chat_api, "token_max", 0) or 0)
             token_data = {
                 "used": total,
-                "max": self.chat_api.token_max,
+                "max": token_max,
                 "breakdown": stats,
-                "model": getattr(self.chat_api, "model", ""),
+                "model": getattr(chat_api, "model", ""),
+                "session_id": sid,
                 "cumulative": {
                     "total_input_tokens": cumul_input,
                     "total_output_tokens": cumul_output,
@@ -4637,37 +4684,41 @@ class AgentRunner:
                     "cache_creation_tokens": cumul_cache_creation,
                 },
                 "session": {
-                    "input_tokens": getattr(self.chat_api, "total_input_tokens", 0),
-                    "output_tokens": getattr(self.chat_api, "total_output_tokens", 0),
-                    "total_input_tokens": getattr(self.chat_api, "total_input_tokens", 0),
-                    "total_output_tokens": getattr(self.chat_api, "total_output_tokens", 0),
-                    "total_tokens": getattr(self.chat_api, "total_input_tokens", 0)
-                    + getattr(self.chat_api, "total_output_tokens", 0),
-                    "requests": getattr(self.chat_api, "total_requests", 0),
-                    "total_requests": getattr(self.chat_api, "total_requests", 0),
-                    "cache_read_tokens": getattr(self.chat_api, "total_cache_read_tokens", 0),
+                    "input_tokens": getattr(chat_api, "total_input_tokens", 0),
+                    "output_tokens": getattr(chat_api, "total_output_tokens", 0),
+                    "total_input_tokens": getattr(chat_api, "total_input_tokens", 0),
+                    "total_output_tokens": getattr(chat_api, "total_output_tokens", 0),
+                    "total_tokens": getattr(chat_api, "total_input_tokens", 0)
+                    + getattr(chat_api, "total_output_tokens", 0),
+                    "requests": getattr(chat_api, "total_requests", 0),
+                    "total_requests": getattr(chat_api, "total_requests", 0),
+                    "cache_read_tokens": getattr(chat_api, "total_cache_read_tokens", 0),
                 },
             }
 
             logger.warning(
-                "[Runner] _broadcast_token_stats: used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d tool_defs=%d thought=%d overhead=%d",
+                "[Runner] _broadcast_token_stats: sid=%s used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d tool_defs=%d thought=%d overhead=%d",
+                sid or "-",
                 total,
-                self.chat_api.token_max,
-                (total / max(self.chat_api.token_max, 1)) * 100,
-                len(self.chat_api.req),
+                token_max,
+                (total / max(token_max, 1)) * 100,
+                len(getattr(chat_api, "req", []) or []),
                 stats.get("system", 0),
                 stats.get("tool", 0),
                 stats.get("tool_defs", 0),
                 stats.get("thought", 0),
                 stats.get("overhead", 0),
             )
-            await bus.emit_async("token_stats", {"sid": self._turn_sid, "agent_id": self._agent_id, "data": token_data})
+            await bus.emit_async(
+                "token_stats",
+                {"sid": sid, "agent_id": self._agent_id, "data": token_data},
+            )
 
             # Write stats file to the agent data directory (for Launcher to read)
             try:
                 import os
 
-                data_dir = getattr(self.chat_api, "history_dir", None)
+                data_dir = getattr(chat_api, "history_dir", None)
                 if data_dir:
                     stats_file = os.path.join(data_dir, "token_stats.json")
                     with open(stats_file, "w", encoding="utf-8") as f:

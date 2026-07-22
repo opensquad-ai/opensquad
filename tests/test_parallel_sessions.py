@@ -16,6 +16,8 @@ from opensquad.session_parallel import (
     MAX_PARALLEL_TURNS,
     ParallelTurnScheduler,
     is_external_channel,
+    is_external_ingress,
+    resolve_primary_session_id,
 )
 
 
@@ -23,9 +25,21 @@ def test_is_external_channel():
     assert is_external_channel("telegram")
     assert is_external_channel("telegram_group")
     assert is_external_channel("feishu")
+    assert is_external_channel("chatpro")
+    assert is_external_channel("chatpro_group")
+    assert is_external_channel("chatpro_dm")
     assert not is_external_channel("web")
     assert not is_external_channel("gateway")
     assert not is_external_channel("")
+
+
+def test_is_external_ingress_sources():
+    assert is_external_ingress("group:demo", "")
+    assert is_external_ingress("wake", "")
+    assert is_external_ingress("chatpro", "")
+    assert is_external_ingress("", "chatpro_group")
+    assert not is_external_ingress("gateway", "web")
+    assert not is_external_ingress("", "web")
 
 
 def test_start_new_session_archives_empty(tmp_path: Path):
@@ -176,3 +190,174 @@ async def test_parallel_scheduler_slots():
     await asyncio.sleep(0.12)
     sched.reap()
     assert not sched.is_session_busy("s1")
+
+
+def test_resolve_primary_session_id(tmp_path: Path):
+    save = tmp_path / "sessions"
+    hist = tmp_path / "history"
+    save.mkdir()
+    hist.mkdir()
+    sm = SessionManager(save_dir=str(save), history_dir=str(hist))
+    first = sm.get_current_session_id()
+    sm.start_new_session()
+    second = sm.get_current_session_id()
+    assert resolve_primary_session_id(sm) == first
+    sm.set_primary_session_id(second)
+    assert resolve_primary_session_id(sm) == second
+
+
+@pytest.mark.asyncio
+async def test_message_router_idle_pushes_process_queue_to_primary(tmp_path: Path, monkeypatch):
+    """Group @mention while idle must wake primary via __PROCESS_QUEUE__ (not focused)."""
+    from opensquad import message_router as mr_mod
+    from opensquad.message_queue import get_message_queue
+
+    save = tmp_path / "sessions"
+    hist = tmp_path / "history"
+    save.mkdir()
+    hist.mkdir()
+    sm = SessionManager(save_dir=str(save), history_dir=str(hist))
+    first = sm.get_current_session_id()
+    sm.start_new_session()
+    second = sm.get_current_session_id()
+    assert sm.get_primary_session_id() == first
+    assert sm.get_focused_session_id() == second
+
+    hub = InputHub()
+
+    class _State:
+        async def get_state(self):
+            return "idle"
+
+        async def get_wake_mode(self):
+            return "strict"
+
+    monkeypatch.setattr(mr_mod, "get_state_manager", lambda: _State())
+    monkeypatch.setattr(
+        mr_mod,
+        "get_sleep_controller",
+        lambda: type("SC", (), {"wake_up": staticmethod(lambda *_: None)})(),
+    )
+    monkeypatch.setattr(mr_mod.MessageRouter, "_check_mention", staticmethod(lambda *_: True))
+    # trigger_process_queue → push_ingress imports get_input_hub locally
+    monkeypatch.setattr("opensquad.input_hub.get_input_hub", lambda: hub)
+    monkeypatch.setattr(
+        "opensquad.ingress_policy.resolve_primary_session_id",
+        lambda _sm=None: first,
+    )
+
+    get_message_queue().get_all()
+
+    router = mr_mod.MessageRouter()
+    result = await router.route_group_message(
+        {
+            "id": "m1",
+            "group_id": "g1",
+            "group_name": "demo-group",
+            "sender_id": "u1",
+            "sender_name": "alice",
+            "content": "@agent305 hello",
+            "mentions": [],
+        }
+    )
+    assert result.get("pushed") is True
+    assert result.get("action") == "push_trigger"
+
+    popped = await hub.wait_any(timeout=1.0)
+    assert popped is not None
+    sid, item = popped
+    assert sid == first
+    assert item["content"] == "__PROCESS_QUEUE__"
+    assert item.get("channel") == "chatpro_group"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_process_queue_starts_primary_turn(tmp_path: Path, monkeypatch):
+    """Parallel dispatcher must drain message_queue and schedule primary turn."""
+    from opensquad import session_dispatcher as sd
+    from opensquad.message_queue import QueueMessage, get_message_queue
+
+    save = tmp_path / "sessions"
+    hist = tmp_path / "history"
+    save.mkdir()
+    hist.mkdir()
+    sm = SessionManager(save_dir=str(save), history_dir=str(hist))
+    primary = sm.get_current_session_id()
+    sm.start_new_session()  # focused ≠ primary
+
+    q = get_message_queue()
+    q.get_all()
+    await q.put(
+        QueueMessage(
+            id=f"m-dispatcher-{time.time()}",
+            type="group",
+            source_id="g1",
+            source_name="demo",
+            sender_id="u1",
+            sender_name="alice",
+            content="@agent hello",
+            timestamp=time.time(),
+            mentions=[],
+            raw_data={},
+            images=[],
+        )
+    )
+
+    hub = InputHub()
+    hub.push("__PROCESS_QUEUE__", source="group:demo", session_id=primary, channel="chatpro_group")
+
+    started: list[tuple[str, object]] = []
+
+    class _Sched:
+        busy_sessions: set[str] = set()
+
+        def reap(self):
+            return None
+
+        def is_session_busy(self, sid: str) -> bool:
+            return False
+
+        def request_stop_session(self, sid: str):
+            return None
+
+        async def acquire_slot(self, sid: str) -> bool:
+            return True
+
+        def start(self, sid: str, coro):
+            started.append((sid, coro))
+            if asyncio.iscoroutine(coro):
+                coro.close()
+
+    class _Runner:
+        _agent_id = "agent305"
+        _current_images: list = []
+
+        async def _emit(self, *a, **k):
+            return None
+
+        async def _emit_busy_sessions(self, busy):
+            return None
+
+        async def _handle_agent_level_command(self, item):
+            raise AssertionError(f"must not ignore PROCESS_QUEUE: {item}")
+
+        async def _parallel_session_turn(self, sid, item):
+            return None
+
+        async def _dispatcher_idle_tick(self):
+            return None
+
+    monkeypatch.setattr("opensquad.session_manager.get_session_manager", lambda: sm)
+    monkeypatch.setattr(sd, "get_input_hub", lambda: hub)
+    monkeypatch.setattr(sd, "ParallelTurnScheduler", lambda max_parallel=4: _Sched())
+    monkeypatch.setattr(sd, "resolve_primary_session_id", lambda _sm=None: primary)
+    monkeypatch.setattr(sd, "resolve_session_id", lambda **kwargs: primary)
+
+    task = asyncio.create_task(sd.run_parallel_dispatcher(_Runner()))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert started, "expected a primary turn to be scheduled"
+    assert started[0][0] == primary

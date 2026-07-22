@@ -1197,3 +1197,58 @@ async def admin_put_model_card_assign(name: str, body: dict, current_user: User 
 @admin_router.delete("/admin/agents/{name}/model-card")
 async def admin_delete_model_card_unassign(name: str, current_user: User = Depends(get_current_user_dep)):
     return await _proxy_delete(f"/api/agents/{name}/model-card")
+
+
+# ============================================================
+# Scheduled Tasks (delegated timed tasks)
+# ============================================================
+
+def _task_mgr(name: str):
+    from opensquad.scheduled_tasks import get_task_manager
+
+    return get_task_manager(name)
+
+
+@admin_router.get("/admin/agents/{name}/scheduled-tasks")
+async def admin_list_scheduled_tasks(name: str, current_user: User = Depends(get_current_user_dep)):
+    return {"tasks": _task_mgr(name).list_tasks()}
+
+
+@admin_router.post("/admin/agents/{name}/scheduled-tasks")
+async def admin_create_scheduled_task(name: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+    return {"task": _task_mgr(name).create_task(body or {})}
+
+
+@admin_router.put("/admin/agents/{name}/scheduled-tasks/{task_id}")
+async def admin_update_scheduled_task(name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+    res = _task_mgr(name).update_task(task_id, body or {})
+    if res is None:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"task": res}
+
+
+@admin_router.delete("/admin/agents/{name}/scheduled-tasks/{task_id}")
+async def admin_delete_scheduled_task(name: str, task_id: str, current_user: User = Depends(get_current_user_dep)):
+    ok = _task_mgr(name).delete_task(task_id)
+    return {"ok": ok}
+
+
+@admin_router.post("/admin/agents/{name}/scheduled-tasks/{task_id}/run")
+async def admin_run_scheduled_task(name: str, task_id: str, current_user: User = Depends(get_current_user_dep)):
+    res = _task_mgr(name).run_now(task_id)
+    if res is None:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"task": res}
+
+
+@admin_router.put("/admin/agents/{name}/scheduled-tasks/{task_id}/enabled")
+async def admin_toggle_scheduled_task(name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+    res = _task_mgr(name).set_enabled(task_id, bool((body or {}).get("enabled", True)))
+    if res is None:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"task": res}
+
+
+@admin_router.get("/admin/agents/{name}/scheduled-tasks/executions")
+async def admin_list_scheduled_executions(name: str, task_id: str | None = Query(default=None), current_user: User = Depends(get_current_user_dep)):
+    return {"executions": _task_mgr(name).list_executions(task_id)}

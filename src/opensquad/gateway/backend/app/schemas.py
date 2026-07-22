@@ -126,6 +126,7 @@ class GroupMemberInfo(BaseModel):
     name: str
     avatar: str | None
     status: str
+    is_agent: bool = False
 
 
 class GroupResponse(GroupBase):

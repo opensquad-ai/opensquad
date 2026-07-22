@@ -2,6 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Reusable input style for scheduled-task forms */
+.os-input {
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border, #d1d5db);
+  background: transparent;
+  font-size: 12px;
+  color: var(--color-text, inherit);
+  outline: none;
+}
+.os-input:focus {
+  border-color: var(--color-primary, #0ea5e9);
+  box-shadow: 0 0 0 1px var(--color-primary, #0ea5e9);
+}
+
 /* Fenced code blocks in assistant dialogue + thought Markdown */
 .ai-markdown .ai-code-wrap {
   margin: 0.5rem 0;

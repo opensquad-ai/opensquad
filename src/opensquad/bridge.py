@@ -602,13 +602,23 @@ class ChatProBridge:
             )
             await message_queue.put(queue_msg)
 
-            # Direct messages always push (unless sleeping and need wake-up)
+            # Direct messages always push onto the primary ingress session
+            from opensquad.ingress_policy import push_ingress, trigger_process_queue
+
             if ai_state == "sleeping":
                 sleep_controller.wake_up(f"DM-{sender_name}")
-                input_hub.push(f"[Wake-DM-{sender_name}]", source="wake", images=image_paths if image_paths else None)
+                # Queue already holds the DM; drain via primary (same as group path).
+                trigger_process_queue(
+                    source="wake",
+                    channel="chatpro_dm",
+                    images=image_paths if image_paths else None,
+                )
             else:
-                input_hub.push(
-                    f"[DM] {sender_name}: {content}", source="chatpro", images=image_paths if image_paths else None
+                push_ingress(
+                    f"[DM] {sender_name}: {content}",
+                    source="chatpro",
+                    channel="chatpro_dm",
+                    images=image_paths if image_paths else None,
                 )
         elif msg_type == "presence":
             # Presence update, optional handling

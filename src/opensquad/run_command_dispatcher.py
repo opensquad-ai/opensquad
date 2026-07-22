@@ -38,6 +38,15 @@ class RunCommandDispatcher:
             return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
 
         if initial_query == "__REQUEST_TOKEN_STATS__":
+            try:
+                from opensquad.session_manager import get_session_manager
+
+                sm = get_session_manager()
+                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                if sid and sid != "unknown":
+                    self.runner._turn_sid = sid
+            except Exception:
+                pass
             await self.runner._broadcast_token_stats()
             return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
 

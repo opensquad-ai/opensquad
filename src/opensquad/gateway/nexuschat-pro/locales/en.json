@@ -117,6 +117,8 @@
     "switchToAI": "Switch to AI Agent",
     "composeHint": "Enter the user's Display Name, not ID or email",
     "copiedToClipboard": "Copied to clipboard",
+    "agentOffline": "This agent is offline; quick chat is unavailable",
+    "agentQuickChat": "Double-click an agent's avatar for quick chat",
     "fileTooLarge": "File too large! Maximum supported size is {{mb}}MB",
     "imageTooLargeCompressing": "Image too large! Maximum {{mb}}MB, compressing for you...",
     "compressFailedTooLarge": "Image compression failed, file too large to upload",
@@ -650,6 +652,7 @@
   },
   "aiChat": {
     "newSession": "New Session",
+    "scheduledTasks": "Scheduled Tasks",
     "uiModeLabel": "UI mode",
     "uiModeClassic": "Work",
     "uiModeSolo": "Code",
@@ -726,7 +729,12 @@
       "loadSessionsFailed": "Failed to load sessions",
       "deleteSessionFailed": "Failed to delete session",
       "renameSessionFailed": "Failed to rename session",
-      "defaultFolder": "Default"
+      "defaultFolder": "Default",
+      "externalBadge": "External",
+      "externalBadgeTitle": "External messages (group / Feishu / Telegram, etc.) only enter this session",
+      "setExternalSession": "Set as external communications session",
+      "setExternalPending": "Setting as external session…",
+      "setExternalFailed": "Failed to set external session; please retry"
     },
     "workingDirModal": {
       "title": "Set working directory",
@@ -1265,6 +1273,47 @@
         "name": "Luxury",
         "desc": "Steady gold-brown, understated elegance"
       }
+    }
+  },
+  "scheduledTasks": {
+    "title": "Scheduled Tasks",
+    "newTask": "New Task",
+    "editTask": "Edit Task",
+    "tab": {
+      "execution": "Execution",
+      "task": "Task"
+    },
+    "loading": "Loading…",
+    "emptyExecution": "No executions yet",
+    "emptyTask": "No tasks yet — click \"New Task\" to create one",
+    "selectExecution": "Select an execution on the left to view its task flow",
+    "selectTask": "Select a task on the left to view details",
+    "confirmDelete": "Delete this task?",
+    "fName": "Task Name",
+    "fNamePh": "e.g. Daily code review",
+    "fPrompt": "Execution Prompt",
+    "fPromptPh": "Describe the task the agent will perform…",
+    "fWorkspace": "Execution Workspace",
+    "fRepeat": "Repeat Type",
+    "fWeekdaysHint": "Weekdays 0=Sun, 1=Mon … 6=Sat, comma-separated",
+    "fDelegate": "Delegate Agent",
+    "fDelegateDefault": "Use current agent",
+    "fModel": "Execution Model",
+    "fModelDefault": "Default model",
+    "fSkills": "Enabled Skills",
+    "fSkillsSearchPh": "Search Skill…",
+    "fEnableNow": "Enable Immediately",
+    "selectAll": "Select All",
+    "clear": "Clear",
+    "noSkills": "No skills available",
+    "enabledCount": "{{n}} enabled",
+    "cancel": "Cancel",
+    "save": "Save",
+    "repeat": {
+      "once": "Once",
+      "daily": "Daily",
+      "weekly": "Weekly",
+      "interval": "Interval"
     }
   }
 }

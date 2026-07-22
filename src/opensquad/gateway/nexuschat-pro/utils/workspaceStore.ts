@@ -12,7 +12,7 @@ export type Workspace = {
   createdAt: number;
 };
 
-export type ContentTabKind = 'session' | 'file';
+export type ContentTabKind = 'session' | 'file' | 'scheduled-tasks';
 
 export type ContentTab = {
   kind: ContentTabKind;
@@ -87,7 +87,7 @@ export function parseContentTabKey(key: string | null): ContentTab | null {
   if (i < 0) return null;
   const kind = key.slice(0, i) as ContentTabKind;
   const id = key.slice(i + 1);
-  if ((kind !== 'session' && kind !== 'file') || !id) return null;
+  if ((kind !== 'session' && kind !== 'file' && kind !== 'scheduled-tasks') || !id) return null;
   return { kind, id };
 }
 

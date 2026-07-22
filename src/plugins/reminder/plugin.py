@@ -35,7 +35,6 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from opensquad.input_hub import input_hub
 from opensquad.plugin_api import Context, Plugin, register, tool
 
 logger = logging.getLogger("plugins.reminder")
@@ -306,15 +305,16 @@ class ReminderPlugin(Plugin):
             asyncio.run_coroutine_threadsafe(_im_task(), self._loop)
 
         else:
-            # ── Agent wake-up path: call_soon_threadsafe -> input_hub queue ──
-            payload = {
-                "source": "reminder",
-                "content": f"[Reminder] {message}",
-            }
-
+            # ── Agent wake-up path: IngressPolicy → primary session ──
             def _push_to_queue():
                 try:
-                    input_hub._get_queue().put_nowait(payload)
+                    from opensquad.ingress_policy import push_ingress
+
+                    push_ingress(
+                        f"[Reminder] {message}",
+                        source="reminder",
+                        channel="external",
+                    )
                 except Exception as e:
                     logger.error(f"[ReminderPlugin] input_hub push failed: {e}")
 

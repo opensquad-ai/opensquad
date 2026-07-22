@@ -2489,7 +2489,20 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                     {/* Avatar */}
                     <div className="w-8 md:w-10 flex-shrink-0 flex flex-col items-center">
                         {!isSequence && (
-                            <AvatarImg avatar={sender?.avatar} seed={sender?.id} label={sender?.name} className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100" title={sender?.name} />
+                            <AvatarImg
+                                avatar={sender?.avatar}
+                                seed={sender?.id}
+                                label={sender?.name}
+                                className="w-8 h-8 md:w-9 h-9 rounded-full object-cover border border-gray-100"
+                                title={sender?.name}
+                                onDoubleClick={!isSelf && sender?.is_agent ? () => {
+                                    if (sender?.status === 'online') {
+                                        window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: sender.id } }));
+                                    } else {
+                                        showCopyToast(t('chat.agentOffline'));
+                                    }
+                                } : undefined}
+                            />
                         )}
                     </div>
 

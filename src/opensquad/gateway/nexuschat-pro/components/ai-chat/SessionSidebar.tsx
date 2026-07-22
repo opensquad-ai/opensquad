@@ -19,6 +19,7 @@ import {
   Code2,
   MessageCircle,
   LayoutGrid,
+  Clock,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import {
@@ -48,12 +49,15 @@ interface SessionSidebarProps {
   /** Optional override for delete (e.g. abandon empty current via new_session first). */
   onDeleteSession?: (sessionId: string) => Promise<void>;
   onOpenSkills?: () => void;
+  onOpenScheduledTasks?: () => void;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
   agentBusy?: boolean;
   /** Session ids currently running a parallel turn */
   busySessionIds?: string[];
   primarySessionId?: string | null;
+  /** Session id waiting for server ack of set_primary_session */
+  pendingPrimarySessionId?: string | null;
   onSetPrimarySession?: (sessionId: string) => void;
   /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
   onSessionsChange?: (sessions: AgentSession[]) => void;
@@ -105,11 +109,13 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onSwitchAndReply,
   onDeleteSession,
   onOpenSkills,
+  onOpenScheduledTasks,
   isOpen,
   sessionTitleUpdate,
   agentBusy = false,
   busySessionIds = [],
   primarySessionId = null,
+  pendingPrimarySessionId = null,
   onSetPrimarySession,
   onSessionsChange,
   uiMode = 'classic',
@@ -427,9 +433,16 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 {isPrimary ? (
                   <span
                     className="shrink-0 text-[9px] px-1 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
-                    title="外界消息（群聊/飞书/Telegram 等）默认接入此主会话"
+                    title={t('aiChat.sessionSidebar.externalBadgeTitle')}
                   >
-                    主
+                    {t('aiChat.sessionSidebar.externalBadge')}
+                  </span>
+                ) : session.id === pendingPrimarySessionId ? (
+                  <span
+                    className="shrink-0 text-[9px] px-1 rounded bg-black/5 dark:bg-white/10 text-textMuted"
+                    title={t('aiChat.sessionSidebar.setExternalPending')}
+                  >
+                    …
                   </span>
                 ) : null}
               </div>
@@ -444,8 +457,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             {!isPrimary && onSetPrimarySession ? (
               <button
                 type="button"
-                title="设为主会话（外界消息接入）"
-                className="p-0.5 rounded hover:bg-primary/10"
+                title={t('aiChat.sessionSidebar.setExternalSession')}
+                disabled={!!pendingPrimarySessionId}
+                className="p-0.5 rounded hover:bg-primary/10 disabled:opacity-40"
                 onClick={(e) => {
                   e.stopPropagation();
                   onSetPrimarySession(session.id);
@@ -608,6 +622,15 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       </div>
 
       <div className="px-2 py-2 space-y-1 border-b border-border/60 shrink-0">
+        <button
+          type="button"
+          disabled={!workspaceRootPath}
+          onClick={() => onOpenScheduledTasks?.()}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive disabled:opacity-40"
+        >
+          <Clock size={14} className="text-violet-500" />
+          {t('aiChat.scheduledTasks')}
+        </button>
         <button
           type="button"
           disabled={!workspaceRootPath}

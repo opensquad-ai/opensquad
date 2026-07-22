@@ -5,6 +5,7 @@ import React, { useMemo } from 'react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
 import { ComposerLandingDock } from './ComposerLandingDock';
+import { ScheduledTasksPage } from './ScheduledTasksPage';
 import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
 
@@ -62,6 +63,9 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
       if (tab.kind === 'file') {
         const name = tab.id.replace(/\\/g, '/').split('/').pop() || tab.id;
         return { tab, title: name, dirty: !!fileDirtyMap[tab.id] };
+      }
+      if (tab.kind === 'scheduled-tasks') {
+        return { tab, title: tabTitles[tab.id]?.trim() || '定时任务' };
       }
       const title = tabTitles[tab.id]?.trim() || tab.id;
       return { tab, title };
@@ -136,6 +140,8 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             relPath={active.id}
             onDirtyChange={(dirty) => handlers.onFileDirty?.(active.id, dirty)}
           />
+        ) : active.kind === 'scheduled-tasks' ? (
+          <ScheduledTasksPage agentName={agentId} rootPath={rootPath} />
         ) : (
           <div
             className={`os-chat-session-shell ${landing ? 'is-landing' : 'is-docked'}`}

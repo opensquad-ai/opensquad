@@ -315,7 +315,7 @@ export interface GroupResponse {
   description: string | null;
   avatar: string | null;
   is_private: boolean;
-  members: Array<{ id: string; name: string; avatar: string | null; status: string }>;
+  members: Array<{ id: string; name: string; avatar: string | null; status: string; is_agent?: boolean }>;
   pinned_message_id: string | null;
   unread_count: number;
   has_unread_mention: boolean;
@@ -1696,6 +1696,84 @@ export const skillAPI = {
     }
 
     return response.json();
+  },
+};
+
+// ============================================================
+// Scheduled Tasks API (delegated timed tasks)
+// ============================================================
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  prompt: string;
+  workspace: string;
+  delegate_agent: string;
+  model_card: string;
+  skills: string[];
+  schedule: {
+    type: 'once' | 'daily' | 'weekly' | 'interval';
+    time?: string;
+    weekdays?: string;
+    run_at_ts?: number;
+    total_seconds?: number;
+  };
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+  last_run_ts: number | null;
+  last_status: string | null;
+  next_run_ts: number | null;
+  run_count: number;
+}
+
+export interface ScheduledExecution {
+  id: string;
+  task_id: string;
+  task_name: string;
+  started_at: number;
+  ended_at: number | null;
+  status: 'running' | 'success' | 'failed' | 'missed';
+  manual: boolean;
+  session_id: string | null;
+  error: string | null;
+}
+
+export const scheduledTaskAPI = {
+  list: async (agentName: string) => {
+    return apiRequest<{ tasks: ScheduledTask[] }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks`);
+  },
+  create: async (agentName: string, task: Partial<ScheduledTask>) => {
+    return apiRequest<{ task: ScheduledTask }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks`, {
+      method: 'POST',
+      body: JSON.stringify(task),
+    });
+  },
+  update: async (agentName: string, taskId: string, task: Partial<ScheduledTask>) => {
+    return apiRequest<{ task: ScheduledTask }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/${encodeURIComponent(taskId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(task),
+    });
+  },
+  remove: async (agentName: string, taskId: string) => {
+    return apiRequest<{ ok: boolean }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE',
+    });
+  },
+  runNow: async (agentName: string, taskId: string) => {
+    return apiRequest<{ task: ScheduledTask }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/${encodeURIComponent(taskId)}/run`, {
+      method: 'POST',
+    });
+  },
+  setEnabled: async (agentName: string, taskId: string, enabled: boolean) => {
+    return apiRequest<{ task: ScheduledTask }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/${encodeURIComponent(taskId)}/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    });
+  },
+  executions: async (agentName: string, taskId?: string) => {
+    const q = taskId ? `?task_id=${encodeURIComponent(taskId)}` : '';
+    return apiRequest<{ executions: ScheduledExecution[] }>(`/ai-web/admin/agents/${encodeURIComponent(agentName)}/scheduled-tasks/executions${q}`);
   },
 };
 

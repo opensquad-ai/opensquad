@@ -106,6 +106,7 @@ def _member_info(user: User, status: str | None = None) -> GroupMemberInfo:
         name=user.name,
         avatar=_ensure_agent_user_avatar(user),
         status=status if status is not None else user.status.value,
+        is_agent=_is_agent_email(getattr(user, "email", None)),
     )
 
 

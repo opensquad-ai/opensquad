@@ -6,8 +6,8 @@ import logging
 import time
 from typing import Any
 
-from opensquad.input_hub import get_input_hub
 from opensquad.message_queue import QueueMessage, get_message_queue
+from opensquad.ingress_policy import trigger_process_queue
 from opensquad.sleep_controller import get_sleep_controller
 from opensquad.state_manager import get_state_manager
 
@@ -82,7 +82,6 @@ class MessageRouter:
 
         state_manager = get_state_manager()
         sleep_controller = get_sleep_controller()
-        input_hub = get_input_hub()
         message_queue = get_message_queue()
 
         result = {"action": "unknown", "queued": False, "pushed": False, "woke_up": False, "reason": ""}
@@ -153,16 +152,17 @@ class MessageRouter:
 
             sleep_controller.wake_up(wake_reason)
 
-            input_hub.push(f"[wakeup-{wake_reason}]", source="wake")
+            # Drain the real queued message(s) on the primary ingress session.
+            primary_sid = trigger_process_queue(source="wake", channel="chatpro_group")
 
             result.update({"action": "wake_from_sleep", "pushed": True, "woke_up": True, "reason": wake_reason})
-            logger.info(f"[Router] Wake from sleep: {wake_reason}")
+            logger.info(f"[Router] Wake from sleep → primary={primary_sid or '-'}: {wake_reason}")
 
         elif ai_state == "working":
             if is_mentioned:
                 # @mention during working state: push trigger to ensure the message is not missed
                 source_label = f"group:{group_name}" if group_name else "chatpro"
-                input_hub.push("__PROCESS_QUEUE__", source=source_label)
+                primary_sid = trigger_process_queue(source=source_label, channel="chatpro_group")
                 result.update(
                     {
                         "action": "queue_mention_working",
@@ -170,7 +170,9 @@ class MessageRouter:
                         "reason": "received @mention while working, pushed trigger to ensure delivery",
                     }
                 )
-                logger.info(f"[Router] @mention during working, pushed trigger: {content}")
+                logger.info(
+                    f"[Router] @mention during working → primary={primary_sid or '-'}: {content}"
+                )
             else:
                 # normal mode non-@: message already queued; Runner turn loop will consume it
                 result.update(
@@ -201,8 +203,7 @@ class MessageRouter:
 
                 # Use a meaningful source label (e.g. group:agent-chat-group) to guide the AI's reply
                 source_label = f"group:{group_name}" if group_name else "chatpro"
-
-                input_hub.push("__PROCESS_QUEUE__", source=source_label)
+                primary_sid = trigger_process_queue(source=source_label, channel="chatpro_group")
                 result.update(
                     {
                         "action": "push_trigger",
@@ -210,7 +211,9 @@ class MessageRouter:
                         "reason": "idle, triggering Runner to consume message queue",
                     }
                 )
-                logger.info(f"[Router] Trigger idle AI to process queue: {content}")
+                logger.info(
+                    f"[Router] Trigger idle AI → primary={primary_sid or '-'}: {content}"
+                )
 
         return result
 

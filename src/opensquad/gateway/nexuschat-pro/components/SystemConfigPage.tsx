@@ -775,17 +775,19 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
     </div>
   );
 
+  // One shell size for all settings sections (General / About / Apps, …).
+  // Match the former "应用" (embedded app panel) footprint so switching tabs
+  // does not resize the modal.
+  const settingsShellClass =
+    'w-[min(96rem,calc(100vw-0.75rem))] h-[calc(100vh-0.75rem)] max-h-[calc(100vh-0.75rem)] shrink-0';
+
   return (
     <SoftOverlay
       open={isOpen}
       onBackdrop={onClose}
       zClass="z-[100]"
-      className={`backdrop-blur-[2px] ${showingApp ? '!p-2 sm:!p-3' : ''}`.trim()}
-      panelClassName={
-        showingApp
-          ? 'w-[min(96rem,calc(100vw-0.75rem))] h-[calc(100vh-0.75rem)] max-h-[calc(100vh-0.75rem)] shrink-0'
-          : 'w-[min(72rem,calc(100vw-1.5rem))] h-[min(52rem,calc(100vh-1.5rem))] shrink-0'
-      }
+      className="backdrop-blur-[2px] !p-2 sm:!p-3"
+      panelClassName={settingsShellClass}
     >
       <div
         className="os-modal-shell flex h-full w-full flex-col overflow-hidden"

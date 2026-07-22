@@ -70,6 +70,13 @@ class InputHandler:
         # -- __REQUEST_TOKEN_STATS__ ----------------------------------------
         if cmd == "__REQUEST_TOKEN_STATS__":
             logger.info("[InputHandler] Command: Request token stats broadcast")
+            try:
+                sm = get_session_manager()
+                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                if sid and sid != "unknown":
+                    runner._turn_sid = sid
+            except Exception:
+                pass
             await broadcast_token_stats()
             return True, None
 

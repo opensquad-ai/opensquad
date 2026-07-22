@@ -650,26 +650,27 @@ class GatewayAdapter(BaseAgent):
         model_card = str(data.get("model_card") or data.get("card") or "").strip()
         self.current_user_id = user_id
 
-        # Route: external channels → primary; web → require/fallback focused
+        # Route via IngressPolicy: external → primary; web keeps/falls back focused
         try:
-            from opensquad.session_manager import get_session_manager
-            from opensquad.session_parallel import is_external_channel
+            from opensquad.ingress_policy import classify, resolve_session_id
 
-            sm = get_session_manager()
-            if is_external_channel(channel):
-                session_id = sm.get_primary_session_id()
+            session_id = resolve_session_id(
+                source="gateway",
+                channel=channel,
+                session_id=session_id,
+            )
+            kind = classify("gateway", channel)
+            if kind == "external":
                 logger.info(
                     "[Adapter] External channel=%s → primary session %s",
                     channel,
                     session_id,
                 )
-            elif not session_id:
-                session_id = sm.get_focused_session_id()
-                if (channel or "web").lower() in ("web", "gateway", ""):
-                    logger.warning(
-                        "[Adapter] Web chat missing session_id; falling back to focused=%s",
-                        session_id,
-                    )
+            elif kind == "web" and not str(data.get("session_id") or "").strip():
+                logger.warning(
+                    "[Adapter] Web chat missing session_id; falling back to focused=%s",
+                    session_id,
+                )
         except Exception as e:
             logger.debug("[Adapter] session routing skipped: %s", e)
 
@@ -706,7 +707,9 @@ class GatewayAdapter(BaseAgent):
                 model_card,
                 session_id or "-",
             )
-        input_hub.push(
+        from opensquad.ingress_policy import push_ingress
+
+        push_ingress(
             content,
             source="gateway",
             images=images if images else None,

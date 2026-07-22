@@ -9,6 +9,7 @@ export type AvatarImgProps = {
   alt?: string;
   loading?: 'lazy' | 'eager';
   title?: string;
+  onDoubleClick?: React.MouseEventHandler<HTMLImageElement>;
 };
 
 /**
@@ -24,6 +25,7 @@ export const AvatarImg: React.FC<AvatarImgProps> = ({
   alt = '',
   loading = 'lazy',
   title,
+  onDoubleClick,
 }) => {
   const resolvedSeed = seed || label || 'default';
   const [src, setSrc] = useState(() => getAvatarUrl(avatar || undefined, resolvedSeed, label));
@@ -39,6 +41,7 @@ export const AvatarImg: React.FC<AvatarImgProps> = ({
       title={title}
       loading={loading}
       className={className}
+      onDoubleClick={onDoubleClick}
       onError={(e) => {
         const img = e.currentTarget;
         if (img.dataset.fallbackApplied) return;

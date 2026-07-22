@@ -12,6 +12,7 @@ from opensquad.session_parallel import (
     ParallelTurnScheduler,
     get_tool_write_lock,
 )
+from opensquad.ingress_policy import resolve_primary_session_id, resolve_session_id
 
 if TYPE_CHECKING:
     from opensquad.runner import AgentRunner
@@ -133,6 +134,49 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
         # Agent-level system commands — always handle globally (even if a sid
         # was attached). Otherwise __NEW_SESSION__ can be mis-routed / dropped
         # when a prior stop latch is still set on the focused session.
+        #
+        # __PROCESS_QUEUE__ is NOT agent-level ignore: it must drain message_queue
+        # and start a turn on the primary ingress session.
+        if content == "__PROCESS_QUEUE__" or content.startswith("__PROCESS_QUEUE__"):
+            from opensquad._runner._input_handler import InputHandler
+            from opensquad.message_queue import get_message_queue
+
+            primary = resolve_primary_session_id(sm)
+            sid = str(item.get("session_id") or sid or primary or "").strip() or primary
+            # Force external queue drains onto primary even if a stale sid arrived.
+            sid = resolve_session_id(
+                source=item.get("source") or "chatpro",
+                channel=item.get("channel") or "chatpro_group",
+                session_id=sid,
+                sm=sm,
+            ) or sid
+            formatted = await InputHandler().handle_queue_process(
+                runner,
+                hub,
+                get_message_queue(),
+                runner._emit,
+            )
+            if not formatted:
+                logger.info("[Dispatcher] __PROCESS_QUEUE__ empty — skip (sid=%s)", sid or "-")
+                continue
+            item = {
+                **item,
+                "content": formatted,
+                "session_id": sid,
+                "channel": item.get("channel") or "chatpro_group",
+                "source": item.get("source") or "chatpro",
+            }
+            imgs = getattr(runner, "_current_images", None) or []
+            if imgs and not item.get("images"):
+                item["images"] = list(imgs)
+            content = formatted
+            logger.info(
+                "[Dispatcher] __PROCESS_QUEUE__ → primary turn sid=%s content_len=%s",
+                sid,
+                len(content),
+            )
+            # Fall through to normal scheduling below.
+
         _AGENT_LEVEL = (
             "__NEW_SESSION__",
             "__STOP__",
@@ -145,13 +189,21 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
             and not content.startswith("__SWITCH_AND_REPLY__:")
             and not content.startswith("__LOAD_SESSION__:")
             and not content.startswith("__WITHDRAW_TURN__:")
+            and not content.startswith("__PROCESS_QUEUE__")
         ):
             await runner._handle_agent_level_command(item)
             continue
 
-        # Resolve session id
+        # Resolve session id via IngressPolicy (external → primary; else keep/focused).
         if not sid:
-            sid = str(item.get("session_id") or "").strip() or sm.get_focused_session_id()
+            sid = str(item.get("session_id") or "").strip()
+        if not sid:
+            sid = resolve_session_id(
+                source=item.get("source"),
+                channel=item.get("channel"),
+                session_id="",
+                sm=sm,
+            )
 
         # SWITCH_AND_REPLY legacy form on a session urgent queue
         if content.startswith("__SWITCH_AND_REPLY__:"):

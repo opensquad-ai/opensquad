@@ -9,32 +9,19 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+# Ingress classification / primary routing lives in ingress_policy (re-exported
+# here so existing ``from opensquad.session_parallel import …`` keeps working).
+from opensquad.ingress_policy import (  # noqa: F401
+    EXTERNAL_CHANNELS,
+    is_external_channel,
+    is_external_ingress,
+    resolve_primary_session_id,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default max concurrent LLM/tool turns per agent process (plan: MAX_PARALLEL_TURNS=4).
 MAX_PARALLEL_TURNS = max(1, int(os.environ.get("OPENSQUAD_MAX_PARALLEL_TURNS", "4")))
-
-# Channels that always route to the agent's primary session (external ingress).
-EXTERNAL_CHANNELS = frozenset(
-    {
-        "telegram",
-        "telegram_group",
-        "telegram_private",
-        "feishu",
-        "feishu_group",
-        "feishu_private",
-        "wecom",
-        "dingtalk",
-        "qq",
-        "whatsapp",
-        "discord",
-        "slack",
-        "api",
-        "external",
-        "group",
-        "chatpro",
-    }
-)
 
 # Agent-level mutex for filesystem / cwd mutating tools (shared workspace).
 _tool_write_lock: asyncio.Lock | None = None
@@ -45,16 +32,6 @@ def get_tool_write_lock() -> asyncio.Lock:
     if _tool_write_lock is None:
         _tool_write_lock = asyncio.Lock()
     return _tool_write_lock
-
-
-def is_external_channel(channel: str | None) -> bool:
-    ch = (channel or "").strip().lower()
-    if not ch or ch in ("web", "cli", "gateway"):
-        return False
-    if ch in EXTERNAL_CHANNELS:
-        return True
-    # Prefix match: telegram_*, feishu_*, etc.
-    return any(ch.startswith(prefix) for prefix in ("telegram", "feishu", "wecom", "dingtalk"))
 
 
 @dataclass

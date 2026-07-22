@@ -933,12 +933,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [tokenStatsBySession, setTokenStatsBySession] = useState<Record<string, TokenStatsState>>({});
   const tokenStatsBySessionRef = useRef(tokenStatsBySession);
   useEffect(() => { tokenStatsBySessionRef.current = tokenStatsBySession; }, [tokenStatsBySession]);
+  /** Last agent-level window stats (fallback when per-session key is missing). */
+  const [agentTokenStats, setAgentTokenStats] = useState<TokenStatsState | null>(null);
+  const agentTokenStatsRef = useRef<TokenStatsState | null>(null);
+  useEffect(() => { agentTokenStatsRef.current = agentTokenStats; }, [agentTokenStats]);
   /** Focused / live session stats (header ring, ContextViewer). */
-  const tokenStats = currentSessionId ? (tokenStatsBySession[currentSessionId] ?? null) : null;
+  const tokenStats = currentSessionId
+    ? (tokenStatsBySession[currentSessionId] ?? agentTokenStats)
+    : agentTokenStats;
   const tokenStatsRef = useRef(tokenStats);
   useEffect(() => { tokenStatsRef.current = tokenStats; }, [tokenStats]);
 
   const applyTokenStats = useCallback((sid: string | null | undefined, next: TokenStatsState | null) => {
+    if (next) {
+      setAgentTokenStats(next);
+      agentTokenStatsRef.current = next;
+    }
     const key = (sid || '').trim();
     if (!key) return;
     setTokenStatsBySession((prev) => {
@@ -951,6 +961,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return { ...prev, [key]: next };
     });
   }, []);
+
+  // When session id arrives after an early token_stats / profile seed, attach
+  // fallback stats to the sid and (once) ask the agent to rebroadcast.
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const existing = tokenStatsBySessionRef.current[currentSessionId];
+    if (existing && existing.max > 0) return;
+    const fallback = agentTokenStatsRef.current;
+    if (fallback && fallback.max > 0) {
+      applyTokenStats(currentSessionId, fallback);
+    }
+    wsServiceRef.current?.requestTokenStats();
+  }, [currentSessionId, applyTokenStats]);
 
   // Session management
   useEffect(() => {
@@ -1190,6 +1213,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [busySessions, setBusySessions] = useState<string[]>([]);
   const busySessionsRef = useRef<string[]>([]);
   const [primarySessionId, setPrimarySessionId] = useState<string | null>(null);
+  const [pendingPrimarySessionId, setPendingPrimarySessionId] = useState<string | null>(null);
+  const pendingPrimarySessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    pendingPrimarySessionIdRef.current = pendingPrimarySessionId;
+  }, [pendingPrimarySessionId]);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
   useEffect(() => { busySessionsRef.current = busySessions; }, [busySessions]);
 
@@ -1429,9 +1457,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const found = res.agents.find(a => a.agent_id === agentId || a.dir_name === agentId);
         if (!found) return;
         setAgentProfile(found);
-        // 用 agentProfile 中的 token_stats 作为 WebSocket 前的初始值（挂到当前会话）
-        if (found.token_stats) {
-          const sid = currentSessionIdRef.current;
+        // Seed from agentProfile before / regardless of WS — hang on current sid when known.
+        if (found.token_stats && Number(found.token_stats.max) > 0) {
+          const sid =
+            currentSessionIdRef.current
+            || agentCurrentSessionIdRef.current
+            || null;
           const stats = {
             used: found.token_stats!.used,
             max: found.token_stats!.max,
@@ -1439,6 +1470,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             session: found.token_stats!.session,
             cumulative: found.token_stats!.cumulative,
           };
+          setAgentTokenStats((prev) => prev ?? stats);
+          agentTokenStatsRef.current = agentTokenStatsRef.current ?? stats;
           if (sid) {
             setTokenStatsBySession((prev) => (prev[sid] ? prev : { ...prev, [sid]: stats }));
           }
@@ -2361,16 +2394,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const unsubTokenStats = aiWsService.on('token_stats', (msg: AIWSMessage) => {
       const data = msg.content || msg.data;
       if (!data || typeof data !== 'object') return;
-      const sid =
-        String(msg.sid || (data as any).session_id || currentSessionIdRef.current || '').trim();
-      if (!sid) return;
-      applyTokenStats(sid, {
-        used: (data as any).used || 0,
-        max: (data as any).max || 0,
+      const stats: TokenStatsState = {
+        used: Number((data as any).used) || 0,
+        max: Number((data as any).max) || 0,
         breakdown: (data as any).breakdown,
         session: (data as any).session,
         cumulative: (data as any).cumulative,
-      });
+      };
+      // Always keep agent-level fallback so the footer is not stuck empty when
+      // the first broadcast races ahead of currentSessionId / carries no sid.
+      const sid = String(
+        msg.sid
+        || (data as any).session_id
+        || agentCurrentSessionIdRef.current
+        || currentSessionIdRef.current
+        || '',
+      ).trim();
+      applyTokenStats(sid || agentCurrentSessionIdRef.current || currentSessionIdRef.current, stats);
     });
 
     // Status / state / wake / sleep / info
@@ -3756,6 +3796,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // Always track agent current — even while a history tab is focused.
       if (sid) {
         agentCurrentSessionIdRef.current = sid;
+        // Late bind: profile/WS may have arrived before any session id.
+        const fallback = agentTokenStatsRef.current;
+        if (fallback && fallback.max > 0 && !tokenStatsBySessionRef.current[sid]) {
+          applyTokenStats(sid, fallback);
+        } else if (!tokenStatsBySessionRef.current[sid] && !fallback) {
+          wsServiceRef.current?.requestTokenStats();
+        }
       }
       if (viewingHistorySessionRef.current) {
         return;
@@ -3822,7 +3869,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
       const data: any = (msg as any).content || (msg as any).data || msg;
       const sid = String(data?.primary_session_id || '').trim();
-      if (sid) setPrimarySessionId(sid);
+      const ok = data?.ok !== false;
+      setPendingPrimarySessionId(null);
+      pendingPrimarySessionIdRef.current = null;
+      if (ok && sid) {
+        setPrimarySessionId(sid);
+        return;
+      }
+      console.warn('[AIChatPage] set_primary_session failed', data);
     });
 
     // Use history_sync as a trigger to reload the canonical current session
@@ -6172,7 +6226,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           wsServiceRef.current?.setReasoningEffort(effort, sessionId);
         }}
         cwd={agentCwd || defaultCwd}
-        tokenStats={tokenStatsBySession[sessionId] ?? null}
+        tokenStats={tokenStatsBySession[sessionId] ?? agentTokenStats}
         onViewReport={() => setShowContextViewer(true)}
         onCompressContext={handleCompressContext}
         compressing={isCompressingContext}
@@ -6360,6 +6414,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       /* ignore */
     }
   };
+
+  const handleOpenScheduledTasks = () => {
+    if (!activeWorkspace) return;
+    const pane = focusedPaneId;
+    openContentTab(agentId, activeWorkspace.id, { kind: 'scheduled-tasks', id: 'scheduled-tasks' }, pane);
+    if (pane) setFocusedPane(agentId, pane);
+    refreshWsSnap();
+  };
+
+  // Open a session content tab (e.g. from the Scheduled Tasks "task flow" button).
+  useEffect(() => {
+    const handler = (e: any) => {
+      const sessionId: string | undefined = e?.detail?.sessionId;
+      if (!sessionId || !activeWorkspace) return;
+      const pane = focusedPaneId;
+      openContentTab(agentId, activeWorkspace.id, { kind: 'session', id: sessionId }, pane);
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+    };
+    window.addEventListener('opensquad-open-session-tab', handler as EventListener);
+    return () => window.removeEventListener('opensquad-open-session-tab', handler as EventListener);
+  }, [activeWorkspace, focusedPaneId, agentId, refreshWsSnap]);
 
   // ---- Image upload ----
 
@@ -6576,6 +6652,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSwitchAndReply={handleSwitchAndReply}
         onDeleteSession={handleDeleteSession}
         onOpenSkills={handleOpenSkills}
+        onOpenScheduledTasks={handleOpenScheduledTasks}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
         agentBusy={
@@ -6586,9 +6663,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
         busySessionIds={busySessions}
         primarySessionId={primarySessionId}
+        pendingPrimarySessionId={pendingPrimarySessionId}
         onSetPrimarySession={(sid) => {
+          setPendingPrimarySessionId(sid);
+          pendingPrimarySessionIdRef.current = sid;
           wsServiceRef.current?.setPrimarySession(sid);
-          setPrimarySessionId(sid);
         }}
         onSessionsChange={handleSessionsChange}
         uiMode={uiMode}

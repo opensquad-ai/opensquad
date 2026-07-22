@@ -8,12 +8,12 @@ try:
     from .fetch_content import fetch_page_content_async
     from .relevance import merge_serp_results
     from .wash_content import wash_content
-    from .web_crawler import search_with_bing_playwright
+    from .web_crawler import _CHROME_UA, _parse_geolocation, search_with_bing_playwright
 except ImportError:
     from fetch_content import fetch_page_content_async
     from relevance import merge_serp_results
     from wash_content import wash_content
-    from web_crawler import search_with_bing_playwright
+    from web_crawler import _CHROME_UA, _parse_geolocation, search_with_bing_playwright
 
 
 # ── Env var sanitization ──────────────────────────────────────────────
@@ -33,7 +33,104 @@ if _pwb_path != _pwb_path.strip():
 _playwright = None
 _browser: Browser | None = None
 _context: BrowserContext | None = None
+_persistent_context: BrowserContext | None = None
 _browser_lock = asyncio.Lock()
+
+
+def _persist_profile_enabled() -> bool:
+    """WEBSEARCH_PERSIST_PROFILE=0 disables on-disk cookie/profile persistence."""
+    return os.environ.get("WEBSEARCH_PERSIST_PROFILE", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def resolve_browser_profile_dir() -> str:
+    """
+    Dedicated Chromium/Chrome user-data dir for websearch.
+
+    Persists cookies, localStorage, and profile state across service restarts.
+    Do NOT point this at your daily Chrome Default profile while Chrome is open
+    (profile lock). Use a dedicated path; seed login via headed --login-setup.
+    """
+    override = os.environ.get("WEBSEARCH_USER_DATA_DIR", "").strip()
+    if override:
+        path = os.path.abspath(override)
+    else:
+        try:
+            from plugins._service_runtime import workspace_data_dir
+        except ImportError:
+            try:
+                from _service_runtime import workspace_data_dir
+            except ImportError:
+                workspace_data_dir = None  # type: ignore[assignment]
+        if workspace_data_dir is not None:
+            path = workspace_data_dir("plugins", "websearch", "browser_profile")
+        else:
+            path = os.path.join(os.path.expanduser("~"), ".opensquad", "websearch_browser_profile")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _launch_kwargs(headless: bool) -> dict:
+    chrome_path = os.environ.get("OPENSQUAD_CHROME_PATH", "").strip()
+    launch_kwargs: dict = {"headless": headless}
+    if chrome_path:
+        launch_kwargs["executable_path"] = chrome_path
+    else:
+        launch_kwargs["channel"] = "chrome"
+    return launch_kwargs
+
+
+async def _launch_chromium(playwright, launch_kwargs: dict):
+    try:
+        return await playwright.chromium.launch(**launch_kwargs)
+    except Exception as chrome_exc:
+        if "channel" in launch_kwargs:
+            print(
+                f"[WebSearch] Chrome channel unavailable ({chrome_exc}); "
+                "falling back to bundled Chromium"
+            )
+            launch_kwargs = dict(launch_kwargs)
+            launch_kwargs.pop("channel", None)
+            return await playwright.chromium.launch(**launch_kwargs)
+        raise
+
+
+async def _launch_persistent_context(playwright, headless: bool) -> BrowserContext:
+    """Launch Chrome/Chromium with an on-disk profile (cookies survive restarts)."""
+    profile_dir = resolve_browser_profile_dir()
+    launch_kwargs = _launch_kwargs(headless)
+    geo = _parse_geolocation()
+    context_kwargs: dict = {
+        **launch_kwargs,
+        "user_agent": _CHROME_UA,
+        "locale": "zh-CN",
+        "timezone_id": "Asia/Shanghai",
+        "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+        "ignore_https_errors": True,
+        "viewport": {"width": 1280, "height": 900},
+    }
+    if geo:
+        context_kwargs["geolocation"] = geo
+        context_kwargs["permissions"] = ["geolocation"]
+
+    try:
+        ctx = await playwright.chromium.launch_persistent_context(profile_dir, **context_kwargs)
+    except Exception as chrome_exc:
+        if "channel" in context_kwargs:
+            print(
+                f"[WebSearch] Persistent Chrome channel unavailable ({chrome_exc}); "
+                "falling back to bundled Chromium profile"
+            )
+            context_kwargs.pop("channel", None)
+            ctx = await playwright.chromium.launch_persistent_context(profile_dir, **context_kwargs)
+        else:
+            raise
+    print(f"[WebSearch] Persistent browser profile: {profile_dir}")
+    return ctx
 
 
 async def _get_browser(headless: bool = True):
@@ -42,42 +139,57 @@ async def _get_browser(headless: bool = True):
     async with _browser_lock:
         if _browser is not None and _browser.is_connected():
             return _browser
-        # Launch new browser
         if _playwright is None:
             _playwright = await async_playwright().start()
         try:
-            # Use a system Chrome only when explicitly requested via env var
-            # (e.g. OPENSQUAD_CHROME_PATH="C:\Program Files\Google\Chrome\
-            # Application\chrome.exe"). Otherwise let Playwright use its
-            # bundled Chromium so the path is cross-platform and does not
-            # assume a Windows install location.
-            chrome_path = os.environ.get("OPENSQUAD_CHROME_PATH", "").strip()
-            launch_kwargs = {"headless": headless}
-            if chrome_path:
-                launch_kwargs["executable_path"] = chrome_path
-            _browser = await _playwright.chromium.launch(**launch_kwargs)
+            _browser = await _launch_chromium(_playwright, _launch_kwargs(headless))
         except Exception as e:
-            # If the bundled Chromium is missing, surface a clear, actionable
-            # error instead of a bare "Executable doesn't exist at ..." so the
-            # user knows to run `python -m playwright install chromium`.
-            # Do NOT retry launch() — if the binary is missing, the retry will
-            # also fail and the uncaught exception would crash the endpoint.
             if "Executable doesn't exist" in str(e):
                 print(
                     "[WebSearch] Chromium binary not found. "
                     "Fix: run `python -m playwright install chromium` to download it."
                 )
                 raise
-            # For other errors (e.g. custom chrome_path failed), try without
-            # executable_path as fallback.
             _browser = await _playwright.chromium.launch(headless=headless)
         print("[WebSearch] Browser launched (singleton)")
         return _browser
 
 
+async def _get_persistent_context(headless: bool = True) -> BrowserContext:
+    """Shared persistent context — cookies/localStorage written under browser_profile."""
+    global _playwright, _persistent_context
+    async with _browser_lock:
+        if _persistent_context is not None:
+            try:
+                # Touch pages list to detect closed context.
+                _ = _persistent_context.pages
+                return _persistent_context
+            except Exception:
+                _persistent_context = None
+        if _playwright is None:
+            _playwright = await async_playwright().start()
+        _persistent_context = await _launch_persistent_context(_playwright, headless)
+        return _persistent_context
+
+
+async def _get_search_handle(headless: bool = True) -> tuple[Browser | None, BrowserContext | None]:
+    """
+    Return (browser, shared_context) for search.
+
+    Prefer persistent context when enabled so Bing cookies survive restarts.
+    """
+    if _persist_profile_enabled():
+        ctx = await _get_persistent_context(headless)
+        return None, ctx
+    browser = await _get_browser(headless)
+    return browser, None
+
+
 async def _get_context(headless: bool = True):
-    """Get or create the shared browser context."""
+    """Get or create the shared browser context (fetch path)."""
     global _context
+    if _persist_profile_enabled():
+        return await _get_persistent_context(headless)
     await _get_browser(headless)
     if _context is None:
         _context = await _browser.new_context(ignore_https_errors=True)
@@ -86,15 +198,30 @@ async def _get_context(headless: bool = True):
 
 async def shutdown_browser():
     """Cleanup: call on plugin unload."""
-    global _playwright, _browser, _context
+    global _playwright, _browser, _context, _persistent_context
+    if _persistent_context:
+        try:
+            await _persistent_context.close()
+        except Exception:
+            pass
+        _persistent_context = None
     if _context:
-        await _context.close()
+        try:
+            await _context.close()
+        except Exception:
+            pass
         _context = None
     if _browser:
-        await _browser.close()
+        try:
+            await _browser.close()
+        except Exception:
+            pass
         _browser = None
     if _playwright:
-        await _playwright.stop()
+        try:
+            await _playwright.stop()
+        except Exception:
+            pass
         _playwright = None
     print("[WebSearch] Browser singleton shut down")
 
@@ -137,8 +264,16 @@ async def search_links_async(
     start_time = time.time()
     ad_str_list = ["选购"]
 
-    browser = await _get_browser(headless)
-    search_tasks = [search_with_bing_playwright(browser, query, max_results=max_results_per_query) for query in queries]
+    browser, shared_context = await _get_search_handle(headless)
+    search_tasks = [
+        search_with_bing_playwright(
+            browser,
+            query,
+            max_results=max_results_per_query,
+            shared_context=shared_context,
+        )
+        for query in queries
+    ]
     search_results_list = await asyncio.gather(*search_tasks)
 
     results = merge_serp_results(
