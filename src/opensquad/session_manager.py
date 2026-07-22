@@ -217,10 +217,18 @@ class SessionManager:
             logger.warning("[SessionManager] Failed to persist primary: %s", e)
 
     def get_primary_session_id(self) -> str:
-        if self._primary_session_id:
-            return self._primary_session_id
-        focused = self.get_current_session_id()
-        self._primary_session_id = focused if focused != "unknown" else ""
+        sid = (self._primary_session_id or "").strip()
+        # Fast path: cached primary is still loadable (current / live / history).
+        if sid and (
+            sid == self.session_data.get("id")
+            or sid in self._live_sessions
+            or self._history_exists(sid)
+        ):
+            return sid
+        # Cached primary is a phantom (deleted/archived session) — re-resolve to a
+        # real loadable session so external ingress (scheduled tasks, reminders,
+        # chatpro, …) doesn't bind to a session the history reader can't find.
+        self._load_primary()
         return self._primary_session_id or ""
 
     def set_primary_session_id(self, sid: str) -> bool:
@@ -824,6 +832,39 @@ class SessionManager:
                         logger.info(f"[SessionManager] Archived session: {sid}")
                     except Exception as e:
                         logger.error(f"[SessionManager] Failed to archive session: {e}")
+
+    def create_parallel_session(self, title: str | None = None) -> str:
+        """Create a brand-new empty session WITHOUT changing focused or primary.
+
+        Used by scheduled-task / delegation fires so each execution gets its own
+        parallel pane (true multi-session) while the user's interactive web chat
+        keeps its focused session. The new session is registered in
+        ``_live_sessions`` and mirrored to ``history/{sid}.json`` so the frontend
+        can load it by id immediately.
+        """
+        with self._lock:
+            now_iso = utc_now_iso()
+            sid = self._generate_id()
+            data = {
+                "id": sid,
+                "title": (title or "").strip() or None,
+                "messages": [],
+                "events": [],
+                "archived_messages": [],
+                "archived_events": [],
+                "latest_summary": "",
+                "last_updated": now_iso,
+                "created_at": now_iso,
+            }
+            self._live_sessions[sid] = data
+            self._save_session_data(data, as_focused=False)
+            logger.info(
+                "[SessionManager] Created parallel session: %s title=%s (focused unchanged=%s)",
+                sid,
+                data.get("title") or "-",
+                self.session_data.get("id") or "-",
+            )
+            return sid
 
     def _drain_pending_mutations_sync(self):
         """Apply queued async mutations before replacing session_data.

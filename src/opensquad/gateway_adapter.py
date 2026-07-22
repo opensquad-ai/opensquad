@@ -650,6 +650,49 @@ class GatewayAdapter(BaseAgent):
         model_card = str(data.get("model_card") or data.get("card") or "").strip()
         self.current_user_id = user_id
 
+        # Scheduled-task initial fire (user_id="scheduled-task:{exec_id}", no
+        # session_id): spawn a brand-new parallel session that does NOT steal
+        # the user's focused web-chat pane. Each execution gets its own empty
+        # timeline ("真分屏"). Follow-ups already carry session_id and reuse it.
+        is_scheduled = (
+            isinstance(user_id, str) and user_id.startswith("scheduled-task:") and bool(user_id.split(":", 1)[1])
+        )
+        if is_scheduled and not session_id:
+            try:
+                from opensquad.session_manager import get_session_manager
+
+                title = str(data.get("session_title") or "").strip()
+                if not title and isinstance(content, str):
+                    # Content is prefixed "[Scheduled Task: {name}]\n..." by
+                    # ScheduledTaskManager._execute — recover the name for UI.
+                    import re
+
+                    m = re.match(r"^\[Scheduled Task:\s*(.+?)\]\s*\n", content)
+                    if m:
+                        title = m.group(1).strip()
+                sid = get_session_manager().create_parallel_session(title=title or None)
+                session_id = sid
+                # Force web channel so IngressPolicy keeps the given sid
+                # (external would remap to primary and defeat per-exec isolation).
+                channel = "web"
+                logger.info(
+                    "[Adapter] Scheduled-task spawn parallel session=%s title=%s exec=%s",
+                    sid,
+                    title or "-",
+                    user_id,
+                )
+                # Announce immediately so the gateway can bind exec.session_id
+                # before the turn even starts (UI: workflow pane loads empty
+                # session instead of "尚未创建会话").
+                if self.connected:
+                    await self._send_event(
+                        {"id": sid, "title": title or "Scheduled Task"},
+                        "current_session",
+                        sid=sid,
+                    )
+            except Exception as e:
+                logger.error("[Adapter] Scheduled-task parallel session spawn failed: %s", e)
+
         # Route via IngressPolicy: external → primary; web keeps/falls back focused
         try:
             from opensquad.ingress_policy import classify, resolve_session_id
@@ -666,7 +709,7 @@ class GatewayAdapter(BaseAgent):
                     channel,
                     session_id,
                 )
-            elif kind == "web" and not str(data.get("session_id") or "").strip():
+            elif kind == "web" and not str(data.get("session_id") or "").strip() and not is_scheduled:
                 logger.warning(
                     "[Adapter] Web chat missing session_id; falling back to focused=%s",
                     session_id,

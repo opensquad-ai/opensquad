@@ -491,15 +491,25 @@ class ScheduledTaskManager:
         if registry is None:
             return False
         target = self._resolve_registry_agent_id(agent_id)
+        # Extract task name from the "[Scheduled Task: {name}]\n..." prefix so
+        # the Agent can title the freshly spawned parallel session.
+        session_title = ""
+        if content.startswith("[Scheduled Task:"):
+            try:
+                session_title = content.split("]", 1)[0].split(":", 1)[1].strip()
+            except Exception:
+                session_title = ""
         message = {
             "type": "chat",
             "user_id": f"scheduled-task:{exec_id}",
             "content": content,
-            # external → Agent's primary session (dedicated to automated input),
-            # separate from the user's interactive web chat. Matches the
-            # original push_ingress fallback semantics.
-            "channel": "external",
+            # web + no session_id → Agent GatewayAdapter spawns a brand-new
+            # parallel session (does NOT steal the user's focused pane) and
+            # binds the turn to it. Follow-ups carry session_id explicitly.
+            "channel": "web",
         }
+        if session_title:
+            message["session_title"] = session_title
         if model_card:
             message["model_card"] = model_card
         try:
