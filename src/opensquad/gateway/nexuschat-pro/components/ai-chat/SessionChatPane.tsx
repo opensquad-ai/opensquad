@@ -13,7 +13,9 @@ import {
 } from '../../utils/aiChatTimeline';
 import {
   getCachedSessionTimeline,
+  getCachedSessionTimelineMeta,
   putCachedSessionTimeline,
+  SESSION_HISTORY_PAGE_SIZE,
 } from '../../utils/sessionTimelineCache';
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { SoloMessage } from './SoloMessage';
@@ -51,7 +53,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const cached = !Array.isArray(liveTimeline)
     ? getCachedSessionTimeline(agentId, sessionId)
     : null;
-  const [loading, setLoading] = useState(!liveTimeline && !cached);
+  // Cache-first: never block the tab on a spinner — paint cache/empty immediately
+  // and refresh in the background so session switches feel instant.
+  const [loading, setLoading] = useState(false);
   const [showSpinner, setShowSpinner] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetched, setFetched] = useState<TimelineEntry[]>(() => cached || []);
@@ -66,13 +70,15 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const timeline = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
 
   useEffect(() => {
-    if (!loading) {
+    // Only show a soft spinner if the first fetch for an uncached session
+    // takes longer than ~800ms — otherwise switches stay silent.
+    if (!loading || timeline.length > 0) {
       setShowSpinner(false);
       return;
     }
-    const t = window.setTimeout(() => setShowSpinner(true), 140);
+    const t = window.setTimeout(() => setShowSpinner(true), 800);
     return () => window.clearTimeout(t);
-  }, [loading]);
+  }, [loading, timeline.length]);
 
   useEffect(() => {
     if (useLive) {
@@ -81,31 +87,53 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
       return;
     }
     let cancelled = false;
-    const hit = getCachedSessionTimeline(agentId, sessionId);
-    if (hit) {
-      setFetched(hit);
+    const meta = getCachedSessionTimelineMeta(agentId, sessionId);
+    if (meta?.entries?.length) {
+      setFetched(meta.entries);
       setLoading(false);
+      // Complete cache: skip network for instant tab switches.
+      if (meta.complete) {
+        setError(null);
+        return;
+      }
     } else {
-      setLoading(true);
+      // Instant empty paint — no blocking overlay while history loads.
       setFetched([]);
+      setLoading(true);
     }
     setError(null);
     void (async () => {
       try {
-        // Full history — paged endpoints truncate messages/events and drop tool
-        // context when opening a session tab.
-        const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
+        const resp = await agentSessionAPI.getSessionHistoryPaged(
+          agentId,
+          sessionId,
+          0,
+          SESSION_HISTORY_PAGE_SIZE,
+        );
         if (cancelled) return;
         const session = resp.session as
-          | { messages?: any[]; events?: any[]; archived_messages?: any[]; archived_events?: any[] }
+          | {
+              messages?: any[];
+              events?: any[];
+              archived_messages?: any[];
+              archived_events?: any[];
+              has_more?: boolean;
+              total_messages?: number;
+            }
           | undefined;
+        const messages = session?.messages || [];
         const entries = buildTimelineFromSession(
-          session?.messages || [],
+          messages,
           session?.events || [],
           session?.archived_messages,
           session?.archived_events,
         );
-        putCachedSessionTimeline(agentId, sessionId, entries);
+        const hasMore = !!session?.has_more;
+        putCachedSessionTimeline(agentId, sessionId, entries, {
+          complete: !hasMore,
+          messageCount: messages.length,
+          totalMessages: session?.total_messages,
+        });
         setFetched(entries);
       } catch (err: any) {
         if (!cancelled) setError(err?.message || '无法加载会话');

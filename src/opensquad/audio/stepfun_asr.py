@@ -17,8 +17,6 @@ from typing import Any
 
 import httpx
 
-from opensquad.audio import http_base_url
-
 logger = logging.getLogger(__name__)
 
 
@@ -342,9 +340,16 @@ async def transcribe_with_card(
     audio_path: str,
     language: str = "zh",
 ) -> dict[str, Any]:
+    from opensquad.audio import asr_protocol_of, resolve_asr_base_url
+
+    if asr_protocol_of(card) == "openai_transcriptions":
+        from opensquad.audio.openai_asr import transcribe_with_card as _oai
+
+        return await _oai(card, audio_path, language=language)
+
     return await transcribe_file(
         api_key=card.get("api_key") or "",
-        base_url=http_base_url(card),
+        base_url=resolve_asr_base_url(card),
         model=card.get("model_name") or "stepaudio-2.5-asr",
         audio_path=audio_path,
         language=language,
@@ -358,9 +363,16 @@ async def transcribe_pcm_with_card(
     sample_rate: int = 24000,
     language: str = "zh",
 ) -> dict[str, Any]:
+    from opensquad.audio import asr_protocol_of, resolve_asr_base_url
+
+    if asr_protocol_of(card) == "openai_transcriptions":
+        from opensquad.audio.openai_asr import transcribe_pcm_with_card as _oai_pcm
+
+        return await _oai_pcm(card, pcm, sample_rate=sample_rate, language=language)
+
     return await transcribe_pcm16le(
         api_key=card.get("api_key") or "",
-        base_url=http_base_url(card),
+        base_url=resolve_asr_base_url(card),
         model=card.get("model_name") or "stepaudio-2.5-asr",
         pcm=pcm,
         sample_rate=sample_rate,

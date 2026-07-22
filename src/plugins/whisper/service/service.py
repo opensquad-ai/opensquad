@@ -8,9 +8,11 @@ Start the service:
     python service.py
 
 API endpoints:
-    POST /transcribe  - Upload audio file for transcription
-    GET  /health      - Health check
-    GET  /status      - Service status
+    POST /transcribe                 - Upload audio file for transcription
+    POST /transcribe/url             - Transcribe by local file path
+    POST /v1/audio/transcriptions    - OpenAI-compatible transcriptions (model cards)
+    GET  /health                     - Health check
+    GET  /status                     - Service status
 """
 
 import logging
@@ -312,6 +314,91 @@ def transcribe_url():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/v1/audio/transcriptions", methods=["POST"])
+def openai_transcriptions():
+    """OpenAI-compatible audio transcriptions endpoint for model-card ASR.
+
+    Accepts multipart form fields:
+      - file: audio file (required)
+      - model: model name (ignored for local whisper; accepted for compatibility)
+      - language: optional language code (e.g. zh, en)
+      - response_format: optional (json / text); default json
+    """
+    global MODEL, STATS
+    STATS["total_requests"] += 1
+
+    if not STATS["model_loaded"] or MODEL is None:
+        STATS["failed_requests"] += 1
+        return jsonify(
+            {
+                "success": False,
+                "error": "Whisper model not loaded. Start the Whisper service and retry.",
+            }
+        ), 503
+
+    if "file" not in request.files:
+        STATS["failed_requests"] += 1
+        return jsonify({"success": False, "error": "No audio file found; upload using the 'file' field"}), 400
+
+    audio_file = request.files["file"]
+    if not audio_file or audio_file.filename == "":
+        STATS["failed_requests"] += 1
+        return jsonify({"success": False, "error": "Filename is empty"}), 400
+
+    language = request.form.get("language") or None
+    if language in ("", "auto", "null", "none"):
+        language = None
+    task = request.form.get("task") or "transcribe"
+    response_format = (request.form.get("response_format") or "json").strip().lower()
+
+    temp_file = None
+    try:
+        suffix = os.path.splitext(audio_file.filename)[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            audio_file.save(tmp.name)
+            temp_file = tmp.name
+
+        logger.info(
+            "OpenAI transcriptions: %s (language=%s, task=%s)",
+            audio_file.filename,
+            language,
+            task,
+        )
+        start_time = time.time()
+        result = MODEL.transcribe(
+            temp_file,
+            language=language,
+            task=task,
+            fp16=False,
+        )
+        duration = time.time() - start_time
+        STATS["successful_requests"] += 1
+        text = (result.get("text") or "").strip()
+        logger.info("OpenAI transcriptions complete in %.2fs", duration)
+
+        if response_format == "text":
+            return text, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+        return jsonify(
+            {
+                "text": text,
+                "language": result.get("language", "unknown"),
+                "duration": round(duration, 2),
+                "success": True,
+            }
+        )
+    except Exception as e:
+        STATS["failed_requests"] += 1
+        logger.error("OpenAI transcriptions failed: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.unlink(temp_file)
+            except Exception as e:
+                logger.warning("Failed to clean up temp file: %s", e)
+
+
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("Whisper Speech-to-Text Service starting...")
@@ -332,10 +419,11 @@ if __name__ == "__main__":
     port = _resolve_service_port()
     logger.info(f"Service address: http://localhost:{port}")
     logger.info("API endpoints:")
-    logger.info("  - POST /transcribe       Upload audio file for transcription")
-    logger.info("  - POST /transcribe/url   Transcribe by file path")
-    logger.info("  - GET  /health           Health check")
-    logger.info("  - GET  /status           Service status")
+    logger.info("  - POST /transcribe                  Upload audio file for transcription")
+    logger.info("  - POST /transcribe/url              Transcribe by file path")
+    logger.info("  - POST /v1/audio/transcriptions     OpenAI-compatible transcriptions")
+    logger.info("  - GET  /health                      Health check")
+    logger.info("  - GET  /status                      Service status")
     logger.info("=" * 60)
 
     app.run(

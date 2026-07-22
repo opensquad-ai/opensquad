@@ -123,9 +123,11 @@ export async function blobToWavFile(
   if (!blob || blob.size < 64) {
     throw new Error('录音太短或为空，请按住麦克风多说几秒再松手');
   }
-  // Already wav — pass through
+  // Already wav — pass through only when the blob itself is WAV.
+  // Callers often pass a desired output filename ending in ``.wav`` while the
+  // blob is still webm/opus from MediaRecorder — do NOT treat that as WAV.
   const type = (blob.type || '').toLowerCase();
-  if (type.includes('wav') || filename.toLowerCase().endsWith('.wav')) {
+  if (type.includes('wav') || type.includes('wave')) {
     return blob instanceof File
       ? blob
       : new File([blob], filename, { type: 'audio/wav' });

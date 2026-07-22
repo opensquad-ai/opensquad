@@ -85,6 +85,73 @@ type InlineCreate = { kind: 'file' | 'dir' };
 
 type VisibleRow = TreeEntry & { depth: number };
 
+/** Module-level tree cache — survives remounts / session switches with same root. */
+const TREE_CACHE_MAX = 8;
+type ModuleTreeCache = {
+  entries: TreeEntry[];
+  truncated: boolean;
+  count: number;
+  at: number;
+};
+const moduleTreeCache = new Map<string, ModuleTreeCache>();
+
+type ModuleFileCacheEntry = {
+  content: string;
+  imageSrc: string | null;
+  meta: { truncated?: boolean; path?: string; size?: number; kind?: 'text' | 'image' };
+  at: number;
+};
+const MODULE_FILE_CACHE_MAX = 64;
+const moduleFileContentCache = new Map<string, ModuleFileCacheEntry>();
+
+function projectCacheKey(agentId: string, rootPath: string): string {
+  return `${agentId}::${rootPath.replace(/\\/g, '/').replace(/\/+$/, '')}`;
+}
+
+function fileCacheKey(agentId: string, rootPath: string, relPath: string): string {
+  return `${projectCacheKey(agentId, rootPath)}::${relPath.replace(/\\/g, '/')}`;
+}
+
+function putModuleTreeCache(
+  agentId: string,
+  rootPath: string,
+  entries: TreeEntry[],
+  truncated: boolean,
+  count: number,
+): void {
+  const key = projectCacheKey(agentId, rootPath);
+  moduleTreeCache.set(key, { entries, truncated, count, at: Date.now() });
+  if (moduleTreeCache.size <= TREE_CACHE_MAX) return;
+  const oldest = [...moduleTreeCache.entries()].sort((a, b) => a[1].at - b[1].at);
+  moduleTreeCache.delete(oldest[0][0]);
+}
+
+function getModuleTreeCache(agentId: string, rootPath: string): ModuleTreeCache | null {
+  return moduleTreeCache.get(projectCacheKey(agentId, rootPath)) || null;
+}
+
+function putModuleFileCache(
+  agentId: string,
+  rootPath: string,
+  relPath: string,
+  entry: ModuleFileCacheEntry,
+): void {
+  const key = fileCacheKey(agentId, rootPath, relPath);
+  moduleFileContentCache.set(key, { ...entry, at: Date.now() });
+  if (moduleFileContentCache.size <= MODULE_FILE_CACHE_MAX) return;
+  const oldest = [...moduleFileContentCache.entries()].sort((a, b) => a[1].at - b[1].at);
+  const drop = moduleFileContentCache.size - MODULE_FILE_CACHE_MAX;
+  for (let i = 0; i < drop; i++) moduleFileContentCache.delete(oldest[i][0]);
+}
+
+function getModuleFileCache(
+  agentId: string,
+  rootPath: string,
+  relPath: string,
+): ModuleFileCacheEntry | null {
+  return moduleFileContentCache.get(fileCacheKey(agentId, rootPath, relPath)) || null;
+}
+
 function buildChildrenMap(entries: TreeEntry[]): Map<string, TreeEntry[]> {
   const map = new Map<string, TreeEntry[]>();
   for (const e of entries) {
@@ -706,7 +773,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const prefetchFileContent = useCallback(
     async (relPath: string, opts?: { force?: boolean }) => {
       if (!agentId || !rootPath || !relPath) return;
-      if (!opts?.force && fileContentCacheRef.current.has(relPath)) return;
+      if (!opts?.force) {
+        if (fileContentCacheRef.current.has(relPath)) return;
+        const mod = getModuleFileCache(agentId, rootPath, relPath);
+        if (mod) {
+          fileContentCacheRef.current.set(relPath, mod);
+          return;
+        }
+      }
       if (filePrefetchInflightRef.current.has(relPath)) return;
       // Skip images for prefetch budget (open still loads them on demand)
       if (isImageFile(relPath)) return;
@@ -733,8 +807,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           at: Date.now(),
         };
         fileContentCacheRef.current.set(relPath, entry);
+        putModuleFileCache(agentId, rootPath, relPath, entry);
         if (resp.path && resp.path !== relPath) {
           fileContentCacheRef.current.set(resp.path, entry);
+          putModuleFileCache(agentId, rootPath, resp.path, entry);
         }
         if (fileContentCacheRef.current.size > 80) {
           const oldest = [...fileContentCacheRef.current.entries()].sort((a, b) => a[1].at - b[1].at);
@@ -832,7 +908,33 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
 
   const loadTree = useCallback(async (opts?: { silent?: boolean }) => {
     if (!agentId || !rootPath) return;
-    const hasTree = treeEntriesRef.current.length > 0 || treeLoadedOnceRef.current;
+    const cached = getModuleTreeCache(agentId, rootPath);
+    const firstPaint = !treeLoadedOnceRef.current;
+    // Instant paint from module cache (session switch / remount with same root).
+    if (cached && cached.entries.length > 0 && firstPaint) {
+      setTreeEntries(cached.entries);
+      setTreeTruncated(!!cached.truncated);
+      setTreeCount(cached.count);
+      treeLoadedOnceRef.current = true;
+      const topDirs = cached.entries
+        .filter((e) => e.type === 'dir' && !e.path.includes('/'))
+        .map((e) => e.path);
+      setExpanded(new Set(topDirs.slice(0, 12)));
+      const warmDirs = new Set(topDirs.slice(0, 12));
+      const warmFiles = cached.entries
+        .filter((e) => {
+          if (e.type !== 'file') return false;
+          if (!e.path.includes('/')) return true;
+          const parent = e.path.slice(0, e.path.lastIndexOf('/'));
+          return warmDirs.has(parent);
+        })
+        .slice(0, 50);
+      for (const f of warmFiles) {
+        void prefetchFileContent(f.path);
+      }
+    }
+    const hasTree =
+      treeEntriesRef.current.length > 0 || treeLoadedOnceRef.current || !!(cached && cached.entries.length);
     // Soft-refresh by default once a tree is on screen (avoid full-panel flash)
     const silent = hasTree && opts?.silent !== false;
     if (!silent) setListLoading(true);
@@ -849,6 +951,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setTreeEntries(entries);
       setTreeTruncated(!!resp.truncated);
       setTreeCount(resp.count ?? entries.length);
+      putModuleTreeCache(agentId, rootPath, entries, !!resp.truncated, resp.count ?? entries.length);
       // Preserve fold state on soft refresh; only seed defaults on first load
       if (!treeLoadedOnceRef.current) {
         const topDirs = entries
@@ -1168,7 +1271,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setFileError(null);
       setMdRaw(false);
 
-      const cached = !opts?.force ? fileContentCacheRef.current.get(relPath) : undefined;
+      const cached = !opts?.force
+        ? fileContentCacheRef.current.get(relPath) ||
+          (() => {
+            const mod = getModuleFileCache(agentId, rootPath, relPath);
+            if (mod) fileContentCacheRef.current.set(relPath, mod);
+            return mod || undefined;
+          })()
+        : undefined;
       if (cached) {
         // Instant paint from cache — no loading flash
         setFileLoading(false);
@@ -1216,12 +1326,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           size: resp.size,
           kind: kind as 'text' | 'image',
         };
-        fileContentCacheRef.current.set(relPath, {
+        const entry = {
           content,
           imageSrc,
           meta: { ...meta, path: resp.path || relPath },
           at: Date.now(),
-        });
+        };
+        fileContentCacheRef.current.set(relPath, entry);
+        putModuleFileCache(agentId, rootPath, relPath, entry);
         if (imageSrc) {
           setImageSrc(imageSrc);
           setFileContent('');
@@ -1288,7 +1400,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     [changedByPath, openDiff, openFile, openUnavailable, treeOnly, onOpenFile, expandToPath],
   );
 
-  // Reset when root / open changes — load full tree once
+  // Reset when root / open changes — load full tree once (module cache paints instantly)
   useEffect(() => {
     if (!isOpen) return;
     setSearch('');
@@ -1305,7 +1417,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     closeMenus();
     treeLoadedOnceRef.current = false;
     if (rootPath) {
-      void loadTree({ silent: false });
+      const cached = getModuleTreeCache(agentId, rootPath);
+      // Same root revisited: silent refresh (no spinner). Cache miss: full load.
+      void loadTree({ silent: !!cached });
       // Silent warm of change stats (both tabs) — no full-panel flash
       void loadChanged({ silent: true });
     } else {

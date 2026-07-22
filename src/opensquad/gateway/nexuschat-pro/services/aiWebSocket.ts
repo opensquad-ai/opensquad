@@ -84,6 +84,8 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'pong',
   'compression_progress',
   'token_stats',
+  'busy_sessions',
+  'primary_session',
   // chat message types — must bypass session filter or messages disappear
   'message',
   'response',
@@ -91,7 +93,10 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'to_user_final',
   'to_user_reply',
   'to_user_end_task',
-  // thought / tool_* / info are session-scoped: when they carry `sid` for an
+  // System info (model switch confirm/fail, mode changes) must not be dropped
+  // when sid ≠ activeSessionId — otherwise Switching… spinner never clears.
+  'info',
+  // thought / tool_* are session-scoped: when they carry `sid` for an
   // old session (e.g. orphaned sub-agent after new_session), drop them.
   'plan',
   'turn_start',
@@ -176,7 +181,7 @@ class AIWebSocketService {
     content: string,
     images?: string[],
     attachments?: any[],
-    opts?: { client_id?: string; session_id?: string },
+    opts?: { client_id?: string; session_id?: string; model_card?: string },
   ) {
     const msg: any = { type: 'chat', content };
     if (images && images.length > 0) {
@@ -191,6 +196,9 @@ class AIWebSocketService {
     }
     if (opts?.session_id) {
       msg.session_id = opts.session_id;
+    }
+    if (opts?.model_card) {
+      msg.model_card = opts.model_card;
     }
     this._send(msg);
   }
@@ -231,6 +239,7 @@ class AIWebSocketService {
    * `model_card_switched` info event, which the chat UI already renders.
    */
   switchModel(cardName: string, sessionId?: string) {
+    console.info('[AIWebSocket] switch_model →', { cardName, sessionId, connected: this.isConnected });
     this._sendCommand('switch_model', {
       card: cardName,
       ...(sessionId ? { session_id: sessionId } : {}),
@@ -365,13 +374,16 @@ class AIWebSocketService {
   switchAndReply(
     sessionId: string,
     content: string = '',
-    opts?: { stopCurrent?: boolean },
+    opts?: { stopCurrent?: boolean; model_card?: string },
   ) {
     const stopCurrent = opts?.stopCurrent !== false;
     const send = () => {
       if (content) {
         // Parallel path: deliver directly to session inbox (no global stop).
-        this.sendMessage(content, undefined, undefined, { session_id: sessionId });
+        this.sendMessage(content, undefined, undefined, {
+          session_id: sessionId,
+          ...(opts?.model_card ? { model_card: opts.model_card } : {}),
+        });
         return;
       }
       this._sendCommand('switch_and_reply', { session_id: sessionId, content: '' });
@@ -545,6 +557,16 @@ class AIWebSocketService {
 
   private _send(data: any) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        const cmd = data?.type === 'command' ? data?.command : (data?.command || data?.type || '');
+        if (cmd === 'new_session' || cmd === 'switch_model' || cmd === 'stop_task' || cmd === 'chat') {
+          console.info('[AIWebSocket] send', {
+            cmd,
+            sid: data?.session_id || data?.data?.session_id,
+            active: this.activeSessionId,
+          });
+        }
+      } catch { /* ignore */ }
       this.ws.send(JSON.stringify(data));
     } else {
       console.warn('[AIWebSocket] Not connected, message not sent:', data);
@@ -590,9 +612,32 @@ class AIWebSocketService {
     if (this.activeSessionId && !SESSION_PASSTHROUGH_TYPES.has(msg.type)) {
       const msgSid = (msg as any).sid;
       if (msgSid && msgSid !== this.activeSessionId) {
-        console.debug(`[AIWebSocket] Dropping ${msg.type} for session ${msgSid} (active: ${this.activeSessionId})`);
+        console.warn(
+          `[AIWebSocket] Dropping ${msg.type} for session ${msgSid} (active: ${this.activeSessionId})`,
+        );
         return;
       }
+    }
+
+    // Inbound diagnostics for the send → reply path (helps confirm whether
+    // the agent/gateway ever answered after a chat outbound).
+    if (
+      msg.type === 'turn_start' ||
+      msg.type === 'state' ||
+      msg.type === 'thought' ||
+      msg.type === 'error' ||
+      msg.type === 'message' ||
+      msg.type === 'stream' ||
+      msg.type === 'to_user_final' ||
+      msg.type === 'to_user_reply'
+    ) {
+      try {
+        console.info('[AIWebSocket] recv', {
+          type: msg.type,
+          sid: (msg as any).sid || null,
+          active: this.activeSessionId,
+        });
+      } catch { /* ignore */ }
     }
 
     // Dispatch to type-specific handlers

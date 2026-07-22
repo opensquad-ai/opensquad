@@ -51,7 +51,11 @@ import {
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
 import { pushCwdRecent } from '../utils/cwdRecents';
-import { putCachedSessionTimeline, getCachedSessionTimeline } from '../utils/sessionTimelineCache';
+import {
+  putCachedSessionTimeline,
+  getCachedSessionTimelineMeta,
+  SESSION_HISTORY_PAGE_SIZE,
+} from '../utils/sessionTimelineCache';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -1074,6 +1078,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const filePushDedupRef = useRef<Map<string, number>>(new Map());
   const isHydratingSessionRef = useRef(false); // true while restoring current session after refresh
   const currentSessionIdRef = useRef<string | null>(null);
+  /** Agent's focused/current session id (from WS/HTTP), independent of UI tab focus. */
+  const agentCurrentSessionIdRef = useRef<string | null>(null);
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
   /** Separate from sessionReloadSeqRef so connected/hydrate cannot invalidate New Session timers. */
@@ -1109,6 +1115,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [modelNameBySession, setModelNameBySession] = useState<Record<string, string>>({});
   const [reasoningBySession, setReasoningBySession] = useState<Record<string, ReasoningEffort>>({});
   const [switchingModelBySession, setSwitchingModelBySession] = useState<Record<string, boolean>>({});
+  /** Always-fresh card maps for deliverMessage (avoid stale useCallback closures). */
+  const cardNameBySessionRef = useRef<Record<string, string>>({});
+  const currentCardNameRef = useRef<string | null>(null);
+  cardNameBySessionRef.current = cardNameBySession;
+  currentCardNameRef.current = currentCardName;
+  /** Optimistic model-switch revert targets when agent reports failure. */
+  const modelSwitchRevertRef = useRef<Record<string, { card: string | null; model: string }>>({});
   const [modeApprovals, setModeApprovals] = useState<ModeSwitchApproval[]>([]);
   const [optionsProposals, setOptionsProposals] = useState<OptionsProposal[]>([]);
   const [agentCwd, setAgentCwd] = useState<string | null>(null);
@@ -1138,6 +1151,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [sessionLoadingLabel, setSessionLoadingLabel] = useState('');
   const newSessionPendingRef = useRef(false); // true after handleNewSession fires, cleared on next connected
+  /** After New Chat succeeds, ignore hydrates that would snap back to an older sid. */
+  const newSessionGuardRef = useRef<{ sid: string; until: number } | null>(null);
 
   // Scroll button visibility
   const [showScrollTop, setShowScrollTop] = useState(false);
@@ -1439,6 +1454,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (mn) setModelName(mn);
           if (ap) setAgentApiProtocol(ap);
           if (pv) setAgentProvider(pv);
+          // Agent-default card only — never overwrite per-session picker state.
           if (card) setCurrentCardName(card);
           if (effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high') {
             setReasoningEffort(effortRaw);
@@ -1630,7 +1646,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           session.events || [],
         );
         if (olderEntries.length > 0) {
-          setTimeline(prev => [...olderEntries, ...prev]);
+          setTimeline(prev => {
+            const next = [...olderEntries, ...prev];
+            putCachedSessionTimeline(agentId, sid, next, {
+              complete: !(session.has_more ?? false),
+              messageCount: historyOffsetRef.current + (session.messages?.length || 0),
+              totalMessages: session.total_messages,
+            });
+            return next;
+          });
           historyOffsetRef.current += session.messages?.length || 0;
         }
         setHasMoreHistory(session.has_more ?? false);
@@ -2441,6 +2465,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const switchedCard = (detailed as any).card;
           const sid = String((detailed as any).session_id || '').trim();
           if (sid) {
+            delete modelSwitchRevertRef.current[sid];
             if (typeof switchedCard === 'string' && switchedCard) {
               setCardNameBySession((prev) => ({ ...prev, [sid]: switchedCard }));
             }
@@ -2469,6 +2494,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (evt === 'model_card_switch_failed') {
           const sid = String((detailed as any).session_id || '').trim();
           if (sid) {
+            const revert = modelSwitchRevertRef.current[sid];
+            if (revert) {
+              if (revert.card) {
+                setCardNameBySession((prev) => ({ ...prev, [sid]: revert.card as string }));
+              }
+              setModelNameBySession((prev) => ({ ...prev, [sid]: revert.model }));
+              delete modelSwitchRevertRef.current[sid];
+            }
             setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
           } else {
             setSwitchingModel(false);
@@ -3008,8 +3041,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             setSessionLoadingLabel(t('aiChat.loadingSession'));
           }
           const resp = await Promise.race([
-            // Large limit ≈ full history; paged API still returns archived_* in full.
-            agentSessionAPI.getCurrentSession(agentId, 0, 10000),
+            // First page only — older turns load on scroll-up via loadMoreHistory.
+            agentSessionAPI.getCurrentSession(agentId, 0, SESSION_HISTORY_PAGE_SIZE),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('Hydration timeout (10s)')), 10000)
             ),
@@ -3019,6 +3052,23 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
           const currentSid = resp.current_session_id;
           const session = resp.session;
+          if (currentSid) {
+            agentCurrentSessionIdRef.current = currentSid;
+          }
+          const guard = newSessionGuardRef.current;
+          if (
+            guard &&
+            Date.now() < guard.until &&
+            currentSid &&
+            currentSid !== guard.sid
+          ) {
+            console.warn(
+              '[AIChatPage] hydrate ignored (new-session guard): disk=%s keep=%s',
+              currentSid,
+              guard.sid,
+            );
+            return;
+          }
           _logMediaDebug('current-session-response', {
             currentSid,
             messageCount: session?.messages?.length || 0,
@@ -3069,7 +3119,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               session.archived_events,
             );
             if (currentSid) {
-              putCachedSessionTimeline(agentId, currentSid, entries);
+              putCachedSessionTimeline(agentId, currentSid, entries, {
+                complete: !(session.has_more ?? false),
+                messageCount: dedupedMessages.length,
+                totalMessages: session.total_messages,
+              });
             }
             _logMediaDebug('timeline-built-from-current', {
               entryCount: entries.length,
@@ -3290,6 +3344,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
             setCurrentSessionId(currentSid);
+            // Restore pane-scoped model from session_data when present.
+            // Never clobber an in-pane optimistic/confirmed card with agent default.
+            {
+              const sessionCard =
+                typeof (session as any)?.model_card === 'string'
+                  ? String((session as any).model_card).trim()
+                  : '';
+              if (sessionCard) {
+                setCardNameBySession((prev) =>
+                  prev[currentSid] === sessionCard ? prev : { ...prev, [currentSid]: sessionCard },
+                );
+                const cardMeta = modelCards.find((c) => c.name === sessionCard);
+                const label =
+                  (cardMeta && (cardMeta.title || cardMeta.model_name || cardMeta.name)) ||
+                  sessionCard;
+                setModelNameBySession((prev) =>
+                  prev[currentSid] === label ? prev : { ...prev, [currentSid]: String(label) },
+                );
+              }
+              // If disk has no override, leave cardNameBySession[currentSid] as-is
+              // (user may have just switched; agent default stays in currentCardName).
+            }
             viewingHistorySessionRef.current = false;
             setViewingHistorySession(false);
             loadingSessionIdRef.current = currentSid;
@@ -3665,9 +3741,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Agent (via GatewayAdapter) sends "current_session" when session changes
     const unsubCurrentSession = aiWsService.on('current_session', (msg: AIWSMessage) => {
       const data = msg.content || msg.data;
-      if (viewingHistorySessionRef.current) {
-        return;
-      }
       const previousSid = currentSessionIdRef.current;
       let sid: string | null = null;
       if (typeof data === 'object') {
@@ -3680,18 +3753,45 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (typeof data === 'string') {
         sid = data;
       }
+      // Always track agent current — even while a history tab is focused.
+      if (sid) {
+        agentCurrentSessionIdRef.current = sid;
+      }
+      if (viewingHistorySessionRef.current) {
+        return;
+      }
       if (sid) {
         currentSessionIdRef.current = sid;
         wsServiceRef.current?.setActiveSession(sid);
         setCurrentSessionId(sid);
         requestSessionListRefresh(agentId, sid);
+        console.info('[AIChatPage] current_session →', sid, {
+          previous: previousSid,
+          newSessionPending: newSessionPendingRef.current,
+        });
       }
       // Clear new-session loading — current_session fires when server confirms the new session
       if (newSessionPendingRef.current) {
         newSessionPendingRef.current = false;
         setIsLoadingSession(false);
         sessionBootstrapDoneRef.current = true;
+        if (sid) {
+          newSessionGuardRef.current = { sid, until: Date.now() + 20000 };
+        }
         // Keep empty timeline from handleNewSession; disk may still hold the old session.
+        return;
+      }
+      const guard = newSessionGuardRef.current;
+      if (guard && Date.now() < guard.until && sid && sid !== guard.sid) {
+        console.warn(
+          '[AIChatPage] current_session ignored during new-session guard: got=%s keep=%s',
+          sid,
+          guard.sid,
+        );
+        // Stay on the newly created session — snap active filter back.
+        currentSessionIdRef.current = guard.sid;
+        wsServiceRef.current?.setActiveSession(guard.sid);
+        setCurrentSessionId(guard.sid);
         return;
       }
       if (!viewingHistorySessionRef.current && (sid !== previousSid || !sessionBootstrapDoneRef.current)) {
@@ -4557,17 +4657,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     // Send via WS (full text with [File: ...] so Agent gets file paths)
+    const paneCard =
+      (targetSessionId && cardNameBySessionRef.current[targetSessionId]) ||
+      currentCardNameRef.current ||
+      undefined;
+    console.info('[AIChatPage] deliverMessage → WS', {
+      targetSessionId,
+      viewingHistorySession,
+      currentSessionId: currentSessionIdRef.current,
+      textHead: wsText.slice(0, 80),
+      wsStatus: wsServiceRef.current?.getStatus?.() ?? 'n/a',
+      model_card: paneCard || null,
+    });
     if (viewingHistorySession && currentSessionId) {
       // Align agent to this session without aborting an unrelated in-flight turn
       // when possible — stopCurrent false lets idle/queue path stay cooperative.
-      wsServiceRef.current?.switchAndReply(currentSessionId, wsText, { stopCurrent: false });
+      wsServiceRef.current?.switchAndReply(currentSessionId, wsText, {
+        stopCurrent: false,
+        model_card: paneCard,
+      });
       setViewingHistorySession(false); // now we're in this session
     } else {
       wsServiceRef.current?.sendMessage(
         wsText,
         allImages.length > 0 ? allImages : undefined,
         nonImageAttachments,
-        { client_id: userUid, session_id: targetSessionId || undefined },
+        {
+          client_id: userUid,
+          session_id: targetSessionId || undefined,
+          model_card: paneCard,
+        },
       );
     }
 
@@ -4838,20 +4957,30 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setCurrentSessionId(sid);
       setViewingHistorySession(false);
       try {
-        const resp = await agentSessionAPI.getSessionHistory(agentId, sid);
+        const resp = await agentSessionAPI.getSessionHistoryPaged(
+          agentId, sid, 0, SESSION_HISTORY_PAGE_SIZE,
+        );
+        if (currentSessionIdRef.current !== sid) return;
         const session = resp.session;
         if (session) {
+          const messages = session.messages || [];
           const entries = buildTimelineFromSession(
-            session.messages || [],
+            messages,
             session.events || [],
             session.archived_messages,
             session.archived_events,
           );
-          putCachedSessionTimeline(agentId, sid, entries);
+          const hasMore = !!session.has_more;
+          putCachedSessionTimeline(agentId, sid, entries, {
+            complete: !hasMore,
+            messageCount: messages.length,
+            totalMessages: session.total_messages,
+          });
           setTimeline(entries);
           setShellStreams(rebuildShellStreamsFromTimeline(entries));
-          historyOffsetRef.current = session.messages?.length || 0;
-          setHasMoreHistory(false);
+          loadingSessionIdRef.current = sid;
+          historyOffsetRef.current = messages.length;
+          setHasMoreHistory(hasMore);
         }
       } catch (err: any) {
         console.error('[AIChatPage] Failed to reload session before pending flush:', err);
@@ -5061,20 +5190,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleNewSession = (projectPath?: string) => {
-    const previousSid = currentSessionIdRef.current;
+    // Compare against the agent's current sid — UI tab focus may point at another
+    // history session while the empty "new" chat is still agent-current.
+    const previousSid =
+      agentCurrentSessionIdRef.current || currentSessionIdRef.current;
     pendingOpenSessionTabRef.current = true;
-    // Stop parent + cancel in-flight sub-agents before switching sessions,
-    // otherwise orphaned delegates keep streaming into the new timeline.
-    wsServiceRef.current?.stopTask();
+    // Only abort in-flight work when something is actually running.
+    // Unconditional stop_task sets a sticky agent-wide Stop latch that can
+    // black out chat after New Chat if the agent process misses a clear.
+    const shouldStop =
+      agentStatus === 'thinking' ||
+      agentStatus === 'working' ||
+      isStreaming ||
+      (previousSid ? busySessionsRef.current.includes(previousSid) : busySessionsRef.current.length > 0);
+    if (shouldStop) {
+      wsServiceRef.current?.stopTask();
+    }
     newSessionPendingRef.current = true;
     userStoppedRef.current = false;
-    // Show empty chat immediately — do not block the pane with「创建会话中」.
     setIsLoadingSession(false);
-    // Clear session filter so responses with the new sid are not dropped while
-    // we wait for current_session / HTTP fallback to set the canonical id.
+    // Optimistic clear so we never treat the pre-rotation empty sid as "new".
     currentSessionIdRef.current = null;
     setCurrentSessionId(null);
-    wsServiceRef.current?.setActiveSession(null);
     wsServiceRef.current?.newSession();
     requestSessionListRefresh(agentId, null);
     setTimeline([]);
@@ -5139,7 +5276,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     loadingSessionIdRef.current = null;
 
     // Fallback: if Runner/Gateway WS ack (current_session) is delayed or lost,
-    // confirm via HTTP soon — UI stays interactive with an empty timeline.
+    // confirm via HTTP — but only adopt when the agent actually rotated sessions.
+    // Finishing early on the OLD sid left currentSessionId=null and no new tab.
     const fallbackSeq = ++newSessionFallbackSeqRef.current;
     const finishNewSession = () => {
       if (fallbackSeq !== newSessionFallbackSeqRef.current) return;
@@ -5148,7 +5286,73 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setIsLoadingSession(false);
       sessionBootstrapDoneRef.current = true;
     };
-    const hardTimeout = window.setTimeout(finishNewSession, 8000);
+    const adoptSession = (currentSid: string | null | undefined, session: any) => {
+      if (!currentSid) return false;
+      const msgCount = session?.messages?.length || 0;
+      const entries = buildTimelineFromSession(session?.messages || [], session?.events || []);
+      setTimeline((prev) => {
+        const liveWfs = prev.filter(
+          (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+        );
+        if (liveWfs.length === 0) return entries;
+        const diskHasLive = entries.some(
+          (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
+        );
+        if (diskHasLive) return entries;
+        return [...entries, ...liveWfs];
+      });
+      setShellStreams(rebuildShellStreamsFromTimeline(entries));
+      agentCurrentSessionIdRef.current = currentSid;
+      currentSessionIdRef.current = currentSid;
+      wsServiceRef.current?.setActiveSession(currentSid);
+      setCurrentSessionId(currentSid);
+      requestSessionListRefresh(agentId, currentSid);
+      diskSessionLoadedRef.current = msgCount > 0;
+      historyOffsetRef.current = msgCount;
+      setHasMoreHistory(session?.has_more ?? false);
+      return true;
+    };
+    const hardTimeout = window.setTimeout(async () => {
+      if (fallbackSeq !== newSessionFallbackSeqRef.current || !newSessionPendingRef.current) return;
+      try {
+        const resp = await agentSessionAPI.getCurrentSession(agentId, 0, 50);
+        if (fallbackSeq !== newSessionFallbackSeqRef.current || !newSessionPendingRef.current) return;
+        const currentSid = resp.current_session_id;
+        const session = resp.session;
+        const sidChanged = !!currentSid && currentSid !== previousSid;
+        // Only adopt a *rotated* sid. Empty same-sid is NOT a successful new session
+        // (that path reused the previous empty chat and never archived it into the list).
+        if (sidChanged) {
+          adoptSession(currentSid, session);
+          if (currentSid) {
+            newSessionGuardRef.current = { sid: currentSid, until: Date.now() + 20000 };
+          }
+        } else {
+          console.warn(
+            '[AIChatPage] new-session hard-timeout: disk still on old sid=%s (previous=%s)',
+            currentSid,
+            previousSid,
+          );
+          setTimeline((prev) => [
+            ...prev,
+            {
+              kind: 'message',
+              data: {
+                role: 'assistant',
+                content:
+                  '新建会话未得到 Agent 确认（磁盘仍是旧会话）。请检查 Agent 是否在线后重试；若持续失败，请只保留一套 Gateway/Agent 进程并重启 Agent305。',
+                timestamp: new Date().toISOString(),
+              },
+              _uid: genUID(),
+            },
+          ]);
+        }
+      } catch (err: any) {
+        console.warn('[AIChatPage] new session hard-timeout HTTP failed:', err?.message || err);
+      } finally {
+        finishNewSession();
+      }
+    }, 8000);
 
     window.setTimeout(async () => {
       if (fallbackSeq !== newSessionFallbackSeqRef.current || !newSessionPendingRef.current) return;
@@ -5158,47 +5362,124 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (fallbackSeq !== newSessionFallbackSeqRef.current || !newSessionPendingRef.current) return;
         const currentSid = resp.current_session_id;
         const session = resp.session;
-        const msgCount = session?.messages?.length || 0;
         const sidChanged = !!currentSid && currentSid !== previousSid;
-        if (sidChanged || msgCount === 0) {
-          const entries = buildTimelineFromSession(session?.messages || [], session?.events || []);
-          // Disk can lag behind live WS tools right after creating a session —
-          // don't wipe an in-flight Worked/Working fold with an empty snapshot.
-          setTimeline((prev) => {
-            const liveWfs = prev.filter(
-              (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
-            );
-            if (liveWfs.length === 0) return entries;
-            const diskHasLive = entries.some(
-              (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
-            );
-            if (diskHasLive) return entries;
-            return [...entries, ...liveWfs];
-          });
-          setShellStreams(rebuildShellStreamsFromTimeline(entries));
-          if (currentSid) {
-            currentSessionIdRef.current = currentSid;
-            wsServiceRef.current?.setActiveSession(currentSid);
-            setCurrentSessionId(currentSid);
-            requestSessionListRefresh(agentId, currentSid);
-          }
-          diskSessionLoadedRef.current = msgCount > 0;
-          historyOffsetRef.current = msgCount;
-          setHasMoreHistory(session?.has_more ?? false);
-        } else {
-          // Same session id still on disk — keep empty timeline, just unblock UI.
-          setTimeline([]);
-          diskSessionLoadedRef.current = false;
+        // Only finish when the agent rotated to a new sid.
+        if (sidChanged) {
+          adoptSession(currentSid, session);
+          window.clearTimeout(hardTimeout);
+          finishNewSession();
         }
-        finishNewSession();
       } catch (err: any) {
         console.warn('[AIChatPage] new session HTTP fallback failed:', err?.message || err);
-        finishNewSession();
-      } finally {
-        window.clearTimeout(hardTimeout);
+        // Keep waiting for WS / hardTimeout — do not clear pending on transient errors.
       }
-    }, 280);
+    }, 600);
   };
+
+  /** Apply a paged/full session payload into timeline + cache (no network). */
+  const applySessionPayload = useCallback(
+    (
+      sessionId: string,
+      session: {
+        messages?: any[];
+        events?: any[];
+        archived_messages?: any[];
+        archived_events?: any[];
+        has_more?: boolean;
+        total_messages?: number;
+      },
+    ) => {
+      const messages = session.messages || [];
+      const entries = buildTimelineFromSession(
+        messages,
+        session.events || [],
+        session.archived_messages,
+        session.archived_events,
+      );
+      const hasMore = !!session.has_more;
+      putCachedSessionTimeline(agentId, sessionId, entries, {
+        complete: !hasMore,
+        messageCount: messages.length,
+        totalMessages: session.total_messages,
+      });
+      setTimeline(entries);
+      setShellStreams(rebuildShellStreamsFromTimeline(entries));
+      loadingSessionIdRef.current = sessionId;
+      historyOffsetRef.current = messages.length;
+      setHasMoreHistory(hasMore);
+    },
+    [agentId],
+  );
+
+  /**
+   * Load session timeline: cache-first paint, paged first page on miss,
+   * optional background soft-refresh when cache is stale/incomplete.
+   */
+  const loadSessionTimelineFast = useCallback(
+    async (
+      sessionId: string,
+      opts?: { forceFetch?: boolean; softRefresh?: boolean },
+    ): Promise<boolean> => {
+      const meta = getCachedSessionTimelineMeta(agentId, sessionId);
+      const cached = meta?.entries;
+      if (cached && cached.length > 0 && !opts?.forceFetch) {
+        setTimeline(cached);
+        setShellStreams(rebuildShellStreamsFromTimeline(cached));
+        loadingSessionIdRef.current = sessionId;
+        historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
+        setHasMoreHistory(!meta.complete);
+        // Complete cache: skip network. Incomplete: soft-refresh in background.
+        if (meta.complete && !opts?.softRefresh) return true;
+        void (async () => {
+          try {
+            const resp = await agentSessionAPI.getSessionHistoryPaged(
+              agentId,
+              sessionId,
+              0,
+              SESSION_HISTORY_PAGE_SIZE,
+            );
+            if (currentSessionIdRef.current !== sessionId) return;
+            const session = resp.session;
+            if (!session) return;
+            const total = session.total_messages ?? 0;
+            const prevTotal = meta.totalMessages;
+            // Skip replace when totals match and we already showed a page.
+            if (
+              meta.complete &&
+              prevTotal != null &&
+              prevTotal === total &&
+              meta.messageCount >= Math.min(SESSION_HISTORY_PAGE_SIZE, total)
+            ) {
+              return;
+            }
+            applySessionPayload(sessionId, session);
+          } catch {
+            /* keep cached paint */
+          }
+        })();
+        return true;
+      }
+
+      try {
+        const resp = await agentSessionAPI.getSessionHistoryPaged(
+          agentId,
+          sessionId,
+          0,
+          SESSION_HISTORY_PAGE_SIZE,
+        );
+        if (currentSessionIdRef.current !== sessionId) return false;
+        const session = resp.session;
+        if (session) {
+          applySessionPayload(sessionId, session);
+          return true;
+        }
+      } catch (err: any) {
+        console.error('[AIChatPage] Failed to load session:', err);
+      }
+      return false;
+    },
+    [agentId, applySessionPayload],
+  );
 
   const handleViewSession = async (sessionId: string) => {
     // If the user clicks the CURRENT session (e.g. switching back from a
@@ -5208,46 +5489,122 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (sessionId === currentSessionIdRef.current) {
       viewingHistorySessionRef.current = false;
       setViewingHistorySession(false);
-      await hydrateCurrentSession();
+      await hydrateCurrentSession({ showLoading: false });
       return;
     }
-    setIsLoadingSession(true);
-    setSessionLoadingLabel(t('aiChat.loadingSession'));
+    // Silent switch: paint cache immediately, never show the global overlay.
     pendingFilePushesRef.current = [];
-    try {
-      // Full history so opened sessions keep complete dialogue + tool streams.
-      const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
-      const session = resp.session;
-      if (session) {
-        const entries = buildTimelineFromSession(
-          session.messages || [],
-          session.events || [],
-          session.archived_messages,
-          session.archived_events,
-        );
-        putCachedSessionTimeline(agentId, sessionId, entries);
-        setTimeline(entries);
-        setShellStreams(rebuildShellStreamsFromTimeline(entries));
-        setCurrentSessionId(sessionId);
-        currentSessionIdRef.current = sessionId;
-        viewingHistorySessionRef.current = true;
-        setViewingHistorySession(true); // mark as viewing history (not the agent's current session)
-        setStreamingText('');
-        setIsStreaming(false);
-        // Full snapshot loaded — no further pages.
-        loadingSessionIdRef.current = sessionId;
-        historyOffsetRef.current = session.messages?.length || 0;
-        setHasMoreHistory(false);
-        const meta = getSessionMeta(agentId, sessionId);
-        if (meta?.projectPath) setAgentCwd(meta.projectPath);
-        else if (pendingProjectPathRef.current?.trim()) setAgentCwd(pendingProjectPathRef.current.trim());
-        else if (defaultCwd) setAgentCwd(defaultCwd);
-      }
-    } catch (err: any) {
-      console.error('[AIChatPage] Failed to load session:', err);
-    } finally {
-      setIsLoadingSession(false);
+    currentSessionIdRef.current = sessionId;
+    setCurrentSessionId(sessionId);
+    viewingHistorySessionRef.current = true;
+    setViewingHistorySession(true);
+    setStreamingText('');
+    setIsStreaming(false);
+    const meta = getCachedSessionTimelineMeta(agentId, sessionId);
+    if (!meta?.entries?.length) {
+      setTimeline([]);
+      setShellStreams({});
     }
+    const projectMeta = getSessionMeta(agentId, sessionId);
+    if (projectMeta?.projectPath) setAgentCwd(projectMeta.projectPath);
+    else if (pendingProjectPathRef.current?.trim()) setAgentCwd(pendingProjectPathRef.current.trim());
+    else if (defaultCwd) setAgentCwd(defaultCwd);
+
+    await loadSessionTimelineFast(sessionId);
+  };
+
+  /** Delete a session; if it is the agent-current, rotate via new_session first so it becomes a history file. */
+  const handleDeleteSession = async (sessionId: string) => {
+    const isAgentCurrent = sessionId === agentCurrentSessionIdRef.current;
+
+    const waitForRotation = (prev: string) =>
+      new Promise<void>((resolve, reject) => {
+        const started = Date.now();
+        const seq = ++newSessionFallbackSeqRef.current;
+        newSessionPendingRef.current = true;
+        wsServiceRef.current?.newSession();
+        const tick = window.setInterval(async () => {
+          if (seq !== newSessionFallbackSeqRef.current) {
+            window.clearInterval(tick);
+            reject(new Error('新建会话已取消'));
+            return;
+          }
+          const cur = agentCurrentSessionIdRef.current;
+          if (cur && cur !== prev) {
+            window.clearInterval(tick);
+            newSessionPendingRef.current = false;
+            resolve();
+            return;
+          }
+          if (Date.now() - started > 6000) {
+            window.clearInterval(tick);
+            try {
+              const resp = await agentSessionAPI.getCurrentSession(agentId, 0, 10);
+              if (resp.current_session_id && resp.current_session_id !== prev) {
+                agentCurrentSessionIdRef.current = resp.current_session_id;
+                currentSessionIdRef.current = resp.current_session_id;
+                setCurrentSessionId(resp.current_session_id);
+                newSessionPendingRef.current = false;
+                resolve();
+                return;
+              }
+            } catch { /* ignore */ }
+            newSessionPendingRef.current = false;
+            reject(new Error('无法放弃当前会话，删除失败'));
+          }
+        }, 200);
+      });
+
+    if (isAgentCurrent) {
+      // Avoid stealing UI focus from another open session tab during rotation.
+      const preserveUi =
+        !!currentSessionIdRef.current && currentSessionIdRef.current !== sessionId;
+      const prevViewing = viewingHistorySessionRef.current;
+      if (preserveUi) viewingHistorySessionRef.current = true;
+      try {
+        await waitForRotation(sessionId);
+      } finally {
+        if (preserveUi) viewingHistorySessionRef.current = prevViewing;
+      }
+    }
+
+    try {
+      await agentSessionAPI.deleteSession(agentId, sessionId);
+    } catch (err: any) {
+      // Race: agent current flag was stale — rotate and retry once.
+      if (!isAgentCurrent) {
+        try {
+          const resp = await agentSessionAPI.getCurrentSession(agentId, 0, 10);
+          if (resp.current_session_id === sessionId) {
+            agentCurrentSessionIdRef.current = sessionId;
+            await waitForRotation(sessionId);
+            await agentSessionAPI.deleteSession(agentId, sessionId);
+          } else {
+            throw err;
+          }
+        } catch (err2) {
+          throw err2;
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    if (currentSessionIdRef.current === sessionId) {
+      const next = agentCurrentSessionIdRef.current;
+      if (next && next !== sessionId) {
+        currentSessionIdRef.current = next;
+        setCurrentSessionId(next);
+        setTimeline([]);
+        setShellStreams({});
+      } else {
+        currentSessionIdRef.current = null;
+        setCurrentSessionId(null);
+        setTimeline([]);
+        setShellStreams({});
+      }
+    }
+    requestSessionListRefresh(agentId, agentCurrentSessionIdRef.current);
   };
 
   const handleSwitchAndReply = async (
@@ -5266,24 +5623,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Still reload history for empty switches so the pane shows prior messages.
     if (content) return;
     try {
-      const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
-      const session = resp.session;
-      if (session) {
-        const entries = buildTimelineFromSession(
-          session.messages || [],
-          session.events || [],
-          session.archived_messages,
-          session.archived_events,
-        );
-        putCachedSessionTimeline(agentId, sessionId, entries);
-        setTimeline(entries);
-        setShellStreams(rebuildShellStreamsFromTimeline(entries));
-        historyOffsetRef.current = session.messages?.length || 0;
-        setHasMoreHistory(false);
-        const meta = getSessionMeta(agentId, sessionId);
-        if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
-        else if (defaultCwd) setAgentCwd(defaultCwd);
-      }
+      await loadSessionTimelineFast(sessionId, { softRefresh: true });
+      const meta = getSessionMeta(agentId, sessionId);
+      if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
+      else if (defaultCwd) setAgentCwd(defaultCwd);
     } catch (err: any) {
       console.error('[AIChatPage] Failed to reload session after switch:', err);
     }
@@ -5307,29 +5650,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     wsServiceRef.current?.setActiveSession(sessionId);
 
     try {
-      const cached = getCachedSessionTimeline(agentId, sessionId);
-      if (cached && cached.length > 0) {
-        setTimeline(cached);
-        setShellStreams(rebuildShellStreamsFromTimeline(cached));
-        historyOffsetRef.current = cached.filter((e) => e.kind === 'message').length;
-        setHasMoreHistory(false);
-      } else {
-        const resp = await agentSessionAPI.getSessionHistory(agentId, sessionId);
-        const session = resp.session;
-        if (session) {
-          const entries = buildTimelineFromSession(
-            session.messages || [],
-            session.events || [],
-            session.archived_messages,
-            session.archived_events,
-          );
-          putCachedSessionTimeline(agentId, sessionId, entries);
-          setTimeline(entries);
-          setShellStreams(rebuildShellStreamsFromTimeline(entries));
-          historyOffsetRef.current = session.messages?.length || 0;
-          setHasMoreHistory(false);
-        }
-      }
+      await loadSessionTimelineFast(sessionId);
       const meta = getSessionMeta(agentId, sessionId);
       if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
       else if (defaultCwd) setAgentCwd(defaultCwd);
@@ -5444,7 +5765,51 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       return changed ? next : prev;
     });
-  }, []);
+    // Prefetch recent session first pages into timeline cache (idle).
+    if (!agentId || !sessions.length) return;
+    const current = currentSessionIdRef.current;
+    const toPrefetch = sessions
+      .map((s) => s.id)
+      .filter((id) => id && id !== current && !getCachedSessionTimelineMeta(agentId, id))
+      .slice(0, 3);
+    if (toPrefetch.length === 0) return;
+    const run = () => {
+      for (const sid of toPrefetch) {
+        void (async () => {
+          try {
+            if (getCachedSessionTimelineMeta(agentId, sid)) return;
+            const resp = await agentSessionAPI.getSessionHistoryPaged(
+              agentId,
+              sid,
+              0,
+              SESSION_HISTORY_PAGE_SIZE,
+            );
+            const session = resp.session;
+            if (!session) return;
+            const messages = session.messages || [];
+            const entries = buildTimelineFromSession(
+              messages,
+              session.events || [],
+              session.archived_messages,
+              session.archived_events,
+            );
+            putCachedSessionTimeline(agentId, sid, entries, {
+              complete: !(session.has_more ?? false),
+              messageCount: messages.length,
+              totalMessages: session.total_messages,
+            });
+          } catch {
+            /* ignore prefetch errors */
+          }
+        })();
+      }
+    };
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(run);
+    } else {
+      window.setTimeout(run, 400);
+    }
+  }, [agentId]);
 
   // Also refresh titles when workspace/agent changes (sidebar may be closed).
   useEffect(() => {
@@ -5785,8 +6150,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         fallbackLabel={agentProfile?.agent_name || agentId}
         switchingModel={!!switchingModelBySession[sessionId]}
         onSelectModel={(cardName) => {
-          setSwitchingModelBySession((prev) => ({ ...prev, [sessionId]: true }));
+          const prevCard = cardNameBySession[sessionId] ?? currentCardName;
+          const prevModel = modelNameBySession[sessionId] ?? modelName ?? '';
+          const cardMeta = modelCards.find((c) => c.name === cardName);
+          const nextModel =
+            (cardMeta && (cardMeta.title || cardMeta.model_name || cardMeta.name)) || cardName;
+          modelSwitchRevertRef.current[sessionId] = {
+            card: prevCard || null,
+            model: String(prevModel || ''),
+          };
+          // Optimistic: update label immediately — never park on "Switching…".
           setCardNameBySession((prev) => ({ ...prev, [sessionId]: cardName }));
+          setModelNameBySession((prev) => ({ ...prev, [sessionId]: String(nextModel) }));
+          setSwitchingModelBySession((prev) => ({ ...prev, [sessionId]: false }));
+          console.info('[AIChatPage] switch_model', { sessionId, cardName });
           wsServiceRef.current?.switchModel(cardName, sessionId);
         }}
         reasoningEffort={reasoningBySession[sessionId] ?? reasoningEffort}
@@ -6197,6 +6574,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onViewSession={handleSidebarViewSession}
         onNewSession={handleNewSessionInWorkspace}
         onSwitchAndReply={handleSwitchAndReply}
+        onDeleteSession={handleDeleteSession}
         onOpenSkills={handleOpenSkills}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}

@@ -3,6 +3,7 @@
  */
 import React, { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { SoftOverlay } from '../SoftOverlay';
 
 export interface RestoreCheckpointModalProps {
   open: boolean;
@@ -32,19 +33,16 @@ export const RestoreCheckpointModal: React.FC<RestoreCheckpointModalProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, busy, onCancel]);
 
-  if (!open) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-[170] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-      role="presentation"
-      onMouseDown={(e) => {
-        if (busy) return;
-        if (e.target === e.currentTarget) onCancel();
-      }}
+    <SoftOverlay
+      open={open}
+      onBackdrop={busy ? undefined : onCancel}
+      dismissDisabled={busy}
+      zClass="z-[170]"
+      className="bg-black/50 backdrop-blur-sm"
+      panelClassName="w-full max-w-md rounded-xl border border-border bg-panel shadow-2xl"
     >
       <div
-        className="w-full max-w-md rounded-xl border border-border bg-panel shadow-2xl animate-in fade-in zoom-in-95 duration-150"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="restore-checkpoint-title"
@@ -85,6 +83,6 @@ export const RestoreCheckpointModal: React.FC<RestoreCheckpointModalProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </SoftOverlay>
   );
 };

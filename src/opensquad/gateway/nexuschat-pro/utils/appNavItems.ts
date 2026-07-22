@@ -39,17 +39,20 @@ export const SETTINGS_APP_NAV_ITEMS: AppNavItem[] = [
   { view: 'logs', i18nKey: 'nav.logs', icon: ScrollText },
 ];
 
-/** Views that open as large SoftOverlay modals (not fullscreen page takeovers). */
-export const APP_MODAL_VIEWS = new Set<string>([
-  ...SETTINGS_APP_NAV_ITEMS.map((i) => i.view),
-  'market',
-  'collab-board',
-]);
-
-export function isAppModalView(view: string): boolean {
-  if (APP_MODAL_VIEWS.has(view)) return true;
+/** App panels embedded inside the settings shell (not separate overlays). */
+export function isSettingsAppView(view: string): boolean {
+  if (view === 'collab-board' || view === 'chat' || view === 'admin' || view === 'ai-chat') {
+    return false;
+  }
+  if (SETTINGS_APP_NAV_ITEMS.some((i) => i.view === view)) return true;
+  if (view === 'market') return true;
   // Dynamic plugin views use "pluginName:viewName"
   return view.includes(':');
+}
+
+/** @deprecated use isSettingsAppView */
+export function isAppModalView(view: string): boolean {
+  return isSettingsAppView(view);
 }
 
 export function navigateAppView(view: string): void {

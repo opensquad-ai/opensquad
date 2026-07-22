@@ -304,6 +304,51 @@ def persist_desktop_workspace_switch(workspace_path: str) -> None:
         save_desktop_workspace_path(app_data, workspace_path)
 
 
+# Builtin model cards that should always be available in workspace lists
+# (never overwrite an existing same-named file the user may have edited).
+BUILTIN_MODEL_CARD_FILES = (
+    "builtin-whisper-asr.json",
+    "builtin-sensevoice-asr.json",
+)
+
+
+def ensure_builtin_model_cards(
+    workspace_path: str | None = None,
+    install_dir: str | None = None,
+) -> list[str]:
+    """Copy missing builtin model cards into the workspace ``model_cards/``.
+
+    Returns the list of card filenames that were newly copied.
+    Existing files are left untouched.
+    """
+    import shutil
+
+    from opensquad.system_config import syscfg
+
+    root = install_dir or syscfg.get_builtin_root()
+    src_dir = os.path.join(root, "model_cards")
+    if workspace_path:
+        dst_dir = os.path.join(os.path.abspath(workspace_path), "model_cards")
+    else:
+        dst_dir = syscfg.workspace_model_cards_dir()
+
+    if not os.path.isdir(src_dir):
+        return []
+
+    os.makedirs(dst_dir, exist_ok=True)
+    copied: list[str] = []
+    for card_name in BUILTIN_MODEL_CARD_FILES:
+        src = os.path.join(src_dir, card_name)
+        dst = os.path.join(dst_dir, card_name)
+        if os.path.isfile(src) and not os.path.isfile(dst):
+            try:
+                shutil.copy2(src, dst)
+                copied.append(card_name)
+            except OSError:
+                pass
+    return copied
+
+
 def _copy_default_resources(workspace_path: str, install_dir: str):
     """Copy default model cards, MCP config and agent to a new workspace."""
     import shutil
@@ -313,7 +358,12 @@ def _copy_default_resources(workspace_path: str, install_dir: str):
     ws_model_cards = os.path.join(workspace_path, "model_cards")
     if os.path.isdir(src_model_cards):
         os.makedirs(ws_model_cards, exist_ok=True)
-        for card_name in ("deepseek-v4-flash.json", "deepseek-v4-pro.json"):
+        seed_cards = (
+            "deepseek-v4-flash.json",
+            "deepseek-v4-pro.json",
+            *BUILTIN_MODEL_CARD_FILES,
+        )
+        for card_name in seed_cards:
             src = os.path.join(src_model_cards, card_name)
             dst = os.path.join(ws_model_cards, card_name)
             if os.path.isfile(src) and not os.path.isfile(dst):

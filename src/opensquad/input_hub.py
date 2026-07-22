@@ -21,9 +21,13 @@ class InputHub:
 
     def __init__(self):
         self._queue: asyncio.Queue | None = None
-        self._urgent_queue: asyncio.Queue | None = None  # urgent command queue (for interrupts)
+        self._urgent_queue: asyncio.Queue | None = None  # agent-level urgent (STOP/NEW_SESSION/…)
+        # Per-session inboxes for parallel multi-session turns
+        self._session_queues: dict[str, asyncio.Queue] = {}
+        self._session_urgent_queues: dict[str, asyncio.Queue] = {}
+        self._stop_sessions: set[str] = set()
         self.last_message_source = None  # records the source of the last message, used for replies
-        self._stop_requested = False  # stop request flag
+        self._stop_requested = False  # stop request flag (agent-wide)
         self.agent_dir = None  # Agent root directory (e.g. agents/ai002)
         # ── Event-driven notification (P0 perf: replaces 1s polling) ──
         self._new_input_event: asyncio.Event | None = None
@@ -112,6 +116,105 @@ class InputHub:
         if self._urgent_queue is None:
             self._urgent_queue = asyncio.Queue(maxsize=10000)
         return self._urgent_queue
+
+    def _get_session_queue(self, sid: str) -> asyncio.Queue:
+        q = self._session_queues.get(sid)
+        if q is None:
+            q = asyncio.Queue(maxsize=10000)
+            self._session_queues[sid] = q
+        return q
+
+    def _get_session_urgent_queue(self, sid: str) -> asyncio.Queue:
+        q = self._session_urgent_queues.get(sid)
+        if q is None:
+            q = asyncio.Queue(maxsize=10000)
+            self._session_urgent_queues[sid] = q
+        return q
+
+    def _put_nowait_backpressure(self, q: asyncio.Queue, data: dict, label: str) -> None:
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            logger.warning("[InputHub] %s full (size=%d), evicting oldest", label, q.qsize())
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            q.put_nowait(data)
+
+    def _signal_input(self) -> None:
+        if self._new_input_event is not None:
+            self._new_input_event.set()
+
+    def _try_pop_any(self) -> tuple[str | None, dict] | None:
+        """Non-blocking: prefer agent urgent, then per-sid urgent, then global, then per-sid normal."""
+        uq = self._get_urgent_queue()
+        if not uq.empty():
+            try:
+                return (None, uq.get_nowait())
+            except asyncio.QueueEmpty:
+                pass
+        for sid, sq in list(self._session_urgent_queues.items()):
+            if not sq.empty():
+                try:
+                    return (sid, sq.get_nowait())
+                except asyncio.QueueEmpty:
+                    continue
+        q = self._get_queue()
+        if not q.empty():
+            try:
+                item = q.get_nowait()
+                return (item.get("session_id") or None, item)
+            except asyncio.QueueEmpty:
+                pass
+        for sid, sq in list(self._session_queues.items()):
+            if not sq.empty():
+                try:
+                    return (sid, sq.get_nowait())
+                except asyncio.QueueEmpty:
+                    continue
+        return None
+
+    async def wait_any(self, timeout: float | None = None) -> tuple[str | None, dict] | None:
+        """Wait for the next input from any session (or agent-level queue).
+
+        Returns (session_id|None, item). session_id is None for agent-level commands
+        (global urgent / legacy global queue without sid).
+        """
+        self._check_session_cwd()
+        popped = self._try_pop_any()
+        if popped is not None:
+            return popped
+
+        event = self.get_input_event()
+        event.clear()
+        try:
+            if timeout is None:
+                await event.wait()
+            else:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        event.clear()
+        return self._try_pop_any()
+
+    def peek_session_pending(self, sid: str) -> bool:
+        sq = self._session_queues.get(sid)
+        su = self._session_urgent_queues.get(sid)
+        return bool((sq and not sq.empty()) or (su and not su.empty()))
+
+    def get_session_pending(self, sid: str) -> list:
+        """Non-blocking drain of one session's normal queue."""
+        items = []
+        q = self._session_queues.get(sid)
+        if not q:
+            return items
+        while True:
+            try:
+                items.append(q.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return items
 
     async def get_user_response(self) -> dict[str, Any]:
         """
@@ -312,25 +415,24 @@ class InputHub:
         source_chat_id: str = "",
         user_id: str = "",
         client_id: str = "",
+        session_id: str = "",
+        model_card: str = "",
     ):
         """Push a new command, optionally with image path list, attachments, and channel identifier.
 
+        When session_id is set, the item goes to that session's inbox (parallel multi-session).
         Backpressure: when the queue is at maxsize=10000, the oldest item is
         evicted to make room. This is a sync method -- callers in tools,
         plugins, and async handlers all use it without await.
         """
         import os
 
-        q = self._get_queue()
+        sid = (session_id or "").strip()
+        q = self._get_session_queue(sid) if sid else self._get_queue()
         logger.debug(
-            f"[InputHub] PUSH from {source} (channel={channel}): content_len={len(content)}, queue_size_before={q.qsize()}, queue_id={id(q)}"
+            f"[InputHub] PUSH from {source} (channel={channel}, sid={sid or '-'}): "
+            f"content_len={len(content)}, queue_size_before={q.qsize()}"
         )
-
-        # NOTE: event_pipeline push removed from here — it caused the trigger message
-        # to be processed twice (once as role=user, once re-injected via role=tool).
-        # message_queue.put() already handles event_pipeline push for group/DM messages.
-        # Web/gateway messages flow through the normal input_hub queue and are detected
-        # by the runner's wait loop via input_hub.get_all_pending().
 
         # Fix paths in images list
         fixed_images = []
@@ -357,19 +459,17 @@ class InputHub:
                     fixed_attachments.append(att)
 
         # Fix paths in content (e.g. Markdown links)
-        # Simple replacement for typical patterns
         if "/uploads/" in content:
-            # Bug 5 fix: use the same path as _fix_path (workspace/data/uploads)
-            # instead of the previously hardcoded gateway/backend/uploads.
             import os
 
             from opensquad.system_config import syscfg
 
             uploads_abs = os.path.join(syscfg.project_root(), "data", "uploads").replace("\\", "/")
-            # Replace /uploads with full path (normalized to forward slashes for consistency in text)
             content = content.replace("/uploads", uploads_abs)
 
         data = {"source": source, "content": content}
+        if sid:
+            data["session_id"] = sid
         if channel:
             data["channel"] = channel
         if sender_name:
@@ -382,31 +482,17 @@ class InputHub:
             data["user_id"] = user_id
         if client_id:
             data["client_id"] = str(client_id).strip()
+        card = (model_card or "").strip()
+        if card:
+            data["model_card"] = card
         if fixed_images:
             data["images"] = fixed_images
         if fixed_attachments:
             data["attachments"] = fixed_attachments
 
-        # ── Backpressure-aware put (sync) ──
-        # Try put_nowait; if queue is full, evict oldest item and retry.
-        try:
-            q.put_nowait(data)
-        except asyncio.QueueFull:
-            logger.warning(
-                "[InputHub] Queue full (size=%d), evicting oldest item for push from %s",
-                q.qsize(),
-                source,
-            )
-            try:
-                q.get_nowait()  # evict oldest
-            except asyncio.QueueEmpty:
-                pass
-            q.put_nowait(data)
-
-        # Signal event-driven waiters
-        if self._new_input_event is not None:
-            self._new_input_event.set()
-        logger.debug(f"[InputHub] PUSH DONE - queue_size_after={self._get_queue().qsize()}")
+        self._put_nowait_backpressure(q, data, f"queue sid={sid or 'global'}")
+        self._signal_input()
+        logger.debug(f"[InputHub] PUSH DONE - sid={sid or 'global'}, queue_size_after={q.qsize()}")
 
     def push_urgent(
         self,
@@ -415,20 +501,20 @@ class InputHub:
         images: list | None = None,
         attachments: list | None = None,
         channel: str = "",
+        session_id: str = "",
     ):
         """Push an urgent command (interrupts the current task), optionally with image paths,
         attachments, and channel identifier.
 
+        When session_id is set, urgency is scoped to that session's worker.
         Backpressure: when the urgent queue is at maxsize=10000, the oldest item
         is evicted to make room. This is a sync method.
         """
-        # Fix paths in images list
         fixed_images = []
         if images:
             for img in images:
                 fixed_images.append(self._fix_path(img))
 
-        # Fix paths in attachments list
         fixed_attachments = []
         if attachments:
             for att in attachments:
@@ -443,35 +529,23 @@ class InputHub:
                 else:
                     fixed_attachments.append(att)
 
+        sid = (session_id or "").strip()
         data = {"source": source, "content": content}
+        if sid:
+            data["session_id"] = sid
         if channel:
             data["channel"] = channel
         if fixed_images:
             data["images"] = fixed_images
         if fixed_attachments:
             data["attachments"] = fixed_attachments
-        uq = self._get_urgent_queue()
 
-        # ── Backpressure-aware put (sync) ──
-        try:
-            uq.put_nowait(data)
-        except asyncio.QueueFull:
-            logger.warning(
-                "[InputHub] Urgent queue full (size=%d), evicting oldest item for push_urgent from %s",
-                uq.qsize(),
-                source,
-            )
-            try:
-                uq.get_nowait()  # evict oldest
-            except asyncio.QueueEmpty:
-                pass
-            uq.put_nowait(data)
-
-        # Signal event-driven waiters
-        if self._new_input_event is not None:
-            self._new_input_event.set()
+        uq = self._get_session_urgent_queue(sid) if sid else self._get_urgent_queue()
+        self._put_nowait_backpressure(uq, data, f"urgent sid={sid or 'global'}")
+        self._signal_input()
         logger.info(
-            f"[InputHub] PUSH_URGENT: content={str(content)[:80]}, source={source}, urgent_queue_size_after={uq.qsize()}, queue_id={id(uq)}"
+            f"[InputHub] PUSH_URGENT: content={str(content)[:80]}, source={source}, "
+            f"sid={sid or 'global'}, urgent_queue_size_after={uq.qsize()}"
         )
 
     def check_urgent_commands(self) -> list:
@@ -487,10 +561,33 @@ class InputHub:
                 break
         return items
 
-    def request_stop(self):
-        """Request that the current task flow be stopped."""
+    def request_stop(self, *, enqueue: bool = True):
+        """Request that the current task flow be stopped (agent-wide).
+
+        enqueue=False when the dispatcher is already draining a __STOP__ item —
+        otherwise request_stop would push another __STOP__ and starve later
+        commands (e.g. __NEW_SESSION__ after New Chat).
+        """
+        already = self._stop_requested
         self._stop_requested = True
-        self.push_urgent("__STOP__", source="system")
+        if enqueue and not already:
+            self.push_urgent("__STOP__", source="system")
+        # Cancel in-flight parallel session turns immediately (do not wait for
+        # the dispatcher to drain __STOP__ — otherwise tools/LLM keep going).
+        try:
+            from opensquad import runner as runner_mod
+
+            active = getattr(runner_mod, "_active_runner", None)
+            sched = getattr(active, "_parallel_scheduler", None) if active else None
+            if sched is not None:
+                for sid in list(getattr(sched, "busy_sessions", set()) or set()):
+                    try:
+                        sched.request_stop_session(sid)
+                    except Exception:
+                        pass
+        except Exception:
+            logger.debug("[InputHub] parallel turn cancel on stop skipped", exc_info=True)
+
         # Also abort in-flight sub-agents (sync + async) — otherwise they keep
         # streaming into the UI / next session after the parent stops.
         try:
@@ -511,9 +608,44 @@ class InputHub:
         except Exception:
             logger.debug("[InputHub] abort_all_tool_processes on stop skipped", exc_info=True)
 
+    def request_stop_session(self, session_id: str):
+        """Request stop for a single session's in-flight turn."""
+        sid = (session_id or "").strip()
+        if not sid:
+            self.request_stop()
+            return
+        already = sid in self._stop_sessions
+        self._stop_sessions.add(sid)
+        if not already:
+            self.push_urgent("__STOP__", source="system", session_id=sid)
+        logger.info("[InputHub] stop requested for session %s", sid)
+        # Cancel that session's parallel turn immediately.
+        try:
+            from opensquad import runner as runner_mod
+
+            active = getattr(runner_mod, "_active_runner", None)
+            sched = getattr(active, "_parallel_scheduler", None) if active else None
+            if sched is not None:
+                sched.request_stop_session(sid)
+        except Exception:
+            logger.debug("[InputHub] session turn cancel on stop skipped", exc_info=True)
+        try:
+            from opensquad.tools.system import abort_all_tool_processes
+
+            abort_all_tool_processes("stop_task")
+        except Exception:
+            logger.debug("[InputHub] abort_all_tool_processes on session stop skipped", exc_info=True)
+
+    def clear_session_stop(self, session_id: str) -> None:
+        self._stop_sessions.discard(session_id or "")
+
+    def is_session_stop_requested(self, session_id: str) -> bool:
+        return (session_id or "") in self._stop_sessions or self._stop_requested
+
     def clear_stop_request(self):
         """Clear the stop request."""
         self._stop_requested = False
+        self._stop_sessions.clear()
 
     def is_stop_requested(self) -> bool:
         """Check whether a stop has been requested."""

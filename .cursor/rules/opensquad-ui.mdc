@@ -1,0 +1,33 @@
+---
+description: OpenSquad frontend visual system — soft tooling UI (Linear × Claude). Apply when editing nexuschat-pro UI, themes, or design tokens.
+globs:
+  - src/opensquad/gateway/nexuschat-pro/**/*.{tsx,ts,css,html}
+  - DESIGN.md
+alwaysApply: false
+---
+
+# OpenSquad UI (soft tooling)
+
+Read [DESIGN.md](DESIGN.md) for full tokens. Follow this when changing frontend chrome.
+
+## Skill combo (do not load all remote skills every time)
+
+1. **Anthropic frontend-design** — brief before big UI changes
+2. **Impeccable quieter / polish** — softer spacing, type, motion
+3. **garden `linear`** — hairline panels, radius ≤16, one muted accent
+4. **qiaomu** — Chinese copy / 盘古之白 only when editing zh strings
+5. **Pro Max / Taste** — not for routine app chrome (landing only for Taste)
+
+## Hard rules
+
+- Use semantic Tailwind colors (`bg-bgLight`, `bg-panel`, `border-border`, `text-textMain`, `text-textMuted`, `primary`). No hardcoded purple/indigo brand gradients.
+- Theme colors only via `themeStore` / `themeEngine` CSS vars.
+- Radius: 6 / 12 / 16 max for chrome. Soft single-layer shadow; prefer hairline borders.
+- Motion 150–200ms ease-out; honor `prefers-reduced-motion`.
+- Modal headers: quiet panel + border — not full-bleed primary bars.
+- Nav active: soft primary tint, not loud filled blocks.
+- Ban: emoji-as-icons, glow shadows, multi-accent rainbow, AI landing-page clichés in product UI.
+
+## Soft pass checklist
+
+Before finishing a UI change: quieter contrast, consistent 8px spacing rhythm, focus rings via `ring-primary/25`, light + dark both readable.

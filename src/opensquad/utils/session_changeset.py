@@ -907,6 +907,41 @@ def keep_file(root: str, path: str) -> dict[str, Any]:
         return {"ok": True, "path": rel, "kept": True, **summary(root)}
 
 
+def keep_all(root: str) -> dict[str, Any]:
+    """Keep every path currently in Changes — same as keep_file for each; withdraw still works."""
+    with _lock:
+        meta = _load_meta(root)
+        paths = sorted(meta.get("file_stats") or {})
+        for rel in paths:
+            if rel not in meta["baseline"]:
+                meta["baseline"][rel] = "missing"
+                meta.setdefault("created", {})[rel] = True
+            abs_path = _abs(root, rel)
+            if os.path.isfile(abs_path):
+                try:
+                    stt = os.stat(abs_path)
+                    kept: dict[str, Any] = {
+                        "mtime": float(stt.st_mtime),
+                        "size": int(stt.st_size),
+                    }
+                except Exception:
+                    kept = {"mtime": 0.0, "size": 0}
+            else:
+                kept = {"missing": True, "mtime": 0.0, "size": 0}
+            meta.setdefault("kept", {})[rel] = kept
+            meta["file_stats"].pop(rel, None)
+            meta.get("edit_base", {}).pop(rel, None)
+            eb = _blob_path(_edit_base_dir(root), rel)
+            if eb and os.path.isfile(eb):
+                try:
+                    os.remove(eb)
+                except Exception:
+                    pass
+        _save_meta(root, meta)
+        # summary() takes the lock again — release first by returning outside; call unlocked path
+    return {"ok": True, "kept": True, "kept_count": len(paths), **summary(root)}
+
+
 def _git_porcelain_paths(root: str) -> list[str]:
     import subprocess
 

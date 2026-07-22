@@ -77,6 +77,7 @@ from ._network import (
     host,
     launcher_url,
     port,
+    sensevoice_url,
     websearch_url,
     whisper_url,
 )
@@ -163,6 +164,7 @@ __all__ = [
     "raw",
     "reload",
     "resource_search_dirs",
+    "sensevoice_url",
     "set_workspace",
     "skills_dir",
     "tool_call_debug",

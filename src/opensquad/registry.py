@@ -18,6 +18,8 @@ _BARE_NAME_NS_PRIORITY: tuple[str, ...] = (
     "im",
     "help",
     "agent_mode",
+    "choice_tools",
+    "goal",
     "collaboration",
     "agent_setup",
     "workspace",
@@ -655,7 +657,7 @@ class ToolRegistry:
                 "agent_mode__request_switch",
                 "agent_mode.request_switch",
             ):
-                if is_tool_blocked_in_plan(tool_name):
+                if is_tool_blocked_in_plan(tool_name, args if isinstance(args, dict) else None):
                     tc_log.warning("[registry.call] Blocked in Plan mode: %s", tool_name)
                     return plan_block_message(tool_name)
         except Exception as e:

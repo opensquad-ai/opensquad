@@ -340,7 +340,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
           <button
             type="button"
             onClick={() => setMaximized((v) => !v)}
-            className="p-1.5 rounded-md text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors"
             aria-label={maximized ? 'Restore' : 'Maximize'}
             title={maximized ? 'Restore' : 'Maximize'}
           >
@@ -349,7 +349,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-md text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 transition-colors"
             aria-label="Close"
             title="Close"
           >

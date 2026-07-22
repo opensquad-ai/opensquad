@@ -50,6 +50,7 @@ def port(name: str) -> int:
         "external_adapter": 9700,
         "websearch": 9001,
         "whisper": 5001,
+        "sensevoice": 7101,
     }
     return get_int("ports", name, defaults.get(name, 0))
 
@@ -169,6 +170,14 @@ def whisper_url() -> str:
     if explicit:
         return explicit
     return f"http://127.0.0.1:{port('whisper')}"
+
+
+def sensevoice_url() -> str:
+    """SenseVoice ASR service URL (aligned with ``port(\"sensevoice\")``, default 7101)."""
+    explicit = get("services", "sensevoice_url", None)
+    if explicit:
+        return explicit
+    return f"http://127.0.0.1:{port('sensevoice')}"
 
 
 def websearch_url() -> str:

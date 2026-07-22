@@ -140,9 +140,12 @@ class AgentWebSocketHandler:
                     await websocket.send_json({"action": "pong"})
 
                 elif action == "status":
-                    # Status update
+                    # Status update (optional per-session)
                     status = message.get("status", "online")
-                    if status == "busy":
+                    session_id = str(message.get("session_id") or "").strip()
+                    if session_id:
+                        registry.set_session_busy(agent_id, session_id, status == "busy")
+                    elif status == "busy":
                         registry.set_busy(agent_id, True)
                     else:
                         registry.set_busy(agent_id, False)
@@ -166,6 +169,8 @@ class AgentWebSocketHandler:
                     "current_session",
                     "history_sync",
                     "session_list",
+                    "busy_sessions",
+                    "primary_session",
                     "file_push",
                     "plan",
                     "prompt_update",
@@ -555,8 +560,16 @@ class UserWebSocketHandler:
                         "history": history,
                         "channel": message.get("channel", "web"),
                     }
+                    # Pass through session_id for parallel multi-session routing
+                    _sid = str(message.get("session_id") or "").strip()
+                    if _sid:
+                        message_to_agent["session_id"] = _sid
+                    # Pane-selected model card — turn bind uses this even if switch_model was dropped
+                    _card = str(message.get("model_card") or message.get("card") or "").strip()
+                    if _card:
+                        message_to_agent["model_card"] = _card
                     # Pass through context fields
-                    for _ctx_key in ("sender_name", "chat_name", "source_chat_id"):
+                    for _ctx_key in ("sender_name", "chat_name", "source_chat_id", "client_id", "message_id"):
                         _ctx_val = message.get(_ctx_key, "")
                         if _ctx_val:
                             message_to_agent[_ctx_key] = _ctx_val
@@ -574,8 +587,11 @@ class UserWebSocketHandler:
                         logger.info(f"Successfully forwarded message from {user_id} to agent {agent_id}")
                         # Increment today's chat count
                         registry.increment_today_chats(agent_id)
-                        # Set Agent to busy
-                        registry.set_busy(agent_id, True)
+                        # Set Agent/session busy
+                        if _sid:
+                            registry.set_session_busy(agent_id, _sid, True)
+                        else:
+                            registry.set_busy(agent_id, True)
 
                         # Broadcast user message to other connected devices (multi-device sync)
                         broadcast_msg = {

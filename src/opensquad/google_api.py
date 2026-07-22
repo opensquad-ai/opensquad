@@ -1140,7 +1140,15 @@ class GoogleAPI:
                 for chunk in response:
                     got_any_chunk = True
                     # Check interruption
-                    if input_hub and input_hub.is_stop_requested():
+                    if input_hub and (
+                        input_hub.is_stop_requested()
+                        or (
+                            getattr(self, "_sid_provider", None)
+                            and (lambda s: bool(s) and input_hub.is_session_stop_requested(str(s)))(
+                                self._sid_provider() if callable(self._sid_provider) else None
+                            )
+                        )
+                    ):
                         logger.info("[GoogleAPI] Interrupted by user")
                         break
 

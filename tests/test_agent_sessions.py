@@ -221,6 +221,75 @@ class TestAgentSessionReader:
         assert by_id["hist-1"]["current"] is False
         assert by_id["hist-2"]["current"] is False
 
+    def test_get_session_list_meta_cache_skips_reread(self, tmp_path, monkeypatch):
+        """Second list call with unchanged mtime must not re-parse history JSON."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "title": "Current", "messages": []}),
+            encoding="utf-8",
+        )
+        hist_path = history_dir / "big.json"
+        hist_path.write_text(
+            json.dumps(
+                {
+                    "id": "big",
+                    "title": "Big Session",
+                    "messages": [{"role": "user", "content": f"m{i}"} for i in range(200)],
+                    "last_updated": "2026-01-01T00:00:00Z",
+                    "created_at": "2026-01-01T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        first = reader.get_session_list()
+        assert any(s["id"] == "big" and s["title"] == "Big Session" for s in first)
+        assert "big" in reader._list_meta_cache
+
+        open_calls = {"n": 0}
+        real_open = open
+
+        def counting_open(*args, **kwargs):
+            path = args[0] if args else kwargs.get("file")
+            if str(path).endswith("big.json"):
+                open_calls["n"] += 1
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counting_open)
+        second = reader.get_session_list()
+        assert any(s["id"] == "big" and s["title"] == "Big Session" for s in second)
+        assert open_calls["n"] == 0
+
+    def test_get_session_list_title_from_head_only(self, tmp_path):
+        """Without top-level title, extract from message head — not full scan needed."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "messages": []}),
+            encoding="utf-8",
+        )
+        (history_dir / "t1.json").write_text(
+            json.dumps(
+                {
+                    "id": "t1",
+                    "messages": [
+                        {"role": "user", "content": "Hello world title candidate"},
+                        {"role": "assistant", "content": "ok"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        sessions = reader.get_session_list()
+        by_id = {s["id"]: s for s in sessions}
+        assert "Hello world" in by_id["t1"]["title"]
+
     # ── get_session_history ───────────────────────────────────────────
 
     def test_get_session_history_no_file(self, local_reader):
@@ -385,7 +454,7 @@ class TestAgentSessionReader:
         assert "hist-1" not in reader._cache
 
     def test_delete_current_session_fails(self, tmp_path):
-        """Cannot delete the current session."""
+        """Cannot delete the current session (even when empty)."""
         save_dir = tmp_path / "sessions"
         history_dir = tmp_path / "history"
         os.makedirs(save_dir, exist_ok=True)
@@ -396,6 +465,25 @@ class TestAgentSessionReader:
         )
         reader = AgentSessionReader(str(save_dir), str(history_dir))
         assert reader.delete_session("cur-1") is False
+
+    def test_delete_empty_current_after_archive(self, tmp_path):
+        """After archiving, the previous empty session is a history file and deletable."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-2", "messages": []}),
+            encoding="utf-8",
+        )
+        hist_path = history_dir / "cur-1.json"
+        hist_path.write_text(
+            json.dumps({"id": "cur-1", "messages": []}),
+            encoding="utf-8",
+        )
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        assert reader.delete_session("cur-1") is True
+        assert not hist_path.exists()
 
     def test_delete_non_existent_session(self, local_reader):
         """Returns False for a session that does not exist."""
@@ -490,6 +578,65 @@ class TestAgentSessionReader:
         r3 = reader.get_session_history_paged("paged", offset=15, limit=10)
         assert len(r3["messages"]) == 5
         assert r3["has_more"] is False
+
+    def test_get_session_history_paged_archived_only_on_first_page(self, tmp_path):
+        """archived_* is returned only for offset=0 to keep later pages light."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "messages": []}),
+            encoding="utf-8",
+        )
+        msgs = [{"role": "user", "content": f"msg {i}"} for i in range(20)]
+        archived = [{"role": "user", "content": "old archived"}]
+        archived_ev = [{"name": "tool_use", "data": "ls"}]
+        (history_dir / "paged.json").write_text(
+            json.dumps(
+                {
+                    "messages": msgs,
+                    "events": [],
+                    "archived_messages": archived,
+                    "archived_events": archived_ev,
+                }
+            ),
+            encoding="utf-8",
+        )
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+
+        r0 = reader.get_session_history_paged("paged", offset=0, limit=5)
+        assert r0["archived_messages"] == archived
+        assert r0["archived_events"] == archived_ev
+
+        r1 = reader.get_session_history_paged("paged", offset=5, limit=5)
+        assert r1["archived_messages"] == []
+        assert r1["archived_events"] == []
+
+    def test_cache_get_returns_shallow_copy(self, tmp_path):
+        """Default cache get avoids deepcopy while still isolating list containers."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "messages": []}),
+            encoding="utf-8",
+        )
+        (history_dir / "s1.json").write_text(
+            json.dumps({"id": "s1", "messages": [{"role": "user", "content": "a"}], "events": []}),
+            encoding="utf-8",
+        )
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        first = reader.get_session_history("s1")
+        assert first is not None
+        second = reader._cache_get("s1")
+        assert second is not None
+        assert second["messages"] is not first["messages"]
+        # Mutating the list container must not mutate the cache entry's list.
+        second["messages"].append({"role": "user", "content": "b"})
+        third = reader._cache_get("s1")
+        assert len(third["messages"]) == 1
 
     def test_get_session_history_paged_no_session(self, local_reader):
         """Returns None for non-existent session."""

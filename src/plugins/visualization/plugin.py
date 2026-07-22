@@ -2,8 +2,9 @@
 Visualization Plugin — embed interactive HTML into Agent Web (classic mode).
 
 Agent calls visualization.create(html=...) with a self-contained HTML document
-(or fragment). The tool returns a structured payload; Agent Web classic mode
-detects kind=html_embed and renders it in a sandboxed iframe inside the dialog.
+(or fragment). The tool returns a structured payload; Agent Web records it as a
+normal tool call, then embeds the HTML in a sandboxed iframe below the agent's
+final reply.
 """
 
 from __future__ import annotations
@@ -63,8 +64,12 @@ class VisualizationPlugin(Plugin):
         description=(
             "Create an interactive HTML visualization for the Agent Web chat UI. "
             "Provide a complete HTML page (or fragment) in `html`. "
-            "Do NOT paste the HTML into the chat reply — the host embeds it automatically. "
-            "Prefer self-contained HTML (inline CSS/JS); avoid remote script sources when possible."
+            "Do NOT paste the HTML into the chat reply — the host embeds it below "
+            "your final reply automatically. "
+            "Prefer self-contained HTML (inline CSS/JS). "
+            "Interactive JS is supported (CSS animations, canvas, confetti, click handlers, timers). "
+            "Avoid remote script CDNs when possible; keep colors/backgrounds self-contained "
+            "so the page remains readable inside the chat."
         ),
     )
     def create(
@@ -109,7 +114,7 @@ class VisualizationPlugin(Plugin):
 
         host_msg = (
             f'Interactive visualization "{name}" was created. '
-            "The host will automatically embed it after this turn. "
+            "The host will embed it below your final reply in Agent Web. "
             "Do not print an inline directive or file path."
         )
         if truncated:

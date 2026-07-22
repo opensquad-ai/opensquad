@@ -307,7 +307,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
   const [sourceDropdownPos, setSourceDropdownPos] = useState<{ top: number; left: number } | null>(null);
 
   return (
-    <div className="flex-1 bg-bgLight flex flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-bgLight">
 
       {/* ── Header ── */}
       <div className={`${adminHeaderBar} justify-between overflow-x-auto whitespace-nowrap no-scrollbar`}>
@@ -386,7 +386,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
 
         {/* ── Left: Source selector ── */}
         <div className="w-48 bg-panel border-r border-border shrink-0 overflow-y-auto hidden md:flex flex-col">
@@ -476,7 +476,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
         </div>
 
         {/* ── Right: Log viewer ── */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 
           {!selectedSource ? (
             <div className="flex-1 flex flex-col items-center justify-center text-textMuted">
@@ -570,27 +570,29 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
               <div
                 ref={logContainerRef}
                 onScroll={handleScroll}
-                className="flex-1 overflow-y-auto bg-gray-950 font-mono text-[11.5px] leading-relaxed p-3"
+                className="min-h-0 flex-1 overflow-auto bg-gray-950 p-3 font-mono text-[11.5px] leading-relaxed"
               >
                 {logsLoading && parsedLines.length === 0 ? (
-                  <div className="flex items-center gap-2 text-gray-500 p-4">
+                  <div className="flex items-center gap-2 p-4 text-gray-500">
                     <Loader2 size={14} className="animate-spin" /> Loading logs...
                   </div>
                 ) : filteredLines.length === 0 ? (
-                  <div className="text-gray-500 p-4">
+                  <div className="p-4 text-gray-500">
                     {searchText || levelFilter !== 'all'
                       ? 'No lines match the current filter.'
                       : 'No log entries found.'}
                   </div>
                 ) : (
-                  filteredLines.map((line, i) => (
-                    <div
-                      key={i}
-                      className={`whitespace-pre-wrap break-all py-px px-1.5 rounded ${LEVEL_BG[line.level]} hover:bg-white/5`}
-                    >
-                      {highlightLine(line.raw)}
-                    </div>
-                  ))
+                  <div className="min-w-max">
+                    {filteredLines.map((line, i) => (
+                      <div
+                        key={i}
+                        className={`whitespace-pre py-px px-1.5 rounded ${LEVEL_BG[line.level]} hover:bg-white/5`}
+                      >
+                        {highlightLine(line.raw)}
+                      </div>
+                    ))}
+                  </div>
                 )}
                 <div ref={logEndRef} />
               </div>

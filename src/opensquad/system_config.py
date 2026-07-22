@@ -55,6 +55,7 @@ from opensquad._syscfg import (
     raw,
     reload,
     resource_search_dirs,
+    sensevoice_url,
     set_workspace,
     tool_call_debug,
     tool_call_debug_backup_count,
@@ -253,6 +254,7 @@ class _SysCfg:
     launcher_url = staticmethod(launcher_url)
     external_adapter_url = staticmethod(external_adapter_url)
     whisper_url = staticmethod(whisper_url)
+    sensevoice_url = staticmethod(sensevoice_url)
     websearch_url = staticmethod(websearch_url)
     default_agent_id = staticmethod(default_agent_id)
     default_timeout = staticmethod(default_timeout)

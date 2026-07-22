@@ -270,6 +270,7 @@ TOOL_MODULES = {
     "task_watch": "opensquad.tools.task_watch",
     "agent_mode": "opensquad.tools.agent_mode_tools",
     "choice_tools": "opensquad.tools.choice_tools",
+    "goal": "opensquad.tools.goal_tools",
     # --- Plugin-owned tools: resolved via PluginManager, not direct import here ---
     # websearch        -> plugins/websearch/
     # vision           -> plugins/vision/
@@ -282,7 +283,16 @@ TOOL_MODULES = {
 }
 
 # Core-level tools get detailed docs in prompts; extended-level get summary only
-CORE_TOOLS = {"system", "filesystem", "im", "long_memory", "collaboration", "agent_mode", "choice_tools"}
+CORE_TOOLS = {
+    "system",
+    "filesystem",
+    "im",
+    "long_memory",
+    "collaboration",
+    "agent_mode",
+    "choice_tools",
+    "goal",
+}
 
 # Mandatory tools: automatically injected into every agent regardless of config.json tools list.
 # These are the built-in core tools shown in the UI as "系统内置".
@@ -297,6 +307,7 @@ MANDATORY_TOOLS = {
     "task_watch",
     "agent_mode",
     "choice_tools",
+    "goal",
 }
 
 BOOT_PHASES = AgentBootPhases(
@@ -851,6 +862,20 @@ async def main(agent_dir: str, override_port: int | None = None):
     _early_runner = early_runner_artifacts.runner
     _runner_task = early_runner_artifacts.runner_task
 
+    # Register model-switch ASAP — early runner already consumes WS commands.
+    # Waiting until after plugins/MCP used to leave `_runner is None` when boot
+    # was cancelled mid-way (UI: switch snaps back to default after ~1s).
+    try:
+        from opensquad.model_switch import init as _model_switch_init
+
+        _model_switch_init(_early_runner, os.path.join(agent_dir, "config.json"))
+        agent_logger.warning(
+            "[Boot] model_switch coordinator ready (early) config=%s",
+            os.path.join(agent_dir, "config.json"),
+        )
+    except Exception as _e:
+        agent_logger.warning(f"[Boot] model_switch early init failed: {_e}")
+
     asyncio.create_task(
         _initialize_mcp_background(
             config,
@@ -934,16 +959,14 @@ async def main(agent_dir: str, override_port: int | None = None):
         agent_logger=agent_logger,
     )
 
-    # Register the event-driven model-switch coordinator. The runner instance
-    # is reused across runner-task restarts (await_runner_shutdown recreates
-    # only the task, not the AgentRunner), so a single init() covers the
-    # process lifetime and survives CancelledError restarts.
+    # model_switch.init already ran right after start_early_runner; refresh the
+    # runner/config handle here in case boot mutated paths (idempotent).
     try:
         from opensquad.model_switch import init as _model_switch_init
 
         _model_switch_init(_early_runner, os.path.join(agent_dir, "config.json"))
     except Exception as _e:
-        agent_logger.warning(f"[Boot] model_switch coordinator init failed: {_e}")
+        agent_logger.warning(f"[Boot] model_switch coordinator re-init failed: {_e}")
 
     await BOOT_PHASES.await_runner_shutdown(
         early_runner=_early_runner,

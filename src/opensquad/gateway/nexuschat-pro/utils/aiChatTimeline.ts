@@ -16,8 +16,9 @@ export function genTimelineUID(): string {
 }
 
 /**
- * Collapse skill payloads for chat display.
+ * Collapse skill / goal payloads for chat display.
  * - `<user_send_skill>name</user_send_skill>` → `/name …`
+ * - `<user_goal>…</user_goal>` → `/goal …`
  * - Expanded SKILL.md bodies (BEGIN/END SKILL) → `/name` + user request only
  */
 export function formatUserSkillDisplayContent(content: string): string {
@@ -35,6 +36,24 @@ export function formatUserSkillDisplayContent(content: string): string {
   );
   if (legacyAsk) {
     content = (legacyAsk[1] || '').trim() || content;
+  }
+
+  const goalRe = /<user_goal>\s*([\s\S]*?)\s*<\/user_goal>/i;
+  const goalMatch = content.match(goalRe);
+  if (goalMatch) {
+    const objective = (goalMatch[1] || '').trim();
+    const rest = content.replace(goalRe, '').trim();
+    const head = objective ? `/goal ${objective}` : '/goal';
+    return rest ? `${head}\n${rest}` : head;
+  }
+
+  const planRe = /<user_plan>\s*([\s\S]*?)\s*<\/user_plan>/i;
+  const planMatch = content.match(planRe);
+  if (planMatch) {
+    const topic = (planMatch[1] || '').trim();
+    const rest = content.replace(planRe, '').trim();
+    const head = topic ? `/plan ${topic}` : '/plan';
+    return rest ? `${head}\n${rest}` : head;
   }
 
   const tagRe = /<user_send_skill>\s*([^<]+?)\s*<\/user_send_skill>/i;

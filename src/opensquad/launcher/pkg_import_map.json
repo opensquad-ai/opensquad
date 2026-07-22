@@ -8,5 +8,6 @@
   "flask-cors": "flask_cors",
   "lark-oapi": "lark_oapi",
   "playwright-stealth": "playwright_stealth",
-  "openai-whisper": "whisper"
+  "openai-whisper": "whisper",
+  "pyyaml": "yaml"
 }

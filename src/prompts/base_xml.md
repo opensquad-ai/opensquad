@@ -65,6 +65,8 @@ except Exception as e:
 
 {{include:parts/common_2.2_metadata_tags.md}}
 {{include:parts/common_2.3_task_planning_rules.md}}
+{{include:parts/common_2.20_goal_mode.md}}
+{{include:parts/common_2.21_plan_workflow.md}}
 {{include:parts/common_2.4.1_shell_command_selection_rule_2.md}}
 ### 2.4 Communication Channel Routing
 

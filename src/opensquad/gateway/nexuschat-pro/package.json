@@ -1,7 +1,7 @@
 {
   "name": "nexuschat-pro",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.8.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "description": "OpenSquad desktop app — local-first multi-agent collaboration gateway",
@@ -31,6 +31,12 @@
     "electron:dev:live": "node scripts/dev-electron-live.mjs"
   },
   "dependencies": {
+    "@tiptap/extension-link": "^3.28.0",
+    "@tiptap/extension-placeholder": "^3.28.0",
+    "@tiptap/extension-underline": "^3.28.0",
+    "@tiptap/pm": "^3.28.0",
+    "@tiptap/react": "^3.28.0",
+    "@tiptap/starter-kit": "^3.28.0",
     "highlight.js": "^11.11.1",
     "i18next": "^25.8.13",
     "lucide-react": "^0.563.0",
@@ -38,7 +44,8 @@
     "mermaid": "^11.16.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "react-i18next": "^16.5.4"
+    "react-i18next": "^16.5.4",
+    "tiptap-markdown": "^0.9.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.0",

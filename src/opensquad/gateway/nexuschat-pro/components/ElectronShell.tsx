@@ -8,7 +8,7 @@ interface ElectronShellProps {
 
 export const ElectronShell: React.FC<ElectronShellProps> = ({ children, className = '' }) => (
   <div
-    className={`h-full w-full flex flex-col overflow-hidden bg-bgLight text-textMain transition-colors duration-300 mobile-safe-shell ${className}`.trim()}
+    className={`h-full w-full flex flex-col overflow-hidden bg-bgLight text-textMain transition-colors duration-soft ease-soft mobile-safe-shell font-sans ${className}`.trim()}
     style={{ backgroundColor: 'var(--color-bg)' }}
   >
     <ElectronTitleBar />

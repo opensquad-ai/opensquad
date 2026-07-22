@@ -18,66 +18,64 @@ logger = logging.getLogger(__name__)
 
 def get_current() -> dict[str, Any]:
     """
-    Get detailed information about the currently active workspace.
+    Get the current **project working directory** (user-selected) and related paths.
 
     Returned fields:
-    - workspace_root  Absolute path of the current workspace root directory
-    - work_dir        Public working directory (workspace/ subdirectory)
-    - agents_dir      Agents directory
-    - exists          Whether the workspace directory exists
-    - metadata        Metadata from .opensquad/workspace.json (if present)
+    - workspace_root  Absolute path of the current project / working directory
+                      (session folder pick if set; otherwise empty — do not invent a project path)
+    - session_cwd     Session-level working directory from the UI folder picker (may be "")
+    - data_root       OpenSquad data/runtime root (agents/, data/, …) — NOT the user project
+    - agents_dir      Agents data directory under data_root (not the user project)
+    - exists          Whether workspace_root exists on disk (False when no session project)
+
+    Note: Do **not** treat data_root / agents_dir as the project root. User project files live
+    under session_cwd / workspace_root once a session folder is chosen.
 
     Example::
 
         result = workspace.get_current()
-        # result["workspace_root"] -> "C:/Users/me/Documents/OpenSquad-Workspace"
-        # result["work_dir"]       -> "C:/Users/me/Documents/OpenSquad-Workspace/workspace"
+        # result["workspace_root"] -> "C:/ai_test/ds"   (user project, if session set)
+        # result["data_root"]      -> ".../opensquad_runtime_deploy"
+        # result["agents_dir"]     -> ".../opensquad_runtime_deploy/agents"
     """
     try:
         from opensquad.system_config import syscfg
 
-        ws_root = syscfg.get_workspace()
+        data_root = syscfg.get_workspace()
     except Exception as e:
         return {"status": "error", "message": f"Cannot read workspace config: {e}"}
 
-    # Check for session-level working directory override (set via folder-picker UI)
+    # Session-level working directory (folder-picker / working-directory API)
     session_cwd = ""
     try:
-        from opensquad._context import get_current_context
+        from opensquad.utils.path_utils import get_session_cwd_override
 
-        ctx = get_current_context()
-        if ctx and ctx.session_cwd:
-            session_cwd = ctx.session_cwd
+        override = get_session_cwd_override()
+        if override:
+            session_cwd = override
     except Exception:
         pass
-
-    # If session_cwd is set, it becomes the effective workspace root for this session
-    effective_root = session_cwd if session_cwd else ws_root
-
-    work_dir = os.path.join(effective_root, "workspace")
-    agents_dir = os.path.join(ws_root, "agents")
-    meta_path = os.path.join(ws_root, ".opensquad", "workspace.json")
-
-    metadata: dict[str, Any] = {}
-    if os.path.isfile(meta_path):
+    if not session_cwd:
         try:
-            import json
+            from opensquad._context import get_current_context
 
-            with open(meta_path, encoding="utf-8") as f:
-                metadata = json.load(f)
+            ctx = get_current_context()
+            if ctx and ctx.session_cwd:
+                session_cwd = ctx.session_cwd
         except Exception:
             pass
+
+    # Effective project root is only the session cwd — never the OpenSquad data root
+    effective_root = session_cwd if session_cwd else ""
+    agents_dir = os.path.join(data_root, "agents")
 
     return {
         "status": "ok",
         "workspace_root": effective_root,
         "session_cwd": session_cwd,
-        "permanent_root": ws_root,
-        "work_dir": work_dir,
+        "data_root": data_root,
         "agents_dir": agents_dir,
-        "exists": os.path.isdir(effective_root),
-        "work_dir_exists": os.path.isdir(work_dir),
-        "metadata": metadata,
+        "exists": bool(effective_root) and os.path.isdir(effective_root),
     }
 
 
@@ -334,7 +332,11 @@ def migrate(source: str, target: str, mode: str = "copy", conflict: str = "skip"
 
 TOOL_DESCRIPTION = {
     "get_current": {
-        "description": "Get the path and metadata of the currently active workspace",
+        "description": (
+            "Get the current user project working directory (session_cwd / workspace_root). "
+            "data_root and agents_dir are OpenSquad storage paths — not the user project. "
+            "workspace_root is empty until a session project folder is selected."
+        ),
         "parameters": {},
     },
     "list_workspaces": {

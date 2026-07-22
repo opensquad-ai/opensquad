@@ -1,0 +1,82 @@
+{
+  "name": "sensevoice",
+  "display_name": "SenseVoice ASR",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Local SenseVoice-Small INT8 ONNX speech-to-text. Download the model from the plugin panel before starting the service.",
+  "author": "OpenSquad",
+  "tags": [
+    "audio",
+    "asr"
+  ],
+  "tools": [],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "port": {
+        "type": "integer",
+        "default": 7101,
+        "description": "SenseVoice service port"
+      },
+      "host": {
+        "type": "string",
+        "default": "0.0.0.0",
+        "description": "SenseVoice service listen address"
+      },
+      "auto_start": {
+        "type": "boolean",
+        "default": false,
+        "description": "Automatically start SenseVoice when the launcher boots (requires model downloaded)"
+      }
+    }
+  },
+  "config_schema": {
+    "port": {
+      "type": "integer",
+      "default": 7101,
+      "description": "SenseVoice service port"
+    },
+    "host": {
+      "type": "string",
+      "default": "0.0.0.0",
+      "description": "SenseVoice service listen address"
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically start SenseVoice when the launcher boots (requires model downloaded)"
+    }
+  },
+  "contributes": {},
+  "service": {
+    "entry": "service/service.py",
+    "default_port": 7101,
+    "port_key": "sensevoice",
+    "health_endpoint": "/health",
+    "auto_start": false,
+    "health_check_interval": 30,
+    "restart_policy": {
+      "max_retries": 5,
+      "backoff": [
+        3,
+        6,
+        12,
+        30,
+        60
+      ]
+    }
+  },
+  "dependencies": {
+    "pip": [
+      "onnxruntime",
+      "soundfile",
+      "librosa",
+      "numpy",
+      "pyyaml",
+      "flask",
+      "flask-cors"
+    ]
+  }
+}

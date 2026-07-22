@@ -45,6 +45,8 @@ interface SessionSidebarProps {
   onViewSession: (sessionId: string) => void;
   onNewSession: (projectPath?: string) => void;
   onSwitchAndReply: (sessionId: string) => void;
+  /** Optional override for delete (e.g. abandon empty current via new_session first). */
+  onDeleteSession?: (sessionId: string) => Promise<void>;
   onOpenSkills?: () => void;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
@@ -101,6 +103,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onViewSession,
   onNewSession,
   onSwitchAndReply,
+  onDeleteSession,
   onOpenSkills,
   isOpen,
   sessionTitleUpdate,
@@ -330,7 +333,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     e.stopPropagation();
     setConfirmingDeleteId(null);
     try {
-      await agentSessionAPI.deleteSession(agentId, sessionId);
+      if (onDeleteSession) {
+        await onDeleteSession(sessionId);
+      } else {
+        await agentSessionAPI.deleteSession(agentId, sessionId);
+      }
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     } catch (err: any) {
       setError(err.message || t('aiChat.sessionSidebar.deleteSessionFailed'));

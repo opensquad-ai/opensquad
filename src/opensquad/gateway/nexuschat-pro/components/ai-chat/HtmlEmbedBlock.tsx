@@ -1,9 +1,11 @@
 /**
  * HtmlEmbedBlock — sandboxed iframe for visualization.create HTML embeds.
- * Classic Agent Web only; do not mount in Solo unless explicitly enabled.
+ * Classic Agent Web: tool call stays in the activity stream; the interactive
+ * iframe is rendered below the assistant's final reply (not inside the fold).
  */
 import React, { useMemo, useState } from 'react';
 import { Check, Copy, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
+import type { TimelineEntry, WorkflowEvent } from '../../utils/aiChatTimeline';
 
 export interface HtmlEmbedPayload {
   kind: 'html_embed';
@@ -103,6 +105,64 @@ export function extractHtmlEmbed(
   return null;
 }
 
+function embedDedupeKey(embed: HtmlEmbedPayload): string {
+  if (embed.id) return `id:${embed.id}`;
+  if (embed.filename) return `file:${embed.filename}`;
+  return `html:${embed.html.slice(0, 96)}`;
+}
+
+/** Collect html_embed payloads from workflow tool_call events (with results). */
+export function collectHtmlEmbedsFromEvents(events: WorkflowEvent[] | null | undefined): HtmlEmbedPayload[] {
+  if (!events?.length) return [];
+  const out: HtmlEmbedPayload[] = [];
+  const seen = new Set<string>();
+  for (const evt of events) {
+    if (evt.type !== 'tool_call') continue;
+    const data = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    const name = String((data as { name?: string; tool?: string }).name || (data as { tool?: string }).tool || '');
+    const args =
+      (data as { arguments?: unknown; args?: unknown }).arguments ??
+      (data as { args?: unknown }).args ??
+      data;
+    const embed = extractHtmlEmbed(name, args as Record<string, unknown> | string | null, evt.result);
+    if (!embed?.html) continue;
+    const key = embedDedupeKey(embed);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(embed);
+  }
+  return out;
+}
+
+/**
+ * Walk timeline entries before `messageIndex` (until the previous user turn)
+ * and collect visualization embeds from intervening workflow blocks.
+ */
+export function collectHtmlEmbedsPrecedingMessage(
+  entries: TimelineEntry[],
+  messageIndex: number,
+): HtmlEmbedPayload[] {
+  if (!entries.length || messageIndex <= 0) return [];
+  const collected: HtmlEmbedPayload[] = [];
+  const seen = new Set<string>();
+  for (let i = messageIndex - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.kind === 'message' && entry.data.role === 'user') break;
+    if (entry.kind === 'workflow') {
+      const embeds = collectHtmlEmbedsFromEvents(entry.data.events);
+      // Scan backwards → prepend so chronological order is preserved.
+      for (let j = embeds.length - 1; j >= 0; j--) {
+        const emb = embeds[j];
+        const key = embedDedupeKey(emb);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        collected.unshift(emb);
+      }
+    }
+  }
+  return collected;
+}
+
 function clampHeight(h?: number): number {
   if (typeof h !== 'number' || Number.isNaN(h)) return DEFAULT_HEIGHT;
   return Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, Math.round(h)));
@@ -110,23 +170,52 @@ function clampHeight(h?: number): number {
 
 interface HtmlEmbedBlockProps {
   payload: HtmlEmbedPayload;
-  /** Show a compact chrome bar with title / copy / expand */
+  /**
+   * `chrome` — bordered card with title / copy / expand (legacy widget look).
+   * `seamless` — no host chrome; flows like agent text in the chat stream.
+   */
+  variant?: 'chrome' | 'seamless';
   className?: string;
 }
 
-export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({ payload, className = '' }) => {
+export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
+  payload,
+  variant = 'chrome',
+  className = '',
+}) => {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const seamless = variant === 'seamless';
   const height = clampHeight(payload.height);
-  const displayHeight = expanded ? Math.min(MAX_HEIGHT, Math.max(height, 720)) : height;
+  const displayHeight = expanded
+    ? Math.min(MAX_HEIGHT, Math.max(height, seamless ? 900 : 720))
+    : height;
   const title = payload.title || payload.filename || 'Visualization';
 
   const srcDoc = useMemo(() => {
     const html = payload.html || '';
     // Ensure charset if missing; keep agent HTML otherwise intact.
-    if (/<meta[^>]+charset=/i.test(html) || /<!DOCTYPE/i.test(html)) return html;
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`;
-  }, [payload.html]);
+    let doc =
+      /<meta[^>]+charset=/i.test(html) || /<!DOCTYPE/i.test(html)
+        ? html
+        : `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`;
+    if (seamless) {
+      // Only collapse host margins — do NOT force transparent backgrounds.
+      // Viz pages often use dark themes + white text; wiping body bg makes them unreadable.
+      const seamlessCss =
+        '<style data-opensquad-seamless="1">' +
+        'html,body{margin:0;padding:0;}' +
+        '</style>';
+      if (/<\/head>/i.test(doc)) {
+        doc = doc.replace(/<\/head>/i, `${seamlessCss}</head>`);
+      } else if (/<body[^>]*>/i.test(doc)) {
+        doc = doc.replace(/<body([^>]*)>/i, `<head>${seamlessCss}</head><body$1>`);
+      } else {
+        doc = `<!DOCTYPE html><html><head><meta charset="utf-8">${seamlessCss}</head><body>${doc}</body></html>`;
+      }
+    }
+    return doc;
+  }, [payload.html, seamless]);
 
   const handleCopy = async () => {
     try {
@@ -145,17 +234,37 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({ payload, classNa
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   };
 
+  if (seamless) {
+    return (
+      <div
+        className={`w-full my-2 overflow-hidden border-0 shadow-none rounded-none ${className}`}
+        data-html-embed="1"
+        data-html-embed-variant="seamless"
+      >
+        <iframe
+          title={title}
+          srcDoc={srcDoc}
+          sandbox="allow-scripts allow-forms allow-modals"
+          referrerPolicy="no-referrer"
+          className="w-full border-0 block"
+          style={{ height: displayHeight }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className={`my-3 w-full rounded-xl border border-border/60 bg-white dark:bg-[#1a1a1c] shadow-[0_2px_12px_rgba(0,0,0,0.04)] overflow-hidden ${className}`}
       data-html-embed="1"
+      data-html-embed-variant="chrome"
     >
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-black/[0.02] dark:bg-white/[0.03]">
         <span className="text-[12px] font-medium text-textMain truncate flex-1 min-w-0">{title}</span>
         <button
           type="button"
           onClick={() => void handleCopy()}
-          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-0 bg-transparent cursor-pointer"
+          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 border-0 bg-transparent cursor-pointer"
           title="Copy HTML"
         >
           {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -163,7 +272,7 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({ payload, classNa
         <button
           type="button"
           onClick={openBlank}
-          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-0 bg-transparent cursor-pointer"
+          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 border-0 bg-transparent cursor-pointer"
           title="Open in new tab"
         >
           <ExternalLink size={14} />
@@ -171,7 +280,7 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({ payload, classNa
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-black/[0.04] dark:hover:bg-white/[0.06] border-0 bg-transparent cursor-pointer"
+          className="p-1 rounded-md text-textMuted hover:text-textMain hover:bg-primary/10 border-0 bg-transparent cursor-pointer"
           title={expanded ? 'Collapse' : 'Expand'}
         >
           {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}

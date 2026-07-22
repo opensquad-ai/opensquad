@@ -272,6 +272,16 @@ class ContextBuilder:
         except Exception as e:
             logger.warning(f"[ContextBuilder] agent_mode injection error: {e}")
 
+        # Active /goal section (session-level completion contract)
+        try:
+            from opensquad.goal_mode import get_goal, goal_prompt_section
+
+            goal_section = goal_prompt_section(get_goal())
+            if goal_section and goal_section not in final:
+                final += "\n\n" + goal_section
+        except Exception as e:
+            logger.warning(f"[ContextBuilder] goal_mode injection error: {e}")
+
         # Anti-repetition reminder (skip shell guidance in Plan mode)
         try:
             from opensquad.agent_mode import MODE_PLAN, get_current_mode

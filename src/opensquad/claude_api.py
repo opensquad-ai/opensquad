@@ -207,6 +207,13 @@ class ClaudeAPI:
             )
         else:
             self.thinking_budget_tokens = model_cfg.get("thinking_budget_tokens", self.thinking_budget_tokens)
+        try:
+            merged = dict(self.config or {}) if isinstance(getattr(self, "config", None), dict) else {}
+            merged.update(model_cfg)
+            self.config = merged
+        except Exception:
+            self.config = dict(model_cfg)
+        self.model_config = dict(model_cfg)
         # Recreate Anthropic client
         client_params = {"api_key": self.api_key, "timeout": self.timeout}
         if self.base_url:
@@ -1127,7 +1134,12 @@ class ClaudeAPI:
                     collected_thinking = []  # Capture extended thinking content
                     for event in stream:
                         got_any_chunk = True
-                        if input_hub.is_stop_requested():
+                        if input_hub.is_stop_requested() or (
+                            getattr(self, "_sid_provider", None)
+                            and (lambda s: bool(s) and input_hub.is_session_stop_requested(str(s)))(
+                                self._sid_provider() if callable(self._sid_provider) else None
+                            )
+                        ):
                             logger.info("[ClaudeAPI] Interrupted")
                             break
 

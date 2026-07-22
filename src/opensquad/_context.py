@@ -114,20 +114,23 @@ class AgentContext:
     agent_dir: str = ""
     """Absolute path to the agent's directory."""
     workspace_dir: str = ""
-    """Active workspace root path (the shared workspace folder)."""
+    """OpenSquad data/runtime root (agents/, data/, …) — not the user project folder.
+
+    User project path for a session is ``session_cwd`` (folder picker).
+    """
 
     session_cwd: str = ""
-    """Session-level working directory override.
+    """Session-level working directory override (user project).
 
     When set (non-empty), all shell commands and file operations default
     to this directory instead of ``workspace_dir``. Set at runtime via
     the ``PUT /api/agents/{name}/working-directory`` endpoint — typically
     triggered by the user clicking a folder-picker button in the chat UI.
 
-    Unlike ``workspace_dir`` (which is the permanent shared workspace),
-    ``session_cwd`` is a per-session override that can be changed at any
-    time without restarting the agent. It is NOT persisted to config.json
-    — it only lasts for the current agent process lifetime.
+    Unlike ``workspace_dir`` (OpenSquad data/runtime storage),
+    ``session_cwd`` is the per-session user project path and can be changed
+    at any time without restarting the agent. It is NOT persisted to
+    config.json — it only lasts for the current agent process lifetime.
 
     Sub-agents spawned by this agent inherit the same ``session_cwd``
     value at spawn time (see ``AgentRunner._spawn_sub_agent``).

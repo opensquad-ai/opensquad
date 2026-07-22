@@ -1073,6 +1073,22 @@ export const adminAPI = {
     });
   },
 
+  /** 保留全部变动（等同逐个 √）；baseline 保留，撤回仍可用 */
+  keepAllSessionFiles: async (name: string, root?: string) => {
+    return apiRequest<{
+      ok: boolean;
+      kept?: boolean;
+      kept_count?: number;
+      additions?: number;
+      deletions?: number;
+      count?: number;
+      files?: unknown[];
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/keep-all`, {
+      method: 'POST',
+      body: JSON.stringify({ root }),
+    });
+  },
+
   checkpointSessionChanges: async (name: string, messageId: string, root?: string) => {
     return apiRequest<{ ok: boolean; message_id: string; files: number }>(
       `/ai-web/admin/agents/${encodeURIComponent(name)}/fs/session-changes/checkpoint`,
@@ -1883,6 +1899,12 @@ export interface ModelCardInfo {
   is_audio_output: boolean;
   is_image_output: boolean;
   audio_output_voice?: string;
+  /** ASR wire protocol: stepfun_sse (default) | openai_transcriptions */
+  asr_protocol?: string;
+  /** System-seeded card (e.g. builtin Whisper); shown in voice picker. */
+  is_builtin?: boolean;
+  /** When set (e.g. "whisper"), runtime rewrites base_url to the live plugin service. */
+  builtin_service?: string;
   /** When true on an ASR card, Agent Web Auto STT / Runner fallback may use this card. */
   auto_asr?: boolean;
   /** When true, this ASR card is used for group-chat speech-to-text. */
@@ -1920,6 +1942,8 @@ export interface AgentSession {
   title: string;
   preview: string;
   current: boolean;
+  /** External-ingress primary session (Telegram/Feishu/group, etc.). */
+  primary?: boolean;
   /** Session start time (ISO). */
   created_at?: string | null;
   /** Last activity time (ISO). */
@@ -1928,6 +1952,8 @@ export interface AgentSession {
 
 export interface AgentSessionData {
   id: string;
+  /** Pane-scoped model card override; falls back to agent default when absent. */
+  model_card?: string | null;
   messages: Array<{
     role: string;
     content: string;

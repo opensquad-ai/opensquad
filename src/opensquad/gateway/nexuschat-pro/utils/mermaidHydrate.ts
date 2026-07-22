@@ -9,11 +9,25 @@ let _seq = 0;
 function detectMermaidTheme(): 'dark' | 'default' {
   try {
     const root = document.documentElement;
+    if (root.classList.contains('dark') || root.dataset.appearance === 'dark') {
+      return 'dark';
+    }
     const body = document.body;
-    const cls = `${root.className} ${body?.className || ''}`;
-    if (/\btheme-(dark|midnight|oled|black)\b/i.test(cls)) return 'dark';
-    if (/\bdark\b/i.test(cls)) return 'dark';
-    const bg = getComputedStyle(body || root).backgroundColor || '';
+    const bg =
+      getComputedStyle(root).getPropertyValue('--color-bg').trim() ||
+      getComputedStyle(body || root).backgroundColor ||
+      '';
+    if (bg.startsWith('#')) {
+      const h = bg.replace('#', '');
+      const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+      if (/^[0-9a-fA-F]{6}$/.test(full)) {
+        const r = parseInt(full.slice(0, 2), 16);
+        const g = parseInt(full.slice(2, 4), 16);
+        const b = parseInt(full.slice(4, 6), 16);
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        if (luminance < 0.45) return 'dark';
+      }
+    }
     const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
     if (m) {
       const r = Number(m[1]);

@@ -20,13 +20,12 @@ VALID_MODES = (MODE_PLAN, MODE_BUILD)
 DEFAULT_MODE = MODE_BUILD
 
 # Exact FC names blocked in Plan (namespace__function).
+# Note: write_file / replace_in_file / create_directory are gated by path at
+# call-time (only `.opensquad/plans/**` allowed) so they stay in the schema.
 PLAN_BLOCKED_TOOLS: frozenset[str] = frozenset(
     {
-        # filesystem writes / side-effects
-        "filesystem__write_file",
-        "filesystem__replace_in_file",
+        # filesystem writes / side-effects (except plan-doc whitelist — see below)
         "filesystem__delete_file",
-        "filesystem__create_directory",
         "filesystem__set_session_cwd",
         "filesystem__add_allowed_dir",
         # shell / jobs / binary write
@@ -51,6 +50,18 @@ PLAN_BLOCKED_TOOLS: frozenset[str] = frozenset(
         "mcp_query__remove_server",
     }
 )
+
+# Filesystem writes allowed in Plan ONLY when the target path is a plan doc.
+PLAN_DOC_WRITE_TOOLS: frozenset[str] = frozenset(
+    {
+        "filesystem__write_file",
+        "filesystem__replace_in_file",
+        "filesystem__create_directory",
+    }
+)
+
+# Path fragment that marks Cursor-style plan documents (cwd-relative or absolute).
+PLAN_DOC_PATH_MARKER = ".opensquad/plans"
 
 # Entire namespaces blocked in Plan (all functions).
 PLAN_BLOCKED_NAMESPACES: frozenset[str] = frozenset(
@@ -98,14 +109,19 @@ _MCP_BLOCK_RE = re.compile(
 )
 
 _PROMPT_PLAN = """
-## Agent Mode: PLAN (read-only)
+## Agent Mode: PLAN (design / investigate — Cursor-style)
 
-You are currently in **Plan** mode. Your job is to explore the codebase and produce a clear plan.
+You are currently in **Plan** mode. Do **not** implement product code yet.
+Your job is: investigate → clarify → write an editable Markdown plan document →
+emit a `<plan>` checklist → then request Build so the user can approve execution.
 
 ALLOWED:
-- Read files, list directories, search code
-- Ask clarifying questions
-- Output a structured plan / checklist for the user
+- Read files, list directories, search code (deep codebase analysis)
+- Ask clarifying questions when requirements are vague (prefer
+  `choice_tools__propose_options` when there are discrete choices)
+- Write/update **only** plan documents under `.opensquad/plans/`
+  (e.g. `.opensquad/plans/YYYYMMDD-short-slug.md`)
+- Emit `<plan>` checklist aligned with that document
 
 DECISIONS: When you have several viable approaches and the user should decide which
 one to pursue, call `choice_tools__propose_options` with a `prompt` and 2–12
@@ -116,13 +132,14 @@ chat (group turn) **or** private Agent Web — never both. STOP this turn after
 calling it; you will receive a system message with the chosen option(s).
 
 FORBIDDEN (tools are blocked; do not attempt):
-- Create, edit, move, or delete files
+- Edit application/source files outside `.opensquad/plans/`
 - Run shell / cmd / bash / powershell / background jobs
 - Git write operations, installs, or other mutating tools
 
-If you need to edit files or run commands to implement the plan, call
-`agent_mode__request_switch` with `target_mode="build"` and a short reason.
-Wait for the user to approve before assuming Build is active.
+When the Markdown plan + `<plan>` checklist are ready for implementation, call
+`agent_mode__request_switch` with `target_mode="build"` and a short reason that
+references the plan file path. Wait for the user to approve before assuming
+Build is active.
 - In **private AI chat**: user clicks Approve on the card above the composer.
 - In a **group chat**: a 确定/拒绝 card is also posted in the group — prefer that
   when the conversation is happening in the group. You may also call
@@ -133,6 +150,9 @@ _PROMPT_BUILD = """
 ## Agent Mode: BUILD (implementation)
 
 You are currently in **Build** mode. You may edit files and run shell/cmd/bash/powershell tools as needed to implement changes.
+
+If a Markdown plan exists under `.opensquad/plans/`, follow it (and keep the
+`<plan>` checklist updated as you complete steps).
 
 If you only need to explore or draft a plan without making changes, call
 `agent_mode__request_switch` with `target_mode="plan"` and a short reason, then wait for user approval
@@ -153,11 +173,39 @@ def _canon_tool_name(tool_name: str) -> str:
     return name
 
 
-def is_tool_blocked_in_plan(tool_name: str) -> bool:
-    """Return True if this tool must not run while agent_mode=plan."""
+def is_plan_doc_path(path: str | None) -> bool:
+    """True if path is under `.opensquad/plans/` (Cursor-style plan MD)."""
+    if not path or not str(path).strip():
+        return False
+    norm = str(path).replace("\\", "/").lower()
+    return PLAN_DOC_PATH_MARKER.lower() in norm
+
+
+def plan_doc_write_allowed(tool_name: str, args: dict | None) -> bool:
+    """Whether a Plan-mode filesystem write is allowed for this call."""
+    name = _canon_tool_name(tool_name)
+    if name not in PLAN_DOC_WRITE_TOOLS:
+        return False
+    args = args or {}
+    path = args.get("path") or args.get("file_path") or args.get("filepath") or ""
+    return is_plan_doc_path(str(path))
+
+
+def is_tool_blocked_in_plan(tool_name: str, args: dict | None = None) -> bool:
+    """Return True if this tool must not run while agent_mode=plan.
+
+    When ``args`` is provided, plan-doc writes under `.opensquad/plans/` are allowed.
+    Schema filtering calls this without args — plan-doc write tools are kept in the
+    schema and enforced at call-time with args.
+    """
     name = _canon_tool_name(tool_name)
     if not name:
         return False
+    if name in PLAN_DOC_WRITE_TOOLS:
+        # Keep in schema; with args, only allow plan-doc paths
+        if args is None:
+            return False
+        return not plan_doc_write_allowed(name, args)
     if name in PLAN_BLOCKED_TOOLS:
         return True
     if name.startswith("mcp__") and _MCP_BLOCK_RE.search(name):
@@ -175,6 +223,9 @@ def is_tool_blocked_in_plan(tool_name: str) -> bool:
     if ns in ("filesystem", "system", "workspace") and _MCP_BLOCK_RE.search(fn):
         # Allow read-ish names that match the regex poorly — keep list_directory etc.
         if fn.startswith(("list_", "read_", "search_", "find_", "get_", "stat_", "check_")):
+            return False
+        # Plan-doc writes already handled above
+        if name in PLAN_DOC_WRITE_TOOLS:
             return False
         return fn not in ("pwd", "cwd", "whoami", "env_get")
     return False
@@ -201,20 +252,40 @@ def mode_prompt_section(mode: str) -> str:
 
 
 def plan_block_message(tool_name: str) -> str:
+    name = _canon_tool_name(tool_name)
+    if name in PLAN_DOC_WRITE_TOOLS:
+        return (
+            f"Blocked in Plan mode: `{name}` — path must be under "
+            f"`{PLAN_DOC_PATH_MARKER}/` (Markdown plan documents only). "
+            "Other source edits require Build: call `agent_mode__request_switch` "
+            'with target_mode="build" and wait for approval.'
+        )
     return (
-        f"Blocked in Plan mode: `{_canon_tool_name(tool_name)}`. "
-        "Plan is read-only. Call `agent_mode__request_switch` with "
-        'target_mode="build" and wait for user approval before editing files or running shell.'
+        f"Blocked in Plan mode: `{name}`. "
+        "Plan is design-only (except `.opensquad/plans/` docs). Call "
+        "`agent_mode__request_switch` with "
+        'target_mode="build" and wait for user approval before editing product files or running shell.'
     )
 
 
 _current_mode: str = DEFAULT_MODE
 _mode_provider = None
+# Per-session Plan/Build overrides (parallel multi-session panes).
+_session_modes: dict[str, str] = {}
 
 
 def set_mode_provider(provider) -> None:
     global _mode_provider
     _mode_provider = provider
+
+
+def set_session_mode(session_id: str, mode: str) -> str:
+    """Remember Plan/Build for one session without changing the agent default."""
+    sid = (session_id or "").strip()
+    mode_n = normalize_mode(mode)
+    if sid:
+        _session_modes[sid] = mode_n
+    return mode_n
 
 
 def set_current_mode(mode: str) -> str:
@@ -224,6 +295,18 @@ def set_current_mode(mode: str) -> str:
 
 
 def get_current_mode() -> str:
+    # Prefer turn-local / per-session mode during parallel multi-session turns.
+    try:
+        from opensquad.session_parallel import get_turn_local
+
+        tl = get_turn_local()
+        if tl is not None and getattr(tl, "agent_mode", ""):
+            return normalize_mode(tl.agent_mode)
+        sid = (tl.sid if tl is not None else "") or ""
+        if sid and sid in _session_modes:
+            return normalize_mode(_session_modes[sid])
+    except Exception:
+        pass
     if _mode_provider:
         try:
             return normalize_mode(_mode_provider())

@@ -16,7 +16,7 @@ import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
 import { AvatarImg } from './components/AvatarImg';
 import { setLanguage } from './i18n';
-import { isAppModalView } from './utils/appNavItems';
+import { isSettingsAppView } from './utils/appNavItems';
 
 // First-launch wizard — driven by the BACKEND, not localStorage.
 //
@@ -40,17 +40,7 @@ type RegistrationStatus = 'unknown' | 'required' | 'closed' | 'error';
 // 路由级懒加载页面组件
 const AIChatPage = React.lazy(() => import('./components/AIChatPage').then(m => ({ default: m.AIChatPage })));
 const AgentManagerPage = React.lazy(() => import('./components/AgentManagerPage').then(m => ({ default: m.AgentManagerPage })));
-const PluginManagerPage = React.lazy(() => import('./components/PluginManagerPage').then(m => ({ default: m.PluginManagerPage })));
-const ServiceManagerPage = React.lazy(() => import('./components/ServiceManagerPage').then(m => ({ default: m.ServiceManagerPage })));
-const McpManagerPage = React.lazy(() => import('./components/McpManagerPage').then(m => ({ default: m.McpManagerPage })));
-const SkillManagerPage = React.lazy(() => import('./components/SkillManagerPage').then(m => ({ default: m.SkillManagerPage })));
-const RolesPage = React.lazy(() => import('./components/RolesPage'));
-const ModelsPage = React.lazy(() => import('./components/ModelsPage'));
-const LogsManagerPage = React.lazy(() => import('./components/LogsManagerPage').then(m => ({ default: m.LogsManagerPage })));
-const PluginMarketPage = React.lazy(() => import('./components/PluginMarketPage').then(m => ({ default: m.PluginMarketPage })));
-const MarketHubPage = React.lazy(() => import('./components/MarketHubPage'));
 const CollabBoardPage = React.lazy(() => import('./components/CollabBoardPage').then(m => ({ default: m.CollabBoardPage })));
-const PluginViewContainer = React.lazy(() => import('./components/plugin-views/PluginViewContainer').then(m => ({ default: m.PluginViewContainer })));
 const SystemConfigPage = React.lazy(() => import('./components/SystemConfigPage').then(m => ({ default: m.SystemConfigPage })));
 
 const App: React.FC = () => {
@@ -60,7 +50,7 @@ const App: React.FC = () => {
     // 兼容旧值 'agent' → 重定向到 'admin'
     if (saved === 'agent') return 'admin';
     // 应用类页面改为弹窗，刷新时不要把主视图卡在全屏管理页
-    if (saved && isAppModalView(saved)) return 'chat';
+    if (saved && isSettingsAppView(saved)) return 'chat';
     return saved || 'chat';
   });
   const [selectedAgentId, setSelectedAgentId] = useState<string>(() => {
@@ -120,8 +110,9 @@ const App: React.FC = () => {
         setIsCollabBoardOpen(true);
         return;
       }
-      if (isAppModalView(view)) {
-        setAppModalView(view);
+      if (isSettingsAppView(view)) {
+        setSettingsInitialAppView(view);
+        setIsSettingsOpen(true);
         return;
       }
       setCurrentView(view);
@@ -148,6 +139,7 @@ const App: React.FC = () => {
   const [chatReady, setChatReady] = useState(false);
   const chatReadySetRef = useRef(false); // 防止 setChatReady 重复触发
   const [settingsInitialTab, setSettingsInitialTab] = useState<'theme' | 'workspace' | 'ports' | 'advanced' | 'about' | undefined>();
+  const [settingsInitialAppView, setSettingsInitialAppView] = useState<string | null>(null);
 
   // ─── 智能预加载系统 ───────────────────────────────────────────────
   // 规则：
@@ -210,8 +202,6 @@ const App: React.FC = () => {
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCollabBoardOpen, setIsCollabBoardOpen] = useState(false);
-  /** Settings「应用」入口：大弹窗（非全屏占页） */
-  const [appModalView, setAppModalView] = useState<string | null>(null);
 
   useEffect(() => {
     const openTheme = () => {
@@ -1308,63 +1298,19 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Settings Modal */}
+      {/* Settings Modal — config tabs + embedded app panels */}
       <Suspense fallback={null}>
         <SystemConfigPage
           isOpen={isSettingsOpen}
           initialTab={settingsInitialTab}
+          initialAppView={settingsInitialAppView}
           onClose={() => {
             setIsSettingsOpen(false);
             setSettingsInitialTab(undefined);
+            setSettingsInitialAppView(null);
           }}
         />
       </Suspense>
-
-      <SoftOverlay
-        open={!!appModalView}
-        onBackdrop={() => setAppModalView(null)}
-        zClass="z-[110]"
-        panelClassName="w-full max-w-6xl h-[min(88vh,900px)]"
-      >
-        <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
-          <Suspense
-            fallback={
-              <div className="flex flex-1 items-center justify-center text-textMuted">{t('common.loading')}</div>
-            }
-          >
-            {appModalView === 'plugins' ? (
-              <PluginManagerPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'services' ? (
-              <ServiceManagerPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'mcp' ? (
-              <McpManagerPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'skills' ? (
-              <SkillManagerPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'roles' ? (
-              <RolesPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'models' ? (
-              <ModelsPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'logs' ? (
-              <LogsManagerPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView === 'market' ? (
-              <MarketHubPage onBack={() => setAppModalView(null)} />
-            ) : null}
-            {appModalView && appModalView.includes(':') ? (
-              <PluginViewContainer
-                viewKey={appModalView}
-                onBack={() => setAppModalView(null)}
-              />
-            ) : null}
-          </Suspense>
-        </div>
-      </SoftOverlay>
 
       <SoftOverlay
         open={isCollabBoardOpen}

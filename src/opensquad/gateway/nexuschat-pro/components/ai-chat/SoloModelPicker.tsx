@@ -199,11 +199,11 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
         disabled={disabled || switching}
         onClick={() => setOpen((v) => !v)}
         className="inline-flex items-center gap-1.5 max-w-[220px] sm:max-w-[280px] rounded-full px-2.5 py-1.5 text-[12px] text-textMain bg-black/[0.05] dark:bg-white/[0.08] hover:bg-primary/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-        title={switching ? 'Switching model…' : 'Switch model'}
+        title={switching ? 'Applying model…' : 'Switch model'}
       >
         <Circle size={10} className="shrink-0 text-textMuted fill-textMuted/30" strokeWidth={1.5} />
         <span className="truncate font-medium">
-          {switching ? 'Switching…' : label}
+          {label}
         </span>
         <ChevronDown
           size={13}
@@ -237,7 +237,9 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                         role="option"
                         aria-selected={selected}
                         onClick={() => {
-                          if (card.name !== selectedName) onSelect(card.name);
+                          // Always fire — re-clicking the optimistic label must
+                          // re-send switch_model if the prior command was dropped.
+                          onSelect(card.name);
                           close();
                         }}
                         className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${

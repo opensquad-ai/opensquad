@@ -24,7 +24,8 @@ class SessionManager:
     Continuous conversation manager.
     - Automatically saves conversation history
     - Automatically loads the last conversation on startup
-    - Singleton pattern: always maintains one continuous session
+    - Maintains a focused session (current_session.json) plus optional live
+      in-memory sessions for parallel turns; primary_session_id routes external ingress.
     """
 
     def __init__(self, save_dir: str | None = None, history_dir: str | None = None, cache_size: int = 10):
@@ -34,9 +35,15 @@ class SessionManager:
         self.save_dir = save_dir or syscfg.workspace_sessions_dir()
         self.history_dir = history_dir or syscfg.workspace_data_dir("ai_his_talk")
         self.current_session_file = os.path.join(self.save_dir, "current_session.json")
+        self.primary_session_file = os.path.join(self.save_dir, "primary_session.json")
         self._lock = threading.Lock()
         # Bumped on truncate / new_session so in-flight async mutations are skipped.
         self._mutation_gen = 0
+        # Per-sid generation for parallel non-focused writes
+        self._mutation_gens: dict[str, int] = {}
+        # Live in-memory sessions (sid -> data). Focused session is always included.
+        self._live_sessions: dict[str, dict] = {}
+        self._primary_session_id: str | None = None
         self.session_data = {
             "id": None,
             "title": None,
@@ -82,6 +89,8 @@ class SessionManager:
 
         # Load existing session
         self._load_session()
+        self._register_live(self.session_data)
+        self._load_or_init_primary()
 
     # ---- LRU cache operations ----
 
@@ -127,6 +136,218 @@ class SessionManager:
     def _cache_remove(self, sid: str):
         """Remove an entry from the cache."""
         self._cache.pop(sid, None)
+
+    # ---- Multi-session live store + primary ----
+
+    def _register_live(self, data: dict | None) -> None:
+        if not isinstance(data, dict):
+            return
+        sid = data.get("id")
+        if sid:
+            self._live_sessions[sid] = data
+
+    def _load_or_init_primary(self) -> None:
+        """Load primary_session_id from disk, or default to earliest created session."""
+        primary = None
+        if os.path.isfile(self.primary_session_file):
+            try:
+                with open(self.primary_session_file, encoding="utf-8") as f:
+                    meta = json.load(f)
+                if isinstance(meta, dict):
+                    primary = str(meta.get("primary_session_id") or "").strip() or None
+            except Exception as e:
+                logger.warning("[SessionManager] Failed to read primary_session.json: %s", e)
+
+        if primary and (primary in self._live_sessions or self._history_exists(primary)):
+            self._primary_session_id = primary
+            return
+
+        # Default: earliest created_at among focused + history
+        earliest_sid = self._find_earliest_session_id()
+        focused = self.session_data.get("id")
+        self._primary_session_id = earliest_sid or focused
+        if self._primary_session_id:
+            self._persist_primary()
+
+    def _history_exists(self, sid: str) -> bool:
+        return os.path.isfile(os.path.join(self.history_dir, f"{sid}.json"))
+
+    def _find_earliest_session_id(self) -> str | None:
+        candidates: list[tuple[str, str]] = []
+        focused = self.session_data
+        fid = focused.get("id")
+        if fid:
+            candidates.append((str(focused.get("created_at") or ""), fid))
+        if os.path.isdir(self.history_dir):
+            try:
+                for name in os.listdir(self.history_dir):
+                    if not name.endswith(".json"):
+                        continue
+                    sid = name[:-5]
+                    created = ""
+                    try:
+                        with open(os.path.join(self.history_dir, name), encoding="utf-8") as f:
+                            data = json.load(f)
+                        if isinstance(data, dict):
+                            created = str(data.get("created_at") or "")
+                            sid = str(data.get("id") or sid)
+                    except Exception:
+                        pass
+                    candidates.append((created, sid))
+            except OSError:
+                pass
+        if not candidates:
+            return None
+        # Empty created_at sorts first; prefer real timestamps then id
+        candidates.sort(key=lambda x: (x[0] or "9999", x[1]))
+        # Prefer entries with a real created_at when any exist
+        with_ts = [c for c in candidates if c[0]]
+        pool = with_ts if with_ts else candidates
+        pool.sort(key=lambda x: (x[0], x[1]))
+        return pool[0][1]
+
+    def _persist_primary(self) -> None:
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            tmp = self.primary_session_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"primary_session_id": self._primary_session_id}, f, indent=2)
+            os.replace(tmp, self.primary_session_file)
+        except Exception as e:
+            logger.warning("[SessionManager] Failed to persist primary: %s", e)
+
+    def get_primary_session_id(self) -> str:
+        if self._primary_session_id:
+            return self._primary_session_id
+        focused = self.get_current_session_id()
+        self._primary_session_id = focused if focused != "unknown" else ""
+        return self._primary_session_id or ""
+
+    def set_primary_session_id(self, sid: str) -> bool:
+        sid = (sid or "").strip()
+        if not sid:
+            return False
+        if sid != self.session_data.get("id") and not self._history_exists(sid) and sid not in self._live_sessions:
+            # Allow setting to a known live or history session only
+            hist = self.get_session_history(sid)
+            if hist is None:
+                logger.warning("[SessionManager] set_primary: unknown sid=%s", sid)
+                return False
+        self._primary_session_id = sid
+        self._persist_primary()
+        logger.info("[SessionManager] Primary session set to %s", sid)
+        return True
+
+    def get_focused_session_id(self) -> str:
+        return self.get_current_session_id()
+
+    def ensure_session_loaded(self, sid: str) -> dict | None:
+        """Ensure sid is in the live map (load from disk if needed). Does not change focus."""
+        if not sid:
+            return None
+        if sid == self.session_data.get("id"):
+            self._register_live(self.session_data)
+            return self.session_data
+        if sid in self._live_sessions:
+            return self._live_sessions[sid]
+        data = self.get_session_history(sid)
+        if data is None:
+            return None
+        # Keep a mutable live copy
+        live = copy.deepcopy(data)
+        self._live_sessions[sid] = live
+        return live
+
+    def _resolve_session_data(self, sid: str | None = None) -> dict:
+        if not sid:
+            try:
+                from opensquad.session_parallel import get_turn_local
+
+                tl = get_turn_local()
+                if tl and tl.sid:
+                    sid = tl.sid
+            except Exception:
+                pass
+        if not sid or sid == self.session_data.get("id"):
+            return self.session_data
+        loaded = self.ensure_session_loaded(sid)
+        if loaded is not None:
+            return loaded
+        logger.warning("[SessionManager] _resolve_session_data fallback to focused for sid=%s", sid)
+        return self.session_data
+
+    def _save_session_data(self, data: dict, *, as_focused: bool | None = None) -> None:
+        """Persist a session dict. Focused → current_session.json; always mirror to history/{sid}.json when id set."""
+        sid = data.get("id")
+        is_focused = as_focused if as_focused is not None else (sid == self.session_data.get("id"))
+        try:
+            self._save_seq += 1
+            data["_save_seq"] = self._save_seq
+            if is_focused:
+                # Adopt disk title lock only for focused file
+                if data is self.session_data:
+                    self._adopt_disk_title_lock()
+                tmp_path = self.current_session_file + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, self.current_session_file)
+            if sid:
+                os.makedirs(self.history_dir, exist_ok=True)
+                hist_path = os.path.join(self.history_dir, f"{sid}.json")
+                tmp_h = hist_path + ".tmp"
+                with open(tmp_h, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_h, hist_path)
+                self._cache_put(sid, data)
+                self._live_sessions[sid] = data
+            self._last_save_time = time.monotonic()
+        except Exception as e:
+            logger.error("[SessionManager] Failed to save session data: %s", e)
+
+    def _enqueue_mutation_for(self, mutation: callable, sid: str | None = None):
+        """Enqueue mutation targeting focused or a specific live session."""
+        target_sid = sid or self.session_data.get("id")
+        focused_id = self.session_data.get("id")
+        is_focused = not target_sid or target_sid == focused_id
+
+        if is_focused:
+            gen = self._mutation_gen
+
+            def _guarded():
+                if self._mutation_gen != gen:
+                    logger.debug(
+                        "[SessionManager] Skipping stale focused mutation (gen %s -> %s)",
+                        gen,
+                        self._mutation_gen,
+                    )
+                    return
+                mutation()
+        else:
+            # Per-sid generation; default 0 so first writes are not skipped after focus changes
+            if target_sid not in self._mutation_gens:
+                self._mutation_gens[target_sid] = 0
+            gen = self._mutation_gens[target_sid]
+
+            def _guarded():
+                if self._mutation_gens.get(target_sid, 0) != gen:
+                    logger.debug(
+                        "[SessionManager] Skipping stale sid mutation sid=%s (gen %s)",
+                        target_sid,
+                        gen,
+                    )
+                    return
+                mutation()
+
+        if self._writer_running and self._write_queue is not None:
+            try:
+                self._write_queue.put_nowait(_guarded)
+                return
+            except queue.Full:
+                pass
+        with self._lock:
+            _guarded()
+            data = self._resolve_session_data(sid)
+            self._save_session_data(data)
 
     # ---- Events and messages ----
 
@@ -277,13 +498,23 @@ class SessionManager:
             _guarded()
             self._save_session()
 
-    def add_event(self, event_type: str, event_data: dict, turn_id: int | None = None, round_id: int | None = None):
+    def add_event(
+        self,
+        event_type: str,
+        event_data: dict,
+        turn_id: int | None = None,
+        round_id: int | None = None,
+        *,
+        sid: str | None = None,
+    ):
         """Add an interaction event to history.
 
         Non-critical events are enqueued for async batch flush.
         tool_call / tool_result events still flush synchronously to guarantee
         crash-recoverable state before tool execution.
+        Optional sid= writes to a live (possibly non-focused) session for parallel turns.
         """
+        target = self._resolve_session_data(sid)
 
         def _mutate():
             event = {
@@ -295,23 +526,19 @@ class SessionManager:
                 event["turn_id"] = turn_id
             if round_id is not None:
                 event["round_id"] = round_id
-            self.session_data["events"].append(event)
-            self.session_data["last_updated"] = utc_now_iso()
-            # Limit event history length
-            if len(self.session_data["events"]) > 2000:
-                self.session_data["events"] = self.session_data["events"][-2000:]
+            target.setdefault("events", []).append(event)
+            target["last_updated"] = utc_now_iso()
+            if len(target["events"]) > 2000:
+                target["events"] = target["events"][-2000:]
 
         if event_type in ("tool_call", "tool_result"):
-            # Layer 3b: critical events — drain any pending async mutations first
-            # to ensure the saved snapshot includes all prior add_message() calls,
-            # then append the event and flush synchronously.
             with self._lock:
                 self._drain_pending_mutations_sync()
                 _mutate()
-                self._save_session()
+                self._save_session_data(target)
             self._last_save_time = time.monotonic()
         else:
-            self._enqueue_mutation(_mutate)
+            self._enqueue_mutation_for(_mutate, sid=sid or target.get("id"))
 
     def _flush_if_dirty(self):
         """DEPRECATED: kept for backward-compat callers.
@@ -359,6 +586,7 @@ class SessionManager:
                     logger.info(
                         f"[SessionManager] Loaded session with {len(self.session_data['messages'])} messages and {len(self.session_data.get('events', []))} events"
                     )
+                    self._sync_goal_state()
             except Exception as e:
                 logger.error(f"[SessionManager] Failed to load session: {e}")
 
@@ -399,6 +627,19 @@ class SessionManager:
         }
         logger.info(f"[SessionManager] Initialized new session: {sid}")
         self._save_session()
+        self._sync_goal_state()
+
+    def _sync_goal_state(self) -> None:
+        """Keep goal_mode in-memory state aligned with session_data['goal']."""
+        try:
+            from opensquad.goal_mode import clear_goal_memory, load_goal_from_session
+
+            if self.session_data.get("goal"):
+                load_goal_from_session(self.session_data)
+            else:
+                clear_goal_memory()
+        except Exception as e:
+            logger.debug("[SessionManager] goal sync skipped: %s", e)
 
     def get_session_history(self, session_id: str) -> dict | None:
         """Read a history session without modifying the current session."""
@@ -448,7 +689,11 @@ class SessionManager:
             return None
 
     def load_history_session(self, session_id: str) -> bool:
-        """Load a specific history session (replaces the current session)."""
+        """Load a specific history session as the focused session.
+
+        Other live in-memory sessions are retained so parallel turns on other
+        sids are not discarded when focus changes.
+        """
         # If already the current session, return True immediately
         if self.session_data.get("id") == session_id:
             return True
@@ -456,12 +701,22 @@ class SessionManager:
         # Archive the current session before switching (if it has content)
         self.archive_current_session()
 
+        # Prefer live in-memory copy (may have newer parallel-turn writes)
+        if session_id in self._live_sessions:
+            logger.info(f"[SessionManager] Live hit (switch): {session_id}")
+            self.session_data = self._live_sessions[session_id]
+            self._save_session()
+            self._sync_goal_state()
+            return True
+
         # 1. Check cache first
         cached = self._cache_get(session_id)
         if cached is not None:
             logger.info(f"[SessionManager] Cache hit (switch): {session_id}")
             self.session_data = cached
+            self._register_live(self.session_data)
             self._save_session()
+            self._sync_goal_state()
             return True
 
         # 2. Cache miss: read from disk
@@ -495,9 +750,11 @@ class SessionManager:
 
             # Put into cache
             self._cache_put(session_id, self.session_data)
+            self._register_live(self.session_data)
 
             self._save_session()
             logger.info(f"[SessionManager] Loaded history session (disk): {session_id}")
+            self._sync_goal_state()
             return True
         except Exception as e:
             logger.error(f"[SessionManager] Failed to load history session: {e}")
@@ -545,24 +802,28 @@ class SessionManager:
         with self._lock:
             self._drain_pending_mutations_sync()
             self._mutation_gen += 1
-            # Snapshot old session data before we overwrite session_data
-            old_data = copy.deepcopy(self.session_data) if self.session_data.get("messages") else None
+            # Snapshot old session before overwrite — including empty sessions so
+            # they enter history/ and remain deletable after the user switches away.
+            old_data = copy.deepcopy(self.session_data) if self.session_data.get("id") else None
             # 1. Write new empty session to current_session.json FIRST
             self._init_new_session()
+            self._register_live(self.session_data)
+            # New sessions are not automatically primary; keep existing primary pointer.
             # 2. Archive old session to history/ SECOND (non-critical for crash recovery)
             if old_data:
                 sid = old_data.get("id")
                 if sid:
+                    self._live_sessions[sid] = old_data
                     self._cache_put(sid, old_data)
-                history_dir = self.history_dir
-                os.makedirs(history_dir, exist_ok=True)
-                file_path = os.path.join(history_dir, f"{sid}.json")
-                try:
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(old_data, f, indent=2, ensure_ascii=False)
-                    logger.info(f"[SessionManager] Archived session: {sid}")
-                except Exception as e:
-                    logger.error(f"[SessionManager] Failed to archive session: {e}")
+                    history_dir = self.history_dir
+                    os.makedirs(history_dir, exist_ok=True)
+                    file_path = os.path.join(history_dir, f"{sid}.json")
+                    try:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            json.dump(old_data, f, indent=2, ensure_ascii=False)
+                        logger.info(f"[SessionManager] Archived session: {sid}")
+                    except Exception as e:
+                        logger.error(f"[SessionManager] Failed to archive session: {e}")
 
     def _drain_pending_mutations_sync(self):
         """Apply queued async mutations before replacing session_data.
@@ -811,11 +1072,18 @@ class SessionManager:
         attachments: list[dict[str, Any]] | None = None,
         output_audio: list[dict[str, Any]] | None = None,
         output_images: list[str] | None = None,
+        *,
+        sid: str | None = None,
         **extra_fields,
     ):
+        # Allow legacy callers that passed sid via kwargs
+        if sid is None and "sid" in extra_fields:
+            sid = extra_fields.pop("sid", None)
         logger.info(
-            f"[SessionManager] add_message: role={role}, content_len={len(content)}, content_preview={content[:80]}"
+            f"[SessionManager] add_message: role={role}, content_len={len(content)}, "
+            f"content_preview={content[:80]}, sid={sid or 'focused'}"
         )
+        target = self._resolve_session_data(sid)
 
         def _mutate():
             message = {
@@ -835,18 +1103,16 @@ class SessionManager:
             if extra_fields:
                 message.update(extra_fields)
 
-            self.session_data["messages"].append(message)
-            self.session_data["last_updated"] = utc_now_iso()
-            # Provisional session title from the first user message until agent names it.
-            if role == "user" and not self.session_data.get("title") and not self.session_data.get("title_locked"):
+            target.setdefault("messages", []).append(message)
+            target["last_updated"] = utc_now_iso()
+            if role == "user" and not target.get("title") and not target.get("title_locked"):
                 provisional = self._title_from_user_content(content)
                 if provisional:
-                    self.session_data["title"] = provisional
-            if len(self.session_data["messages"]) > 1000:
-                self.session_data["messages"] = self.session_data["messages"][-1000:]
+                    target["title"] = provisional
+            if len(target["messages"]) > 1000:
+                target["messages"] = target["messages"][-1000:]
 
-        # P0-1: enqueue mutation for async flush; sync fallback if writer not running
-        self._enqueue_mutation(_mutate)
+        self._enqueue_mutation_for(_mutate, sid=sid or target.get("id"))
 
     def _adopt_disk_title_lock(self) -> None:
         """
@@ -873,26 +1139,15 @@ class SessionManager:
 
     def _save_session(self):
         try:
-            self._adopt_disk_title_lock()
+            self._register_live(self.session_data)
+            self._save_session_data(self.session_data, as_focused=True)
             msg_count = len(self.session_data.get("messages", []))
             evt_count = len(self.session_data.get("events", []))
             sid = self.session_data.get("id", "unknown")
-            # Increment save_seq and stamp it onto the data so _load_session can
-            # detect stale overwrites from the async writer.
-            self._save_seq += 1
-            self.session_data["_save_seq"] = self._save_seq
             logger.info(
-                f"[SessionManager] _save_session: sid={sid}, messages={msg_count}, events={evt_count}, save_seq={self._save_seq}, file={self.current_session_file}"
+                f"[SessionManager] _save_session: sid={sid}, messages={msg_count}, events={evt_count}, "
+                f"save_seq={self._save_seq}, file={self.current_session_file}"
             )
-            tmp_path = self.current_session_file + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.session_data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp_path, self.current_session_file)
-            self._last_save_time = time.monotonic()
-            # Synchronize cache with the latest state of the current session
-            sid = self.session_data.get("id")
-            if sid:
-                self._cache_put(sid, self.session_data)
         except Exception as e:
             logger.error(f"[SessionManager] Failed to save session: {e}")
 
@@ -920,14 +1175,15 @@ class SessionManager:
 
         self._enqueue_mutation(_mutate)
 
-    def get_messages(self, limit: int | None = None) -> list[dict]:
-        messages = self.session_data["messages"]
+    def get_messages(self, limit: int | None = None, *, sid: str | None = None) -> list[dict]:
+        data = self._resolve_session_data(sid)
+        messages = data.get("messages") or []
         if limit:
             return messages[-limit:]
         return messages
 
-    def get_messages_for_chat_api(self, limit: int = 50) -> list[dict]:
-        messages = self.get_messages(limit)
+    def get_messages_for_chat_api(self, limit: int = 50, *, sid: str | None = None) -> list[dict]:
+        messages = self.get_messages(limit, sid=sid)
         result = []
         _ui_only_keys = frozenset(
             {
@@ -951,8 +1207,9 @@ class SessionManager:
             result.append(api_msg)
         return result
 
-    def get_events(self, limit: int | None = None) -> list[dict]:
-        events = self.session_data.get("events", [])
+    def get_events(self, limit: int | None = None, *, sid: str | None = None) -> list[dict]:
+        data = self._resolve_session_data(sid)
+        events = data.get("events", [])
         if limit:
             return events[-limit:]
         return events
@@ -1186,6 +1443,7 @@ class SessionManager:
                     "title": title,
                     "preview": preview,
                     "current": True,
+                    "primary": curr_id == self.get_primary_session_id(),
                     "created_at": self.session_data.get("created_at"),
                     "last_updated": self.session_data.get("last_updated"),
                 }
@@ -1237,6 +1495,7 @@ class SessionManager:
                             "title": title,
                             "preview": preview,
                             "current": False,
+                            "primary": sid == self.get_primary_session_id(),
                             "created_at": created_at,
                             "last_updated": last_updated,
                         }
@@ -1255,16 +1514,48 @@ class SessionManager:
         self._lazy_sessions[temp_id] = real_id
 
     def delete_session(self, session_id: str) -> bool:
-        self._cache_remove(session_id)
-        history_dir = self.history_dir
-        file_path = os.path.join(history_dir, f"{session_id}.json")
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
+        """Delete a history session, or abandon an empty current session.
+
+        Non-empty current sessions cannot be deleted (would destroy in-flight work).
+        Empty current is rotated to a fresh id so the deleted id disappears.
+        """
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return False
+        with self._lock:
+            self._cache_remove(session_id)
+            self._live_sessions.pop(session_id, None)
+
+            if session_id == self.session_data.get("id"):
+                messages = self.session_data.get("messages") or []
+                if messages:
+                    return False
+                # Abandon empty current — rotate so the old id is gone.
+                self._mutation_gen += 1
+                self._init_new_session()
+                self._register_live(self.session_data)
+                history_path = os.path.join(self.history_dir, f"{session_id}.json")
+                if os.path.exists(history_path):
+                    try:
+                        os.remove(history_path)
+                    except Exception:
+                        pass
+                logger.info(
+                    "[SessionManager] Abandoned empty current session %s → %s",
+                    session_id,
+                    self.session_data.get("id"),
+                )
                 return True
-            except Exception:
-                return False
-        return False
+
+            history_dir = self.history_dir
+            file_path = os.path.join(history_dir, f"{session_id}.json")
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    return True
+                except Exception:
+                    return False
+            return False
 
 
 # Global singleton

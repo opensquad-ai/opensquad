@@ -830,6 +830,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
                 return self._handle_fs_session_keep(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/keep-all"):
+                name = path.split("/")[3]
+                body = self._read_body() or {}
+                return self._handle_fs_session_keep_all(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/fs/session-changes/checkpoint"):
                 name = path.split("/")[3]
                 body = self._read_body() or {}
@@ -1441,6 +1445,17 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             result["agent"] = name
             if not result.get("ok"):
                 return self._send_json({"error": result.get("error") or "keep failed"}, 400)
+            return self._send_json(result)
+
+        def _handle_fs_session_keep_all(self, name: str, body: dict):
+            """POST — keep all Changed files; baselines retained so withdraw still works."""
+            root, err = self._agent_fs_root(name, str(body.get("root") or ""))
+            if err is not None:
+                return err
+            from opensquad.utils.session_changeset import keep_all
+
+            result = keep_all(root)
+            result["agent"] = name
             return self._send_json(result)
 
         def _handle_fs_session_checkpoint(self, name: str, body: dict):
@@ -3433,6 +3448,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
         # ── Model Cards handlers ──
 
         def _handle_list_model_cards(self):
+            try:
+                from opensquad.workspace_utils import ensure_builtin_model_cards
+
+                ensure_builtin_model_cards()
+            except Exception:
+                pass
             cards = []
             if not os.path.isdir(MODEL_CARDS_DIR):
                 return self._send_json({"cards": cards})
@@ -3451,6 +3472,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         "name": card_name,
                         "title": data.get("title", card_name),
                         "api_protocol": data.get("api_protocol", ""),
+                        "asr_protocol": data.get("asr_protocol", ""),
                         "provider": data.get("provider", ""),
                         "model_name": data.get("model_name", ""),
                         "base_url": data.get("base_url", ""),
@@ -3466,6 +3488,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         "is_audio_output": data.get("is_audio_output", False),
                         "is_image_output": data.get("is_image_output", False),
                         "audio_output_voice": data.get("audio_output_voice", "alloy"),
+                        "is_builtin": bool(data.get("is_builtin", False)),
+                        "builtin_service": data.get("builtin_service", ""),
+                        "group_asr": bool(data.get("group_asr", False)),
+                        "auto_asr": bool(data.get("auto_asr", False)),
                         "render_mode": data.get("render_mode", "strict"),  # full | strict (Default: strict)
                     }
                 )
@@ -3506,6 +3532,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 "is_audio_output": body.get("is_audio_output", False),
                 "is_image_output": body.get("is_image_output", False),
                 "audio_output_voice": body.get("audio_output_voice", "alloy"),
+                "asr_protocol": body.get("asr_protocol", ""),
+                "builtin_service": body.get("builtin_service", ""),
+                "is_builtin": body.get("is_builtin", False),
+                "group_asr": body.get("group_asr", False),
+                "auto_asr": body.get("auto_asr", False),
                 "render_mode": body.get("render_mode", "strict"),
             }
             fpath = os.path.join(MODEL_CARDS_DIR, f"{card_name}.json")

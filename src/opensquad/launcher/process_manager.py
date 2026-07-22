@@ -29,15 +29,34 @@ _log = logging.getLogger("launcher.process_manager")
 # from its import name (e.g. "beautifulsoup4" → "bs4").
 _PKG_IMPORT_MAP_PATH = os.path.join(os.path.dirname(__file__), "pkg_import_map.json")
 
+# Always-on aliases so critical packages work even when pkg_import_map.json is
+# stale in a long-lived launcher process (map is otherwise loaded once at import).
+_BUILTIN_IMPORT_ALIASES: dict[str, str] = {
+    "pyyaml": "yaml",
+    "PyYAML": "yaml",
+    "openai-whisper": "whisper",
+    "flask-cors": "flask_cors",
+    "beautifulsoup4": "bs4",
+    "opencv-python": "cv2",
+    "python-dotenv": "dotenv",
+    "scikit-learn": "sklearn",
+}
+
 
 def _load_pkg_import_map() -> dict[str, str]:
     try:
         with open(_PKG_IMPORT_MAP_PATH, encoding="utf-8") as _f:
             data = json.load(_f)
-        return {k: v for k, v in data.items() if not k.startswith("_")}
+        loaded = {k: v for k, v in data.items() if not k.startswith("_")}
     except Exception as _e:
-        _log.warning(f"Failed to load pkg_import_map.json: {_e}; using empty map.")
-        return {}
+        _log.warning(f"Failed to load pkg_import_map.json: {_e}; using builtin aliases only.")
+        loaded = {}
+    return {**_BUILTIN_IMPORT_ALIASES, **loaded}
+
+
+def _pkg_import_map() -> dict[str, str]:
+    """Fresh map each call so launcher does not need restart after map edits."""
+    return _load_pkg_import_map()
 
 
 _PKG_IMPORT_MAP = _load_pkg_import_map()
@@ -195,6 +214,16 @@ def _build_child_process_env(extra: dict[str, str] | None = None) -> dict[str, s
 
 # Backward-compatible alias for plugin service spawns.
 def _plugin_python_executable() -> str:
+    """Interpreter for plugin HTTP services.
+
+    Prefer the OpenSquad Agent Python runtime when available. Dev project
+    ``.venv`` (especially Anaconda-based) often breaks native wheels such as
+    ``onnxruntime`` with DLL init failures, while Agent Python is the supported
+    target for plugin services in both frozen and source launches.
+    """
+    packaged = _resolve_packaged_python_executable()
+    if packaged:
+        return packaged
     return _child_python_executable() or sys.executable
 
 
@@ -1002,7 +1031,7 @@ class PluginServiceProcess:
         if not pip_deps:
             return True
 
-        pkg_import_map = _PKG_IMPORT_MAP
+        pkg_import_map = _pkg_import_map()
 
         def _check_all() -> list[str]:
             """Return list of deps still missing (not importable in plugin Python)."""
@@ -1919,7 +1948,7 @@ def _install_builtin_plugin_deps(svc_infos: list[dict]):
         # Without this, `pip install openai-whisper` (which pulls torch) can take
         # 10+ minutes and every PluginServiceProcess.start() waits on
         # _plugin_deps_ready, making websearch/external_api unstartable.
-        pkg_import_map = _PKG_IMPORT_MAP
+        pkg_import_map = _pkg_import_map()
 
         missing = []
         skipped_heavy = []

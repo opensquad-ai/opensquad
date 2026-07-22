@@ -1,6 +1,6 @@
 /**
- * Circular constellation of pulsing dots + status label + elapsed timer.
- * Classic Agent Web "working / thinking" chrome (Manus-like).
+ * Circular constellation of pulsing dots — Agent Web working indicator.
+ * Use PulseDotsOrbit alone beside titles, or PulseDotsStatus for orbit + label.
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatElapsedAtLeastOneSecond } from '../../utils/formatElapsed';
@@ -13,15 +13,23 @@ const LABELS: Record<PulseDotsKind, string> = {
   working: '工作中',
 };
 
-/** Concentric rings → many round dots packed into a circle */
+/** Concentric rings → circular cluster (no angular / rotating sweep). */
 const RING_LAYOUT: { r: number; n: number }[] = [
   { r: 0, n: 1 },
-  { r: 0.34, n: 6 },
-  { r: 0.62, n: 10 },
-  { r: 0.9, n: 14 },
+  { r: 0.36, n: 6 },
+  { r: 0.66, n: 10 },
+  { r: 0.92, n: 14 },
 ];
 
-type DotPos = { x: number; y: number; delay: number };
+type DotPos = {
+  x: number;
+  y: number;
+  /** Steady radial fade (center brighter); animation only modulates opacity. */
+  baseOpacity: number;
+  scale: number;
+  /** Radial breathe delay only — never angular, so it does not look like spin. */
+  delay: number;
+};
 
 function buildCircularDots(): DotPos[] {
   const pts: DotPos[] = [];
@@ -31,15 +39,57 @@ function buildCircularDots(): DotPos[] {
       const a = t * Math.PI * 2 - Math.PI / 2;
       const x = 50 + Math.cos(a) * ring.r * 50;
       const y = 50 + Math.sin(a) * ring.r * 50;
-      // Angular sweep + slight radial offset → soft rotating breathe
-      const delay = t * 0.95 + ring.r * 0.22;
-      pts.push({ x, y, delay });
+      // Soft spatial fade: center solid, rim ghosted (matches reference stills).
+      const radial = 1 - ring.r;
+      const jitter = ((i * 17 + Math.round(ring.r * 40)) % 7) / 7; // fixed, not time-based
+      const baseOpacity = Math.min(1, 0.18 + radial * 0.72 + jitter * 0.12);
+      const scale = 0.72 + radial * 0.4;
+      // Only radial phase — whole ring fades together, no rotating highlight.
+      const delay = ring.r * 0.5;
+      pts.push({ x, y, baseOpacity, scale, delay });
     }
   }
   return pts;
 }
 
 const CIRCULAR_DOTS = buildCircularDots();
+
+export interface PulseDotsOrbitProps {
+  /** Outer box size in px (default 18). */
+  size?: number;
+  className?: string;
+}
+
+/** Dot-matrix orbit only — for session list / beside “Working for”. */
+export const PulseDotsOrbit: React.FC<PulseDotsOrbitProps> = ({
+  size = 18,
+  className = '',
+}) => {
+  const dots = useMemo(() => CIRCULAR_DOTS, []);
+  const cell = Math.max(1.5, size * (2.5 / 18));
+  return (
+    <span
+      className={`os-pulse-orbit ${className}`}
+      style={{ width: size, height: size }}
+      aria-hidden
+    >
+      {dots.map((d, i) => (
+        <span
+          key={i}
+          className="os-pulse-cell"
+          style={{
+            left: `${d.x}%`,
+            top: `${d.y}%`,
+            width: cell * d.scale,
+            height: cell * d.scale,
+            ['--pulse-base' as string]: String(d.baseOpacity),
+            animationDelay: `${d.delay}s`,
+          }}
+        />
+      ))}
+    </span>
+  );
+};
 
 export interface PulseDotsStatusProps {
   kind?: PulseDotsKind;
@@ -48,6 +98,8 @@ export interface PulseDotsStatusProps {
   /** Optional step / depth counter (↓N) */
   stepCount?: number;
   className?: string;
+  /** Orbit diameter in px */
+  orbitSize?: number;
   /** @deprecated Ignored — always circular many-dot constellation */
   variant?: string;
 }
@@ -57,9 +109,9 @@ export const PulseDotsStatus: React.FC<PulseDotsStatusProps> = ({
   startedMs,
   stepCount,
   className = '',
+  orbitSize = 18,
 }) => {
   const [elapsedMs, setElapsedMs] = useState(0);
-  const dots = useMemo(() => CIRCULAR_DOTS, []);
 
   useEffect(() => {
     if (startedMs == null) {
@@ -85,19 +137,7 @@ export const PulseDotsStatus: React.FC<PulseDotsStatusProps> = ({
         .filter(Boolean)
         .join(' · ')}
     >
-      <span className="os-pulse-orbit" aria-hidden>
-        {dots.map((d, i) => (
-          <span
-            key={i}
-            className="os-pulse-cell"
-            style={{
-              left: `${d.x}%`,
-              top: `${d.y}%`,
-              animationDelay: `${d.delay}s`,
-            }}
-          />
-        ))}
-      </span>
+      <PulseDotsOrbit size={orbitSize} />
       <span className="text-[13px] leading-none text-textMuted/80 tracking-tight">
         {label}
         {timeLabel != null ? (

@@ -24,6 +24,12 @@ from .log_setup import get_tool_call_debug_logger
 from .message_queue import message_queue
 from .parser import ResponseParser
 from .registry import ToolRegistry
+from .session_parallel import (
+    TurnLocal,
+    get_turn_local,
+    reset_turn_local,
+    set_turn_local,
+)
 from .sleep_controller import sleep_controller
 from .task import TaskManager
 from .task_logger import task_logger
@@ -295,6 +301,14 @@ class AgentRunner:
                 state_manager = agent_context.state_manager
         self._injected_session_manager = session_manager
         self._injected_state_manager = state_manager
+        self._root_chat_api = chat_api
+        self._session_chat_apis: dict[str, Any] = {}
+        # Per-session model card overrides (pane-scoped); agent default stays in config.json.
+        self._session_model_cards: dict[str, str] = {}
+        self._root_tl = TurnLocal(chat_api=chat_api)
+        self._parallel_scheduler = None
+        self._tool_write_lock = None
+        # Use property-backed chat_api / turn fields via TurnLocal when in a parallel task
         self.chat_api = chat_api
         self.tool_registry = tool_registry
         self.task_manager = TaskManager()
@@ -363,6 +377,8 @@ class AgentRunner:
         self._turn_sid = (
             _get_session_manager().get_current_session_id()
         )  # Session ID for the current turn (closure-safe)
+        self._root_tl.sid = self._turn_sid
+        self._root_tl.chat_api = self._root_chat_api
         self._current_turn = 0  # Current turn index (1-based), reset on each handle call
         self._current_round = 0  # Message round (1-based), monotonically increasing, does not reset across messages; used to precisely attribute events to messages
         self._turn_started_ms: float = 0.0  # Current turn start time (ms), reset on each LLM call
@@ -460,14 +476,140 @@ class AgentRunner:
         # Subscribe to agent_ready from boot (fires before run() starts)
         bus.subscribe("agent_ready", lambda _: self._replay_pending())
 
+    def _active_tl(self) -> TurnLocal:
+        tl = get_turn_local()
+        return tl if tl is not None else self._root_tl
+
+    @property
+    def chat_api(self):
+        api = self._active_tl().chat_api
+        return api if api is not None else self._root_chat_api
+
+    @chat_api.setter
+    def chat_api(self, value):
+        self._root_chat_api = value
+        self._root_tl.chat_api = value
+        tl = get_turn_local()
+        if tl is not None:
+            tl.chat_api = value
+
+    @property
+    def _turn_sid(self) -> str:
+        return self._active_tl().sid or getattr(self, "_fallback_turn_sid", "")
+
+    @_turn_sid.setter
+    def _turn_sid(self, value: str):
+        self._active_tl().sid = value or ""
+        if get_turn_local() is None:
+            self._fallback_turn_sid = value or ""
+
+    @property
+    def _current_images(self):
+        return self._active_tl().images
+
+    @_current_images.setter
+    def _current_images(self, value):
+        self._active_tl().images = value if value is not None else []
+
+    @property
+    def _current_attachments(self):
+        return self._active_tl().attachments
+
+    @_current_attachments.setter
+    def _current_attachments(self, value):
+        self._active_tl().attachments = value if value is not None else []
+
+    @property
+    def _current_channel(self):
+        return self._active_tl().channel
+
+    @_current_channel.setter
+    def _current_channel(self, value):
+        self._active_tl().channel = value or ""
+
+    @property
+    def _current_source_chat_id(self):
+        return self._active_tl().source_chat_id
+
+    @_current_source_chat_id.setter
+    def _current_source_chat_id(self, value):
+        self._active_tl().source_chat_id = value or ""
+
+    @property
+    def _current_user_id(self):
+        return self._active_tl().user_id
+
+    @_current_user_id.setter
+    def _current_user_id(self, value):
+        self._active_tl().user_id = value or ""
+
+    @property
+    def _current_input_source(self):
+        return self._active_tl().input_source
+
+    @_current_input_source.setter
+    def _current_input_source(self, value):
+        self._active_tl().input_source = value or "unknown"
+
+    @property
+    def _current_turn(self):
+        return self._active_tl().turn
+
+    @_current_turn.setter
+    def _current_turn(self, value):
+        self._active_tl().turn = int(value or 0)
+
+    @property
+    def _current_round(self):
+        return self._active_tl().round
+
+    @_current_round.setter
+    def _current_round(self, value):
+        self._active_tl().round = int(value or 0)
+
+    @property
+    def _workflow_started_ms(self):
+        return self._active_tl().workflow_started_ms
+
+    @_workflow_started_ms.setter
+    def _workflow_started_ms(self, value):
+        self._active_tl().workflow_started_ms = float(value or 0)
+
+    @property
+    def _turn_started_ms(self):
+        return self._active_tl().turn_started_ms
+
+    @_turn_started_ms.setter
+    def _turn_started_ms(self, value):
+        self._active_tl().turn_started_ms = float(value or 0)
+
+    @property
+    def _current_tools(self):
+        return self._active_tl().current_tools
+
+    @_current_tools.setter
+    def _current_tools(self, value):
+        self._active_tl().current_tools = value
+
+    @property
+    def _current_tool_choice(self):
+        return self._active_tl().current_tool_choice
+
+    @_current_tool_choice.setter
+    def _current_tool_choice(self, value):
+        self._active_tl().current_tool_choice = value or "auto"
+
     async def _emit(self, etype, data):
         """Event push with session_id (uses the sid captured at turn start to avoid routing errors on session switch)"""
         sid = self._turn_sid
         await bus.emit_async(etype, {"sid": sid, "data": data})
 
-    def _load_history(self):
-        """Load history session"""
+    def _load_history(self, sid: str | None = None):
+        """Load history session into the active chat_api (optionally for a specific sid)."""
         logger.info("[Runner] _load_history() CALLED")
+        target_sid = sid or self._turn_sid or _get_session_manager().get_current_session_id()
+        if target_sid:
+            _get_session_manager().ensure_session_loaded(target_sid)
 
         # Preserve the system prompt
         system_msg = None
@@ -479,10 +621,10 @@ class AgentRunner:
             self.chat_api.req.append(system_msg)
 
         # Restore persisted summary for CONTEXT_SUMMARY prompt injection
-        _sess = _get_session_manager().session_data or {}
+        _sess = _get_session_manager()._resolve_session_data(target_sid) or {}
         self.chat_api._latest_summary = _sess.get("latest_summary", "") or ""
 
-        history = _get_session_manager().get_messages_for_chat_api(limit=50)
+        history = _get_session_manager().get_messages_for_chat_api(limit=50, sid=target_sid)
         if history:
             # Add history messages (limit count to avoid exceeding context)
             loaded_roles: list[str] = []
@@ -492,10 +634,6 @@ class AgentRunner:
                 content = msg.get("content", "")
                 has_tool_calls = isinstance(msg.get("tool_calls"), list) and msg["tool_calls"]
 
-                # Keep any message that carries LLM-visible state.
-                # - user/assistant/system/tool roles are always relevant
-                # - assistant messages with tool_calls are kept even if content is empty/None
-                # - content can be string, list (Claude multimodal), or None (tool-only assistant)
                 keep = False
                 if role in ("user", "assistant", "system", "tool"):
                     if (
@@ -513,16 +651,14 @@ class AgentRunner:
                     skipped_info.append(f"{role}:{type(content).__name__}")
 
             logger.warning(
-                "[Runner] _load_history: history=%d, loaded=%d (roles=%s), skipped=%s",
+                "[Runner] _load_history: sid=%s history=%d, loaded=%d (roles=%s), skipped=%s",
+                target_sid,
                 len(history),
                 len(self.chat_api.req) - (1 if system_msg else 0),
                 loaded_roles,
                 skipped_info,
             )
 
-            # FIX B: Restore _prev_reasoning_content from last assistant message for DeepSeek V4
-            # After session load, _prev_reasoning_content is always "". Without this fix,
-            # _validate_and_fix_reasoning_content() skips all injection logic and the API returns 400.
             _last_asst = next((m for m in reversed(self.chat_api.req) if m.get("role") == "assistant"), None)
             if _last_asst and _last_asst.get("reasoning_content"):
                 self.chat_api._prev_reasoning_content = _last_asst["reasoning_content"]
@@ -532,14 +668,10 @@ class AgentRunner:
             else:
                 self.chat_api._prev_reasoning_content = ""
 
-            # CRITICAL FIX: Validate and fix message sequence for DeepSeek compatibility
-            # OpenAI/DeepSeek API requires: role=tool must follow role=assistant with tool_calls
-            # After loading from session storage, tool_calls data may be lost, causing invalid sequence
             self._validate_message_sequence()
-
-            logger.info(f"[Runner] Loaded {len(history)} messages from history")
+            logger.info(f"[Runner] Loaded {len(history)} messages from history sid={target_sid}")
         else:
-            logger.info("[Runner] Session history is empty")
+            logger.info("[Runner] Session history is empty sid=%s", target_sid)
 
     async def _withdraw_turn(self, timestamp: str, message_id: str | None = None) -> None:
         """Truncate session messages/events from a user turn and reload LLM context.
@@ -678,8 +810,422 @@ class AgentRunner:
             logger.info(f"[Runner] Fixed {fixed} message sequence issues for API compatibility")
 
     async def run(self, initial_query: str | None = None, **kwargs):
-        """Start and run the agent - continuous conversation mode"""
-        logger.info(f"[Runner] ===== run() STARTED, initial_query={'yes' if initial_query else 'None'} =====")
+        """Start and run the agent - continuous conversation mode (parallel multi-session)."""
+        import os as _os_env
+
+        use_parallel = _os_env.environ.get("OPENSQUAD_PARALLEL_SESSIONS", "1").strip() not in (
+            "0",
+            "false",
+            "False",
+            "no",
+        )
+        if use_parallel:
+            from opensquad.session_dispatcher import run_parallel_dispatcher
+
+            # WARNING so it always shows even when root logger is raised to WARNING
+            logger.warning("[Runner] ===== run() STARTED (parallel dispatcher) =====")
+            await run_parallel_dispatcher(self, initial_query=initial_query, **kwargs)
+            return
+
+        logger.warning(
+            f"[Runner] ===== run() STARTED (serial), initial_query={'yes' if initial_query else 'None'} ====="
+        )
+        await self._run_serial(initial_query=initial_query, **kwargs)
+
+    async def _emit_busy_sessions(self, busy: set[str]) -> None:
+        await bus.emit_async(
+            "busy_sessions",
+            {"sessions": sorted(busy), "agent_id": self._agent_id},
+        )
+        # Also mirror to gateway registry via status when any busy
+        try:
+            await self._emit("status", "busy" if busy else "online")
+        except Exception:
+            pass
+
+    async def _dispatcher_idle_tick(self) -> None:
+        """Periodic idle work while waiting for parallel-session input."""
+        if self._plugin_manager and self._plugin_manager.check_reload_needed():
+            reload_result = self._plugin_manager.reload_plugins(
+                registry=self.tool_registry,
+                agent_id=self._agent_id,
+                agent_tool_names=self._agent_tool_names,
+            )
+            if reload_result.get("loaded") or reload_result.get("unloaded"):
+                logger.info(
+                    "[Runner] Plugin hot-reload: loaded=%s, unloaded=%s",
+                    reload_result.get("loaded"),
+                    reload_result.get("unloaded"),
+                )
+
+    async def _handle_agent_level_command(self, item: dict) -> None:
+        """Handle global urgent commands from the parallel dispatcher."""
+        content = str(item.get("content") or "")
+        if content == "__STOP__":
+            # Cancel in-flight work, then CLEAR the latch (serial path does the same).
+            # Leaving _stop_requested=True forever makes the dispatcher treat every
+            # later user message as "stopped" and drop it — no chat / no new session.
+            input_hub.request_stop(enqueue=False)
+            sched = getattr(self, "_parallel_scheduler", None)
+            if sched:
+                for sid in list(sched.busy_sessions):
+                    sched.request_stop_session(sid)
+            try:
+                for sid in list(getattr(input_hub, "_stop_sessions", set()) or set()):
+                    input_hub.clear_session_stop(sid)
+            except Exception:
+                pass
+            input_hub.clear_stop_request()
+            logger.info("[Runner] Stop handled (parallel) — latch cleared")
+            return
+        if content == "__REQUEST_TOKEN_STATS__":
+            await self._broadcast_token_stats()
+            return
+        if content == "__NEW_SESSION__":
+            input_hub.clear_stop_request()
+            try:
+                # Clear per-session stop latches so the new chat is not born "stopped".
+                for sid in list(getattr(input_hub, "_stop_sessions", set()) or set()):
+                    input_hub.clear_session_stop(sid)
+            except Exception:
+                pass
+            try:
+                from opensquad.goal_mode import clear_goal_memory
+
+                clear_goal_memory()
+            except Exception:
+                pass
+            self._reset_session_stats()
+            # Drain stale global-queue items. Do NOT park them in _pending_buffer:
+            # that buffer only replays on agent_ready, so user chats drained here
+            # would vanish forever after New Chat.
+            drained = input_hub.get_all_pending()
+            replay_user: list[dict] = []
+            for item in drained or []:
+                raw = str(item.get("content") or "")
+                if not raw or raw.startswith("__"):
+                    continue
+                replay_user.append(item)
+            if drained and not replay_user:
+                logger.info(
+                    "[Runner] New session drained %d system/empty pending item(s)",
+                    len(drained),
+                )
+            _get_session_manager().start_new_session()
+            try:
+                from opensquad.utils.path_utils import get_workspace_root
+                from opensquad.utils.session_changeset import clear_for_new_session
+
+                clear_for_new_session(get_workspace_root())
+            except Exception:
+                logger.debug("[Runner] session changeset clear skipped", exc_info=True)
+            new_sid = _get_session_manager().get_current_session_id()
+            self._turn_sid = new_sid
+            self._load_history()
+            logger.info("[Runner] New session started (parallel): sid=%s", new_sid)
+            await self._emit("turn_start", 0)
+            await bus.emit_async("session_list", _get_session_manager().get_session_list())
+            await bus.emit_async(
+                "current_session",
+                {"id": new_sid, "title": "Current Session"},
+            )
+            try:
+                await self._broadcast_token_stats()
+            except Exception:
+                pass
+            await self._emit("info", "New session started")
+            now_ms = int(datetime.now().timestamp() * 1000)
+            await self._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
+            # Re-queue any real user messages that raced with New Chat onto the
+            # new session inbox so they are not lost.
+            for item in replay_user:
+                try:
+                    input_hub.push(
+                        content=str(item.get("content") or ""),
+                        source=item.get("source", "web"),
+                        images=item.get("images"),
+                        attachments=item.get("attachments"),
+                        channel=item.get("channel", ""),
+                        sender_name=item.get("sender_name", ""),
+                        chat_name=item.get("chat_name", ""),
+                        source_chat_id=item.get("source_chat_id", ""),
+                        user_id=item.get("user_id", ""),
+                        client_id=item.get("client_id", ""),
+                        session_id=new_sid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[Runner] Failed to requeue drained chat after new session",
+                        exc_info=True,
+                    )
+            if replay_user:
+                logger.info(
+                    "[Runner] Requeued %d user message(s) onto new sid=%s",
+                    len(replay_user),
+                    new_sid,
+                )
+            return
+        if content.startswith("__LOAD_SESSION__:"):
+            sid = content.split(":", 1)[1]
+            if _get_session_manager().load_history_session(sid):
+                self._turn_sid = sid
+                self._load_history(sid)
+                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+                await bus.emit_async("session_list", _get_session_manager().get_session_list())
+            return
+        if content.startswith("__WITHDRAW_TURN__:"):
+            _ts, _mid = self._parse_withdraw_payload(content)
+            await self._withdraw_turn(_ts, message_id=_mid or None)
+            return
+        if content == "__COMPRESS_CONTEXT__":
+            # Do NOT push_urgent(self) — that infinite-loops the parallel dispatcher.
+            # Compression is handled by the serial run loop; for parallel, ignore
+            # until a dedicated compress path exists.
+            logger.warning(
+                "[Runner] __COMPRESS_CONTEXT__ ignored on parallel dispatcher "
+                "(would re-queue forever if pushed urgent again)"
+            )
+            return
+        # Unknown agent command — ignore
+        logger.info("[Runner] Ignoring agent-level command: %s", content[:80])
+
+    async def _parallel_session_turn(self, sid: str, item: dict) -> None:
+        """Run one user message for *sid* in an isolated TurnLocal (true parallel)."""
+        from opensquad.session_model import bind_for_turn, current_api_card
+
+        preferred_card = str(item.get("model_card") or "").strip() or None
+        # Single authority: session_model.bind_for_turn (chat payload → store → API).
+        api = await bind_for_turn(self, sid, preferred_card=preferred_card)
+        logger.warning(
+            "[Runner] turn bind sid=%s preferred=%s card=%s model=%s base=%s",
+            sid,
+            preferred_card or "-",
+            current_api_card(api) or "-",
+            getattr(api, "model", None),
+            (getattr(api, "base_url", None) or "")[:60],
+        )
+
+        tl = TurnLocal(sid=sid, chat_api=api)
+        # Carry per-session Plan/Build into this turn (independent of other panes).
+        try:
+            from opensquad.agent_mode import get_current_mode
+
+            modes = getattr(self, "_session_agent_modes", None)
+            if isinstance(modes, dict) and sid in modes:
+                tl.agent_mode = modes[sid]
+            else:
+                tl.agent_mode = get_current_mode()
+        except Exception:
+            pass
+        token = set_turn_local(tl)
+        try:
+            content = str(item.get("content") or "")
+            # Fresh user message: clear any prior Stop latch so a new turn can run.
+            input_hub.clear_session_stop(sid)
+            if content and not content.startswith("__"):
+                input_hub.clear_stop_request()
+            _get_session_manager().ensure_session_loaded(sid)
+            self._turn_sid = sid
+            self._load_history(sid)
+
+            if not content or content.startswith("__"):
+                # Session-scoped system cmds
+                if content == "__STOP__":
+                    return
+                if content.startswith("__"):
+                    await self._handle_agent_level_command(item)
+                    return
+                # Empty content = session focus only; do not invent a blank user turn
+                # (matches serial _input_handler SWITCH_AND_REPLY empty-reply path).
+                return
+
+            self._current_images = item.get("images") or []
+            self._current_attachments = item.get("attachments") or []
+            self._current_channel = item.get("channel") or "web"
+            self._current_source_chat_id = item.get("source_chat_id") or ""
+            self._current_user_id = item.get("user_id") or ""
+            self._current_input_source = item.get("source") or "gateway"
+            self._last_user_input = content
+            self._current_round = (self._current_round or 0) + 1
+            self._workflow_started_ms = datetime.now().timestamp() * 1000
+
+            client_id = str(item.get("client_id") or "").strip()
+            extra = {}
+            if client_id:
+                extra["client_id"] = client_id
+                extra["message_id"] = client_id
+
+            _get_session_manager().add_message(
+                "user",
+                content,
+                images=self._current_images or None,
+                attachments=self._current_attachments or None,
+                sid=sid,
+                **extra,
+            )
+            # Keep focused pointer in sync for UI when this is the focused session
+            if sid == _get_session_manager().get_focused_session_id():
+                await bus.emit_async("current_session", {"id": sid, "title": "Current Session"})
+
+            await self._emit("state", "working")
+            await _get_state_manager().set_state("working")
+            await self._emit_busy_sessions(
+                getattr(self, "_parallel_scheduler", None).busy_sessions
+                if getattr(self, "_parallel_scheduler", None)
+                else {sid}
+            )
+
+            self._context_builder.chat_api = self.chat_api
+
+            current_input = content
+            max_turns = 200
+            try:
+                max_turns = int(syscfg.get("max_turns", 200)) if hasattr(syscfg, "get") else 200
+            except Exception:
+                max_turns = 200
+
+            stopped = False
+            for turn in range(max_turns):
+                if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
+                    logger.info("[Runner] Stop during parallel turn sid=%s", sid)
+                    stopped = True
+                    break
+
+                self._current_turn = turn + 1
+                self._turn_started_ms = datetime.now().timestamp() * 1000
+                await self._emit(
+                    "turn_start",
+                    {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)},
+                )
+
+                await self._setup_prompt()
+
+                _native_images = self._current_images if turn == 0 else None
+                _b64_images = self._tool_result_images or None
+                _is_first_turn = turn == 0
+                self._setup_event_dispatch() if hasattr(self, "_setup_event_dispatch") else None
+
+                lock = getattr(self, "_tool_write_lock", None)
+                try:
+                    ai_response = await self.chat_api.chat(
+                        current_input,
+                        image_path=_native_images,
+                        image_b64_list=_b64_images,
+                        tools=self._current_tools,
+                        tool_choice=self._current_tool_choice,
+                        tool_call_strategy=self.tool_call_strategy,
+                        skip_add_user=not _is_first_turn,
+                    )
+                    await self._broadcast_token_stats()
+                except Exception as e:
+                    logger.error("[Runner] parallel chat() failed sid=%s: %s", sid, e)
+                    await self._emit("error", {"message": str(e)[:300]})
+                    break
+
+                # Stop may have arrived during streaming — do NOT execute tools.
+                if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
+                    logger.info("[Runner] Stop after LLM (parallel) sid=%s — skipping tools", sid)
+                    _partial = "".join(getattr(self, "_streamed_user_text", []) or [])
+                    if _partial.strip():
+                        try:
+                            _get_session_manager().add_message("assistant", _partial.strip(), sid=sid)
+                        except Exception:
+                            pass
+                    stopped = True
+                    break
+
+                if not isinstance(ai_response, dict):
+                    ai_response = {"text": str(ai_response or ""), "tool_data": None}
+
+                full_response = ai_response.get("text") or ""
+                tool_data = ai_response.get("tool_data")
+                output_media = ai_response.get("output_media")
+                finish_reason = ai_response.get("finish_reason")
+                stream_error = bool(ai_response.get("stream_error"))
+
+                async def _do_handle():
+                    return await self._handle_turn_result(
+                        full_response,
+                        tool_data_from_api=tool_data,
+                        output_media=output_media,
+                        finish_reason=finish_reason,
+                        stream_error=stream_error,
+                    )
+
+                if lock is not None:
+                    async with lock:
+                        stop, next_input, went_to_sleep = await _do_handle()
+                else:
+                    stop, next_input, went_to_sleep = await _do_handle()
+
+                if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
+                    logger.info("[Runner] Stop after tools (parallel) sid=%s", sid)
+                    stopped = True
+                    break
+
+                if went_to_sleep or stop:
+                    break
+                current_input = next_input or ""
+                if not current_input and not tool_data:
+                    break
+
+            _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+            await self._emit(
+                "turn_elapsed",
+                {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms},
+            )
+            if stopped:
+                await self._emit("status", "Task stopped")
+            await self._emit("state", "idle")
+            await self._broadcast_token_stats()
+        except asyncio.CancelledError:
+            logger.info("[Runner] Parallel turn cancelled sid=%s", sid)
+            try:
+                _wf_ended_ms = int(datetime.now().timestamp() * 1000)
+                await self._emit(
+                    "turn_elapsed",
+                    {
+                        "started_ms": int(getattr(self, "_workflow_started_ms", _wf_ended_ms) or _wf_ended_ms),
+                        "ended_ms": _wf_ended_ms,
+                    },
+                )
+                await self._emit("status", "Task stopped")
+                await self._emit("state", "idle")
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            logger.error("[Runner] Parallel turn error sid=%s: %s", sid, e, exc_info=True)
+            try:
+                await self._emit("error", {"message": str(e)[:300]})
+                await self._emit("state", "idle")
+            except Exception:
+                pass
+        finally:
+            input_hub.clear_session_stop(sid)
+            # Drop agent-wide Stop latch once this turn is done so the next
+            # user message is not immediately aborted.
+            if input_hub.is_stop_requested():
+                busy = set()
+                try:
+                    sched = getattr(self, "_parallel_scheduler", None)
+                    if sched:
+                        busy = set(sched.busy_sessions) - {sid}
+                except Exception:
+                    busy = set()
+                if not busy:
+                    input_hub.clear_stop_request()
+            reset_turn_local(token)
+            try:
+                sched = getattr(self, "_parallel_scheduler", None)
+                if sched:
+                    await self._emit_busy_sessions(sched.busy_sessions)
+            except Exception:
+                pass
+
+    async def _run_serial(self, initial_query: str | None = None, **kwargs):
+        """Original single-session continuous conversation loop."""
+        logger.info(f"[Runner] ===== _run_serial() STARTED, initial_query={'yes' if initial_query else 'None'} =====")
 
         # Mark agent ready and replay any buffered pre-boot messages
         self._agent_ready = True
@@ -1058,6 +1604,13 @@ class AgentRunner:
                     _get_session_manager().start_new_session()
                     self._turn_sid = _get_session_manager().get_current_session_id()
                     self._load_history()  # Reload (now empty)
+                    try:
+                        from opensquad.goal_mode import clear_goal_memory, notify_goal_changed
+
+                        clear_goal_memory()
+                        await notify_goal_changed(None, text="Goal cleared (new session)")
+                    except Exception:
+                        pass
                     await self._emit("turn_start", 0)  # Trigger frontend cleanup
 
                     # Update session list for frontend
@@ -1091,6 +1644,13 @@ class AgentRunner:
                     if _get_session_manager().load_history_session(sid):
                         self._turn_sid = sid
                         self._load_history()
+                        try:
+                            from opensquad.goal_mode import get_goal, load_goal_from_session, notify_goal_changed
+
+                            load_goal_from_session()
+                            await notify_goal_changed(get_goal(), text="Goal restored from session")
+                        except Exception:
+                            pass
                         await self._emit("turn_start", 0)
                         history_data = {
                             "messages": _get_session_manager().get_messages(),
@@ -1383,8 +1943,8 @@ class AgentRunner:
             # LLM decides when to use <plan> based on task complexity
             await self._setup_prompt()
 
-            # Expand skill tags only for the model prompt — session already stored the
-            # compact <user_send_skill> form for UI / history.
+            # Expand skill / goal tags only for the model prompt — session already stored
+            # the compact tag form for UI / history.
             _llm_user_text = initial_query
             if isinstance(_llm_user_text, str) and "<user_send_skill>" in _llm_user_text.lower():
                 try:
@@ -1393,6 +1953,22 @@ class AgentRunner:
                     _llm_user_text = expand_user_send_skill(_llm_user_text)
                 except Exception as e:
                     logger.warning(f"[Runner] expand_user_send_skill failed: {e}")
+            if isinstance(_llm_user_text, str) and "<user_goal>" in _llm_user_text.lower():
+                try:
+                    from opensquad.goal_mode import expand_user_goal, get_goal, notify_goal_changed
+
+                    _llm_user_text = expand_user_goal(_llm_user_text)
+                    await notify_goal_changed(get_goal(), text="Goal set from user message")
+                except Exception as e:
+                    logger.warning(f"[Runner] expand_user_goal failed: {e}")
+            if isinstance(_llm_user_text, str) and "<user_plan>" in _llm_user_text.lower():
+                try:
+                    from opensquad.plan_workflow import ensure_plan_mode_for_user_plan, expand_user_plan
+
+                    await ensure_plan_mode_for_user_plan()
+                    _llm_user_text = expand_user_plan(_llm_user_text)
+                except Exception as e:
+                    logger.warning(f"[Runner] expand_user_plan failed: {e}")
 
             current_input = f"User input: {_llm_user_text}"
             if self._dynamic_context_prefix:
@@ -2128,6 +2704,12 @@ class AgentRunner:
                     _wait_poll_interval = 0.25  # Faster pickup of mid-call voice supplements
                     _max_wait_turns = 0  # 0 = wait indefinitely
                     _wait_turn_count = 0
+                    try:
+                        from opensquad.goal_mode import arm_continuation
+
+                        arm_continuation()
+                    except Exception:
+                        pass
 
                     while _max_wait_turns == 0 or _wait_turn_count < _max_wait_turns:
                         _wait_turn_count += 1
@@ -2394,6 +2976,24 @@ class AgentRunner:
                             current_input = ""
                             break  # Break out of wait loop, continue with LLM call
 
+                        # /goal continuation: if still pursuing and no user/pipeline work,
+                        # inject one synthetic cue so the agent keeps execute-verify looping.
+                        try:
+                            from opensquad.goal_mode import take_continuation
+
+                            _goal_cont = take_continuation()
+                        except Exception:
+                            _goal_cont = None
+                        if _goal_cont:
+                            logger.info("[Runner] Injecting /goal continuation while idle")
+                            await self._emit("status", "working")
+                            await self._setup_prompt()
+                            self.chat_api.add_user_message(_goal_cont)
+                            current_input = ""
+                            self._inner_loop_count = 1
+                            self._turn_start_time = time.perf_counter()
+                            break
+
                         # Message queue: push to event_pipeline, don't break
                         pending_msgs = message_queue.get_all()
                         if pending_msgs:
@@ -2447,6 +3047,8 @@ class AgentRunner:
                 await self._setup_prompt()
 
                 if stop:
+                    was_user_stop = input_hub.is_stop_requested()
+                    input_hub.clear_stop_request()
                     await (
                         self._broadcast_token_stats()
                     )  # Write cumulative stats immediately after conversation completes
@@ -2455,7 +3057,7 @@ class AgentRunner:
                     await self._emit(
                         "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
                     )
-                    await self._emit("status", "Response complete")
+                    await self._emit("status", "Task stopped" if was_user_stop else "Response complete")
                     # Notify frontend that agent is idle so send button is restored
                     await _get_state_manager().set_state("idle")
                     await self._emit("state", "idle")
@@ -2957,8 +3559,30 @@ class AgentRunner:
             # Phase 1: Execute ALL tools and collect results (no add_tool_result yet)
             _tool_results = []  # List of dicts with tool metadata for batch commit
             _control_flow_return = None  # If a control tool requests immediate return
+            _stopped_by_user = False
+
+            def _turn_stop_requested() -> bool:
+                try:
+                    sid = getattr(self, "_turn_sid", "") or ""
+                    if sid and input_hub.is_session_stop_requested(sid):
+                        return True
+                    return bool(input_hub.is_stop_requested())
+                except Exception:
+                    return False
 
             for call_index, (t_name, t_args_dict) in enumerate(tool_calls):
+                if _turn_stop_requested():
+                    _stopped_by_user = True
+                    for rest_index in range(call_index, len(tool_calls)):
+                        rest_name, _ = tool_calls[rest_index]
+                        rid = f"call_stop_{rest_index}"
+                        await self._emit("tool_call", {"id": rid, "name": rest_name, "args": "{}"})
+                        await self._emit(
+                            "tool_result",
+                            {"id": rid, "name": rest_name, "result": "Cancelled: stopped by user"},
+                        )
+                    break
+
                 tc_log.info("[runner] [tool] #%d: name=%r, args=%r", call_index, t_name, t_args_dict)
                 call_id = f"call_{datetime.now().strftime('%M%S')}_{t_name}_{call_index}"
                 _sanitized = {k: ("..." if v is ... else v) for k, v in t_args_dict.items()} if t_args_dict else {}
@@ -3020,6 +3644,9 @@ class AgentRunner:
                     finally:
                         reset_tool_call_context(_ctx_token)
                     task_supervisor.report_activity()
+
+                    if _turn_stop_requested():
+                        _stopped_by_user = True
 
                     # Mid-tool drain: voice/web supplements arriving during a long tool
                     # should enter event_pipeline ASAP (not wait for the whole batch).
@@ -3308,6 +3935,9 @@ class AgentRunner:
                         "ui_extras": _ui_extras,
                     }
                 )
+                if _stopped_by_user or _turn_stop_requested():
+                    _stopped_by_user = True
+                    break
 
             if _control_flow_return:
                 logger.info(f"[Runner] [DIAG] _control_flow_return set: {_control_flow_return}")
@@ -3350,6 +3980,16 @@ class AgentRunner:
 
                 if task_logger.has_active_task():
                     task_logger.increment_turn(entry["name"])
+
+            if _stopped_by_user or _turn_stop_requested():
+                tc_log.info(
+                    "[runner] [tool] Stopped by user after %d result(s) — ending turn",
+                    len(_tool_results),
+                )
+                if _saved_msg:
+                    _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self._workflow_started_ms)
+                    _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
+                return True, "", False
 
             tc_log.info(
                 "[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results)

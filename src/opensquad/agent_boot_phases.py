@@ -344,18 +344,46 @@ class AgentBootPhases:
             agent_logger.debug("[Boot] realtime_manager.bind_runner skipped: %s", exc)
 
         async def _runner_with_crash_handler():
-            try:
-                await early_runner.run()
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except Exception as exc:
-                agent_logger.exception(
-                    "[Runner] CRASHED (agent=%s): %s. The runner task has died.",
-                    agent_id,
-                    exc,
-                )
+            # Keep the consumer of input_hub alive across anyio/MCP CancelledError
+            # storms during boot. Re-raising CancelledError left the urgent queue
+            # unconsumed (new_session / chat / switch_model all appear dead in UI).
+            while True:
+                try:
+                    await early_runner.run()
+                    agent_logger.warning(
+                        "[Runner] run() returned normally (agent=%s) — restarting",
+                        agent_id,
+                    )
+                except asyncio.CancelledError:
+                    drained = 0
+                    try:
+                        from opensquad.sdk import _drain_task_cancellation
 
-        runner_task = asyncio.create_task(_runner_with_crash_handler())
+                        drained = _drain_task_cancellation()
+                    except Exception:
+                        pass
+                    agent_logger.warning(
+                        "[Runner] CancelledError (drained=%s, agent=%s) — restarting runner",
+                        drained,
+                        agent_id,
+                    )
+                    await asyncio.sleep(0.05)
+                    continue
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as exc:
+                    agent_logger.exception(
+                        "[Runner] CRASHED (agent=%s): %s. Restarting in 1s.",
+                        agent_id,
+                        exc,
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
+
+        runner_task = asyncio.create_task(
+            _runner_with_crash_handler(),
+            name=f"agent-runner:{agent_id}",
+        )
         agent_logger.info(
             "[BootPerf] phase_runner_started=%dms agent_id=%s",
             int((__import__("time").perf_counter() - boot_main_t0) * 1000),

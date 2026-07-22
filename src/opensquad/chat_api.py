@@ -304,25 +304,43 @@ class ChatAPI:
         if "reasoning_effort" in model_cfg:
             self.reasoning_effort = normalize_effort(model_cfg.get("reasoning_effort"))
 
-        # Close old client connection pool before recreating,
-        # otherwise httpx connections leak until garbage collection.
-        with contextlib.suppress(Exception):
-            await self.client.close()
+        # Keep the backing config dict in sync. Parallel sessions clone via
+        # ``base.config`` — if we only mutate instance fields, clones (and
+        # post-restart boots) keep calling the old provider (e.g. OpenCode).
+        try:
+            merged = dict(self.config or {}) if isinstance(getattr(self, "config", None), dict) else {}
+            merged.update(model_cfg)
+            self.config = merged
+        except Exception:
+            self.config = dict(model_cfg)
+        self.model_config = dict(model_cfg)
 
-        # Recreate the OpenAI client with new credentials
+        # Close old client connection pool without blocking the switch.
+        # await close() can stall for seconds on half-open sockets; the UI then
+        # sits on "Switching…" even though credentials are already updated.
+        old_client = self.client
         self.client = _get_async_openai()(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self.timeout,
             http_client=_make_llm_http_client(self.timeout),
         )
+
+        async def _close_old() -> None:
+            with contextlib.suppress(Exception):
+                await old_client.close()
+
+        with contextlib.suppress(Exception):
+            asyncio.get_running_loop().create_task(_close_old())
+
         # File IDs are provider/account specific -- clear cache
         self._file_id_cache.clear()
-        # Re-initialise tiktoken encoding for the new model
-        try:
-            self.encoding = _get_tiktoken().encoding_for_model(self.model)
-        except KeyError:
-            self.encoding = _get_tiktoken().get_encoding("cl100k_base")
+        # Re-initialise tiktoken only when the model id changed (can be slow).
+        if old_model != self.model or getattr(self, "encoding", None) is None:
+            try:
+                self.encoding = _get_tiktoken().encoding_for_model(self.model)
+            except KeyError:
+                self.encoding = _get_tiktoken().get_encoding("cl100k_base")
         logger.info(f"[ChatAPI] Model hot-reloaded: {old_model} -> {self.model}")
 
     def update_system_prompt(self, new_prompt: str):
@@ -1953,7 +1971,11 @@ class ChatAPI:
                 async for chunk in stream:
                     got_any_chunk = True
                     # Check for stop request; break streaming early if requested
-                    if input_hub.is_stop_requested():
+                    # (agent-wide or this session — parallel panes use session stop).
+                    _stop_sid = self._sid_provider() if self._sid_provider else None
+                    if input_hub.is_stop_requested() or (
+                        _stop_sid and input_hub.is_session_stop_requested(str(_stop_sid))
+                    ):
                         logger.info("[ChatAPI] Stop requested during streaming, breaking")
                         break
 

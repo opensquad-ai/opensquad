@@ -24,11 +24,30 @@ def test_normalize_mode():
 
 
 def test_plan_blocks_file_writes():
-    assert is_tool_blocked_in_plan("filesystem__write_file")
-    assert is_tool_blocked_in_plan("filesystem.write_file")
-    assert is_tool_blocked_in_plan("filesystem__replace_in_file")
+    # Generic product writes stay blocked at call-time without a plan-doc path
+    assert is_tool_blocked_in_plan("filesystem__write_file", {"path": "src/app.py"})
+    assert is_tool_blocked_in_plan("filesystem.write_file", {"path": "README.md"})
+    assert is_tool_blocked_in_plan("filesystem__replace_in_file", {"path": "foo.ts"})
     assert is_tool_blocked_in_plan("filesystem__delete_file")
-    assert is_tool_blocked_in_plan("filesystem__create_directory")
+    assert is_tool_blocked_in_plan("filesystem__create_directory", {"path": "src/components"})
+
+
+def test_plan_allows_plan_doc_writes():
+    from opensquad.agent_mode import is_plan_doc_path
+
+    assert is_plan_doc_path(".opensquad/plans/20260720-split.md")
+    assert is_plan_doc_path(r"C:\proj\.opensquad\plans\x.md")
+    assert not is_plan_doc_path("src/opensquad/plans/x.md")
+    assert not is_tool_blocked_in_plan(
+        "filesystem__write_file",
+        {"path": ".opensquad/plans/20260720-feature.md"},
+    )
+    assert not is_tool_blocked_in_plan(
+        "filesystem__create_directory",
+        {"path": ".opensquad/plans"},
+    )
+    # Schema filtering keeps write tools available (args=None → not blocked)
+    assert not is_tool_blocked_in_plan("filesystem__write_file")
 
 
 def test_plan_allows_reads():
@@ -59,7 +78,8 @@ def test_filter_tools_for_mode():
     ]
     filtered = filter_tools_for_mode(tools, MODE_PLAN)
     names = [(t.get("function") or {}).get("name") for t in filtered]
-    assert names == ["filesystem__read_file"]
+    # write_file kept for plan-doc path gate; shell still removed
+    assert names == ["filesystem__read_file", "filesystem__write_file"]
     assert filter_tools_for_mode(tools, MODE_BUILD) == tools
 
 

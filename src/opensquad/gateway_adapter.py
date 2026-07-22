@@ -242,8 +242,38 @@ class GatewayAdapter(BaseAgent):
         logger.info(f"[Adapter] Command received from Gateway ({user_id}): {command}")
 
         if command == "stop_task":
-            input_hub.request_stop()
-            logger.info(f"[Adapter] Stop task requested by user {user_id}")
+            stop_sid = str(cmd_data.get("session_id") or "").strip()
+            stop_all = bool(cmd_data.get("all"))
+            if stop_all or not stop_sid:
+                input_hub.request_stop()
+                logger.info(f"[Adapter] Stop task (all) requested by user {user_id}")
+            else:
+                input_hub.request_stop_session(stop_sid)
+                logger.info(f"[Adapter] Stop task for session {stop_sid} by user {user_id}")
+            return
+
+        if command == "set_primary_session":
+            sid = str(cmd_data.get("session_id") or "").strip()
+            sm = None
+            try:
+                from opensquad._context import get_current_context
+
+                ctx = get_current_context()
+                sm = ctx.session_manager if ctx else None
+            except Exception:
+                sm = None
+            if sm is None:
+                from opensquad.session_manager import get_session_manager
+
+                sm = get_session_manager()
+            ok = bool(sid and sm.set_primary_session_id(sid))
+            logger.info(f"[Adapter] set_primary_session sid={sid} ok={ok}")
+            if self.connected:
+                await self._send_event(
+                    {"ok": ok, "primary_session_id": sm.get_primary_session_id()},
+                    "primary_session",
+                    sid=sm.get_primary_session_id(),
+                )
             return
 
         if command == "request_token_stats":
@@ -290,25 +320,47 @@ class GatewayAdapter(BaseAgent):
         if command == "switch_and_reply":
             sid = cmd_data.get("session_id", "")
             reply = cmd_data.get("content", "")
-            cmd = f"__SWITCH_AND_REPLY__:{sid}:{reply}"
-            input_hub.push_urgent(cmd, source="gateway")
-            logger.info(f"[Adapter] Switch and reply command sent via urgent queue: {cmd[:80]}")
+            # Prefer per-session inbox over global SWITCH so parallel turns stay isolated.
+            if sid and reply:
+                input_hub.push(
+                    reply,
+                    source="gateway",
+                    session_id=str(sid),
+                    images=cmd_data.get("images"),
+                    attachments=cmd_data.get("attachments"),
+                    channel=str(cmd_data.get("channel") or "web"),
+                )
+                logger.info(f"[Adapter] switch_and_reply → session inbox sid={sid}, content_len={len(str(reply))}")
+            else:
+                cmd = f"__SWITCH_AND_REPLY__:{sid}:{reply}"
+                input_hub.push_urgent(cmd, source="gateway", session_id=str(sid) if sid else "")
+                logger.info(f"[Adapter] Switch and reply command sent via urgent queue: {cmd[:80]}")
             await self._try_wake_agent("urgent-command")
             return
 
         if command == "switch_model":
-            # Event-driven runtime model switch.  Only the card name is carried
-            # over the WebSocket; the agent process resolves the full cfg (with
-            # api_key) from its local model_cards directory.  Emitting on the
-            # bus schedules the async coordinator immediately -- no need to wait
-            # for the next turn, and no urgent-queue sentinel is pushed so an
-            # in-flight LLM stream is not interrupted.
+            # Runtime model switch. Prefer a direct await so we never depend on
+            # EventBus weakref/task scheduling (which previously dropped switches
+            # silently — UI label changed, but LLM kept using the default OpenCode).
             card_name = cmd_data.get("card", "") or cmd_data.get("card_name", "")
-            if card_name:
-                bus.emit("model.switch.requested", {"card": card_name})
-                logger.info(f"[Adapter] switch_model requested: card={card_name}")
-            else:
+            sid = str(cmd_data.get("session_id") or "").strip()
+            if not card_name:
                 logger.warning("[Adapter] switch_model command missing 'card' field")
+                return
+            logger.warning("[Adapter] switch_model DIRECT card=%s sid=%s", card_name, sid or "-")
+            try:
+                from opensquad.model_switch import is_ready, switch_to_card
+
+                if not is_ready():
+                    logger.warning("[Adapter] switch_model deferred: coordinator not ready yet")
+                result = await switch_to_card(str(card_name), session_id=sid or None)
+                logger.warning("[Adapter] switch_model result=%s", result)
+            except Exception as e:
+                logger.warning("[Adapter] switch_model direct failed (%s); bus fallback", e)
+                payload = {"card": card_name}
+                if sid:
+                    payload["session_id"] = sid
+                bus.emit("model.switch.requested", payload)
             return
 
         if command == "set_voice_config":
@@ -371,9 +423,13 @@ class GatewayAdapter(BaseAgent):
 
         if command == "set_reasoning_effort":
             effort = cmd_data.get("effort", "") or cmd_data.get("reasoning_effort", "")
+            sid = str(cmd_data.get("session_id") or "").strip()
             if effort:
-                bus.emit("model.reasoning_effort.requested", {"effort": effort})
-                logger.info(f"[Adapter] set_reasoning_effort requested: effort={effort}")
+                payload = {"effort": effort}
+                if sid:
+                    payload["session_id"] = sid
+                bus.emit("model.reasoning_effort.requested", payload)
+                logger.info(f"[Adapter] set_reasoning_effort requested: effort={effort} sid={sid or '-'}")
             else:
                 logger.warning("[Adapter] set_reasoning_effort command missing 'effort' field")
             return
@@ -381,14 +437,34 @@ class GatewayAdapter(BaseAgent):
         if command == "set_agent_mode":
             mode = cmd_data.get("mode", "") or cmd_data.get("agent_mode", "")
             req_id = cmd_data.get("id") or cmd_data.get("approved_request_id")
+            sid = str(cmd_data.get("session_id") or "").strip()
             if mode:
-                bus.emit(
-                    "agent.mode.requested",
-                    {"mode": mode, "id": req_id, "approved_request_id": req_id},
-                )
-                logger.info(f"[Adapter] set_agent_mode requested: mode={mode}")
+                payload = {"mode": mode, "id": req_id, "approved_request_id": req_id}
+                if sid:
+                    payload["session_id"] = sid
+                bus.emit("agent.mode.requested", payload)
+                logger.info(f"[Adapter] set_agent_mode requested: mode={mode} sid={sid or '-'}")
             else:
                 logger.warning("[Adapter] set_agent_mode command missing 'mode' field")
+            return
+
+        if command == "set_goal":
+            action = cmd_data.get("action", "") or cmd_data.get("op", "") or "status"
+            objective = cmd_data.get("objective", "") or cmd_data.get("goal", "") or ""
+            try:
+                from opensquad.goal_mode import apply_goal_action
+
+                result = await apply_goal_action(
+                    str(action),
+                    objective=str(objective),
+                    nudge=bool(cmd_data.get("nudge", True)),
+                )
+                logger.info(
+                    f"[Adapter] set_goal action={action} ok={result.get('ok')} "
+                    f"status={(result.get('goal') or {}).get('status')}"
+                )
+            except Exception as e:
+                logger.warning(f"[Adapter] set_goal failed: {e}")
             return
 
         if command == "deny_mode_switch":
@@ -569,18 +645,67 @@ class GatewayAdapter(BaseAgent):
         chat_name = data.get("chat_name", "")
         source_chat_id = data.get("source_chat_id", "")
         client_id = str(data.get("client_id") or data.get("message_id") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        # Pane picker card — applied on the turn even if switch_model was lost.
+        model_card = str(data.get("model_card") or data.get("card") or "").strip()
         self.current_user_id = user_id
 
+        # Route: external channels → primary; web → require/fallback focused
+        try:
+            from opensquad.session_manager import get_session_manager
+            from opensquad.session_parallel import is_external_channel
+
+            sm = get_session_manager()
+            if is_external_channel(channel):
+                session_id = sm.get_primary_session_id()
+                logger.info(
+                    "[Adapter] External channel=%s → primary session %s",
+                    channel,
+                    session_id,
+                )
+            elif not session_id:
+                session_id = sm.get_focused_session_id()
+                if (channel or "web").lower() in ("web", "gateway", ""):
+                    logger.warning(
+                        "[Adapter] Web chat missing session_id; falling back to focused=%s",
+                        session_id,
+                    )
+        except Exception as e:
+            logger.debug("[Adapter] session routing skipped: %s", e)
+
         logger.info(
-            f"[Adapter] Received from Gateway ({user_id}, channel={channel}): {content}"
+            f"[Adapter] Received from Gateway ({user_id}, channel={channel}, sid={session_id}): {content}"
             + (f" images={len(images)}" if images else "")
             + (f" attachments={len(attachments)}" if attachments else "")
         )
 
+        # Fresh user chat must never be blocked by a sticky Stop latch.
+        # New Chat always sends stop_task first; if __STOP__/__NEW_SESSION__
+        # ordering leaves _stop_requested=True, the parallel dispatcher used
+        # to drop every subsequent user message (UI: send OK, zero reaction).
+        try:
+            if session_id:
+                input_hub.clear_session_stop(session_id)
+            input_hub.clear_stop_request()
+        except Exception:
+            logger.debug("[Adapter] clear stop latch before chat skipped", exc_info=True)
+
         # Wake only — do NOT inject a fake wakeup message; the real payload follows.
         await self._try_wake_agent("web-message", inject_sentinel=False)
 
-        logger.debug(f"[Adapter] About to push to input_hub: content_len={len(content)}, channel={channel}")
+        logger.info(
+            "[Adapter] Push chat → input_hub content_len=%s channel=%s sid=%s stop=%s",
+            len(content or ""),
+            channel,
+            session_id or "-",
+            input_hub.is_stop_requested(),
+        )
+        if model_card:
+            logger.warning(
+                "[Adapter] chat carries model_card=%s sid=%s",
+                model_card,
+                session_id or "-",
+            )
         input_hub.push(
             content,
             source="gateway",
@@ -592,8 +717,9 @@ class GatewayAdapter(BaseAgent):
             source_chat_id=source_chat_id,
             user_id=user_id or "",
             client_id=client_id,
+            session_id=session_id or "",
+            model_card=model_card,
         )
-        logger.debug("[Adapter] Push to input_hub DONE")
 
     async def on_runner_output(self, data):
         """When Runner finishes a reply (final text response; content should be a string)."""

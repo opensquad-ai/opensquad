@@ -72,6 +72,8 @@ except Exception as e:
 
 {{include:parts/common_2.2_thinking_tags.md}}
 {{include:parts/common_2.3_task_planning_rules.md}}
+{{include:parts/common_2.20_goal_mode.md}}
+{{include:parts/common_2.21_plan_workflow.md}}
 ### 2.4 Communication Channel Routing
 
 You perceive multiple communication channels and must route replies correctly by source:

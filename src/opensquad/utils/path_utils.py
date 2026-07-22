@@ -48,13 +48,13 @@ def set_allowed_dirs(dirs: list[str]) -> None:
 
 
 def get_workspace_root() -> str:
-    """Return the current workspace root (fallback to process cwd).
+    """Return the effective working directory for tools (fallback to process cwd).
 
     Resolution order:
-    1. ``AgentContext.session_cwd`` — per-session override set via the
-       folder-picker UI. When set, all shell commands and file operations
-       default to this directory.
-    2. ``syscfg.get_workspace()`` — the permanent shared workspace folder.
+    1. ``AgentContext.session_cwd`` / module override — user project folder
+       chosen for this session (folder picker). Prefer this for project work.
+    2. ``syscfg.get_workspace()`` — OpenSquad data/runtime root (agents/, data/, …).
+       This is storage, not the user project; used only when no session project is set.
     3. ``os.getcwd()`` — last resort fallback.
     """
     # 0. Module-level override (thread-safe, set by filesystem.set_session_cwd)

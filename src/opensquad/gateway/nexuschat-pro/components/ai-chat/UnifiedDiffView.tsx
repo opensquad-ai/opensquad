@@ -47,18 +47,15 @@ function DiffCodeRow({ line, lang }: { line: DiffLine; lang: string }) {
     : isDel
       ? 'text-rose-400'
       : 'text-transparent';
+  // Single gutter: prefer new (current) line, fall back to old for pure deletes.
+  const lineno = line.new_lineno ?? line.old_lineno ?? '';
 
   return (
     <div className={`flex items-stretch ${rowBg}`}>
       <span
-        className={`select-none w-9 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] ${gutterBg}`}
+        className={`select-none w-10 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] border-r border-white/5 ${gutterBg}`}
       >
-        {line.old_lineno ?? ''}
-      </span>
-      <span
-        className={`select-none w-9 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] border-r border-white/5 ${gutterBg}`}
-      >
-        {line.new_lineno ?? ''}
+        {lineno}
       </span>
       <span
         className={`select-none w-4 shrink-0 text-center font-semibold leading-[18px] ${markColor}`}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle } from 'react';
+import React, { useState, useEffect, useCallback, useRef, forwardRef, useImperativeHandle, Suspense } from 'react';
 import {
   X, Save, RefreshCw, ToggleLeft, ToggleRight, Plus, FolderOpen, ExternalLink,
   CheckCircle, AlertCircle, Palette, Info, SlidersHorizontal, Cable, Settings2,
@@ -19,14 +19,38 @@ import {
   useWorkflowExpandLevel,
 } from '../utils/workflowExpandPref';
 import { setLanguage } from '../i18n';
-import { navigateAppView, SETTINGS_APP_NAV_ITEMS } from '../utils/appNavItems';
+import { SETTINGS_APP_NAV_ITEMS } from '../utils/appNavItems';
 import { usePluginNavItems } from '../utils/usePluginNavItems';
+
+const PluginManagerPage = React.lazy(() =>
+  import('./PluginManagerPage').then((m) => ({ default: m.PluginManagerPage })),
+);
+const ServiceManagerPage = React.lazy(() =>
+  import('./ServiceManagerPage').then((m) => ({ default: m.ServiceManagerPage })),
+);
+const McpManagerPage = React.lazy(() =>
+  import('./McpManagerPage').then((m) => ({ default: m.McpManagerPage })),
+);
+const SkillManagerPage = React.lazy(() =>
+  import('./SkillManagerPage').then((m) => ({ default: m.SkillManagerPage })),
+);
+const RolesPage = React.lazy(() => import('./RolesPage'));
+const ModelsPage = React.lazy(() => import('./ModelsPage'));
+const LogsManagerPage = React.lazy(() =>
+  import('./LogsManagerPage').then((m) => ({ default: m.LogsManagerPage })),
+);
+const MarketHubPage = React.lazy(() => import('./MarketHubPage'));
+const PluginViewContainer = React.lazy(() =>
+  import('./plugin-views/PluginViewContainer').then((m) => ({ default: m.PluginViewContainer })),
+);
 
 interface SystemConfigPageProps {
   isOpen: boolean;
   onClose: () => void;
   /** Optional tab to open when modal becomes visible */
   initialTab?: TabKey;
+  /** Optional app panel (plugins / logs / …) to open inside settings */
+  initialAppView?: string | null;
 }
 
 type TabKey = 'general' | 'theme' | 'workspace' | 'ports' | 'advanced' | 'about';
@@ -644,16 +668,32 @@ const AboutTab: React.FC = () => {
 
 // ---------- Main Modal ----------
 
-export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onClose, initialTab }) => {
+export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
+  isOpen,
+  onClose,
+  initialTab,
+  initialAppView = null,
+}) => {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<TabKey>(() => initialTab && VALID_TABS.has(initialTab) ? initialTab : readSavedTab());
+  const [activeTab, setActiveTab] = useState<TabKey>(() =>
+    initialTab && VALID_TABS.has(initialTab) ? initialTab : readSavedTab(),
+  );
+  const [activeAppView, setActiveAppView] = useState<string | null>(null);
   const pluginNavItems = usePluginNavItems();
 
-  const goAppView = (view: string) => {
-    // Keep settings open underneath; app SoftOverlay is higher z-index.
-    // Back from the app modal should reveal settings again.
-    navigateAppView(view);
+  const selectConfigTab = (key: TabKey) => {
+    setActiveAppView(null);
+    setActiveTab(key);
   };
+
+  const selectAppView = (view: string) => {
+    setActiveAppView(view);
+  };
+
+  const backFromApp = () => {
+    setActiveAppView(null);
+  };
+
   const [config, setConfig] = useState<Record<string, any> | null>(() => peekSystemConfig());
 
   const [loading, setLoading] = useState(false);
@@ -676,9 +716,17 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
   }, [t]);
 
   useEffect(() => {
-    if (!isOpen) return;
-    if (initialTab && VALID_TABS.has(initialTab)) {
-      setActiveTab(initialTab);
+    if (!isOpen) {
+      setActiveAppView(null);
+      return;
+    }
+    if (initialAppView) {
+      setActiveAppView(initialAppView);
+    } else {
+      setActiveAppView(null);
+      if (initialTab && VALID_TABS.has(initialTab)) {
+        setActiveTab(initialTab);
+      }
     }
     const cached = peekSystemConfig();
     if (cached) {
@@ -687,7 +735,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
       return;
     }
     void load();
-  }, [isOpen, initialTab, load]);
+  }, [isOpen, initialTab, initialAppView, load]);
 
   useEffect(() => {
     try {
@@ -717,16 +765,27 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
     }
   };
 
-  const needsServerConfig = activeTab === 'workspace' || activeTab === 'ports' || activeTab === 'advanced';
+  const showingApp = !!activeAppView;
+  const needsServerConfig = !showingApp && (activeTab === 'workspace' || activeTab === 'ports' || activeTab === 'advanced');
   const showSave = needsServerConfig;
+
+  const appFallback = (
+    <div className="flex h-full min-h-[12rem] items-center justify-center text-textMuted">
+      <RefreshCw size={22} className="animate-spin" />
+    </div>
+  );
 
   return (
     <SoftOverlay
       open={isOpen}
       onBackdrop={onClose}
       zClass="z-[100]"
-      className="backdrop-blur-[2px]"
-      panelClassName="w-[min(56rem,calc(100vw-2rem))] h-[min(40rem,calc(100vh-2rem))] shrink-0"
+      className={`backdrop-blur-[2px] ${showingApp ? '!p-2 sm:!p-3' : ''}`.trim()}
+      panelClassName={
+        showingApp
+          ? 'w-[min(96rem,calc(100vw-0.75rem))] h-[calc(100vh-0.75rem)] max-h-[calc(100vh-0.75rem)] shrink-0'
+          : 'w-[min(72rem,calc(100vw-1.5rem))] h-[min(52rem,calc(100vh-1.5rem))] shrink-0'
+      }
     >
       <div
         className="os-modal-shell flex h-full w-full flex-col overflow-hidden"
@@ -748,12 +807,12 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
         <div className="flex min-h-0 flex-1">
           <nav className="flex w-[148px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-bgLight/70 p-2 sm:w-[168px]">
             {NAV_ITEMS.map((item) => {
-              const active = activeTab === item.key;
+              const active = !showingApp && activeTab === item.key;
               return (
                 <button
                   key={item.key}
                   type="button"
-                  onClick={() => setActiveTab(item.key)}
+                  onClick={() => selectConfigTab(item.key)}
                   className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
                     active
                       ? 'bg-panel text-textMain shadow-soft'
@@ -775,129 +834,179 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({ isOpen, onCl
 
             {SETTINGS_APP_NAV_ITEMS.map((item) => {
               const Icon = item.icon;
+              const active = activeAppView === item.view;
               return (
                 <button
                   key={item.view}
                   type="button"
-                  onClick={() => goAppView(item.view)}
-                  className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm text-textMuted transition-all duration-soft ease-soft hover:bg-panel/70 hover:text-textMain"
+                  onClick={() => selectAppView(item.view)}
+                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
+                    active
+                      ? 'bg-panel text-textMain shadow-soft'
+                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
+                  }`}
                 >
-                  <Icon size={16} strokeWidth={1.75} className="shrink-0" />
+                  <Icon size={16} strokeWidth={1.75} className={`shrink-0 ${active ? 'text-primary' : ''}`} />
                   <span className="truncate font-medium">{t(item.i18nKey)}</span>
                 </button>
               );
             })}
 
-            {pluginNavItems.map((item) => (
-              <button
-                key={`plugin-nav-${item.name}-${item.view}`}
-                type="button"
-                onClick={() => goAppView(item.view)}
-                className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm text-textMuted transition-all duration-soft ease-soft hover:bg-panel/70 hover:text-textMain"
-                title={item.label}
-              >
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-primary/15 text-[9px] font-bold text-primary">
-                  {(item.label || item.name).charAt(0).toUpperCase()}
-                </span>
-                <span className="truncate font-medium">{item.label}</span>
-              </button>
-            ))}
+            {pluginNavItems.map((item) => {
+              const active = activeAppView === item.view;
+              return (
+                <button
+                  key={`plugin-nav-${item.name}-${item.view}`}
+                  type="button"
+                  onClick={() => selectAppView(item.view)}
+                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-sm transition-all duration-soft ease-soft ${
+                    active
+                      ? 'bg-panel text-textMain shadow-soft'
+                      : 'text-textMuted hover:bg-panel/70 hover:text-textMain'
+                  }`}
+                  title={item.label}
+                >
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-primary/15 text-[9px] font-bold text-primary">
+                    {(item.label || item.name).charAt(0).toUpperCase()}
+                  </span>
+                  <span className="truncate font-medium">{item.label}</span>
+                </button>
+              );
+            })}
           </nav>
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
-              {error && (
-                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
-                  {error}
-                </div>
-              )}
-
-              {activeTab === 'general' && <GeneralTab />}
-
-              {activeTab === 'theme' && <ThemeSettingsPanel />}
-
-              {activeTab === 'about' && <AboutTab />}
-
-              {loading && needsServerConfig && !config && (
-                <div className="flex h-40 items-center justify-center">
-                  <RefreshCw size={22} className="animate-spin text-primary" />
-                </div>
-              )}
-
-              {config && (
-                <>
-                  <div style={{ display: activeTab === 'workspace' ? 'block' : 'none' }}>
-                    <WorkspaceManager />
+            {showingApp ? (
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bgLight">
+                <Suspense fallback={appFallback}>
+                  <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                    {activeAppView === 'plugins' ? (
+                      <PluginManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'services' ? (
+                      <ServiceManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'mcp' ? (
+                      <McpManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'skills' ? (
+                      <SkillManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'roles' ? (
+                      <RolesPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'models' ? (
+                      <ModelsPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'logs' ? (
+                      <LogsManagerPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView === 'market' ? (
+                      <MarketHubPage onBack={backFromApp} />
+                    ) : null}
+                    {activeAppView && activeAppView.includes(':') ? (
+                      <PluginViewContainer viewKey={activeAppView} onBack={backFromApp} />
+                    ) : null}
                   </div>
-                  <div style={{ display: activeTab === 'ports' ? 'block' : 'none' }}>
-                    <PortsTab
-                      ports={config.ports || {}}
-                      hosts={config.hosts || {}}
-                      onChange={(ports, hosts) => patch({ ports, hosts })}
-                    />
-                  </div>
-                  <div style={{ display: activeTab === 'advanced' ? 'block' : 'none' }}>
-                    <AdvancedTab ref={advancedTabRef} config={config} onChange={patch} />
-                  </div>
-                </>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-bgLight/50 px-5 py-3.5">
-              <div className="min-w-0">
-                {showSave ? (
-                  saved ? (
-                    <span className="text-sm font-medium text-green-600">{t('systemConfig.saved')}</span>
-                  ) : (
-                    <span className="text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
-                  )
-                ) : (
-                  <span className="text-xs text-textMuted">{t('systemConfig.liveHint')}</span>
-                )}
+                </Suspense>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {showSave && (
-                  <button
-                    type="button"
-                    onClick={() => void load({ force: true })}
-                    disabled={loading}
-                    className="os-icon-btn"
-                    title={t('systemConfig.reload')}
-                  >
-                    <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-                  </button>
-                )}
-                {showSave ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="rounded-full border border-border px-4 py-2 text-sm text-textMuted transition-colors hover:bg-panel hover:text-textMain"
-                    >
-                      {t('common.cancel')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSave}
-                      disabled={saving || !config}
-                      className="flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
-                    >
-                      {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-                      {t('common.save')}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-                  >
-                    {t('themeSettings.done')}
-                  </button>
-                )}
-              </div>
-            </div>
+            ) : (
+              <>
+                <div className="min-h-0 flex-1 overflow-y-auto p-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border">
+                  {error && (
+                    <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
+                      {error}
+                    </div>
+                  )}
+
+                  {activeTab === 'general' && <GeneralTab />}
+
+                  {activeTab === 'theme' && <ThemeSettingsPanel />}
+
+                  {activeTab === 'about' && <AboutTab />}
+
+                  {loading && needsServerConfig && !config && (
+                    <div className="flex h-40 items-center justify-center">
+                      <RefreshCw size={22} className="animate-spin text-primary" />
+                    </div>
+                  )}
+
+                  {config && (
+                    <>
+                      <div style={{ display: activeTab === 'workspace' ? 'block' : 'none' }}>
+                        <WorkspaceManager />
+                      </div>
+                      <div style={{ display: activeTab === 'ports' ? 'block' : 'none' }}>
+                        <PortsTab
+                          ports={config.ports || {}}
+                          hosts={config.hosts || {}}
+                          onChange={(ports, hosts) => patch({ ports, hosts })}
+                        />
+                      </div>
+                      <div style={{ display: activeTab === 'advanced' ? 'block' : 'none' }}>
+                        <AdvancedTab ref={advancedTabRef} config={config} onChange={patch} />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Footer — config tabs only */}
+                <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-bgLight/50 px-5 py-3.5">
+                  <div className="min-w-0">
+                    {showSave ? (
+                      saved ? (
+                        <span className="text-sm font-medium text-green-600">{t('systemConfig.saved')}</span>
+                      ) : (
+                        <span className="text-xs text-textMuted">{t('systemConfig.restartHint')}</span>
+                      )
+                    ) : (
+                      <span className="text-xs text-textMuted">{t('systemConfig.liveHint')}</span>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {showSave && (
+                      <button
+                        type="button"
+                        onClick={() => void load({ force: true })}
+                        disabled={loading}
+                        className="os-icon-btn"
+                        title={t('systemConfig.reload')}
+                      >
+                        <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                      </button>
+                    )}
+                    {showSave ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={onClose}
+                          className="rounded-full border border-border px-4 py-2 text-sm text-textMuted transition-colors hover:bg-panel hover:text-textMain"
+                        >
+                          {t('common.cancel')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSave}
+                          disabled={saving || !config}
+                          className="flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+                        >
+                          {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                          {t('common.save')}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={onClose}
+                        className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                      >
+                        {t('themeSettings.done')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

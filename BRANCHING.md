@@ -1,3 +1,10 @@
+
+| &nbsp; | &nbsp; | &nbsp; |
+| ------ | ------ | ------ |
+| &nbsp; | &nbsp; | &nbsp; |
+| &nbsp; | &nbsp; | &nbsp; |
+
+
 # Branching Strategy — Working on a Module
 
 This guide answers one question:
@@ -60,20 +67,20 @@ about to start coding.
 ### Release lines vs. integration
 
 - `release/x.y.z` is a **short-lived working branch**. It exists only for
-  the duration of one release cycle: cut from `dev` (for the next minor
-  or major) or from the existing `vX.Y.Z` tag (for a patch), used for
-  the version bump + changelog + QA, then PR'd to `main` and **deleted**
-  once the tag is in place. **Tags, not branches, are the long-lived
-  record of what shipped.**
+the duration of one release cycle: cut from `dev` (for the next minor
+or major) or from the existing `vX.Y.Z` tag (for a patch), used for
+the version bump + changelog + QA, then PR'd to `main` and **deleted**
+once the tag is in place. **Tags, not branches, are the long-lived
+record of what shipped.**
 - `hotfix/*` follows the same shape for an urgent production fix that
-  cannot wait for the next planned release: branched from `main`, minimal
-  fix, PR to `main` with a tag, then deleted.
+cannot wait for the next planned release: branched from `main`, minimal
+fix, PR to `main` with a tag, then deleted.
 - `dev` is the **integration line**: every `feature/*`, `fix/*`, `docs/*`,
-  `chore/*` PR lands here first.
+`chore/*` PR lands here first.
 - `main` receives three kinds of merge: from `release/x.y.z` (planned
-  release graduation), from `hotfix/*` (urgent fix), and from `dev` (the
-  periodic "absorb dev" sync to keep main in step with what dev has
-  accumulated between releases).
+release graduation), from `hotfix/*` (urgent fix), and from `dev` (the
+periodic "absorb dev" sync to keep main in step with what dev has
+accumulated between releases).
 
 > **Don't keep a `release/*` or `hotfix/*` branch around "just in case".**
 > The `vX.Y.Z` tag is the source of truth. If a future patch is needed,
@@ -85,13 +92,15 @@ about to start coding.
 
 Ask yourself three questions:
 
-| Question                                                | Base branch                                  |
-|---------------------------------------------------------|----------------------------------------------|
-| Am I adding new behavior or a new module?               | `dev`                                        |
-| Am I fixing a non-urgent bug?                           | `dev`                                        |
-| Am I editing docs (not a typo / broken link)?           | `dev`                                        |
-| Am I cutting a new release line for `x.y.z`?            | `dev` (next minor/major) or the existing `vX.Y.Z` tag (patch) |
-| Am I fixing a critical production bug right now?        | `main` → `hotfix/*`                          |
+
+| Question                                         | Base branch                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------- |
+| Am I adding new behavior or a new module?        | `dev`                                                         |
+| Am I fixing a non-urgent bug?                    | `dev`                                                         |
+| Am I editing docs (not a typo / broken link)?    | `dev`                                                         |
+| Am I cutting a new release line for `x.y.z`?     | `dev` (next minor/major) or the existing `vX.Y.Z` tag (patch) |
+| Am I fixing a critical production bug right now? | `main` → `hotfix/*`                                           |
+
 
 > Default to `dev`. `release/x.y.z` and `hotfix/*` are maintainer
 > workflows; never branch a regular feature off them.
@@ -106,16 +115,18 @@ All work-in-progress branches follow:
 <type>/<module>-<short-kebab-description>
 ```
 
-| Type       | When to use                                        | Example                                  |
-|------------|----------------------------------------------------|------------------------------------------|
-| `feature/` | New functionality, new module, new API surface     | `feature/plugin-store-rating-filter`     |
-| `fix/`     | Non-urgent bug fix                                 | `fix/gateway-node-secret-missing`        |
-| `release/` | Short-lived release-prep branch (cut by maintainer)| `release/0.3.0`                          |
-| `hotfix/`  | Urgent production fix (branched from `main`)       | `hotfix/rotate-leaked-secret`            |
-| `docs/`    | Docs-only change (typos / broken links can skip)   | `docs/branching-typo`                    |
-| `chore/`   | Refactor, CI, tooling, no behavior change          | `chore/ruff-pin-0.6`                     |
-| `refactor/`| Code restructure with same behavior                | `refactor/agent-message-bus`             |
-| `test/`    | Adding tests only, no production code change       | `test/plugin-store-coverage`             |
+
+| Type        | When to use                                         | Example                              |
+| ----------- | --------------------------------------------------- | ------------------------------------ |
+| `feature/`  | New functionality, new module, new API surface      | `feature/plugin-store-rating-filter` |
+| `fix/`      | Non-urgent bug fix                                  | `fix/gateway-node-secret-missing`    |
+| `release/`  | Short-lived release-prep branch (cut by maintainer) | `release/0.3.0`                      |
+| `hotfix/`   | Urgent production fix (branched from `main`)        | `hotfix/rotate-leaked-secret`        |
+| `docs/`     | Docs-only change (typos / broken links can skip)    | `docs/branching-typo`                |
+| `chore/`    | Refactor, CI, tooling, no behavior change           | `chore/ruff-pin-0.6`                 |
+| `refactor/` | Code restructure with same behavior                 | `refactor/agent-message-bus`         |
+| `test/`     | Adding tests only, no production code change        | `test/plugin-store-coverage`         |
+
 
 > `release/x.y.z` and `hotfix/*` are short-lived. They will be deleted
 > after they graduate to `main`; the `vX.Y.Z` tag is what remains.
@@ -125,17 +136,19 @@ All work-in-progress branches follow:
 The `<module>` token should match a top-level area in the repo so the
 branch is easy to triage:
 
-| Module area in repo                          | `<module>` token |
-|----------------------------------------------|------------------|
-| `src/opensquad/gateway/`                     | `gateway`        |
-| `src/opensquad/gateway/nexuschat-pro/`       | `gateway-ui`     |
-| `src/plugins/`                               | `plugins`        |
-| `src/skills/`                                | `skills`         |
-| `src/opensquad/agent/`                       | `agent`          |
-| `src/opensquad/tools/`                       | `tools`          |
-| `doc_en/` / `doc_cn/` / `docs/`              | `docs`           |
-| `tests/`                                     | `tests`          |
-| `.github/workflows/`, `scripts/`             | `ci`             |
+
+| Module area in repo                    | `<module>` token |
+| -------------------------------------- | ---------------- |
+| `src/opensquad/gateway/`               | `gateway`        |
+| `src/opensquad/gateway/nexuschat-pro/` | `gateway-ui`     |
+| `src/plugins/`                         | `plugins`        |
+| `src/skills/`                          | `skills`         |
+| `src/opensquad/agent/`                 | `agent`          |
+| `src/opensquad/tools/`                 | `tools`          |
+| `doc_en/` / `doc_cn/` / `docs/`        | `docs`           |
+| `tests/`                               | `tests`          |
+| `.github/workflows/`, `scripts/`       | `ci`             |
+
 
 If your change spans multiple modules, either split the work into stacked
 PRs or use the dominant module in the branch name. Mention the rest in
@@ -297,22 +310,26 @@ So for `0.x.y` releases, **MINOR bumps are the meaningful unit** and can
 contain breaking changes; **PATCH bumps** are for pure bug fixes within
 an existing minor line. `1.0.0` is the lock-in milestone.
 
-| Bump                                | When                                                                                                                                                                  |
-|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `0.x.y` → `0.x.(y+1)` (PATCH)       | Pure bug fixes shipped together. No new external surface, no new required config, no first-run UX change. Existing deployments need to do nothing on upgrade.          |
-| `0.x.y` → `0.(x+1).0` (MINOR)       | New user-facing flow (e.g. first-launch wizard), new external API / endpoint, new required config, new auth mechanism, or an accumulated batch of features from dev. |
-| `0.x.y` → `0.x.y.postN` (POST)      | Urgent post-release fix to a **shipped** version that does not warrant a new minor/patch. Keeps the existing minor line alive with minimal disruption.                |
-| `0.x.y` → `1.0.0` (MAJOR)           | Public API is now stable. Any further breaking change requires a major bump.                                                                                          |
+
+| Bump                           | When                                                                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0.x.y` → `0.x.(y+1)` (PATCH)  | Pure bug fixes shipped together. No new external surface, no new required config, no first-run UX change. Existing deployments need to do nothing on upgrade.        |
+| `0.x.y` → `0.(x+1).0` (MINOR)  | New user-facing flow (e.g. first-launch wizard), new external API / endpoint, new required config, new auth mechanism, or an accumulated batch of features from dev. |
+| `0.x.y` → `0.x.y.postN` (POST) | Urgent post-release fix to a **shipped** version that does not warrant a new minor/patch. Keeps the existing minor line alive with minimal disruption.               |
+| `0.x.y` → `1.0.0` (MAJOR)      | Public API is now stable. Any further breaking change requires a major bump.                                                                                         |
+
 
 PEP 440 dev / post markers combine with the above for development lines:
 
-| Marker                | Meaning                                                                | Used on          |
-|-----------------------|------------------------------------------------------------------------|------------------|
-| `0.X.0.dev0`          | "we're starting work on the 0.X.0 release"                             | `dev` branch tip |
-| `0.X.0.dev5`          | "iterating; this is the 5th dev snapshot"                              | long dev cycles  |
-| `0.X.0a1` / `b1` / `rc1` | alpha / beta / release candidate                                    | pre-release tags |
-| `0.X.0`               | "0.X.0 is shipped"                                                     | `vX.Y.Z` tag     |
-| `0.X.0.postN`         | "post-release fix #N, not a new release"                               | hotfix tags      |
+
+| Marker                   | Meaning                                    | Used on          |
+| ------------------------ | ------------------------------------------ | ---------------- |
+| `0.X.0.dev0`             | "we're starting work on the 0.X.0 release" | `dev` branch tip |
+| `0.X.0.dev5`             | "iterating; this is the 5th dev snapshot"  | long dev cycles  |
+| `0.X.0a1` / `b1` / `rc1` | alpha / beta / release candidate           | pre-release tags |
+| `0.X.0`                  | "0.X.0 is shipped"                         | `vX.Y.Z` tag     |
+| `0.X.0.postN`            | "post-release fix #N, not a new release"   | hotfix tags      |
+
 
 **Heuristic for maintainers:** ask "what does a deployer have to *do*
 on upgrade?" If the answer is "nothing, it just works", it's PATCH. If
@@ -373,16 +390,16 @@ While your branch is open:
   git push --force-with-lease origin <your-branch>
   ```
 - **Avoid `git merge`.** Rebase keeps history linear; merges create
-  noisy "Merge branch 'dev' into feature/x" commits that get squashed
-  away anyway.
+noisy "Merge branch 'dev' into feature/x" commits that get squashed
+away anyway.
 - **Run the local quality gate** before requesting review
-  (see [CONTRIBUTING.md → Coding Standards](CONTRIBUTING.md#coding-standards)).
+(see [CONTRIBUTING.md → Coding Standards](CONTRIBUTING.md#coding-standards)).
 - **Stay focused.** If scope grows, open a new branch / PR instead of
-  piling unrelated changes into one.
+piling unrelated changes into one.
 - **For release branches:** keep the QA loop tight. Every fix commit on
-  the release branch becomes part of the released history; squash
-  noise locally before pushing, and never push `wip` or `try again`
-  commits to a release branch.
+the release branch becomes part of the released history; squash
+noise locally before pushing, and never push `wip` or `try again`
+commits to a release branch.
 
 ---
 
@@ -396,7 +413,9 @@ Your branch is ready to merge when **all** of the following are true:
 - [ ] PR description links the tracking issue (`Closes #N` or `Refs #N`).
 - [ ] PR template is fully filled in (no sections deleted).
 - [ ] All CI checks are green (lint, pytest, frontend smoke, doc links,
-      secret scan, SAST, SCA).
+  ```
+  secret scan, SAST, SCA).
+  ```
 - [ ] CODEOWNER for the touched directories has approved.
 - [ ] No `system_config*.json`, no workspace data, no secrets.
 - [ ] Branch is rebased on the target branch (no merge commits).
@@ -408,19 +427,27 @@ action.
 
 ### Post-merge checklist for release captains
 
-If the PR was a **`release/x.y.z` graduation** or a **`hotfix/*` merge
-to `main`**, the work is not done when the PR merges. The release
+If the PR was a `**release/x.y.z` graduation** or a `**hotfix/*` merge
+to `main**`, the work is not done when the PR merges. The release
 captain must also:
 
 - [ ] Tag the merge commit on `main` as `vX.Y.Z` and push the tag.
-      `git tag -a vX.Y.Z <merge-sha> -m "vX.Y.Z" && git push origin vX.Y.Z`
+  ```
+  `git tag -a vX.Y.Z <merge-sha> -m "vX.Y.Z" && git push origin vX.Y.Z`
+  ```
 - [ ] Delete the `release/x.y.z` / `hotfix/*` branch both locally and
-      remotely. The `vX.Y.Z` tag is the long-lived record; the branch
-      is scratch.
+  ```
+  remotely. The `vX.Y.Z` tag is the long-lived record; the branch
+  is scratch.
+  ```
 - [ ] Back-merge `main` into `dev` (for releases) or cherry-pick the
-      fix commit onto `dev` (for hotfixes) so dev doesn't drift.
+  ```
+  fix commit onto `dev` (for hotfixes) so dev doesn't drift.
+  ```
 - [ ] Bump dev's `pyproject.toml` to the next `*.dev0` version and
-      push the dev bump commit.
+  ```
+  push the dev bump commit.
+  ```
 
 If any of these steps is skipped, dev will silently fall out of sync
 with main, and the next release cycle will start from a stale base.
@@ -429,20 +456,22 @@ with main, and the next release cycle will start from a stale base.
 
 ## 7. Common pitfalls
 
-| Pitfall                                              | Fix                                                            |
-|------------------------------------------------------|----------------------------------------------------------------|
-| Branched from `main` for a normal feature           | Re-cut from `dev`; close the old PR and open a new one.        |
-| Branched from `dev` for a hotfix                     | Re-cut from `main`; do not back-merge `dev` into a hotfix.     |
-| Kept a `release/*` branch around "for the next patch"| Delete it. Future patches are cut fresh from the `vX.Y.Z` tag. |
-| Forgot to tag the merge commit                       | `git tag -a vX.Y.Z <merge-sha>` then `git push origin vX.Y.Z`. |
-| Skipped the `main → dev` absorb step                 | `git checkout dev && git merge --no-ff main` after the release PR merges. |
-| Tagged the merge commit but forgot to delete the branch | `git push origin --delete release/x.y.z` and `git branch -D release/x.y.z`. |
-| Branch name `my-branch` or `test`                    | Rename: `git branch -m feature/<module>-<desc>`.               |
-| Commits like "wip", "fix typo", "asdf"               | Squash them locally before pushing.                            |
-| Forced `git push` without `--force-with-lease`       | Use `--force-with-lease` to avoid clobbering teammate work.    |
-| PR with 30+ files across 8 modules                  | Split into stacked PRs along module lines.                     |
-| `git add -A` to "just stage everything"             | Stage explicit files. CI guard will fail on leaked workspace.   |
-| Unsure if a change is PATCH or MINOR                 | Use the heuristic in [Example E § When to bump](BRANCHING.md#example-e--im-cutting-a-new-release-v030-maintainer): "what does a deployer have to *do* on upgrade?" If anything, it's MINOR. |
+
+| Pitfall                                                 | Fix                                                                                                                                                                                         |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Branched from `main` for a normal feature               | Re-cut from `dev`; close the old PR and open a new one.                                                                                                                                     |
+| Branched from `dev` for a hotfix                        | Re-cut from `main`; do not back-merge `dev` into a hotfix.                                                                                                                                  |
+| Kept a `release/*` branch around "for the next patch"   | Delete it. Future patches are cut fresh from the `vX.Y.Z` tag.                                                                                                                              |
+| Forgot to tag the merge commit                          | `git tag -a vX.Y.Z <merge-sha>` then `git push origin vX.Y.Z`.                                                                                                                              |
+| Skipped the `main → dev` absorb step                    | `git checkout dev && git merge --no-ff main` after the release PR merges.                                                                                                                   |
+| Tagged the merge commit but forgot to delete the branch | `git push origin --delete release/x.y.z` and `git branch -D release/x.y.z`.                                                                                                                 |
+| Branch name `my-branch` or `test`                       | Rename: `git branch -m feature/<module>-<desc>`.                                                                                                                                            |
+| Commits like "wip", "fix typo", "asdf"                  | Squash them locally before pushing.                                                                                                                                                         |
+| Forced `git push` without `--force-with-lease`          | Use `--force-with-lease` to avoid clobbering teammate work.                                                                                                                                 |
+| PR with 30+ files across 8 modules                      | Split into stacked PRs along module lines.                                                                                                                                                  |
+| `git add -A` to "just stage everything"                 | Stage explicit files. CI guard will fail on leaked workspace.                                                                                                                               |
+| Unsure if a change is PATCH or MINOR                    | Use the heuristic in [Example E § When to bump](BRANCHING.md#example-e--im-cutting-a-new-release-v030-maintainer): "what does a deployer have to *do* on upgrade?" If anything, it's MINOR. |
+
 
 ---
 

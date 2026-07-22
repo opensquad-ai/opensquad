@@ -8,7 +8,7 @@ and the user message dynamic prefix layer respectively:
     system_vars (low-frequency/static, injected into system prompt):
         - AGENT_PROFILE      <- agent.md file content (permanent memory)
         - CONTEXT_SUMMARY    <- chat_api._latest_summary (context summary, changes only on compression)
-        - AGENT_WORKSPACE    <- Agent working directory path (static)
+        - AGENT_WORKSPACE    <- Session project cwd + OpenSquad data root (updates when session_cwd changes)
         - TEAM_COLLAB_CARDS  <- Collab card directory table + usage instructions (stable during tasks)
 
     dynamic_vars (high-frequency/dynamic, injected into each turn's user message prefix):
@@ -33,10 +33,35 @@ _memory_manager = None
 _agent_md_path = None
 _agent_dir = None  # Agent's own directory path (e.g. C:\...\agents\coder)
 _project_root = None  # Project root directory path (e.g. C:\...\opensquad)
-_workspace_root = None  # Currently active workspace root path (from syscfg.get_workspace())
+_data_root = None  # OpenSquad data/runtime root (syscfg.get_workspace()) — NOT the user project
 _bridge = None  # ChatPro Bridge instance (for retrieving group member list)
 _agent_config = None  # Current agent's config.json (for checking collaboration config)
 _agents_dir = None  # agents/ directory path (for reading other agents' config.json)
+
+
+def _resolve_session_project_cwd() -> str:
+    """Return the user project directory for this session, or '' if not set.
+
+    The project path is chosen when a session starts (folder picker / working-directory
+    API). It must NOT be confused with the OpenSquad data root (agents/, data/, …).
+    """
+    try:
+        from opensquad.utils.path_utils import get_session_cwd_override
+
+        override = get_session_cwd_override()
+        if override and os.path.isdir(override):
+            return os.path.normcase(os.path.abspath(override))
+    except Exception:
+        pass
+    try:
+        from opensquad._context import get_current_context
+
+        ctx = get_current_context()
+        if ctx and ctx.session_cwd and os.path.isdir(ctx.session_cwd):
+            return os.path.normcase(os.path.abspath(ctx.session_cwd))
+    except Exception:
+        pass
+    return ""
 
 
 def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, agent_config=None, agents_dir=None):
@@ -44,15 +69,7 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
     Initialize at startup. Called by boot.py.
     Caches memory_manager, agent.md path, bridge, and agent_config.
     """
-    global \
-        _memory_manager, \
-        _agent_md_path, \
-        _agent_dir, \
-        _project_root, \
-        _workspace_root, \
-        _bridge, \
-        _agent_config, \
-        _agents_dir
+    global _memory_manager, _agent_md_path, _agent_dir, _project_root, _data_root, _bridge, _agent_config, _agents_dir
     _memory_manager = memory_manager
     _agent_md_path = agent_md_path
     _bridge = bridge
@@ -68,14 +85,14 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
         logger.info(f"[ContextBase] Agent directory: {_agent_dir}")
         logger.info(f"[ContextBase] Project root: {_project_root}")
 
-    # Workspace root: prefer syscfg (authoritative source), fall back to _project_root
+    # Data/runtime root: where OpenSquad stores agents/, data/, config — not the user project
     try:
         from opensquad.system_config import syscfg as _syscfg
 
-        _workspace_root = _syscfg.get_workspace()
+        _data_root = _syscfg.get_workspace()
     except Exception:
-        _workspace_root = _project_root
-    logger.info(f"[ContextBase] Workspace root: {_workspace_root}")
+        _data_root = _project_root
+    logger.info(f"[ContextBase] OpenSquad data root: {_data_root}")
 
     if _memory_manager:
         logger.info(
@@ -166,26 +183,43 @@ def inject_standard(context: dict) -> tuple:
             "(Context compression has not been triggered yet; no historical summary available.)"
         )
 
-    # --- Agent workspace path (static) ---
+    # --- Paths: session project cwd vs OpenSquad data root ---
     if _agent_dir:
-        # Workspace root: prefer syscfg authoritative value, fall back to _project_root derived from agent path
-        ws_root = _workspace_root or _project_root or ""
-        ws_work_dir = os.path.join(ws_root, "workspace") if ws_root else ""
+        data_root = _data_root or _project_root or ""
+        project_cwd = _resolve_session_project_cwd()
+        if project_cwd:
+            project_block = (
+                f"**Current Project Working Directory** (user project for this session):\n"
+                f"- Path: `{project_cwd}`\n"
+                f"- This is the project folder chosen when the session started (folder picker / "
+                f"working-directory API). Put code, documents, and collaboration outputs here.\n"
+                f"- Default cwd for shell and file tools resolves to this path.\n"
+            )
+        else:
+            project_block = (
+                "**Current Project Working Directory**:\n"
+                "- (Not set for this session yet.)\n"
+                "- Do **not** treat the OpenSquad data root below as the user project. "
+                "The project path is determined when a new session starts (folder picker).\n"
+                "- Call `workspace.get_current()` and read `session_cwd` / `workspace_root` "
+                "after the user selects a project folder.\n"
+            )
         system_vars["AGENT_WORKSPACE"] = (
-            f"**Currently Active Workspace Root**:\n"
-            f"- Path: `{ws_root}`\n"
-            f"- Contains: agents/ (each agent's directory), workspace/ (shared working directory), data/ (data), prompts/, collab_cards/\n\n"
-            f"**Shared Working Directory (where project files/collaboration outputs go)**:\n"
-            f"- Path: `{ws_work_dir}`\n"
-            f"- Note: All code, documents, and output files that need to be persisted go here. Shared by all agents.\n\n"
+            f"{project_block}\n"
+            f"**OpenSquad Data Root** (agent runtime / data storage — NOT the user project):\n"
+            f"- Path: `{data_root}`\n"
+            f"- Contains: agents/ (each agent's directory), data/ (logs/history), "
+            f"collab_cards/, model_cards/, plugins/, skills/, and optionally workspace/ "
+            f"(legacy default shared folder — only a fallback when no session project is set)\n"
+            f"- Never assume user project files live here.\n\n"
             f"**Private Directory (your personal space)**:\n"
             f"- Path: `{_agent_dir}`\n"
-            f"- Contains: agent.md (permanent memory), config.json (config), role.md (role definition), data/ (session/state), skills/ (skill packages)\n"
+            f"- Contains: agent.md (permanent memory), config.json (config), role.md (role definition), "
+            f"data/ (session/state), skills/ (skill packages)\n"
             f"- Note: Only you read/write here. agent.md path: `{_agent_md_path}`\n\n"
-            f"**Workspace Management**:\n"
-            f"- Use `workspace.get_current()` to query current workspace details\n"
-            f"- Use `workspace.create(path)` to create a new workspace\n"
-            f"- Use `workspace.migrate(source, target)` to migrate data to a new workspace"
+            f"**Path helpers**:\n"
+            f"- Use `workspace.get_current()` to query the live project cwd (`session_cwd` / `workspace_root`)\n"
+            f"- Use `workspace.create(path)` / `workspace.migrate(source, target)` for OpenSquad data workspaces"
         )
     else:
         system_vars["AGENT_WORKSPACE"] = "(Agent working directory not configured.)"

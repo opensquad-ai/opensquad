@@ -34,23 +34,55 @@
 | `image_steps` | number | 否 | 文生图采样步数（StepFun 等），默认 8 |
 | `image_cfg_scale` | number | 否 | 文生图 CFG（StepFun 等），默认 1.0 |
 | `audio_output_voice` | string | 否 | 音频输出语音角色，默认 "alloy" |
+| `asr_protocol` | string | 否 | ASR 协议：`stepfun_sse`（默认，StepFun `/audio/asr/sse`）或 `openai_transcriptions`（OpenAI `/audio/transcriptions`，含本地 Whisper） |
+| `builtin_service` | string | 否 | 内置服务名，如 `whisper`：运行时用系统 Whisper 地址覆盖 `base_url` |
+| `is_builtin` | boolean | 否 | 是否为系统内置模型卡（列表展示用） |
+| `group_asr` | boolean | 否 | 是否作为群聊 STT 模型卡 |
+| `auto_asr` | boolean | 否 | 是否作为自动转写相关标记 |
 
-### Agent `voice` 段（StepAudio）
+### Agent `voice` 段（语音绑定）
 
 在 Agent `config.json` 中可配置：
 
 ```json
 "voice": {
-  "asr_card": "stepaudio-2.5-asr",
+  "asr_card": "builtin-whisper-asr",
   "tts_card": "stepaudio-2.5-tts",
   "realtime_card": "stepaudio-2.5-realtime",
   "realtime_voice": "linjiajiejie"
 }
 ```
 
-- `asr_card`：`asr_tts.transcribe_audio_file` 使用的 ASR 模型卡
-- `tts_card`：`asr_tts.synthesize_speech` 使用的 TTS 模型卡（仅工具主动调用时合成）
+- `asr_card`：Agent Web 录音 STT / `asr_tts.transcribe_audio_file` / mouthpiece 使用的 ASR 模型卡
+- `tts_card`：`asr_tts.synthesize_speech` 与气泡朗读使用的 TTS 模型卡
 - `realtime_card`：Agent Web 实时通话使用的 Realtime 模型卡
+
+系统会自动向工作区种子拷贝 **「系统内置 Whisper ASR」**（`builtin-whisper-asr`）与 **「系统内置 SenseVoice ASR」**（`builtin-sensevoice-asr`）。在 Agent Web 语音配置的「ASR 输入」中选中即可。
+
+- Whisper：需启动 Whisper 插件服务（或开启插件 `auto_start`）
+- SenseVoice：模型**不会**随 OpenSquad 首次安装自动下载。打开侧栏 **SenseVoice ASR** 插件面板点击「下载模型」（约 150MB，来自 ModelScope），再启动 SenseVoice 服务后即可使用
+
+#### 本地 OpenAI 兼容 ASR 模型卡示例
+
+任意提供 `POST {base_url}/audio/transcriptions` 的本地服务（Faster-Whisper HTTP、LocalAI 等）可按下列字段建卡，并在语音选项中切换：
+
+```json
+{
+  "name": "local-whisper-asr",
+  "title": "本地 Whisper ASR",
+  "api_protocol": "openai_compat",
+  "asr_protocol": "openai_transcriptions",
+  "provider": "Local",
+  "api_key": "sk-local",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "model_name": "whisper-1",
+  "is_audio": true,
+  "is_audio_output": false
+}
+```
+
+> **注意**：未设置 `asr_protocol` 的旧 StepAudio ASR 卡默认仍走 `stepfun_sse`。仅内置 Whisper（`builtin_service: "whisper"`）在省略该字段时会走 `openai_transcriptions`。
+
 | `tool_call_mode` | string | 否 | 工具调用模式：`auto`/`native`/`xml`，默认 `auto` |
 | `render_mode` | string | 否 | 渲染模式：`strict`（严格）/`full`（完整），默认 `strict` |
 | `enable_repetition_check` | boolean | 否 | 是否启用重复检测，默认 false |

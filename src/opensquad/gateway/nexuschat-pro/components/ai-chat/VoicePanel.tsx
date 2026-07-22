@@ -653,13 +653,34 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
         {showVoiceConfig && onVoiceBindingsChange ? (
           <div className="mb-2 rounded-lg border border-border/70 bg-bgLight/80 p-2 space-y-1.5">
             <p className="text-[10px] text-textMuted">
-              三项各自选择模型卡（在「模型」面板用 url / api_key / model 创建）。保存后立即生效。
+              三项各自选择模型卡。ASR 可选系统内置 Whisper / SenseVoice，或本地 OpenAI 兼容转写服务；TTS /
+              Realtime 在「模型」面板用 url / api_key / model 创建。保存后立即生效。
             </p>
             {([
               { key: 'asr_card' as const, label: 'ASR 输入' },
               { key: 'tts_card' as const, label: 'TTS 输出' },
               { key: 'realtime_card' as const, label: 'Realtime 双向' },
-            ]).map(({ key, label }) => (
+            ]).map(({ key, label }) => {
+              const options =
+                key === 'asr_card'
+                  ? [
+                      ...modelCards.filter((c) => c.is_audio && !c.is_audio_output),
+                      ...modelCards.filter((c) => !(c.is_audio && !c.is_audio_output)),
+                    ]
+                  : key === 'tts_card'
+                    ? [
+                        ...modelCards.filter((c) => c.is_audio_output && !c.is_audio),
+                        ...modelCards.filter((c) => !(c.is_audio_output && !c.is_audio)),
+                      ]
+                    : modelCards;
+              // Deduplicate while keeping role-preferred cards first.
+              const seen = new Set<string>();
+              const ordered = options.filter((c) => {
+                if (seen.has(c.name)) return false;
+                seen.add(c.name);
+                return true;
+              });
+              return (
               <div key={key} className="flex items-center gap-2">
                 <span className="text-[10px] text-textMuted w-16 shrink-0">{label}</span>
                 <select
@@ -669,14 +690,15 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
                   onChange={(e) => setDraftBindings((prev) => ({ ...prev, [key]: e.target.value }))}
                 >
                   <option value="">(none)</option>
-                  {modelCards.map((c) => (
+                  {ordered.map((c) => (
                     <option key={c.name} value={c.name}>
                       {c.title || c.name}
                     </option>
                   ))}
                 </select>
               </div>
-            ))}
+              );
+            })}
             <div className="flex items-center gap-2">
               <span className="text-[10px] text-textMuted w-16 shrink-0">音色</span>
               <input

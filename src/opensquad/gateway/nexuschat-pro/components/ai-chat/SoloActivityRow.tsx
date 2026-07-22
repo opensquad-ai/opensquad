@@ -25,7 +25,7 @@ import { parsePlanContent, PlanBlock, type PlanStep } from './PlanBlock';
 import { FollowScrollBox } from './FollowScrollBox';
 import { MarkdownScrollBody } from './MarkdownScrollBody';
 import { extractHtmlEmbed, isVisualizationToolName } from './HtmlEmbedBlock';
-import { PulseDotsStatus, pulseKindFromFlags } from './PulseDotsStatus';
+import { PulseDotsOrbit, PulseDotsStatus } from './PulseDotsStatus';
 import {
   type WorkflowExpandLevel,
   workflowExpandFlags,
@@ -477,7 +477,9 @@ const TextChevronToggle: React.FC<{
   /** Filename substring in primary — dashed underline + click (does not toggle) */
   fileLabel?: string;
   onFileClick?: () => void;
-}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick }) => {
+  /** Dot-matrix orbit before the title (e.g. live “Working for”) */
+  leadingPulse?: boolean;
+}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse }) => {
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
   const faint = errored
@@ -533,8 +535,9 @@ const TextChevronToggle: React.FC<{
     type="button"
     onClick={onToggle}
     style={{ color: faint }}
-    className="group inline-flex items-baseline gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
+    className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
   >
+    {leadingPulse ? <PulseDotsOrbit size={depth === 0 ? 16 : 14} /> : null}
     <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
       {shimmer ? <ShimmerLabel color={faint}>{title}</ShimmerLabel> : title}
     </span>
@@ -1010,49 +1013,18 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     turnStartedMs ??
     (typeof block.started_ms === 'number' ? block.started_ms : undefined);
 
-  const classicPulseKind = pulseKindFromFlags({
-    thinking: thinkingActive,
-    working:
-      hasRunning ||
-      planningActive ||
-      hasLiveCompression ||
-      (isLiveTurn && !thinkingActive && !showNextPlanning),
-  });
-
   const renderOuterToggle = (opts?: { shimmer?: boolean; running?: boolean }) => {
-    if (embedVisualizations && isLiveTurn) {
-      const steps = Math.max(displayLines.length, block.events?.length || 0);
-      return (
-        <button
-          type="button"
-          onClick={toggleOuter}
-          className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
-        >
-          <PulseDotsStatus
-            kind={showNextPlanning ? 'preparing' : classicPulseKind}
-            startedMs={liveStartedMs}
-            stepCount={steps > 0 ? steps : undefined}
-          />
-          <span
-            className="text-[13px] font-normal leading-none shrink-0"
-            style={{
-              color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)',
-            }}
-          >
-            {outerOpen ? '⌄' : '>'}
-          </span>
-        </button>
-      );
-    }
+    const running = opts?.running ?? isLiveTurn;
     return (
       <TextChevronToggle
         primary={summary.primary}
         secondary={summary.secondary}
         open={outerOpen}
         onToggle={toggleOuter}
-        running={opts?.running ?? isLiveTurn}
+        running={running}
         shimmer={opts?.shimmer}
         depth={0}
+        leadingPulse={!!running}
       />
     );
   };

@@ -145,6 +145,7 @@ _DEFAULT_PORTS = {
     "external_adapter": 9700,
     "websearch": 9001,
     "whisper": 5001,
+    "sensevoice": 7101,
 }
 
 _ENV_PORT_MAP = {
@@ -210,6 +211,13 @@ def whisper_url() -> str:
     if explicit:
         return explicit
     return f"http://127.0.0.1:{port('whisper')}"
+
+
+def sensevoice_url() -> str:
+    explicit = get("services", "sensevoice_url", None)
+    if explicit:
+        return explicit
+    return f"http://127.0.0.1:{port('sensevoice')}"
 
 
 def websearch_url() -> str:

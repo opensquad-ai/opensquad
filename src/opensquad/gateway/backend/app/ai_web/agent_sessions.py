@@ -78,7 +78,9 @@ class AgentSessionReader:
         }
         # LRU cache: sid -> {"data": ..., "mtime": ...}
         self._cache: OrderedDict[str, dict] = OrderedDict()
-        self._cache_max_size = 10
+        self._cache_max_size = 32
+        # Lightweight session-list metadata cache: sid -> {mtime, title, preview, created_at, last_updated}
+        self._list_meta_cache: dict[str, dict[str, Any]] = {}
         # mtime cache for current_session.json — avoid re-parsing unchanged large files
         self._current_session_mtime: float | None = None
         # Load current session from disk
@@ -124,6 +126,7 @@ class AgentSessionReader:
         """Force the next read to reload current_session.json from disk."""
         self._current_session_mtime = None
         self._cache.clear()
+        self._list_meta_cache.clear()
         self._reload()
 
     # ---- LRU cache ----
@@ -145,7 +148,13 @@ class AgentSessionReader:
         while len(self._cache) > self._cache_max_size:
             self._cache.popitem(last=False)
 
-    def _cache_get(self, sid: str) -> dict | None:
+    def _cache_get(self, sid: str, *, deep: bool = False) -> dict | None:
+        """Return cached session data.
+
+        By default returns a shallow structural copy (dict + list copies of
+        messages/events) to avoid expensive deepcopy on every API hit.
+        Pass deep=True when the caller will mutate nested message objects.
+        """
         if sid not in self._cache:
             return None
         entry = self._cache[sid]
@@ -155,7 +164,14 @@ class AgentSessionReader:
             del self._cache[sid]
             return None
         self._cache.move_to_end(sid)
-        return copy.deepcopy(entry["data"])
+        data = entry["data"]
+        if deep:
+            return copy.deepcopy(data)
+        out = dict(data)
+        for key in ("messages", "events", "archived_messages", "archived_events"):
+            if isinstance(out.get(key), list):
+                out[key] = list(out[key])
+        return out
 
     # ---- internal helpers ----
 
@@ -188,7 +204,11 @@ class AgentSessionReader:
         return self.session_data.get("id")
 
     def get_session_list(self) -> list[dict[str, Any]]:
-        """Return list of all sessions (current + history), newest first."""
+        """Return list of all sessions (current + history), newest first.
+
+        Uses a per-file mtime metadata cache so repeated list refreshes (sidebar
+        polling) do not re-parse large history JSON files.
+        """
         # Always force-reload: after new_session the mtime cache can lag (esp. Windows)
         # and the sidebar would keep showing the previous current session.
         self._reload(force=True)
@@ -206,81 +226,35 @@ class AgentSessionReader:
             except Exception:
                 return None, None
 
-        def _parse_iso_ms(value: str | None) -> float | None:
-            if not value or not isinstance(value, str):
-                return None
-            s = value.strip()
-            if not s:
-                return None
-            try:
-                if s.endswith("Z"):
-                    s = s[:-1] + "+00:00"
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    # Storage convention: naive → UTC (matches time_utils.utc_from_iso)
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.timestamp() * 1000.0
-            except Exception:
-                return None
-
-        def _latest_activity_iso(data: dict | None, file_path: str | None = None) -> str | None:
-            """Best-effort last activity: max(last_updated, message/event ts, file mtime)."""
-            candidates: list[float] = []
-            if isinstance(data, dict):
-                for key in ("last_updated", "created_at"):
-                    raw = data.get(key)
-                    ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
-                    if ms is not None:
-                        candidates.append(ms)
-                for msg in data.get("messages") or []:
-                    if isinstance(msg, dict):
-                        raw = msg.get("timestamp")
-                        ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
-                        if ms is not None:
-                            candidates.append(ms)
-                for evt in data.get("events") or []:
-                    if isinstance(evt, dict):
-                        raw = evt.get("timestamp")
-                        ms = _parse_iso_ms(raw if isinstance(raw, str) else None)
-                        if ms is not None:
-                            candidates.append(ms)
-            if file_path:
-                try:
-                    candidates.append(os.path.getmtime(file_path) * 1000.0)
-                except Exception:
-                    pass
-            if not candidates:
-                return None
-            best = max(candidates)
-            return datetime.fromtimestamp(best / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        def _pick_ts(data: dict | None, file_path: str | None = None) -> tuple[str | None, str | None]:
+        def _pick_ts_light(data: dict | None, file_path: str | None = None) -> tuple[str | None, str | None]:
+            """Prefer top-level fields + file mtime; do not scan all messages/events."""
             created = (data or {}).get("created_at") if isinstance(data, dict) else None
             updated = (data or {}).get("last_updated") if isinstance(data, dict) else None
-            if file_path and (not created or not updated):
+            if file_path:
                 f_created, f_updated = _file_ts(file_path)
                 created = created or f_created
-                updated = updated or f_updated
-            # Prefer freshest activity so sidebar age tracks recent chats even when
-            # the stored last_updated field lagged behind message timestamps.
-            activity = _latest_activity_iso(data, file_path)
-            if activity:
-                updated = activity
-            # Never leave both empty — sidebar needs a displayable age.
+                # File mtime is a reliable activity signal without parsing messages.
+                updated = f_updated or updated
             if not created and not updated:
                 now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 return now, now
             return created or updated, updated or created
 
         def _extract_title(messages: list, fallback: str) -> str:
-            for m in messages:
+            # Only scan a small prefix — enough for title tags / first user turn.
+            head = messages[:12] if isinstance(messages, list) else []
+            for m in head:
+                if not isinstance(m, dict):
+                    continue
                 if m.get("role") == "assistant":
                     match = re.search(r"<title>(.*?)</title>", m.get("content", "") or "", re.DOTALL)
                     if match:
                         t = match.group(1).strip()
                         if t:
                             return t
-            for m in messages:
+            for m in head:
+                if not isinstance(m, dict):
+                    continue
                 if m.get("role") == "user":
                     content = (m.get("content", "") or "").strip()
                     if content:
@@ -292,13 +266,65 @@ class AgentSessionReader:
             return fallback
 
         def _extract_preview(messages: list) -> str:
-            for m in reversed(messages):
+            if not isinstance(messages, list) or not messages:
+                return ""
+            # Prefer last few messages only (avoid full reverse scan of huge arrays).
+            tail = messages[-8:]
+            for m in reversed(tail):
+                if not isinstance(m, dict):
+                    continue
                 if m.get("role") == "user":
-                    content = m.get("content", "").strip()
+                    content = (m.get("content", "") or "").strip()
                     if content:
                         content = re.sub(r"<image>.*?</image>", "[image]", content)
                         return content[:80]
             return ""
+
+        def _meta_from_data(sid: str, data: dict | None, fp: str | None, mtime: float | None) -> dict[str, Any]:
+            messages = (data or {}).get("messages", []) if isinstance(data, dict) else []
+            title = ""
+            if isinstance(data, dict) and data.get("title"):
+                title = str(data.get("title") or "").strip()
+            if not title:
+                title = _extract_title(messages if isinstance(messages, list) else [], sid)
+            preview = _extract_preview(messages if isinstance(messages, list) else [])
+            created_at, last_updated = _pick_ts_light(data if isinstance(data, dict) else None, fp)
+            return {
+                "mtime": mtime,
+                "title": title or sid,
+                "preview": preview,
+                "created_at": created_at,
+                "last_updated": last_updated,
+            }
+
+        def _get_list_meta(sid: str, fp: str) -> dict[str, Any]:
+            try:
+                mtime = os.path.getmtime(fp)
+            except OSError:
+                mtime = None
+            cached_meta = self._list_meta_cache.get(sid)
+            if cached_meta is not None and mtime is not None and cached_meta.get("mtime") == mtime:
+                return cached_meta
+
+            # Prefer full-session LRU (already parsed) without re-reading disk.
+            session_cached = self._cache_get(sid)
+            data_for_meta: dict | None = None
+            if session_cached is not None:
+                data_for_meta = session_cached
+            else:
+                try:
+                    with open(fp, encoding="utf-8") as jf:
+                        raw = json.load(jf)
+                    if isinstance(raw, dict):
+                        data_for_meta = raw
+                    elif isinstance(raw, list):
+                        data_for_meta = {"id": sid, "messages": raw, "title": None}
+                except Exception:
+                    data_for_meta = None
+
+            meta = _meta_from_data(sid, data_for_meta, fp, mtime)
+            self._list_meta_cache[sid] = meta
+            return meta
 
         # 1. Current session
         curr_id = self.session_data.get("id")
@@ -307,7 +333,7 @@ class AgentSessionReader:
             messages = self.session_data.get("messages", [])
             title = self.session_data.get("title") or _extract_title(messages, curr_id)
             preview = _extract_preview(messages)
-            created_at, last_updated = _pick_ts(self.session_data, self.current_session_file)
+            created_at, last_updated = _pick_ts_light(self.session_data, self.current_session_file)
             sessions.append(
                 {
                     "id": curr_id,
@@ -329,50 +355,30 @@ class AgentSessionReader:
                     key=lambda x: os.path.getmtime(os.path.join(self.history_dir, x)),
                     reverse=True,
                 )
+                live_sids: set[str] = set()
                 for f in files:
                     sid = f.replace(".json", "")
+                    live_sids.add(sid)
                     if sid in seen_ids:
                         continue
-                    title = sid
-                    preview = ""
-                    data_for_ts: dict | None = None
                     fp = os.path.join(self.history_dir, f)
-                    cached = self._cache_get(sid)
-                    if cached is not None:
-                        messages = cached.get("messages", [])
-                        title = cached.get("title") or _extract_title(messages, sid)
-                        preview = _extract_preview(messages)
-                        data_for_ts = cached
-                    else:
-                        try:
-                            with open(fp, encoding="utf-8") as jf:
-                                content = jf.read()
-                                try:
-                                    data = json.loads(content)
-                                    if isinstance(data, dict):
-                                        data_for_ts = data
-                                        messages = data.get("messages", []) or []
-                                        title = data.get("title") or _extract_title(messages, sid)
-                                        preview = _extract_preview(messages)
-                                except Exception:
-                                    match = re.search(r"<title>(.*?)</title>", content, re.DOTALL)
-                                    if match:
-                                        title = match.group(1).strip() or sid
-                        except Exception:
-                            pass
-                    created_at, last_updated = _pick_ts(data_for_ts, fp)
+                    meta = _get_list_meta(sid, fp)
                     sessions.append(
                         {
                             "id": sid,
-                            "title": title,
-                            "preview": preview,
+                            "title": meta.get("title") or sid,
+                            "preview": meta.get("preview") or "",
                             "current": False,
                             "primary": sid == primary_id,
-                            "created_at": created_at,
-                            "last_updated": last_updated,
+                            "created_at": meta.get("created_at"),
+                            "last_updated": meta.get("last_updated"),
                         }
                     )
                     seen_ids.add(sid)
+                # Drop stale list-meta entries for deleted history files
+                stale = [k for k in self._list_meta_cache if k not in live_sids and k != curr_id]
+                for k in stale:
+                    self._list_meta_cache.pop(k, None)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")
 
@@ -409,6 +415,7 @@ class AgentSessionReader:
             ok = _write_json(self.current_session_file, self.session_data)
             if ok:
                 self._current_session_mtime = None
+                self._list_meta_cache.pop(session_id, None)
             return ok
 
         # History file
@@ -437,6 +444,7 @@ class AgentSessionReader:
             if not _write_json(file_path, data):
                 return False
             self._cache.pop(session_id, None)
+            self._list_meta_cache.pop(session_id, None)
             return True
         except Exception as e:
             logger.error(f"Failed to rename session {session_id}: {e}")
@@ -497,12 +505,19 @@ class AgentSessionReader:
             return None
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a history session file from disk."""
-        # Cannot delete the current session
+        """Delete a history session file from disk.
+
+        Cannot delete the agent's current active session (empty or not).
+        Empty current chats are abandoned via Agent ``new_session`` (which
+        archives them into history/), then deleted as history files.
+        """
+        self._reload(force=True)
+        # Cannot delete the current session — agent owns current_session.json
         if session_id == self.session_data.get("id"):
             return False
         # Remove from cache
         self._cache.pop(session_id, None)
+        self._list_meta_cache.pop(session_id, None)
         file_path = os.path.join(self.history_dir, f"{session_id}.json")
         if os.path.exists(file_path):
             try:
@@ -517,24 +532,24 @@ class AgentSessionReader:
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 
     async def async_get_session_list(self) -> list[dict[str, Any]]:
-        return self.get_session_list()
+        return await asyncio.to_thread(self.get_session_list)
 
     async def async_get_current_session_id(self) -> str:
-        return self.get_current_session_id()
+        return await asyncio.to_thread(self.get_current_session_id)
 
     async def async_get_session_history(self, session_id: str) -> dict[str, Any] | None:
-        return self.get_session_history(session_id)
+        return await asyncio.to_thread(self.get_session_history, session_id)
 
     async def async_get_session_history_paged(
         self, session_id: str, offset: int = 0, limit: int = 50
     ) -> dict[str, Any] | None:
-        return self.get_session_history_paged(session_id, offset, limit)
+        return await asyncio.to_thread(self.get_session_history_paged, session_id, offset, limit)
 
     async def async_delete_session(self, session_id: str) -> bool:
-        return self.delete_session(session_id)
+        return await asyncio.to_thread(self.delete_session, session_id)
 
     async def async_rename_session(self, session_id: str, title: str) -> bool:
-        return self.rename_session(session_id, title)
+        return await asyncio.to_thread(self.rename_session, session_id, title)
 
     def get_session_history_paged(
         self,
@@ -666,15 +681,23 @@ class AgentSessionReader:
 
         has_more = (total_messages - offset - limit) > 0
 
+        # Archived content only on the first page — later pages would duplicate
+        # a potentially huge archived_* payload on every scroll-up request.
+        if offset == 0:
+            archived_messages = full.get("archived_messages") or []
+            archived_events = full.get("archived_events") or []
+        else:
+            archived_messages = []
+            archived_events = []
+
         return {
             "id": session_id,
+            "title": full.get("title"),
+            "model_card": full.get("model_card"),
             "messages": paged_messages,
             "events": paged_events,
-            # Archived content is returned in full on every page (no
-            # pagination) so the frontend can render the collapsed
-            # "已归档" section regardless of which page is loaded.
-            "archived_messages": full.get("archived_messages") or [],
-            "archived_events": full.get("archived_events") or [],
+            "archived_messages": archived_messages,
+            "archived_events": archived_events,
             "total_messages": total_messages,
             "total_events": total_events,
             "has_more": has_more,

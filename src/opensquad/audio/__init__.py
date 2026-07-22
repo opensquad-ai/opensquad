@@ -136,6 +136,45 @@ def http_base_url(card: dict[str, Any]) -> str:
     return (card.get("base_url") or "").strip().rstrip("/")
 
 
+def resolve_asr_base_url(card: dict[str, Any]) -> str:
+    """Resolve ASR HTTP base URL, rewriting builtin local ASR services.
+
+    Builtin cards set ``builtin_service`` (e.g. ``whisper`` / ``sensevoice``).
+    Their placeholder ``base_url`` is ignored; we use the live plugin service
+    URL + ``/v1`` so the OpenAI-compatible client hits
+    ``POST …/v1/audio/transcriptions``.
+    """
+    builtin = (card.get("builtin_service") or "").strip().lower()
+    if builtin in ("whisper", "sensevoice"):
+        if builtin == "whisper":
+            root = (syscfg.whisper_url() or "").strip().rstrip("/")
+        else:
+            root = (syscfg.sensevoice_url() or "").strip().rstrip("/")
+        if not root:
+            return http_base_url(card)
+        if root.endswith("/v1"):
+            return root
+        return f"{root}/v1"
+    return http_base_url(card)
+
+
+def asr_protocol_of(card: dict[str, Any] | None) -> str:
+    """Return ASR wire protocol for a voice card (default: stepfun_sse)."""
+    if not card:
+        return "stepfun_sse"
+    proto = (card.get("asr_protocol") or "").strip().lower()
+    if proto in ("openai_transcriptions", "openai", "whisper", "sensevoice"):
+        return "openai_transcriptions"
+    if proto in ("stepfun_sse", "stepfun"):
+        return "stepfun_sse"
+    if proto:
+        return proto
+    # Omitted asr_protocol: builtin local ASR → OpenAI transcriptions; else StepFun SSE.
+    if (card.get("builtin_service") or "").strip().lower() in ("whisper", "sensevoice"):
+        return "openai_transcriptions"
+    return "stepfun_sse"
+
+
 def ws_realtime_url(card: dict[str, Any]) -> str:
     """Build realtime websocket URL from card base_url + model_name.
 

@@ -39,31 +39,39 @@ class ToolTurnExecutor:
         tc_log.info("[runner] [tool] Executing %d parallel tool call(s)", len(tool_calls))
         tool_results: list[dict[str, Any]] = []
         control_flow_return: tuple[bool, str, bool] | None = None
+        stopped_by_user = False
 
-        for call_index, (tool_name, tool_args_dict) in enumerate(tool_calls):
-            # Stop between tools so a partial batch can finish quickly after abort.
+        def _stop_requested() -> bool:
             try:
                 from opensquad.input_hub import input_hub
 
-                if input_hub.is_stop_requested():
-                    for rest_index in range(call_index, len(tool_calls)):
-                        rest_name, _ = tool_calls[rest_index]
-                        rid = f"call_stop_{rest_index}"
-                        await self.runner._emit(
-                            "tool_call",
-                            {"id": rid, "name": rest_name, "args": "{}"},
-                        )
-                        await self.runner._emit(
-                            "tool_result",
-                            {
-                                "id": rid,
-                                "name": rest_name,
-                                "result": "Cancelled: stopped by user",
-                            },
-                        )
-                    break
+                sid = getattr(self.runner, "_turn_sid", "") or ""
+                if sid and input_hub.is_session_stop_requested(sid):
+                    return True
+                return bool(input_hub.is_stop_requested())
             except Exception:
-                pass
+                return False
+
+        for call_index, (tool_name, tool_args_dict) in enumerate(tool_calls):
+            # Stop between tools so a partial batch can finish quickly after abort.
+            if _stop_requested():
+                stopped_by_user = True
+                for rest_index in range(call_index, len(tool_calls)):
+                    rest_name, _ = tool_calls[rest_index]
+                    rid = f"call_stop_{rest_index}"
+                    await self.runner._emit(
+                        "tool_call",
+                        {"id": rid, "name": rest_name, "args": "{}"},
+                    )
+                    await self.runner._emit(
+                        "tool_result",
+                        {
+                            "id": rid,
+                            "name": rest_name,
+                            "result": "Cancelled: stopped by user",
+                        },
+                    )
+                break
 
             entry = await self._execute_single_tool(call_index, tool_name, tool_args_dict, tc_log)
             if entry.get("control_flow_return") is not None:
@@ -73,10 +81,27 @@ class ToolTurnExecutor:
                 continue
             tool_results.append(entry)
 
+            # Also bail after a tool if Stop arrived mid-execution.
+            if _stop_requested():
+                stopped_by_user = True
+                break
+
         if control_flow_return:
             return ToolExecutionResult(handled=True, return_value=control_flow_return)
 
         await self._batch_commit(tool_results)
+
+        if stopped_by_user or _stop_requested():
+            tc_log.info("[runner] [tool] Stopped by user after %d tool result(s)", len(tool_results))
+            perf_event(
+                "runner",
+                "tool_batch_stopped",
+                agent_id=getattr(self.runner, "_agent_id", ""),
+                tool_count=len(tool_results),
+                elapsed_ms=int((__import__("time").perf_counter() - t0) * 1000),
+            )
+            # should_stop=True so the turn loop does not call the LLM again.
+            return ToolExecutionResult(handled=True, return_value=(True, "", False))
 
         tc_log.info("[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(tool_results))
         if saved_msg:

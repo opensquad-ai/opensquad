@@ -828,8 +828,61 @@ class SystemHandlerMixin:
 
     def _handle_list_model_cards(self):
         """GET /api/model-cards — list model cards."""
-        cards = self._list_cards(self.state.model_cards_dir)
+        try:
+            from opensquad.workspace_utils import ensure_builtin_model_cards
+
+            ensure_builtin_model_cards()
+        except Exception:
+            pass
+        cards = self._list_model_cards_rich(self.state.model_cards_dir)
         return self._send_json({"cards": cards})
+
+    def _list_model_cards_rich(self, dir_path: str) -> list:
+        """List model cards with voice capability fields for Agent Web UI."""
+        cards = []
+        if not os.path.isdir(dir_path):
+            return cards
+        for fname in sorted(os.listdir(dir_path)):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(dir_path, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                with open(fpath, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = {}
+            card_name = fname[:-5]
+            cards.append(
+                {
+                    "name": card_name,
+                    "title": data.get("title", card_name),
+                    "api_protocol": data.get("api_protocol", ""),
+                    "asr_protocol": data.get("asr_protocol", ""),
+                    "provider": data.get("provider", ""),
+                    "model_name": data.get("model_name", ""),
+                    "base_url": data.get("base_url", ""),
+                    "token_max": data.get("token_max", 0),
+                    "temperature": data.get("temperature", 0),
+                    "frequency_penalty": data.get("frequency_penalty", 0.0),
+                    "presence_penalty": data.get("presence_penalty", 0.0),
+                    "top_k": data.get("top_k", 0),
+                    "is_think": data.get("is_think", False),
+                    "is_image": data.get("is_image", False),
+                    "is_audio": data.get("is_audio", False),
+                    "is_video": data.get("is_video", False),
+                    "is_audio_output": data.get("is_audio_output", False),
+                    "is_image_output": data.get("is_image_output", False),
+                    "audio_output_voice": data.get("audio_output_voice", "alloy"),
+                    "is_builtin": bool(data.get("is_builtin", False)),
+                    "builtin_service": data.get("builtin_service", ""),
+                    "group_asr": bool(data.get("group_asr", False)),
+                    "auto_asr": bool(data.get("auto_asr", False)),
+                    "render_mode": data.get("render_mode", "strict"),
+                }
+            )
+        return cards
 
     def _handle_get_model_card(self, card_name: str):
         """GET /api/model-cards/{name} — get a model card."""
