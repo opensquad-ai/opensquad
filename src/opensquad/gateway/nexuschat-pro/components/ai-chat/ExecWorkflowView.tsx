@@ -1,10 +1,9 @@
 /**
  * ExecWorkflowView — embedded Agent Web chat for a scheduled-task execution.
  *
- * Replaces the old "Open task flow in session" navigation: the delegated
- * session's timeline (thoughts / tool calls / results) renders inline in the
- * execution-list right pane, with a full Agent Web composer (model picker,
- * effort, skills, send) so the user can follow up in the same window.
+ * Live WS timeline (dialogue → tool-flow → dialogue) plus token stats, matching
+ * the main Agent Web pane. Disk hydrate is a fallback; soft-poll alone is not
+ * used while a session is open (it caused clumped logs and delayed follow-ups).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -20,8 +19,9 @@ import {
 } from '../../services/api';
 import { SessionChatPane } from './SessionChatPane';
 import { AgentWebComposer, type ComposerSendPayload } from './AgentWebComposer';
-import { ModePicker, type AgentMode } from './ModePicker';
-import { EffortPicker, type ReasoningEffort } from './EffortPicker';
+import { type AgentMode } from './ModePicker';
+import { type ReasoningEffort } from './EffortPicker';
+import { useExecSessionLiveTimeline } from '../../hooks/useExecSessionLiveTimeline';
 
 interface Props {
   agentName: string;
@@ -63,6 +63,14 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
   const [stopping, setStopping] = useState(false);
   const [sendErr, setSendErr] = useState<string | null>(null);
 
+  // Session history + live events live on the delegated agent.
+  const sessionAgentId = (task?.delegate_agent || agentName || '').trim() || agentName;
+
+  const { timeline, tokenStats, appendOptimisticUser, busy: liveBusy } = useExecSessionLiveTimeline(
+    sessionAgentId,
+    exec.session_id,
+  );
+
   useEffect(() => {
     modelCardAPI.getCards().then((r) => setCards(r.cards || [])).catch(() => {});
     skillAPI.getSkills().then((r) => setSkills(r.skills || [])).catch(() => {});
@@ -89,6 +97,9 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
       if (!text) return;
       setSending(true);
       setSendErr(null);
+      // Optimistic: show the user bubble immediately under the prior turn,
+      // then stream agent tool-flow via WS (not a delayed HTTP poll rebuild).
+      appendOptimisticUser(text);
       try {
         await scheduledTaskAPI.sendFollowup(agentName, exec.id, text, modelCard);
       } catch (e: any) {
@@ -97,7 +108,7 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
         setSending(false);
       }
     },
-    [agentName, exec.id, exec.session_id, modelCard, t],
+    [agentName, exec.id, exec.session_id, modelCard, t, appendOptimisticUser],
   );
 
   const handleStop = useCallback(async () => {
@@ -149,17 +160,17 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
         </div>
       </div>
 
-      {/* Timeline (delegated session) — soft-poll while running; never remount */}
+      {/* Timeline — live WS when session exists */}
       <div className="flex-1 min-h-0 flex flex-col">
         {hasSession ? (
           <SessionChatPane
             key={`exec-${exec.id}-${exec.session_id}`}
-            agentId={agentName}
+            agentId={sessionAgentId}
             sessionId={exec.session_id!}
+            liveTimeline={timeline}
             isSolo
             columnClass="max-w-3xl mx-auto w-full"
             agentName={task?.delegate_agent || agentName}
-            pollIntervalMs={exec.status === 'running' ? 2500 : undefined}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-6 text-center">
@@ -180,7 +191,7 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
         agentId={agentName}
         columnClass="max-w-3xl mx-auto w-full"
         disabled={!hasSession}
-        busy={sending}
+        busy={sending || liveBusy}
         agentMode={mode}
         onModeChange={setMode}
         modelCards={cards}
@@ -191,11 +202,12 @@ export const ExecWorkflowView: React.FC<Props> = ({ agentName, rootPath, exec, t
         reasoningEffort={effort}
         onEffortChange={setEffort}
         cwd={task?.workspace || rootPath}
-        tokenStats={null}
+        tokenStats={tokenStats}
         availableSkills={skills}
         skillsLoading={false}
         onOpenSkills={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'skills' }))}
         onSend={onSend}
+        onStop={() => { void handleStop(); }}
         onActivate={() => {}}
       />
     </div>

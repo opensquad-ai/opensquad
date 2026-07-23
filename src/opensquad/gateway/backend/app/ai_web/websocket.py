@@ -197,11 +197,7 @@ class AgentWebSocketHandler:
                     # scheduled tasks it never fires and session_id stayed null
                     # ("尚未创建会话"). Capturing from the first event with a
                     # non-empty sid makes the workflow loadable immediately.
-                    if (
-                        user_id
-                        and isinstance(user_id, str)
-                        and user_id.startswith("scheduled-task:")
-                    ):
+                    if user_id and isinstance(user_id, str) and user_id.startswith("scheduled-task:"):
                         _st_exec_id = user_id.split(":", 1)[1]
                         _st_sess_id = str(message.get("sid") or "").strip()
                         if not _st_sess_id:
@@ -214,9 +210,7 @@ class AgentWebSocketHandler:
 
                                 set_execution_session_by_exec_id(_st_exec_id, _st_sess_id)
                             except Exception as _st_e:
-                                logger.warning(
-                                    "[WS] scheduled-task session capture failed: %s", _st_e
-                                )
+                                logger.warning("[WS] scheduled-task session capture failed: %s", _st_e)
                     if msg_type == "info":
                         try:
                             info_payload = message.get("content") or message.get("data") or {}
@@ -287,11 +281,7 @@ class AgentWebSocketHandler:
                         # scheduled-task execution that triggered this turn.
                         # user_id is "scheduled-task:{exec_id}" (set by
                         # ScheduledTaskManager._send_to_agent).
-                        if (
-                            user_id
-                            and isinstance(user_id, str)
-                            and user_id.startswith("scheduled-task:")
-                        ):
+                        if user_id and isinstance(user_id, str) and user_id.startswith("scheduled-task:"):
                             _exec_id = user_id.split(":", 1)[1]
                             _sess_id = ""
                             _c = message.get("content")
@@ -305,9 +295,7 @@ class AgentWebSocketHandler:
 
                                     set_execution_session_by_exec_id(_exec_id, _sess_id)
                                 except Exception as e:
-                                    logger.warning(
-                                        "[WS] scheduled-task session capture failed: %s", e
-                                    )
+                                    logger.warning("[WS] scheduled-task session capture failed: %s", e)
 
                     # Persist final assistant replies in Gateway WS history so refresh
                     # still works when the disk-session HTTP API is slow or unavailable.
@@ -325,7 +313,15 @@ class AgentWebSocketHandler:
                             )
 
                     if user_id:
-                        if user_id in ("adapter-user",) or user_id.startswith("feishu_"):
+                        if (
+                            user_id in ("adapter-user",)
+                            or user_id.startswith("feishu_")
+                            # Scheduled-task turns use a synthetic user_id with no
+                            # browser WS. Broadcast so ExecWorkflowView / Agent Web
+                            # panes watching this agent receive live events (sid-
+                            # filtered on the client) instead of HTTP-poll-only lag.
+                            or user_id.startswith("scheduled-task:")
+                        ):
                             await user_handler.broadcast_to_agent(agent_id, message)
                         else:
                             await user_handler.forward_to_user(user_id, agent_id, message)
@@ -335,7 +331,11 @@ class AgentWebSocketHandler:
                 elif action == "chat_response":
                     user_id = message.get("user_id")
                     if user_id:
-                        if user_id in ("adapter-user",) or user_id.startswith("feishu_"):
+                        if (
+                            user_id in ("adapter-user",)
+                            or user_id.startswith("feishu_")
+                            or user_id.startswith("scheduled-task:")
+                        ):
                             await user_handler.broadcast_to_agent(
                                 agent_id,
                                 {"type": "message", "role": "assistant", "content": message.get("content", "")},
