@@ -56,6 +56,8 @@ import {
   getCachedSessionTimelineMeta,
   SESSION_HISTORY_PAGE_SIZE,
 } from '../utils/sessionTimelineCache';
+import { pickSessionLiveTimeline } from '../utils/sessionLiveTimeline';
+import { useTextSelectionFreeze } from '../hooks/useTextSelectionFreeze';
 import {
   setSessionProjectPath,
   setSessionWorkspaceId,
@@ -85,6 +87,8 @@ import {
   resizeSplit,
   collectLeaves,
   findLeaf,
+  getFocusedPaneTabs,
+  parseContentTabKey,
   type WorkspaceStoreSnapshot,
   type ContentTab,
   type Workspace,
@@ -1136,9 +1140,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const sid = (eventSidRef.current || currentSessionIdRef.current || '').trim();
     if (sid) {
       setLiveTimelinesBySession((prev) => {
-        const cur =
-          prev[sid]
-          ?? (sid === (currentSessionIdRef.current || '') ? timelineRef.current : []);
+        // Never seed a missing bucket from timelineRef — after a parallel /
+        // scheduled-task current_session flip, timelineRef still holds the
+        // previous focused session and would contaminate the new sid.
+        const cur = prev[sid] ?? [];
         const next = updater(Array.isArray(cur) ? cur : []);
         const out = { ...prev, [sid]: next };
         liveTimelinesBySessionRef.current = out;
@@ -1151,6 +1156,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       setTimelineState(updater);
     }
   }, []);
+
+  // Freeze rendered chat while selecting text. Keep freeze after mouseup until
+  // the user clears the selection (click elsewhere) — otherwise live WS / scroll
+  // remounts DOM nodes and kills copy-paste.
+  const flatTimelineLive = useMemo(() => flattenArchivedSections(timeline), [timeline]);
+  const liveSelectView = useMemo(
+    () => ({ entries: flatTimelineLive, streaming: streamingText }),
+    [flatTimelineLive, streamingText],
+  );
+  const {
+    displayValue: selectFrozenView,
+    isFrozenRef: textSelectFrozenRef,
+  } = useTextSelectionFreeze(messagesContainerRef, liveSelectView);
+  const displayTimeline = selectFrozenView.entries;
+  const displayStreamingText = selectFrozenView.streaming;
 
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
@@ -1764,6 +1784,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   useLayoutEffect(() => {
     const el = messagesContainerRef.current;
     if (!el) return;
+    // Selecting / holding a text selection: never move scrollTop.
+    if (textSelectFrozenRef.current) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode)) return;
+
     const { scrollHeight, scrollTop, clientHeight } = el;
     const prevH = prevOuterScrollHeightRef.current;
     prevOuterScrollHeightRef.current = scrollHeight; // always track
@@ -1884,9 +1909,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // pane B's events overwrite the global timeline while A is still running.
     const onWs = (type: string, handler: (msg: AIWSMessage) => void) =>
       aiWsService.on(type, (msg: AIWSMessage) => {
+        // Prefer explicit msg.sid. Do NOT fall back to agentCurrentSessionId —
+        // scheduled-task parallel turns update that without stealing UI focus,
+        // and sid-less interactive events would land in the exec bucket.
         eventSidRef.current = String(
           (msg as any).sid
-          || agentCurrentSessionIdRef.current
           || currentSessionIdRef.current
           || '',
         ).trim();
@@ -3400,6 +3427,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             if (isCompressionHydration) {
               // Keep live message order + in-flight tool stream; disk snapshot
               // already has archived turns flattened into the normal timeline.
+              eventSidRef.current = currentSid || '';
               setTimeline((prev) => {
                 let merged = _mergeCompressionHydration(prev, nextEntries);
                 const bufferedWf = pendingHydrationWorkflowEventsRef.current;
@@ -3409,6 +3437,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 return merged;
               });
+              eventSidRef.current = '';
               // Restore CMD panels from disk; keep any live streams preferred.
               setShellStreams((live) => ({
                 ...rebuildShellStreamsFromTimeline(nextEntries),
@@ -3425,6 +3454,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               // If disk snapshot lags (common right after new session / early tools),
               // keep any already-rendered live workflow so the Worked/Working fold
               // does not vanish mid-turn.
+              // Write into the disk response's sid — not whatever UI focus was
+              // (parallel/scheduled current_session must not redirect hydrate).
+              eventSidRef.current = currentSid || '';
               setTimeline((prev) => {
                 const liveWfs = prev.filter(
                   (e) => e.kind === 'workflow' && !(e as { data: WorkflowBlock }).data.completed,
@@ -3446,6 +3478,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 }
                 return merged;
               });
+              eventSidRef.current = '';
               setShellStreams(rebuildShellStreamsFromTimeline(withBuffered));
               nextEntries = withBuffered;
             }
@@ -3883,6 +3916,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       if (typeof data === 'string') {
         sid = data;
+      }
+      const uid = String(msg.user_id || '').trim();
+      // Scheduled-task parallel spawn announces current_session for exec binding
+      // only — must NOT steal the interactive pane's focused session (that used
+      // to hydrate the focused chat into the new sid's live bucket → 会话串台).
+      if (uid.startsWith('scheduled-task:')) {
+        // Do not seed an empty live bucket here — that blocks disk hydrate in
+        // ExecWorkflowView until a full page refresh. First WS event for sid
+        // creates the bucket via setTimeline.
+        if (sid) {
+          requestSessionListRefresh(agentId, previousSid || sid);
+        }
+        return;
       }
       // Always track agent current — even while a history tab is focused.
       if (sid) {
@@ -5298,6 +5344,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // Always seal open workflow / Running tools — even when there is no streaming text
     // (e.g. hung tool_call with no result yet).
     setTimeline((prev) => {
+      const nowMs = Date.now();
       const updated = [...prev];
       for (let i = updated.length - 1; i >= 0; i--) {
         const entry = updated[i];
@@ -5312,14 +5359,32 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }
           return evt;
         });
+        const started =
+          typeof entry.data.started_ms === 'number'
+            ? entry.data.started_ms
+            : (typeof turnStartedMsRef.current === 'number'
+              ? turnStartedMsRef.current
+              : events[0]?.timestamp);
+        const elapsed =
+          typeof entry.data.elapsed_ms === 'number'
+            ? entry.data.elapsed_ms
+            : (typeof started === 'number' ? Math.max(0, nowMs - started) : undefined);
         updated[i] = {
           ...entry,
-          data: { ...entry.data, events, status: null, completed: true },
+          data: {
+            ...entry.data,
+            events,
+            status: null,
+            completed: true,
+            started_ms: typeof started === 'number' ? started : entry.data.started_ms,
+            elapsed_ms: elapsed,
+          },
         } as TimelineEntry;
         break;
       }
       return finalizeWorkflowAndAddMessage(updated, stoppedMsg);
     });
+    setTurnStartedMs(undefined);
     if (sid) {
       const st = { ...streamingTextBySessionRef.current };
       delete st[sid];
@@ -5586,18 +5651,22 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const loadSessionTimelineFast = useCallback(
     async (
       sessionId: string,
-      opts?: { forceFetch?: boolean; softRefresh?: boolean },
+      opts?: { forceFetch?: boolean; softRefresh?: boolean; allowNonCurrent?: boolean },
     ): Promise<boolean> => {
+      const stillTarget = () =>
+        opts?.allowNonCurrent || currentSessionIdRef.current === sessionId;
       const meta = getCachedSessionTimelineMeta(agentId, sessionId);
       const cached = meta?.entries;
       if (cached && cached.length > 0 && !opts?.forceFetch) {
         eventSidRef.current = sessionId;
         setTimeline(cached);
         eventSidRef.current = '';
-        setShellStreams(rebuildShellStreamsFromTimeline(cached));
-        loadingSessionIdRef.current = sessionId;
-        historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
-        setHasMoreHistory(!meta.complete);
+        if (!opts?.allowNonCurrent) {
+          setShellStreams(rebuildShellStreamsFromTimeline(cached));
+          loadingSessionIdRef.current = sessionId;
+          historyOffsetRef.current = meta.messageCount || cached.filter((e) => e.kind === 'message').length;
+          setHasMoreHistory(!meta.complete);
+        }
         // Complete cache: skip network. Incomplete: soft-refresh in background.
         if (meta.complete && !opts?.softRefresh) return true;
         void (async () => {
@@ -5608,7 +5677,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               0,
               SESSION_HISTORY_PAGE_SIZE,
             );
-            if (currentSessionIdRef.current !== sessionId) return;
+            if (!stillTarget()) return;
             const session = resp.session;
             if (!session) return;
             const total = session.total_messages ?? 0;
@@ -5621,6 +5690,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               meta.messageCount >= Math.min(SESSION_HISTORY_PAGE_SIZE, total)
             ) {
               return;
+            }
+            // Soft-refresh must not clobber a richer live bucket (e.g. WS already
+            // has the assistant reply that disk has not flushed yet).
+            const live = liveTimelinesBySessionRef.current[sessionId];
+            if (Array.isArray(live) && live.length > 0) {
+              const liveAsst = live.filter(
+                (e) => e.kind === 'message' && e.data.role === 'assistant' && String(e.data.content || '').trim(),
+              ).length;
+              const diskEntries = buildTimelineFromSession(
+                session.messages || [],
+                session.events || [],
+                session.archived_messages,
+                session.archived_events,
+              );
+              const diskAsst = diskEntries.filter(
+                (e) => e.kind === 'message' && e.data.role === 'assistant' && String(e.data.content || '').trim(),
+              ).length;
+              if (liveAsst >= diskAsst) return;
             }
             applySessionPayload(sessionId, session);
           } catch {
@@ -5637,7 +5724,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           0,
           SESSION_HISTORY_PAGE_SIZE,
         );
-        if (currentSessionIdRef.current !== sessionId) return false;
+        if (!stillTarget()) return false;
         const session = resp.session;
         if (session) {
           applySessionPayload(sessionId, session);
@@ -5803,29 +5890,57 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   /** Prepare UI/WS for sending into a session without aborting another pane's turn. */
-  const prepareSessionForSend = async (sessionId: string) => {
+  const prepareSessionForSend = async (
+    sessionId: string,
+    opts?: { stay?: boolean },
+  ) => {
+    viewingHistorySessionRef.current = false;
+    setViewingHistorySession(false);
+
     if (sessionId === currentSessionIdRef.current) {
-      viewingHistorySessionRef.current = false;
-      setViewingHistorySession(false);
       return;
     }
+
+    const liveBucket = liveTimelinesBySessionRef.current[sessionId];
+    const hasLiveContent = Array.isArray(liveBucket) && liveBucket.length > 0;
+
+    // stay=true (scheduled-task exec / parallel pane follow-up): route by
+    // session_id only. Do NOT steal the focused Agent Web session, and do NOT
+    // reload-from-disk when a live bucket already exists — disk/cache lag behind
+    // the WS-finalized assistant reply and would erase it before append.
+    if (opts?.stay) {
+      if (!hasLiveContent) {
+        try {
+          eventSidRef.current = sessionId;
+          await loadSessionTimelineFast(sessionId, { allowNonCurrent: true });
+          eventSidRef.current = '';
+        } catch (err: any) {
+          eventSidRef.current = '';
+          console.error('[AIChatPage] Failed to prepare stay-session for send:', err);
+        }
+      }
+      return;
+    }
+
     // Focus locally for outbound routing metadata, but do NOT wipe other
-    // panes' live timeline buckets. loadSessionTimelineFast writes into the
-    // per-sid map via setTimeline + eventSidRef.
+    // panes' live timeline buckets when this sid already has live content.
     pendingFilePushesRef.current = [];
     currentSessionIdRef.current = sessionId;
-    viewingHistorySessionRef.current = false;
     setCurrentSessionId(sessionId);
-    setViewingHistorySession(false);
     wsServiceRef.current?.setActiveSession(sessionId);
+
+    const meta = getSessionMeta(agentId, sessionId);
+    if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
+    else if (defaultCwd) setAgentCwd(defaultCwd);
+
+    if (hasLiveContent) {
+      return;
+    }
 
     try {
       eventSidRef.current = sessionId;
       await loadSessionTimelineFast(sessionId);
       eventSidRef.current = '';
-      const meta = getSessionMeta(agentId, sessionId);
-      if (meta?.projectPath?.trim()) setAgentCwd(meta.projectPath.trim());
-      else if (defaultCwd) setAgentCwd(defaultCwd);
     } catch (err: any) {
       eventSidRef.current = '';
       console.error('[AIChatPage] Failed to prepare session for send:', err);
@@ -5872,6 +5987,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [wsSnap, activeWorkspace]);
 
   const focusedPaneId = wsSnap.chrome.focusedPaneId;
+
+  /** Sidebar highlight: focused pane's active session tab (not backend session.current). */
+  const sidebarSelectedSessionId = useMemo(() => {
+    if (activeWorkspace && agentId) {
+      const tabs = getFocusedPaneTabs(agentId, activeWorkspace.id);
+      const tab = parseContentTabKey(tabs.activeKey);
+      if (tab?.kind === 'session') return tab.id;
+    }
+    return currentSessionId;
+  }, [wsSnap, activeWorkspace, agentId, currentSessionId]);
 
   // Ensure project files panel is open when a workspace is active (recover from prior close/clip)
   useEffect(() => {
@@ -6188,16 +6313,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     paneId: string,
     sessionId: string,
     payload: ComposerSendPayload,
+    opts?: { stay?: boolean },
   ) => {
     if (!activeWorkspace) return;
     setFocusedPane(agentId, paneId);
-    openContentTab(
-      agentId,
-      activeWorkspace.id,
-      { kind: 'session', id: sessionId },
-      paneId,
-    );
-    refreshWsSnap();
+    if (!opts?.stay) {
+      openContentTab(
+        agentId,
+        activeWorkspace.id,
+        { kind: 'session', id: sessionId },
+        paneId,
+      );
+      refreshWsSnap();
+    }
 
     if (autoSpeechEnabledRef.current) {
       unlockAutoTtsAudio();
@@ -6240,8 +6368,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
 
     // Other sessions may be busy — still send immediately (true parallel).
-    await prepareSessionForSend(sessionId);
+    await prepareSessionForSend(sessionId, { stay: opts?.stay });
     armOutboundTurnPending(sessionId);
+    // stay / cross-session: do not salvage focused-pane stream text into the
+    // target sid (and vice versa) — follow-up must only APPEND on that sid.
+    const sameFocused = sessionId === (currentSessionIdRef.current || '');
     deliverMessage(
       {
         text: payload.text,
@@ -6251,11 +6382,110 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         skillName: payload.skillName,
         sessionId,
       },
-      { clearInputState: false, salvageStream: true },
+      { clearInputState: false, salvageStream: sameFocused && !opts?.stay },
     );
   };
 
-  const makePaneHandlers = (paneId: string): PaneShellHandlers => ({
+  const makePaneHandlers = (paneId: string): PaneShellHandlers => {
+    const renderPendingFor = (sessionId: string): React.ReactNode => {
+      const queue = pendingMessages.filter((m) => m.sessionId === sessionId);
+      if (queue.length === 0) return null;
+      return (
+        <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
+          <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
+            <Clock size={11} className="text-primary flex-shrink-0" />
+            <span className="text-[11px] text-textMain font-semibold">
+              {t('aiChat.pendingCount', { count: queue.length })}
+            </span>
+            <span className="text-[10px] text-textMuted">
+              · ↗ {t('aiChat.pendingAutoSendHint')}
+            </span>
+            <div className="flex-1" />
+            <button
+              type="button"
+              onClick={handleSendNextPending}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors"
+              title={t('aiChat.sendNext')}
+            >
+              <Zap size={10} />
+              {t('aiChat.sendNext')}
+            </button>
+            <button
+              type="button"
+              onClick={handleCancelAllPending}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
+              title={t('aiChat.pendingClearAll')}
+            >
+              <X size={10} />
+              {t('aiChat.pendingClearAll')}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPendingCollapsed((c) => !c)}
+              className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
+              title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
+            >
+              {pendingCollapsed ? '▴' : '▾'}
+            </button>
+          </div>
+          {!pendingCollapsed && (
+            <div className="max-h-[200px] overflow-y-auto">
+              {queue.map((pm, idx) => {
+                const imgCount = pm.images.length;
+                const fileCount = pm.fileAtts.length;
+                const preview = (pm.text || '').replace(/\s+/g, ' ').trim();
+                return (
+                  <div
+                    key={pm.id}
+                    className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-primary/10 transition-colors"
+                  >
+                    <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
+                      {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
+                    </span>
+                    <div className="flex-1 min-w-0 flex items-center gap-2">
+                      {preview ? (
+                        <span className="truncate text-[12px] text-textMain">{preview}</span>
+                      ) : (
+                        <span className="text-[12px] italic text-textMuted">
+                          {imgCount > 0 || fileCount > 0
+                            ? t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })
+                            : t('aiChat.pendingLabel')}
+                        </span>
+                      )}
+                      {(imgCount > 0 || fileCount > 0) && preview && (
+                        <span className="flex-shrink-0 text-[10px] text-textMuted whitespace-nowrap">
+                          {t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
+                      <button
+                        type="button"
+                        onClick={() => handleSendPendingNow(pm.id)}
+                        className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
+                        title={t('aiChat.sendNow')}
+                      >
+                        <Zap size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleCancelPending(pm.id)}
+                        className="p-1 rounded text-textMuted hover:bg-primary/10 hover:text-textMain transition-colors"
+                        title={t('aiChat.cancelPending')}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    return {
     onSelectTab: (tab) => handleContentTabSelect(tab, paneId),
     onCloseTab: (tab) => handleContentTabClose(tab, paneId),
     onReorderTabs: (from, to) => handleContentTabReorder(from, to, paneId),
@@ -6280,11 +6510,75 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         refreshWsSnap();
       }
     },
+    getSessionLiveTimeline: (sessionId: string) => {
+      // Only this sid's live bucket — never borrow currentSessionId / global
+      // timeline (that still holds another chat after a parallel spawn).
+      // Missing bucket → null so ExecWorkflowView hydrates that sid from disk.
+      const live = pickSessionLiveTimeline(liveTimelinesBySession, sessionId);
+      return live != null ? flattenArchivedSections(live) : null;
+    },
+    getSessionTokenStats: (sessionId: string) =>
+      tokenStatsBySession[sessionId] ?? (sessionId === currentSessionId ? agentTokenStats : null),
+    isSessionBusy: (sessionId: string) => isSessionBusy(sessionId),
+    sendToSessionStay: (sessionId, payload) =>
+      handlePaneComposerSend(paneId, sessionId, payload, { stay: true }),
+    stopSession: (sessionId: string) => handleStop(sessionId),
+    renderSessionPendingPanel: renderPendingFor,
+    ensureSessionWatched: (sessionId: string) => {
+      const sid = (sessionId || '').trim();
+      if (!sid) return;
+      try {
+        (wsServiceRef.current || getAiWsService(agentId)).watchSession?.(sid);
+      } catch {
+        /* ignore */
+      }
+      // If scheduled-task exec view attaches before any WS event created a live
+      // bucket, seed once from disk so the pane is not empty until refresh.
+      const hasBucket = Object.prototype.hasOwnProperty.call(
+        liveTimelinesBySessionRef.current,
+        sid,
+      );
+      if (hasBucket) return;
+      void (async () => {
+        try {
+          const resp = await agentSessionAPI.getSessionHistoryPaged(
+            agentId,
+            sid,
+            0,
+            SESSION_HISTORY_PAGE_SIZE,
+          );
+          if (Object.prototype.hasOwnProperty.call(liveTimelinesBySessionRef.current, sid)) {
+            // Live WS already created a richer bucket — do not clobber.
+            return;
+          }
+          const session = resp.session;
+          const entries = buildTimelineFromSession(
+            session?.messages || [],
+            session?.events || [],
+          );
+          setLiveTimelinesBySession((prev) => {
+            if (Object.prototype.hasOwnProperty.call(prev, sid) && (prev[sid]?.length || 0) > 0) {
+              return prev;
+            }
+            const out = { ...prev, [sid]: entries };
+            liveTimelinesBySessionRef.current = out;
+            return out;
+          });
+          if (entries.length > 0) {
+            putCachedSessionTimeline(agentId, sid, entries, {
+              complete: !(session?.has_more ?? false),
+              messageCount: session?.messages?.length || 0,
+              totalMessages: session?.total_messages,
+            });
+          }
+        } catch (err: any) {
+          console.warn('[AIChatPage] ensureSessionWatched hydrate failed:', err?.message || err);
+        }
+      })();
+    },
     renderSessionChat: (sessionId: string) => {
       const hasLiveBucket = Object.prototype.hasOwnProperty.call(liveTimelinesBySession, sessionId);
-      const live = hasLiveBucket
-        ? liveTimelinesBySession[sessionId]
-        : (sessionId === currentSessionId ? timeline : null);
+      const live = hasLiveBucket ? liveTimelinesBySession[sessionId] : null;
       return (
         <SessionChatPane
           key={`session-chat-${paneId}-${sessionId}`}
@@ -6419,103 +6713,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             />
           ) : null
         }
-        pendingPanel={(() => {
-          const queue = pendingMessages.filter((m) => m.sessionId === sessionId);
-          if (queue.length === 0) return null;
-          return (
-            <div className="rounded-lg border border-border/50 bg-transparent overflow-hidden">
-              <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-border/40 bg-transparent">
-                <Clock size={11} className="text-primary flex-shrink-0" />
-                <span className="text-[11px] text-textMain font-semibold">
-                  {t('aiChat.pendingCount', { count: queue.length })}
-                </span>
-                <span className="text-[10px] text-textMuted">
-                  · ↗ {t('aiChat.pendingAutoSendHint')}
-                </span>
-                <div className="flex-1" />
-                <button
-                  type="button"
-                  onClick={handleSendNextPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors"
-                  title={t('aiChat.sendNext')}
-                >
-                  <Zap size={10} />
-                  {t('aiChat.sendNext')}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCancelAllPending}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
-                  title={t('aiChat.pendingClearAll')}
-                >
-                  <X size={10} />
-                  {t('aiChat.pendingClearAll')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPendingCollapsed((c) => !c)}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium text-textMuted hover:bg-primary/10 transition-colors"
-                  title={pendingCollapsed ? t('aiChat.pendingExpand') : t('aiChat.pendingCollapse')}
-                >
-                  {pendingCollapsed ? '▴' : '▾'}
-                </button>
-              </div>
-              {!pendingCollapsed && (
-                <div className="max-h-[200px] overflow-y-auto">
-                  {queue.map((pm, idx) => {
-                    const imgCount = pm.images.length;
-                    const fileCount = pm.fileAtts.length;
-                    const preview = (pm.text || '').replace(/\s+/g, ' ').trim();
-                    return (
-                      <div
-                        key={pm.id}
-                        className="group flex items-center gap-2 px-2.5 py-1.5 border-b border-border/30 last:border-b-0 hover:bg-primary/10 transition-colors"
-                      >
-                        <span className="flex-shrink-0 text-[10px] font-mono text-textMuted min-w-[28px]">
-                          {t('aiChat.pendingQueuePosition', { index: idx + 1 })}
-                        </span>
-                        <div className="flex-1 min-w-0 flex items-center gap-2">
-                          {preview ? (
-                            <span className="truncate text-[12px] text-textMain">{preview}</span>
-                          ) : (
-                            <span className="text-[12px] italic text-textMuted">
-                              {imgCount > 0 || fileCount > 0
-                                ? t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })
-                                : t('aiChat.pendingLabel')}
-                            </span>
-                          )}
-                          {(imgCount > 0 || fileCount > 0) && preview && (
-                            <span className="flex-shrink-0 text-[10px] text-textMuted whitespace-nowrap">
-                              {t('aiChat.pendingAttachments', { images: imgCount, files: fileCount })}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex-shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
-                          <button
-                            type="button"
-                            onClick={() => handleSendPendingNow(pm.id)}
-                            className="p-1 rounded text-primary hover:bg-primary/10 transition-colors"
-                            title={t('aiChat.sendNow')}
-                          >
-                            <Zap size={12} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCancelPending(pm.id)}
-                            className="p-1 rounded text-textMuted hover:bg-primary/10 hover:text-textMain transition-colors"
-                            title={t('aiChat.cancelPending')}
-                          >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        pendingPanel={renderPendingFor(sessionId)}
         statusHint={null}
       />
     ),
@@ -6527,7 +6725,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         return { ...prev, [relPath]: dirty };
       });
     },
-  });
+  };
+  };
 
   const handleOpenSkills = () => {
     try {
@@ -6727,8 +6926,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // Check if timeline has any messages (for empty state)
   const hasContent = timeline.length > 0 || isStreaming;
-  // Never render the old "已归档" fold — expand any leftover sections inline.
-  const displayTimeline = useMemo(() => flattenArchivedSections(timeline), [timeline]);
 
   // ---- Render ----
   return (
@@ -6766,7 +6963,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       {/* Session Sidebar — full height, flush with center top row */}
       <SessionSidebar
         agentId={agentId}
-        currentSessionId={currentSessionId}
+        currentSessionId={sidebarSelectedSessionId}
         workspaceRootPath={activeWorkspace?.rootPath || null}
         workspaceId={activeWorkspace?.id || null}
         onViewSession={handleSidebarViewSession}
@@ -7213,9 +7410,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           })}
 
           {/* Streaming message (always at the very bottom) */}
-          {(streamingText || isStreaming) && (
+          {(displayStreamingText || isStreaming) && (
             <StreamingMessage
-              content={streamingText}
+              content={displayStreamingText}
               isComplete={!isStreaming}
               avatarSrc={resolveChatAvatar(agentProfile?.chat_profile)}
               variant={isSolo ? 'solo' : 'classic'}

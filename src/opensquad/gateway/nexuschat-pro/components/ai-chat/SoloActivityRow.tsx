@@ -361,17 +361,39 @@ function buildLines(
   return lines;
 }
 
+function frozenElapsedMs(block: WorkflowBlock, turnStartedMs?: number): number | null {
+  if (typeof block.elapsed_ms === 'number') return Math.max(0, block.elapsed_ms);
+  const start =
+    (typeof turnStartedMs === 'number' ? turnStartedMs : undefined)
+    ?? (typeof block.started_ms === 'number' ? block.started_ms : undefined)
+    ?? (typeof block.events[0]?.timestamp === 'number' ? block.events[0].timestamp : undefined);
+  if (typeof start !== 'number') return null;
+  let end: number | undefined;
+  for (let i = block.events.length - 1; i >= 0; i--) {
+    const ts = block.events[i]?.timestamp;
+    if (typeof ts === 'number' && ts >= start) {
+      end = ts;
+      break;
+    }
+  }
+  // Completed turns must NEVER use Date.now() — that keeps "Worked for"
+  // climbing after stop / no assistant reply (e.g. 11h ghosts).
+  return Math.max(0, (end ?? start) - start);
+}
+
 function outerSummary(
   block: WorkflowBlock,
   lines: ActivityLine[],
   turnStartedMs?: number,
 ): { primary: string; secondary: string } {
-  let elapsedMs: number | null =
-    typeof block.elapsed_ms === 'number' ? block.elapsed_ms : null;
-  if (elapsedMs == null && turnStartedMs != null) {
+  let elapsedMs: number | null = null;
+  if (typeof block.elapsed_ms === 'number') {
+    elapsedMs = Math.max(0, block.elapsed_ms);
+  } else if (block.completed) {
+    elapsedMs = frozenElapsedMs(block, turnStartedMs);
+  } else if (turnStartedMs != null) {
     elapsedMs = Math.max(0, Date.now() - turnStartedMs);
-  }
-  if (elapsedMs == null && typeof block.started_ms === 'number') {
+  } else if (typeof block.started_ms === 'number') {
     elapsedMs = Math.max(0, Date.now() - block.started_ms);
   }
   const elapsedLabel =
@@ -924,6 +946,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   const userOverrideRef = useRef<'open' | 'closed' | null>(null);
   const stepsScrollRef = useRef<HTMLDivElement>(null);
   const stepsAtBottomRef = useRef(true);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const toggleOuter = () => {
     setOuterOpen((v) => {
@@ -951,11 +974,19 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   useEffect(() => {
     if (!isLiveTurn && !hasRunning && !hasLiveCompression) return;
-    const t = setInterval(() => setTick((n) => n + 1), 400);
+    const t = setInterval(() => {
+      // Elapsed-time header only — never rebuild line bodies on this tick.
+      // Skip entirely while the user has a text selection (any pane).
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return;
+      setTick((n) => n + 1);
+    }, 1000);
     return () => clearInterval(t);
   }, [isLiveTurn, hasRunning, hasLiveCompression]);
 
-  const lines = useMemo(() => buildLines(block, shellStreams), [block, tick, shellStreams]);
+  // Do NOT put `tick` in buildLines deps — that remounted thought/tool text every
+  // 400ms and cleared mouse selections in scheduled-task / live panes.
+  const lines = useMemo(() => buildLines(block, shellStreams), [block, shellStreams]);
   const summary = useMemo(
     () => outerSummary(block, lines, turnStartedMs),
     [block, lines, turnStartedMs, tick],
@@ -1000,6 +1031,8 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   // Live turns: keep the steps box pinned to the bottom while the user hasn't scrolled up.
   useEffect(() => {
     if (!outerOpen || !useStepsScrollBox || !isLiveTurn) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
     const el = stepsScrollRef.current;
     if (!el || !stepsAtBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
@@ -1083,7 +1116,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     if (thoughtBodies.length === 0 && !showNextPlanning) return null;
     if (thoughtBodies.length === 0 && showNextPlanning) {
       return (
-        <div className="my-1.5 w-full select-text">
+        <div ref={rootRef} className="my-1.5 w-full select-text">
           <NextPlanningPlaceholder
             depth={0}
             classic={embedVisualizations}
@@ -1094,7 +1127,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     }
 
     return (
-      <div className="my-1.5 w-full select-text">
+      <div ref={rootRef} className="my-1.5 w-full select-text">
         {renderOuterToggle({ running: isLiveTurn, shimmer: thinkingActive })}
         {outerOpen && thoughtBodies.length > 0 && (
           <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
@@ -1129,7 +1162,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
     const live = !!(summaryLine?.running || hasLiveCompression);
 
     return (
-      <div className="my-1.5 w-full select-text">
+      <div ref={rootRef} className="my-1.5 w-full select-text">
         {renderOuterToggle({ running: live, shimmer: live })}
         {outerOpen && summaryLine && (summaryLine.detail || summaryLine.running) && (
           <div
@@ -1179,7 +1212,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   if (isPlanOnly) {
     const planLines = displayLines.filter((l) => l.kind === 'plan' && l.planSteps && l.planSteps.length > 0);
     return (
-      <div className="my-1.5 w-full select-text space-y-0.5">
+      <div ref={rootRef} className="my-1.5 w-full select-text space-y-0.5">
         {thoughtBodies.length > 0 && (
           <div className="mb-1">
             {renderOuterToggle({ running: thinkingActive, shimmer: thinkingActive })}
@@ -1214,7 +1247,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   }
 
   return (
-    <div className="my-1.5 w-full select-text">
+    <div ref={rootRef} className="my-1.5 w-full select-text">
       {renderOuterToggle({
         running: isLiveTurn || hasRunning || hasLiveCompression,
         shimmer: thinkingActive || hasRunning || hasLiveCompression,

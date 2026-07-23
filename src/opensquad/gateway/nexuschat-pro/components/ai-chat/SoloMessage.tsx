@@ -18,6 +18,6 @@ interface SoloMessageProps {
   onWithdraw?: () => void;
 }
 
-export const SoloMessage: React.FC<SoloMessageProps> = (props) => (
+export const SoloMessage: React.FC<SoloMessageProps> = React.memo((props) => (
   <MessageBubble {...props} variant="solo" />
-);
+));

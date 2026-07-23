@@ -91,7 +91,7 @@ function isPlausibleFileAttachmentName(name: string): boolean {
   return true;
 }
 
-export const MessageBubble: React.FC<MessageBubbleProps> = ({
+const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   message,
   isStreaming,
   senderName,
@@ -712,3 +712,31 @@ export const MessageBubble: React.FC<MessageBubbleProps> = ({
     </div>
   );
 };
+
+function sameFileAtts(a?: FileAttachment[], b?: FileAttachment[]): boolean {
+  if (a === b) return true;
+  if (!a?.length && !b?.length) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].name !== b[i].name || a[i].url !== b[i].url || a[i].type !== b[i].type) return false;
+  }
+  return true;
+}
+
+/** Skip re-renders when parent chat ticks (token ring, timers) but message body is unchanged. */
+export const MessageBubble = React.memo(MessageBubbleInner, (prev, next) => (
+  prev.isStreaming === next.isStreaming
+  && prev.senderName === next.senderName
+  && prev.variant === next.variant
+  && prev.anchorId === next.anchorId
+  && prev.agentId === next.agentId
+  && prev.canWithdraw === next.canWithdraw
+  // onWithdraw is often an inline lambda — ignore identity.
+  && prev.message.role === next.message.role
+  && prev.message.content === next.message.content
+  && prev.message.message_id === next.message.message_id
+  && prev.message.type === next.message.type
+  && prev.message.end_task === next.message.end_task
+  && sameFileAtts(prev.message.attachments, next.message.attachments)
+  && (prev.message.images?.join('\0') || '') === (next.message.images?.join('\0') || '')
+));

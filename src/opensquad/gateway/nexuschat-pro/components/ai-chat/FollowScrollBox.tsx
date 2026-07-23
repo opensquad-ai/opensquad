@@ -43,7 +43,10 @@ export const FollowScrollBox: React.FC<FollowScrollBoxProps> = ({
       ref.current.scrollTop = ref.current.scrollHeight;
     });
     return () => cancelAnimationFrame(id);
-  }, [contentKey, follow, children]);
+    // Intentionally omit `children`: parent re-renders (elapsed tick, live
+    // stream) recreate element identity and would re-scroll every frame,
+    // wiping text selection. contentKey already tracks content growth.
+  }, [contentKey, follow]);
 
   const onScroll = () => {
     const el = ref.current;

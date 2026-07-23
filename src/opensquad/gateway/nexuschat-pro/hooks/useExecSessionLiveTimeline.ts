@@ -13,6 +13,7 @@ import {
   buildTimelineFromSession,
   foldTaskProcessSinceLastUser,
   genTimelineUID,
+  rebaseTimelineUids,
   sealIncompleteWorkflows,
   type TimelineEntry,
   type WorkflowEvent,
@@ -36,12 +37,50 @@ function extractContent(msg: AIWSMessage): string {
 }
 
 function msgSid(msg: AIWSMessage): string {
+  const c = msg.content;
+  const d = msg.data;
   return String(
     (msg as any).sid
-    || (typeof msg.content === 'object' && msg.content && (msg.content as any).session_id)
-    || (typeof msg.data === 'object' && msg.data && (msg.data as any).session_id)
+    || (typeof c === 'object' && c && ((c as any).session_id || (c as any).sid))
+    || (typeof d === 'object' && d && ((d as any).session_id || (d as any).sid
+      || (typeof (d as any).data === 'object' && (d as any).data?.session_id)))
     || '',
   ).trim();
+}
+
+/** Prefer the timeline with more workflow activity (not just top-level entry count). */
+function timelineRichness(entries: TimelineEntry[]): number {
+  let n = 0;
+  for (const e of entries) {
+    if (e.kind === 'workflow') n += 10 + (e.data.events?.length || 0) * 3 + (e.data.completed ? 0 : 1);
+    else n += 2;
+  }
+  return n;
+}
+
+/** Normalize token_stats payloads (flat or still EventBus-wrapped). */
+function unwrapTokenPayload(msg: AIWSMessage): Record<string, unknown> | null {
+  let data: any = msg.content ?? msg.data;
+  if (!data || typeof data !== 'object') return null;
+  if (
+    'data' in data
+    && data.data
+    && typeof data.data === 'object'
+    && ('used' in data.data || 'max' in data.data)
+  ) {
+    data = data.data;
+  }
+  if (!('used' in data) && !('max' in data)) return null;
+  return data as Record<string, unknown>;
+}
+
+function toSoloTokenStats(data: Record<string, unknown>): SoloTokenStats {
+  return {
+    used: Number(data.used) || 0,
+    max: Number(data.max) || 0,
+    breakdown: data.breakdown as SoloTokenStats['breakdown'],
+    session: data.session as SoloTokenStats['session'],
+  };
 }
 
 function finalizeWorkflowAndAddMessage(prev: TimelineEntry[], msg: ChatMessage): TimelineEntry[] {
@@ -86,12 +125,23 @@ function finalizeWorkflowAndAddMessage(prev: TimelineEntry[], msg: ChatMessage):
 export function useExecSessionLiveTimeline(
   agentId: string,
   sessionId: string | null | undefined,
+  opts?: {
+    /**
+     * Soft-merge from disk every 1.2s. Disable when Agent Web sessionBridge
+     * already owns live WS updates — competing disk rewrites remount text
+     * nodes and break mouse selection.
+     */
+    diskPoll?: boolean;
+  },
 ): {
   timeline: TimelineEntry[];
   tokenStats: SoloTokenStats | null;
   appendOptimisticUser: (text: string) => void;
+  /** Freeze open workflow timers (stop / terminate without assistant reply). */
+  sealOnStop: () => void;
   busy: boolean;
 } {
+  const diskPoll = opts?.diskPoll !== false;
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [tokenStats, setTokenStats] = useState<SoloTokenStats | null>(null);
   const [busy, setBusy] = useState(false);
@@ -197,25 +247,65 @@ export function useExecSessionLiveTimeline(
     setBusy(true);
   }, []);
 
+  const sealOnStop = useCallback(() => {
+    const nowMs = Date.now();
+    setTimeline((prev) => {
+      const sealed = sealIncompleteWorkflows(prev, { nowMs });
+      // Also cancel open tool cards so the fold is not stuck "running".
+      return sealed.map((entry) => {
+        if (entry.kind !== 'workflow') return entry;
+        const events = entry.data.events.map((evt) => {
+          if (evt.type === 'tool_call' && !evt.result) {
+            return {
+              ...evt,
+              result: 'Cancelled: stopped by user',
+              resultStatus: 'error' as const,
+            };
+          }
+          return evt;
+        });
+        return { ...entry, data: { ...entry.data, events, status: null, completed: true } };
+      });
+    });
+    setBusy(false);
+  }, []);
+
   // Live WS for this session
   useEffect(() => {
     if (!agentId || !sessionId) return;
 
     const aiWs = getAiWsService(agentId);
     aiWs.connect(agentId);
-    // Ask agent to push latest token ring for this session.
-    try {
-      aiWs.requestTokenStats();
-    } catch {
-      /* optional */
-    }
+    // Bind this browser to the exec session (Agent Web parity) and pull stats.
+    const askStats = () => {
+      try {
+        aiWs.watchSession(sessionId);
+      } catch {
+        try {
+          aiWs.requestTokenStats(sessionId);
+        } catch {
+          /* optional */
+        }
+      }
+    };
+    askStats();
+    // Re-request shortly after connect in case the first command raced ahead
+    // of the agent WS being ready.
+    const askAgain = window.setTimeout(askStats, 800);
+    // Only re-watch while this exec pane is busy — idle 12s polls still fan out
+    // token_stats and re-render the chat tree after the agent has stopped.
+    const askInterval = window.setInterval(() => {
+      if (!busyRef.current) return;
+      askStats();
+    }, 12000);
 
     const forThisSession = (msg: AIWSMessage): boolean => {
       const sid = msgSid(msg);
-      // Events without sid (rare agent-level) — ignore for exec pane to avoid
-      // bleeding primary-session chatter into the scheduled-task timeline.
-      if (!sid) return false;
-      return sid === sessionIdRef.current;
+      if (sid) return sid === sessionIdRef.current;
+      // Some frames omit sid during a parallel turn. While this exec pane is
+      // already busy, accept them so the fold updates live; otherwise drop to
+      // avoid stealing the primary chat's chatter.
+      return busyRef.current;
     };
 
     const onWs = (type: string, handler: (msg: AIWSMessage) => void) =>
@@ -385,8 +475,14 @@ export function useExecSessionLiveTimeline(
     unsubs.push(
       onWs('turn_elapsed', (msg) => {
         const data = (msg.content || msg.data || {}) as Record<string, unknown>;
-        const elapsed = Number(data.elapsed_ms ?? data.elapsed ?? 0);
-        if (!(elapsed > 0)) return;
+        // Backend sends {started_ms, ended_ms}; some paths may send elapsed_ms.
+        let elapsed = Number(data.elapsed_ms ?? data.elapsed ?? NaN);
+        const started = Number(data.started_ms ?? NaN);
+        const ended = Number(data.ended_ms ?? NaN);
+        if (!(elapsed >= 0) && Number.isFinite(started) && Number.isFinite(ended)) {
+          elapsed = Math.max(0, ended - started);
+        }
+        if (!(elapsed >= 0)) return;
         setTimeline((prev) => {
           const updated = [...prev];
           for (let i = updated.length - 1; i >= 0; i--) {
@@ -394,13 +490,43 @@ export function useExecSessionLiveTimeline(
               const wf = (updated[i] as Extract<TimelineEntry, { kind: 'workflow' }>).data;
               updated[i] = {
                 ...updated[i],
-                data: { ...wf, elapsed_ms: elapsed, started_ms: wf.started_ms ?? Date.now() - elapsed },
+                data: {
+                  ...wf,
+                  elapsed_ms: elapsed,
+                  started_ms: Number.isFinite(started)
+                    ? started
+                    : (wf.started_ms ?? Date.now() - elapsed),
+                  completed: true,
+                  status: null,
+                },
               } as TimelineEntry;
               break;
             }
           }
           return updated;
         });
+        setBusy(false);
+      }),
+    );
+
+    // Stop / idle without a final assistant message — freeze the timer.
+    unsubs.push(
+      aiWs.on('state', (msg: AIWSMessage) => {
+        if (!forThisSession(msg) && msgSid(msg)) return;
+        const data = msg.content ?? msg.data;
+        const state = typeof data === 'string'
+          ? data
+          : (typeof data === 'object' && data ? String((data as any).state || '') : '');
+        const lower = state.toLowerCase();
+        if (
+          lower === 'idle'
+          || lower === 'ready'
+          || lower.includes('task stopped')
+          || lower.includes('stopped')
+        ) {
+          setTimeline((prev) => sealIncompleteWorkflows(prev, { nowMs: Date.now() }));
+          setBusy(false);
+        }
       }),
     );
 
@@ -420,58 +546,76 @@ export function useExecSessionLiveTimeline(
 
     unsubs.push(
       aiWs.on('token_stats', (msg: AIWSMessage) => {
-        const data = msg.content || msg.data;
-        if (!data || typeof data !== 'object') return;
-        const sid = msgSid(msg);
-        // Accept sid-matched stats, or agent-level (no sid) while this pane is open.
+        const data = unwrapTokenPayload(msg);
+        if (!data) return;
+        const sid = msgSid(msg) || String(data.session_id || '').trim();
+        // Prefer sid-matched stats; if the agent omitted sid (legacy), accept
+        // while this pane is open so the ring is never stuck empty.
         if (sid && sid !== sessionIdRef.current) return;
-        setTokenStats({
-          used: Number((data as any).used) || 0,
-          max: Number((data as any).max) || 0,
-          breakdown: (data as any).breakdown,
-          session: (data as any).session,
-        });
+        setTokenStats(toSoloTokenStats(data));
       }),
     );
 
-    // Safety net: slow disk refresh while still receiving live events can fill
-    // gaps if a WS chunk was missed — but only when we have no in-flight busy
-    // turn, to avoid clobbering optimistic / live interleaving.
+    // Fast disk catch-up: scheduled-task events may miss the browser WS; switching
+    // tabs remounts and hydrates (user sees updates then). Keep merging from disk
+    // while this pane is open so the fold stays live without tab switching.
+    // Skip when sessionBridge owns live WS — competing rewrites break selection.
+    if (!diskPoll) {
+      return () => {
+        unsubs.forEach((u) => {
+          try {
+            u();
+          } catch {
+            /* ignore */
+          }
+        });
+        window.clearTimeout(askAgain);
+        window.clearInterval(askInterval);
+      };
+    }
+
+    const pullDisk = async () => {
+      try {
+        // Don't rewrite DOM while the user is selecting text in the page.
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) return;
+        const resp = await agentSessionAPI.getSessionHistoryPaged(
+          agentId,
+          sessionId,
+          0,
+          SESSION_HISTORY_PAGE_SIZE,
+        );
+        const session = resp.session as
+          | {
+              messages?: any[];
+              events?: any[];
+              archived_messages?: any[];
+              archived_events?: any[];
+            }
+          | undefined;
+        const messages = session?.messages || [];
+        const entries = buildTimelineFromSession(
+          messages,
+          session?.events || [],
+          session?.archived_messages,
+          session?.archived_events,
+        );
+        setTimeline((prev) => {
+          if (timelineRichness(entries) <= timelineRichness(prev)) return prev;
+          // Keep React keys stable so expand/collapse survives the merge.
+          return rebaseTimelineUids(prev, entries);
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+    void pullDisk();
+    // Poll only while the turn is live. Continuous 1.2s rewrites after stop
+    // remount markdown and make text selection impossible.
     const pollId = window.setInterval(() => {
-      if (busyRef.current) return;
-      void (async () => {
-        try {
-          const resp = await agentSessionAPI.getSessionHistoryPaged(
-            agentId,
-            sessionId,
-            0,
-            SESSION_HISTORY_PAGE_SIZE,
-          );
-          const session = resp.session as
-            | {
-                messages?: any[];
-                events?: any[];
-                archived_messages?: any[];
-                archived_events?: any[];
-              }
-            | undefined;
-          const messages = session?.messages || [];
-          const entries = buildTimelineFromSession(
-            messages,
-            session?.events || [],
-            session?.archived_messages,
-            session?.archived_events,
-          );
-          setTimeline((prev) => {
-            // Prefer live timeline when it already has at least as many entries.
-            if (prev.length >= entries.length) return prev;
-            return entries;
-          });
-        } catch {
-          /* ignore */
-        }
-      })();
-    }, 8000);
+      if (!busyRef.current) return;
+      void pullDisk();
+    }, 1200);
 
     return () => {
       unsubs.forEach((u) => {
@@ -482,8 +626,10 @@ export function useExecSessionLiveTimeline(
         }
       });
       window.clearInterval(pollId);
+      window.clearTimeout(askAgain);
+      window.clearInterval(askInterval);
     };
-  }, [agentId, sessionId]);
+  }, [agentId, sessionId, diskPoll]);
 
-  return { timeline, tokenStats, appendOptimisticUser, busy };
+  return { timeline, tokenStats, appendOptimisticUser, sealOnStop, busy };
 }

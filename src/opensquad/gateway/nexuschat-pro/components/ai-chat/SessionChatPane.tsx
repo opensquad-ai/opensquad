@@ -3,7 +3,7 @@
  * hosting the live chatSlot (or mirrors the live timeline for the same sid).
  * Replaces SessionHistoryPreview's plain "你/AGENT" list.
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { agentSessionAPI } from '../../services/api';
 import {
@@ -19,6 +19,7 @@ import {
   SESSION_HISTORY_PAGE_SIZE,
 } from '../../utils/sessionTimelineCache';
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
+import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
@@ -75,7 +76,24 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const userScrolledRef = useRef(false);
   const scrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const useLive = Array.isArray(liveTimeline);
-  const timeline = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
+  const liveOrFetched = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
+  const {
+    displayValue: timeline,
+    isFrozen,
+    isFrozenRef,
+  } = useTextSelectionFreeze(listRef, liveOrFetched);
+
+  // Live turns often append events inside the same workflow entry (length
+  // unchanged). Track inner activity so auto-scroll / paint stay in sync.
+  const timelineSig = useMemo(() => {
+    let sig = timeline.length * 1000;
+    for (const e of timeline) {
+      if (e.kind === 'workflow') {
+        sig += (e.data.events?.length || 0) * 3 + (e.data.completed ? 0 : 1);
+      }
+    }
+    return sig;
+  }, [timeline]);
 
   useEffect(() => {
     // Only show a soft spinner if the first fetch for an uncached session
@@ -156,10 +174,12 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
 
   // Soft poll: refresh timeline in place (no loading spinner, no remount).
   // Skipped when liveTimeline is provided or pollIntervalMs is unset/<=0.
+  // Also skipped while the user is selecting text (poll would clear selection).
   useEffect(() => {
     if (useLive || !pollIntervalMs || pollIntervalMs <= 0) return;
     let cancelled = false;
     const softRefresh = async () => {
+      if (isFrozenRef.current) return;
       try {
         const resp = await agentSessionAPI.getSessionHistoryPaged(
           agentId,
@@ -167,7 +187,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           0,
           SESSION_HISTORY_PAGE_SIZE,
         );
-        if (cancelled) return;
+        if (cancelled || isFrozenRef.current) return;
         const session = resp.session as
           | {
               messages?: any[];
@@ -192,7 +212,33 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           totalMessages: session?.total_messages,
         });
         // Keep React keys stable so expand/collapse state survives the poll.
-        setFetched((prev) => rebaseTimelineUids(prev, entries));
+        setFetched((prev) => {
+          const next = rebaseTimelineUids(prev, entries);
+          // Bail when nothing meaningful changed — avoid idle re-renders that
+          // destroy text selection.
+          if (
+            prev.length === next.length
+            && prev.every((p, i) => {
+              const n = next[i];
+              if (p.kind !== n.kind || p._uid !== n._uid) return false;
+              if (p.kind === 'message' && n.kind === 'message') {
+                return p.data.content === n.data.content && p.data.role === n.data.role;
+              }
+              if (p.kind === 'workflow' && n.kind === 'workflow') {
+                return (
+                  p.data.completed === n.data.completed
+                  && p.data.status === n.data.status
+                  && (p.data.events?.length || 0) === (n.data.events?.length || 0)
+                  && (p.data.elapsed_ms || 0) === (n.data.elapsed_ms || 0)
+                );
+              }
+              return true;
+            })
+          ) {
+            return prev;
+          }
+          return next;
+        });
         setError(null);
       } catch {
         // Keep showing the last good timeline; transient errors during a run
@@ -235,9 +281,13 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     listRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  // Auto-follow bottom only when user hasn't scrolled away
+  // Auto-follow bottom only when user hasn't scrolled away and isn't selecting
   useEffect(() => {
     if (loading && timeline.length === 0) return;
+    if (isFrozenRef.current || isFrozen) {
+      updateScrollButtons();
+      return;
+    }
     if (userScrolledRef.current) {
       updateScrollButtons();
       return;
@@ -246,7 +296,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     updateScrollButtons();
-  }, [timeline.length, loading, useLive, updateScrollButtons]);
+  }, [timeline.length, timelineSig, loading, useLive, isFrozen, updateScrollButtons]);
 
   useEffect(() => {
     return () => {
