@@ -15,7 +15,7 @@
  *   - Status indicators
  *   - Unified timeline: messages and workflow events interleaved
  */
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Suspense } from 'react';
 import {
   Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
@@ -153,6 +153,10 @@ import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
 import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
+
+const SkillManagerPage = React.lazy(() =>
+  import('./SkillManagerPage').then((m) => ({ default: m.SkillManagerPage })),
+);
 import {
   applyJobStatus,
   applyJobStdout,
@@ -1005,6 +1009,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [viewingHistorySession]);
   const [sessionTitleUpdate, setSessionTitleUpdate] = useState<{ id: string; title: string } | null>(null);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(true);
+  /** In-chat Skill 库：keep SessionSidebar, replace center + files with SkillManagerPage. */
+  const [skillsViewOpen, setSkillsViewOpen] = useState(false);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
     try {
       const raw = localStorage.getItem('opensquad.filesPanel.open');
@@ -1281,6 +1287,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** Session ids currently running a parallel turn (from busy_sessions events). */
   const [busySessions, setBusySessions] = useState<string[]>([]);
   const busySessionsRef = useRef<string[]>([]);
+  /** Sessions that finished a turn while not selected — grey-dot until user opens them. */
+  const [unseenCompleteSessionIds, setUnseenCompleteSessionIds] = useState<string[]>([]);
+  const viewedSessionIdRef = useRef<string | null>(null);
   const [primarySessionId, setPrimarySessionId] = useState<string | null>(null);
   const [pendingPrimarySessionId, setPendingPrimarySessionId] = useState<string | null>(null);
   const pendingPrimarySessionIdRef = useRef<string | null>(null);
@@ -1289,6 +1298,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [pendingPrimarySessionId]);
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
   useEffect(() => { busySessionsRef.current = busySessions; }, [busySessions]);
+
+  // When a session leaves busy_sessions and isn't currently selected → grey unread-complete dot.
+  const prevBusySessionsRef = useRef<string[]>([]);
+  useEffect(() => {
+    const prev = prevBusySessionsRef.current;
+    const next = busySessions;
+    prevBusySessionsRef.current = next;
+    if (prev.length === 0) return;
+    const finished = prev.filter((id) => !next.includes(id));
+    if (finished.length === 0) return;
+    const viewed = viewedSessionIdRef.current;
+    const newlyUnseen = finished.filter((id) => id && id !== viewed);
+    if (newlyUnseen.length === 0) return;
+    setUnseenCompleteSessionIds((cur) => {
+      const merged = new Set(cur);
+      for (const id of newlyUnseen) merged.add(id);
+      const arr = Array.from(merged);
+      if (arr.length === cur.length && arr.every((id) => cur.includes(id))) return cur;
+      return arr;
+    });
+  }, [busySessions]);
 
   const clearOutboundTurnPending = useCallback((sid?: string) => {
     if (sid) {
@@ -4000,7 +4030,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         : Array.isArray(data)
           ? data.map(String)
           : [];
-      setBusySessions(sessions);
+      setBusySessions((prev) => {
+        if (
+          prev.length === sessions.length
+          && prev.every((id, i) => id === sessions[i])
+        ) {
+          return prev;
+        }
+        return sessions;
+      });
     });
 
     const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
@@ -5998,6 +6036,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return currentSessionId;
   }, [wsSnap, activeWorkspace, agentId, currentSessionId]);
 
+  useEffect(() => {
+    viewedSessionIdRef.current = sidebarSelectedSessionId;
+    if (!sidebarSelectedSessionId) return;
+    setUnseenCompleteSessionIds((cur) =>
+      cur.includes(sidebarSelectedSessionId)
+        ? cur.filter((id) => id !== sidebarSelectedSessionId)
+        : cur,
+    );
+  }, [sidebarSelectedSessionId]);
+
   // Ensure project files panel is open when a workspace is active (recover from prior close/clip)
   useEffect(() => {
     if (!activeWorkspace) return;
@@ -6220,6 +6268,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   /** Open / continue a session in the currently anchored pane only. */
   const handleSidebarViewSession = (sessionId: string) => {
+    setSkillsViewOpen(false);
     if (activeWorkspace) {
       const pane = focusedPaneId;
       openContentTab(
@@ -6238,6 +6287,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleNewSessionInWorkspace = (projectPath?: string) => {
+    setSkillsViewOpen(false);
     const path = (projectPath || activeWorkspace?.rootPath || '').trim();
     // Sidebar / global new-session → anchored pane
     if (!pendingTargetPaneIdRef.current && focusedPaneId) {
@@ -6729,14 +6779,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleOpenSkills = () => {
-    try {
-      window.dispatchEvent(new CustomEvent('switchView', { detail: 'skills' }));
-    } catch {
-      /* ignore */
-    }
+    setSkillsViewOpen((open) => {
+      const next = !open;
+      if (next) setSessionSidebarOpen(true);
+      return next;
+    });
   };
 
   const handleOpenScheduledTasks = () => {
+    setSkillsViewOpen(false);
     if (!activeWorkspace) return;
     const pane = focusedPaneId;
     openContentTab(agentId, activeWorkspace.id, { kind: 'scheduled-tasks', id: 'scheduled-tasks' }, pane);
@@ -6749,6 +6800,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const handler = (e: any) => {
       const sessionId: string | undefined = e?.detail?.sessionId;
       if (!sessionId || !activeWorkspace) return;
+      setSkillsViewOpen(false);
       const pane = focusedPaneId;
       openContentTab(agentId, activeWorkspace.id, { kind: 'session', id: sessionId }, pane);
       if (pane) setFocusedPane(agentId, pane);
@@ -6757,6 +6809,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     window.addEventListener('opensquad-open-session-tab', handler as EventListener);
     return () => window.removeEventListener('opensquad-open-session-tab', handler as EventListener);
   }, [activeWorkspace, focusedPaneId, agentId, refreshWsSnap]);
+
+  // Open in-chat Skill 库 from nested views (e.g. ExecWorkflowView).
+  useEffect(() => {
+    const handler = () => {
+      setSkillsViewOpen(true);
+      setSessionSidebarOpen(true);
+    };
+    window.addEventListener('opensquad-open-skills', handler as EventListener);
+    return () => window.removeEventListener('opensquad-open-skills', handler as EventListener);
+  }, []);
 
   // ---- Image upload ----
 
@@ -6972,6 +7034,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onDeleteSession={handleDeleteSession}
         onOpenSkills={handleOpenSkills}
         onOpenScheduledTasks={handleOpenScheduledTasks}
+        skillsActive={skillsViewOpen}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
         agentBusy={
@@ -6981,6 +7044,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           (!!currentSessionId && busySessions.includes(currentSessionId))
         }
         busySessionIds={busySessions}
+        unseenCompleteSessionIds={unseenCompleteSessionIds}
         primarySessionId={primarySessionId}
         pendingPrimarySessionId={pendingPrimarySessionId}
         onSetPrimarySession={(sid) => {
@@ -7011,6 +7075,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         />
       )}
 
+      {skillsViewOpen ? (
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
+          <Suspense
+            fallback={
+              <div className="flex-1 flex items-center justify-center text-[12px] text-textMuted">
+                <Loader2 size={20} className="animate-spin mr-2" />
+                Loading…
+              </div>
+            }
+          >
+            <SkillManagerPage
+              embedded
+              initialAgentId={agentProfile?.dir_name || agentId}
+              onBack={() => setSkillsViewOpen(false)}
+            />
+          </Suspense>
+        </div>
+      ) : (
+      <>
       <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
         {/* L1 nest chrome — active workspace tab is panel and joins L2 with no seam */}
         <div className="flex-shrink-0 bg-nest">
@@ -7560,6 +7643,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenFile={handleOpenFileInTab}
       />
       </div>
+      </>
+      )}
       </div>
 
       <RestoreCheckpointModal

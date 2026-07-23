@@ -50,11 +50,15 @@ interface SessionSidebarProps {
   onDeleteSession?: (sessionId: string) => Promise<void>;
   onOpenSkills?: () => void;
   onOpenScheduledTasks?: () => void;
+  /** Highlight Skill 库 when the in-chat skills panel is open. */
+  skillsActive?: boolean;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
   agentBusy?: boolean;
   /** Session ids currently running a parallel turn */
   busySessionIds?: string[];
+  /** Sessions that finished while not selected — show grey unread-complete dot */
+  unseenCompleteSessionIds?: string[];
   primarySessionId?: string | null;
   /** Session id waiting for server ack of set_primary_session */
   pendingPrimarySessionId?: string | null;
@@ -99,7 +103,51 @@ function belongsToWorkspace(
   return pathsEqual(p, workspaceRootPath);
 }
 
-export const SessionSidebar: React.FC<SessionSidebarProps> = ({
+function sessionsListEqual(a: AgentSession[], b: AgentSession[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id
+      || x.title !== y.title
+      || x.current !== y.current
+      || x.primary !== y.primary
+      || x.last_updated !== y.last_updated
+      || x.created_at !== y.created_at
+      || x.origin !== y.origin
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Must live outside SessionSidebar — an inner component remounts on every parent
+ *  render and restarts .os-interactive hover transitions (row background flicker). */
+const SidebarSection: React.FC<{
+  title: string;
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}> = ({ title, count, open, onToggle, children }) => (
+  <div className="mb-1">
+    <button
+      type="button"
+      className="w-full flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
+      onClick={onToggle}
+    >
+      {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      <span className="flex-1 text-left">{title}</span>
+      <span className="tabular-nums opacity-70">{count}</span>
+    </button>
+    {open ? children : null}
+  </div>
+);
+
+const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   agentId,
   currentSessionId,
   workspaceRootPath,
@@ -110,10 +158,12 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   onDeleteSession,
   onOpenSkills,
   onOpenScheduledTasks,
+  skillsActive = false,
   isOpen,
   sessionTitleUpdate,
   agentBusy = false,
   busySessionIds = [],
+  unseenCompleteSessionIds = [],
   primarySessionId = null,
   pendingPrimarySessionId = null,
   onSetPrimarySession,
@@ -142,7 +192,30 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const reloadMeta = useCallback(() => {
-    setMetaMap(loadSessionProjectMeta(agentId));
+    setMetaMap((prev) => {
+      const next = loadSessionProjectMeta(agentId);
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+      if (prevKeys.length === nextKeys.length) {
+        let same = true;
+        for (const k of nextKeys) {
+          const a = prev[k];
+          const b = next[k];
+          if (
+            !a
+            || a.pinned !== b.pinned
+            || a.archived !== b.archived
+            || a.projectPath !== b.projectPath
+            || a.workspaceId !== b.workspaceId
+          ) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return prev;
+      }
+      return next;
+    });
   }, [agentId]);
 
   const loadSessions = useCallback(async (opts?: { silent?: boolean }): Promise<AgentSession[]> => {
@@ -153,8 +226,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     }
     try {
       const resp = await agentSessionAPI.getSessionList(agentId);
-      const list = resp.sessions || [];
-      setSessions(list);
+      const list = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
+      // Avoid no-op setState — parent/chat ticks + 6s poll would remount hover UI.
+      setSessions((prev) => (sessionsListEqual(prev, list) ? prev : list));
       reloadMeta();
       return list;
     } catch (err: any) {
@@ -376,22 +450,22 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   };
 
   const renderRow = (session: AgentSession, rowKey: string) => {
-    const isCurrent = session.id === currentSessionId || !!session.current;
+    // Highlight follows UI selection only — never backend session.current (stale "live" flag).
+    const isCurrent = !!currentSessionId && session.id === currentSessionId;
     const isPrimary = !!session.primary || session.id === primarySessionId;
     const meta = metaMap[session.id];
     const pinned = !!meta?.pinned;
     const archived = !!meta?.archived;
-    const busy = (isCurrent && agentBusy) || busySessionIds.includes(session.id);
+    const busy = busySessionIds.includes(session.id) || (!!agentBusy && !!session.current);
+    const unseenComplete = !busy && !isCurrent && unseenCompleteSessionIds.includes(session.id);
     const confirming = confirmingDeleteId === session.id;
     const editing = editingId === session.id;
 
     return (
       <div
         key={rowKey}
-        className={`group os-interactive flex items-center gap-1 px-2.5 py-1.5 rounded-none cursor-pointer text-[12px] ${
-          isCurrent
-            ? 'is-active text-textMuted'
-            : 'text-textMuted/75'
+        className={`group os-interactive flex items-center gap-1 mx-1.5 px-2.5 py-1.5 rounded-xl cursor-pointer text-[12px] text-textMain ${
+          isCurrent ? 'is-active' : ''
         }`}
         onClick={() => {
           if (editing || confirming) return;
@@ -407,8 +481,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         ) : (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-              isCurrent ? 'bg-emerald-500' : 'bg-transparent border border-border'
+              unseenComplete
+                ? 'bg-textMuted'
+                : 'bg-transparent border border-border'
             }`}
+            title={unseenComplete ? '任务已完成' : undefined}
           />
         )}
         <div className="min-w-0 flex-1">
@@ -428,7 +505,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             />
           ) : (
             <>
-              <div className="truncate font-medium flex items-center gap-1">
+              <div className="truncate font-normal flex items-center gap-1">
                 <span className="truncate">{session.title || session.id}</span>
                 {isPrimary ? (
                   <span
@@ -538,26 +615,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     );
   };
 
-  const Section: React.FC<{
-    id: keyof typeof sectionOpen;
-    title: string;
-    count: number;
-    children: React.ReactNode;
-  }> = ({ id, title, count, children }) => (
-    <div className="mb-1">
-      <button
-        type="button"
-        className="w-full flex items-center gap-1 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-textMuted hover:text-textMain"
-        onClick={() => setSectionOpen((s) => ({ ...s, [id]: !s[id] }))}
-      >
-        {sectionOpen[id] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <span className="flex-1 text-left">{title}</span>
-        <span className="tabular-nums opacity-70">{count}</span>
-      </button>
-      {sectionOpen[id] ? children : null}
-    </div>
-  );
-
   if (!softMounted) return null;
 
   return (
@@ -626,26 +683,30 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           type="button"
           disabled={!workspaceRootPath}
           onClick={() => onOpenScheduledTasks?.()}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive disabled:opacity-40"
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
-          <Clock size={14} className="text-violet-500" />
+          <Clock size={16} className="text-violet-500" />
           {t('aiChat.scheduledTasks')}
         </button>
         <button
           type="button"
           disabled={!workspaceRootPath}
           onClick={() => onNewSession(workspaceRootPath || undefined)}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive disabled:opacity-40"
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
-          <MessageSquarePlus size={14} className="text-sky-500" />
+          <MessageSquarePlus size={16} className="text-sky-500" />
           新建对话
         </button>
         <button
           type="button"
           onClick={() => onOpenSkills?.()}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted os-interactive"
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
+            skillsActive
+              ? 'bg-primary/10 text-primary'
+              : 'text-textMain'
+          }`}
         >
-          <Sparkles size={14} className="text-textMuted/70" />
+          <Sparkles size={16} className={skillsActive ? 'text-primary' : 'text-textMuted/70'} />
           Skill 库
         </button>
       </div>
@@ -657,27 +718,42 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           <div className="px-3 py-2 text-[11px] text-rose-500">{error}</div>
         ) : (
           <>
-            <Section id="pinned" title="置顶" count={sections.pinned.length}>
+            <SidebarSection
+              title="置顶"
+              count={sections.pinned.length}
+              open={sectionOpen.pinned}
+              onToggle={() => setSectionOpen((s) => ({ ...s, pinned: !s.pinned }))}
+            >
               {sections.pinned.length === 0 ? (
                 <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
               ) : (
                 sections.pinned.map((s) => renderRow(s, `pinned:${s.id}`))
               )}
-            </Section>
-            <Section id="recent" title="最近" count={sections.recent.length}>
+            </SidebarSection>
+            <SidebarSection
+              title="最近"
+              count={sections.recent.length}
+              open={sectionOpen.recent}
+              onToggle={() => setSectionOpen((s) => ({ ...s, recent: !s.recent }))}
+            >
               {sections.recent.length === 0 ? (
                 <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
               ) : (
                 sections.recent.map((s) => renderRow(s, `recent:${s.id}`))
               )}
-            </Section>
-            <Section id="archive" title="归档" count={sections.archive.length}>
+            </SidebarSection>
+            <SidebarSection
+              title="归档"
+              count={sections.archive.length}
+              open={sectionOpen.archive}
+              onToggle={() => setSectionOpen((s) => ({ ...s, archive: !s.archive }))}
+            >
               {sections.archive.length === 0 ? (
                 <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
               ) : (
                 sections.archive.map((s) => renderRow(s, `archive:${s.id}`))
               )}
-            </Section>
+            </SidebarSection>
           </>
         )}
       </div>
@@ -715,3 +791,5 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     </div>
   );
 };
+
+export const SessionSidebar = React.memo(SessionSidebarInner);

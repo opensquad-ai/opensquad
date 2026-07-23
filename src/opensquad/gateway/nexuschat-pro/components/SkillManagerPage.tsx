@@ -10,6 +10,10 @@ import { marked } from 'marked';
 
 interface SkillManagerPageProps {
   onBack: () => void;
+  /** Prefer this agent for skill-level injection when the page opens (e.g. current Agent Web). */
+  initialAgentId?: string;
+  /** Embedded inside Agent Web (keep session sidebar); hide settings mobile-nav affordance. */
+  embedded?: boolean;
 }
 
 const LAYOUT_KEY = 'skill_manager_layout';
@@ -490,7 +494,11 @@ const SKILL_CATEGORIES: SkillCategoryDef[] = [
 
 // ---- Main Component ----
 
-export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) => {
+export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
+  onBack,
+  initialAgentId,
+  embedded = false,
+}) => {
   const { t } = useTranslation();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -551,12 +559,18 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) =>
         const data = await adminAPI.getAgents();
         const list = data.agents || [];
         setAgents(list);
-        if (list.length > 0) setSelectedAgent(list[0].dir_name);
+        if (list.length > 0) {
+          const preferred =
+            initialAgentId && list.some((a) => a.dir_name === initialAgentId)
+              ? initialAgentId
+              : list[0].dir_name;
+          setSelectedAgent(preferred);
+        }
       } catch {
         setAgents([]);
       }
     })();
-  }, []);
+  }, [initialAgentId]);
 
   useEffect(() => {
     if (!selectedAgent) return;
@@ -769,13 +783,15 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({ onBack }) =>
         >
           <ArrowLeft size={18} className="md:w-5 md:h-5" />
         </button>
-        <button
-          onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
-          className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors md:hidden shrink-0"
-          aria-label="Navigation menu"
-        >
-          <Menu size={18} />
-        </button>
+        {!embedded && (
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
+            className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors md:hidden shrink-0"
+            aria-label="Navigation menu"
+          >
+            <Menu size={18} />
+          </button>
+        )}
         <BookOpen size={18} className="text-primary shrink-0 md:w-[22px] md:h-[22px]" />
         <h1 className="text-base md:text-lg font-bold text-textMain shrink-0 whitespace-nowrap">{t('skillManager.title')}</h1>
 

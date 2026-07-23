@@ -465,7 +465,7 @@ export const ExecWorkflowView: React.FC<Props> = ({
         compressDisabled={!hasSession || compressing}
         availableSkills={skills}
         skillsLoading={false}
-        onOpenSkills={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'skills' }))}
+        onOpenSkills={() => window.dispatchEvent(new CustomEvent('opensquad-open-skills'))}
         pendingPanel={pendingPanel}
         onSend={onSend}
         onStop={() => { void handleStop(); }}
