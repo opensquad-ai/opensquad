@@ -2,12 +2,28 @@
  * WorkspacePaneShell — one split leaf: L2 tab bar + content (chat / file / preview) + composer.
  */
 import React, { useMemo } from 'react';
+import { Loader2 } from 'lucide-react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
 import { ComposerLandingDock } from './ComposerLandingDock';
 import { ScheduledTasksPage } from './ScheduledTasksPage';
+import type { ComposerSendPayload } from './AgentWebComposer';
+import type { SoloTokenStats } from './SoloContextFooter';
+import type { TimelineEntry } from '../../utils/aiChatTimeline';
 import type { ContentTab, PaneTabs } from '../../utils/workspaceStore';
 import { parseContentTabKey } from '../../utils/workspaceStore';
+
+/** Optional Agent Web session bridge for scheduled-task exec UI (stay on scheduled-tasks tab). */
+export type PaneSessionBridge = {
+  getSessionLiveTimeline?: (sessionId: string) => TimelineEntry[] | null;
+  getSessionTokenStats?: (sessionId: string) => SoloTokenStats | null;
+  isSessionBusy?: (sessionId: string) => boolean;
+  /** Send WITHOUT opening/switching to a session L2 tab. Same queue logic as pane composer send. */
+  sendToSessionStay?: (sessionId: string, payload: ComposerSendPayload) => void | Promise<void>;
+  stopSession?: (sessionId: string) => void;
+  renderSessionPendingPanel?: (sessionId: string) => React.ReactNode;
+  ensureSessionWatched?: (sessionId: string) => void;
+};
 
 export type PaneShellHandlers = {
   onSelectTab: (tab: ContentTab) => void;
@@ -26,7 +42,10 @@ export type PaneShellHandlers = {
   renderSessionChat?: (sessionId: string) => React.ReactNode;
   /** Empty live session → center composer + greeting (smooth dock on first send). */
   isComposerLanding?: (sessionId: string) => boolean;
-};
+  /** True while hydrating after refresh/connect — show loading, not New Chat. */
+  isSessionLoading?: (sessionId: string) => boolean;
+  sessionLoadingLabel?: string;
+} & PaneSessionBridge;
 
 interface WorkspacePaneShellProps {
   paneId: string;
@@ -39,6 +58,8 @@ interface WorkspacePaneShellProps {
   rootPath: string;
   tabTitles: Record<string, string>;
   fileDirtyMap: Record<string, boolean>;
+  /** Live WS session id hosted by this pane (may differ from the active L2 tab). */
+  liveSessionId?: string | null;
   /** Live chat UI for the focused session pane (messages + header; no composer) */
   chatSlot?: React.ReactNode;
   handlers: PaneShellHandlers;
@@ -55,6 +76,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   rootPath,
   tabTitles,
   fileDirtyMap,
+  liveSessionId = null,
   chatSlot,
   handlers,
 }) => {
@@ -73,7 +95,16 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   }, [tabs.open, tabTitles, fileDirtyMap]);
 
   const active = parseContentTabKey(tabs.activeKey);
+  const openSessionTabs = useMemo(
+    () => tabs.open.filter((t) => t.kind === 'session'),
+    [tabs.open],
+  );
+  const sessionLoading =
+    !!active &&
+    active.kind === 'session' &&
+    (handlers.isSessionLoading?.(active.id) ?? false);
   const landing =
+    !sessionLoading &&
     !!active &&
     active.kind === 'session' &&
     !!handlers.renderComposer &&
@@ -141,26 +172,72 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             onDirtyChange={(dirty) => handlers.onFileDirty?.(active.id, dirty)}
           />
         ) : active.kind === 'scheduled-tasks' ? (
-          <ScheduledTasksPage agentName={agentId} rootPath={rootPath} />
+          <ScheduledTasksPage
+            agentName={agentId}
+            rootPath={rootPath}
+            sessionBridge={{
+              getSessionLiveTimeline: handlers.getSessionLiveTimeline,
+              getSessionTokenStats: handlers.getSessionTokenStats,
+              isSessionBusy: handlers.isSessionBusy,
+              sendToSessionStay: handlers.sendToSessionStay,
+              stopSession: handlers.stopSession,
+              renderSessionPendingPanel: handlers.renderSessionPendingPanel,
+              ensureSessionWatched: handlers.ensureSessionWatched,
+            }}
+          />
         ) : (
           <div
-            className={`os-chat-session-shell ${landing ? 'is-landing' : 'is-docked'}`}
+            className={`os-chat-session-shell relative ${landing ? 'is-landing' : 'is-docked'}`}
           >
-            <div className="os-chat-session-messages">
-              {chatSlot
-                ? chatSlot
-                : handlers.renderSessionChat
-                  ? handlers.renderSessionChat(active.id)
-                  : (
-                    <div
-                      className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
-                      onClick={handlers.onFocus}
-                    >
-                      会话内容不可用
-                    </div>
-                  )}
+            {sessionLoading ? (
+              <div
+                className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-stage/90 text-textMuted"
+                role="status"
+                aria-live="polite"
+              >
+                <Loader2 size={28} className="text-primary animate-spin" />
+                <p className="text-sm">
+                  {handlers.sessionLoadingLabel || '加载会话中...'}
+                </p>
+              </div>
+            ) : null}
+            <div className="os-chat-session-messages relative min-h-0 flex-1">
+              {/* Keep every open session tab mounted (hidden when inactive) so
+                  switching L2 tabs is seamless — no remount / refetch flash. */}
+              {openSessionTabs.map((tab) => {
+                const isActive = !!active && active.kind === 'session' && active.id === tab.id;
+                const useLiveSlot = !!chatSlot && !!liveSessionId && tab.id === liveSessionId;
+                return (
+                  <div
+                    key={`keep-${paneId}-${tab.id}`}
+                    className={isActive ? 'h-full min-h-0 flex flex-col' : 'hidden'}
+                    aria-hidden={!isActive}
+                  >
+                    {useLiveSlot
+                      ? chatSlot
+                      : handlers.renderSessionChat
+                        ? handlers.renderSessionChat(tab.id)
+                        : (
+                          <div
+                            className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
+                            onClick={handlers.onFocus}
+                          >
+                            会话内容不可用
+                          </div>
+                        )}
+                  </div>
+                );
+              })}
+              {active?.kind === 'session' && openSessionTabs.length === 0 ? (
+                <div
+                  className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
+                  onClick={handlers.onFocus}
+                >
+                  会话内容不可用
+                </div>
+              ) : null}
             </div>
-            {handlers.renderComposer ? (
+            {handlers.renderComposer && active?.kind === 'session' && !sessionLoading ? (
               <ComposerLandingDock landing={landing} seedKey={active.id}>
                 {handlers.renderComposer(active.id)}
               </ComposerLandingDock>

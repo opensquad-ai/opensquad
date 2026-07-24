@@ -219,11 +219,7 @@ class SessionManager:
     def get_primary_session_id(self) -> str:
         sid = (self._primary_session_id or "").strip()
         # Fast path: cached primary is still loadable (current / live / history).
-        if sid and (
-            sid == self.session_data.get("id")
-            or sid in self._live_sessions
-            or self._history_exists(sid)
-        ):
+        if sid and (sid == self.session_data.get("id") or sid in self._live_sessions or self._history_exists(sid)):
             return sid
         # Cached primary is a phantom (deleted/archived session) — re-resolve to a
         # real loadable session so external ingress (scheduled tasks, reminders,
@@ -586,15 +582,24 @@ class SessionManager:
                 # Restore save_seq from disk to prevent stale async-writer overwrites
                 self._save_seq = self.session_data.get("_save_seq", 0)
 
-                # If the current session has no messages, try loading history
-                if not self.session_data.get("messages"):
-                    logger.info("[SessionManager] Current session is empty, trying to load latest history")
-                else:
+                if self._is_reusable_draft(self.session_data):
+                    # Keep the empty draft as the New Session cache — do not
+                    # bounce to latest history (that undoes New Session).
+                    self.session_data["draft"] = True
+                    loaded = True
+                    logger.info(
+                        "[SessionManager] Loaded empty draft session: %s",
+                        self.session_data.get("id"),
+                    )
+                    self._sync_goal_state()
+                elif self.session_data.get("messages"):
                     loaded = True
                     logger.info(
                         f"[SessionManager] Loaded session with {len(self.session_data['messages'])} messages and {len(self.session_data.get('events', []))} events"
                     )
                     self._sync_goal_state()
+                else:
+                    logger.info("[SessionManager] Current session is empty, trying to load latest history")
             except Exception as e:
                 logger.error(f"[SessionManager] Failed to load session: {e}")
 
@@ -625,6 +630,9 @@ class SessionManager:
         self.session_data = {
             "id": sid,
             "title": None,
+            # Empty shells are drafts: hidden from the sidebar and reused on
+            # subsequent New Session clicks until the user sends a message.
+            "draft": True,
             "messages": [],
             "events": [],  # Interaction event history
             "archived_messages": [],  # Messages removed by context compression, kept for UI display
@@ -792,8 +800,11 @@ class SessionManager:
         except Exception as e:
             logger.error(f"[SessionManager] Failed to archive session: {e}")
 
-    def start_new_session(self):
+    def start_new_session(self) -> bool:
         """Start a new session (automatically archives the old one).
+
+        Returns True when a new sid was created, False when the existing empty
+        draft was reused (New Session click with no user input yet).
 
         Critical ordering: the new empty session file is written to disk
         (current_session.json) BEFORE the old session is archived to history/.
@@ -809,6 +820,20 @@ class SessionManager:
         """
         with self._lock:
             self._drain_pending_mutations_sync()
+            # Reuse the empty draft — do not mint another sid or archive a shell.
+            if self._is_reusable_draft(self.session_data):
+                if not self.session_data.get("draft"):
+                    self.session_data["draft"] = True
+                    try:
+                        self._save_session()
+                    except Exception:
+                        logger.debug("[SessionManager] draft flag persist skipped", exc_info=True)
+                logger.info(
+                    "[SessionManager] Reusing empty draft session: %s",
+                    self.session_data.get("id"),
+                )
+                return False
+
             self._mutation_gen += 1
             # Snapshot old session before overwrite — including empty sessions so
             # they enter history/ and remain deletable after the user switches away.
@@ -820,7 +845,20 @@ class SessionManager:
             # 2. Archive old session to history/ SECOND (non-critical for crash recovery)
             if old_data:
                 sid = old_data.get("id")
-                if sid:
+                if sid and self._is_reusable_draft(old_data):
+                    # Never keep never-sent shells in history/ or the sidebar.
+                    self._live_sessions.pop(sid, None)
+                    try:
+                        self._cache_remove(sid)
+                    except Exception:
+                        pass
+                    history_path = os.path.join(self.history_dir, f"{sid}.json")
+                    try:
+                        if os.path.isfile(history_path):
+                            os.remove(history_path)
+                    except Exception as e:
+                        logger.debug("[SessionManager] Failed to drop empty draft %s: %s", sid, e)
+                elif sid:
                     self._live_sessions[sid] = old_data
                     self._cache_put(sid, old_data)
                     history_dir = self.history_dir
@@ -832,8 +870,9 @@ class SessionManager:
                         logger.info(f"[SessionManager] Archived session: {sid}")
                     except Exception as e:
                         logger.error(f"[SessionManager] Failed to archive session: {e}")
+            return True
 
-    def create_parallel_session(self, title: str | None = None) -> str:
+    def create_parallel_session(self, title: str | None = None, origin: str | None = None) -> str:
         """Create a brand-new empty session WITHOUT changing focused or primary.
 
         Used by scheduled-task / delegation fires so each execution gets its own
@@ -841,6 +880,9 @@ class SessionManager:
         keeps its focused session. The new session is registered in
         ``_live_sessions`` and mirrored to ``history/{sid}.json`` so the frontend
         can load it by id immediately.
+
+        ``origin`` (e.g. ``"scheduled_task"``) is persisted so session lists can
+        hide non-interactive sessions while they remain loadable by id.
         """
         with self._lock:
             now_iso = utc_now_iso()
@@ -856,12 +898,16 @@ class SessionManager:
                 "last_updated": now_iso,
                 "created_at": now_iso,
             }
+            origin_s = (origin or "").strip()
+            if origin_s:
+                data["origin"] = origin_s
             self._live_sessions[sid] = data
             self._save_session_data(data, as_focused=False)
             logger.info(
-                "[SessionManager] Created parallel session: %s title=%s (focused unchanged=%s)",
+                "[SessionManager] Created parallel session: %s title=%s origin=%s (focused unchanged=%s)",
                 sid,
                 data.get("title") or "-",
+                origin_s or "-",
                 self.session_data.get("id") or "-",
             )
             return sid
@@ -1146,10 +1192,14 @@ class SessionManager:
 
             target.setdefault("messages", []).append(message)
             target["last_updated"] = utc_now_iso()
-            if role == "user" and not target.get("title") and not target.get("title_locked"):
-                provisional = self._title_from_user_content(content)
-                if provisional:
-                    target["title"] = provisional
+            if role == "user":
+                # First real user input promotes the draft into the normal session list.
+                if target.get("draft"):
+                    target["draft"] = False
+                if not target.get("title") and not target.get("title_locked"):
+                    provisional = self._title_from_user_content(content)
+                    if provisional:
+                        target["title"] = provisional
             if len(target["messages"]) > 1000:
                 target["messages"] = target["messages"][-1000:]
 
@@ -1455,8 +1505,44 @@ class SessionManager:
             "last_updated": self.session_data["last_updated"],
         }
 
+    @staticmethod
+    def _has_user_input(data: dict | None) -> bool:
+        """True when the user has actually sent something (text / images / files)."""
+        if not isinstance(data, dict):
+            return False
+        for m in data.get("messages") or []:
+            if not isinstance(m, dict) or m.get("role") != "user":
+                continue
+            if str(m.get("content") or "").strip():
+                return True
+            if m.get("images") or m.get("attachments"):
+                return True
+        return False
+
+    @classmethod
+    def _is_reusable_draft(cls, data: dict | None) -> bool:
+        """Empty interactive shell that should be reused instead of spawning another sid."""
+        if not isinstance(data, dict) or not str(data.get("id") or "").strip():
+            return False
+        if str(data.get("origin") or "").strip() == "scheduled_task":
+            return False
+        return not cls._has_user_input(data)
+
+    @staticmethod
+    def _session_hidden_from_list(data: dict | None) -> bool:
+        """True when session should not appear in the interactive session sidebar."""
+        if not isinstance(data, dict):
+            return False
+        if str(data.get("origin") or "").strip() == "scheduled_task":
+            return True
+        # Explicit New Session draft cache — never list until first user send.
+        if data.get("draft"):
+            return True
+        # Legacy never-sent shells (no draft flag, no title) — same treatment.
+        return SessionManager._is_reusable_draft(data) and not str(data.get("title") or "").strip()
+
     def get_session_list(self) -> list[dict[str, str]]:
-        """Get all session list."""
+        """Get all session list (excludes scheduled-task origin sessions)."""
         history_dir = self.history_dir
         sessions = []
         seen_ids = set()
@@ -1474,7 +1560,7 @@ class SessionManager:
 
         # 1. Current session
         curr_id = self.session_data.get("id")
-        if curr_id:
+        if curr_id and not self._session_hidden_from_list(self.session_data):
             messages = self.session_data.get("messages", [])
             title = self.resolve_session_title(messages, self.session_data.get("title"), curr_id)
             preview = _extract_preview(messages)
@@ -1490,6 +1576,8 @@ class SessionManager:
                 }
             )
             seen_ids.add(curr_id)
+        elif curr_id:
+            seen_ids.add(curr_id)
 
         # 2. History files
         if os.path.exists(history_dir):
@@ -1504,43 +1592,53 @@ class SessionManager:
                     preview = ""
                     created_at = None
                     last_updated = None
+                    origin = ""
                     # Prefer reading title from cache (with mtime validation)
                     cached = self._cache_get(sid)
                     if cached is not None:
+                        if self._session_hidden_from_list(cached):
+                            seen_ids.add(sid)
+                            continue
                         messages = cached.get("messages", [])
                         title = self.resolve_session_title(messages, cached.get("title"), sid)
                         preview = _extract_preview(messages)
                         created_at = cached.get("created_at")
                         last_updated = cached.get("last_updated")
+                        origin = str(cached.get("origin") or "").strip()
                     else:
                         try:
                             with open(os.path.join(history_dir, f), encoding="utf-8") as jf:
                                 content = jf.read()
                                 try:
                                     parsed = json.loads(content)
+                                    if isinstance(parsed, dict) and self._session_hidden_from_list(parsed):
+                                        seen_ids.add(sid)
+                                        continue
                                     messages = parsed.get("messages", []) or []
                                     title = self.resolve_session_title(messages, parsed.get("title"), sid)
                                     preview = _extract_preview(messages)
                                     if isinstance(parsed, dict):
                                         created_at = parsed.get("created_at")
                                         last_updated = parsed.get("last_updated")
+                                        origin = str(parsed.get("origin") or "").strip()
                                 except Exception:
                                     match = re.search(r"<title>(.*?)</title>", content, re.DOTALL)
                                     if match:
                                         title = match.group(1).strip() or sid
                         except Exception:
                             pass
-                    sessions.append(
-                        {
-                            "id": sid,
-                            "title": title,
-                            "preview": preview,
-                            "current": False,
-                            "primary": sid == self.get_primary_session_id(),
-                            "created_at": created_at,
-                            "last_updated": last_updated,
-                        }
-                    )
+                    entry = {
+                        "id": sid,
+                        "title": title,
+                        "preview": preview,
+                        "current": False,
+                        "primary": sid == self.get_primary_session_id(),
+                        "created_at": created_at,
+                        "last_updated": last_updated,
+                    }
+                    if origin:
+                        entry["origin"] = origin
+                    sessions.append(entry)
                     seen_ids.add(sid)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")

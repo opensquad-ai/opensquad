@@ -418,64 +418,73 @@
   }
 }
 
-/* ── New-session composer: center ↔ bottom dock ─────────────────────── */
+/* ── New-session composer: center ↔ bottom dock ───────────────────────
+   Use transform (not grid-template-rows / justify-content) so the morph
+   interpolates on the compositor thread instead of snapping. */
 .os-chat-session-shell {
-  display: grid;
+  --duration-composer-dock: 420ms;
+  --ease-composer-dock: cubic-bezier(0.22, 1, 0.36, 1);
+  display: flex;
+  flex-direction: column;
+  position: relative;
   height: 100%;
   min-height: 0;
   flex: 1;
-  transition: grid-template-rows var(--duration-panel, 220ms) var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1));
-}
-.os-chat-session-shell.is-landing {
-  grid-template-rows: 0fr minmax(0, 1fr);
-}
-.os-chat-session-shell.is-docked {
-  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 .os-chat-session-messages {
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: opacity 180ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1));
+  transition: opacity var(--duration-composer-dock) var(--ease-composer-dock);
 }
 .os-chat-session-shell.is-landing .os-chat-session-messages {
   opacity: 0;
   pointer-events: none;
+  transition-delay: 0ms;
 }
 .os-chat-session-shell.is-docked .os-chat-session-messages {
   opacity: 1;
+  /* Fade chat in slightly after the composer starts settling downward */
+  transition-delay: 90ms;
 }
 
 .os-composer-landing-dock {
+  flex: 0 0 auto;
   min-width: 0;
-  transition: padding 220ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1));
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  z-index: 2;
+  transform: translate3d(0, 0, 0);
+  transition: transform var(--duration-composer-dock) var(--ease-composer-dock);
+  will-change: transform;
 }
+/* Sit near vertical center while empty; ease down to the bottom on first send */
 .os-composer-landing-dock.is-landing {
-  height: 100%;
-  justify-content: center;
-  padding-bottom: 6vh;
+  transform: translate3d(0, calc(-1 * min(36vh, 280px)), 0);
 }
 .os-composer-landing-dock.is-docked {
-  justify-content: flex-end;
-  padding-bottom: 0;
+  transform: translate3d(0, 0, 0);
 }
 
 .os-composer-landing-hero {
   overflow: hidden;
   max-height: 160px;
   opacity: 1;
-  transform: translateY(0);
+  transform: translate3d(0, 0, 0);
   margin-bottom: 1.25rem;
   transition:
-    opacity 200ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1)),
-    transform 220ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1)),
-    max-height 220ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1)),
-    margin 220ms var(--ease-soft, cubic-bezier(0.22, 1, 0.36, 1));
+    opacity 280ms var(--ease-composer-dock),
+    transform var(--duration-composer-dock) var(--ease-composer-dock),
+    max-height var(--duration-composer-dock) var(--ease-composer-dock),
+    margin var(--duration-composer-dock) var(--ease-composer-dock);
 }
 .os-composer-landing-dock.is-docked .os-composer-landing-hero {
   opacity: 0;
-  transform: translateY(10px);
+  transform: translate3d(0, 12px, 0);
   max-height: 0;
   margin-bottom: 0;
   pointer-events: none;
@@ -488,6 +497,8 @@
   .os-composer-landing-hero {
     transition: none !important;
   }
+  .os-composer-landing-dock.is-landing,
+  .os-composer-landing-dock.is-docked,
   .os-composer-landing-dock.is-docked .os-composer-landing-hero {
     transform: none;
   }

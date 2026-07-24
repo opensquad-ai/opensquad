@@ -10,6 +10,7 @@ import {
   sealIncompleteWorkflows,
   shouldTreatWorkflowComplete,
   timelineHasToolEvent,
+  timelineHasVisibleChatContent,
   type TimelineEntry,
   type WorkflowEvent,
 } from './aiChatTimeline';
@@ -747,5 +748,69 @@ describe('buildTimelineFromSession in-progress refresh', () => {
     expect(tools).toHaveLength(1);
     expect(tools[0].content?.id).toBe('call_runner_write_0');
     expect(tools[0].content?.partial).toBeUndefined();
+  });
+});
+
+describe('timelineHasVisibleChatContent', () => {
+  it('ignores empty / lifecycle-only workflow shells (landing must stay centered)', () => {
+    const emptyShell: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: { events: [], status: 'working', completed: false, started_ms: Date.now() },
+        _uid: 'w1',
+      },
+    ];
+    expect(timelineHasVisibleChatContent(emptyShell)).toBe(false);
+
+    const lifecycleOnly: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { type: 'info', content: { text: 'New session started' }, timestamp: Date.now() },
+            { type: 'info', content: 'Workflow started', timestamp: Date.now() },
+          ],
+          status: null,
+          completed: true,
+        },
+        _uid: 'w2',
+      },
+    ];
+    expect(timelineHasVisibleChatContent(lifecycleOnly)).toBe(false);
+
+    const hintOnly: TimelineEntry[] = [
+      {
+        kind: 'status_hint',
+        data: { hintType: 'sleep', content: 30, timestamp: Date.now() },
+        _uid: 'h1',
+      },
+    ];
+    expect(timelineHasVisibleChatContent(hintOnly)).toBe(false);
+  });
+
+  it('detects real messages and tool activity', () => {
+    expect(
+      timelineHasVisibleChatContent([
+        {
+          kind: 'message',
+          data: { role: 'user', content: 'hello', timestamp: new Date().toISOString() },
+          _uid: 'm1',
+        },
+      ]),
+    ).toBe(true);
+
+    expect(
+      timelineHasVisibleChatContent([
+        {
+          kind: 'workflow',
+          data: {
+            events: [toolCall('c1')],
+            status: 'working',
+            completed: false,
+          },
+          _uid: 'w3',
+        },
+      ]),
+    ).toBe(true);
   });
 });

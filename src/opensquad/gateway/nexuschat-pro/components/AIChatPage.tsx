@@ -42,6 +42,7 @@ import {
   formatUserSkillDisplayContent,
   genTimelineUID,
   timelineHasToolEvent,
+  timelineHasVisibleChatContent,
   workflowToolEventKey,
   sealIncompleteWorkflows,
   shouldTreatWorkflowComplete,
@@ -53,6 +54,7 @@ import {
 import { pushCwdRecent } from '../utils/cwdRecents';
 import {
   putCachedSessionTimeline,
+  getCachedSessionTimeline,
   getCachedSessionTimelineMeta,
   SESSION_HISTORY_PAGE_SIZE,
 } from '../utils/sessionTimelineCache';
@@ -66,6 +68,9 @@ import {
 } from '../utils/sessionProjectMeta';
 import {
   loadWorkspaceStore,
+  loadWorkspaceStoreResolved,
+  setWorkspaceStoreAliases,
+  pruneGoneSessionTabs,
   migrateProjectPathsToWorkspaces,
   ensureWorkspace,
   openWorkspaceTab,
@@ -157,6 +162,10 @@ import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
 const SkillManagerPage = React.lazy(() =>
   import('./SkillManagerPage').then((m) => ({ default: m.SkillManagerPage })),
 );
+const PluginManagerPage = React.lazy(() =>
+  import('./PluginManagerPage').then((m) => ({ default: m.PluginManagerPage })),
+);
+const RolesPage = React.lazy(() => import('./RolesPage'));
 import {
   applyJobStatus,
   applyJobStdout,
@@ -177,7 +186,6 @@ interface AIChatPageProps {
   onOpenProfile?: () => void;
   onOpenSettings?: () => void;
 }
-
 
 /** Last manually selected model / effort — survives refresh before config loads. */
 function lastModelStorageKey(agentId: string) {
@@ -1044,8 +1052,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [viewingHistorySession]);
   const [sessionTitleUpdate, setSessionTitleUpdate] = useState<{ id: string; title: string } | null>(null);
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(true);
-  /** In-chat Skill 库：keep SessionSidebar, replace center + files with SkillManagerPage. */
-  const [skillsViewOpen, setSkillsViewOpen] = useState(false);
+  /** In-chat Skill 库 / 插件：keep SessionSidebar, replace center + files. */
+  const [libraryView, setLibraryView] = useState<null | 'skills' | 'plugins' | 'roles'>(null);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
     try {
       const raw = localStorage.getItem('opensquad.filesPanel.open');
@@ -1066,7 +1074,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   });
   const [fileOpenRequest, setFileOpenRequest] = useState<ProjectFileOpenRequest | null>(null);
   const [wsSnap, setWsSnap] = useState<WorkspaceStoreSnapshot>(() =>
-    loadWorkspaceStore(typeof agentId === 'string' ? agentId : ''),
+    loadWorkspaceStoreResolved(typeof agentId === 'string' ? agentId : ''),
   );
   const [closeWorkspaceTarget, setCloseWorkspaceTarget] = useState<Workspace | null>(null);
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
@@ -1082,6 +1090,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [restoreConfirm, setRestoreConfirm] = useState<{
     entryUid: string;
     message: ChatMessage;
+    sessionId?: string;
   } | null>(null);
   const [filesLiveChanges, setFilesLiveChanges] = useState<{
     nonce: number;
@@ -1230,9 +1239,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // Runtime model-switch dropdown: available cards + in-flight switch flag.
   const [modelCards, setModelCards] = useState<ModelCardInfo[]>([]);
   const [switchingModel, setSwitchingModel] = useState(false);
-  // The currently-active card name (config.json model._card). Used to pinpoint
-  // the selected <option> even when two cards from different vendors share the
-  // same model_name (model_name alone is not a unique identity).
+  // The currently-active card name (last UI pick / config.json model._card).
+  // Used to pinpoint the selected <option> even when two cards from different
+  // vendors share the same model_name (model_name alone is not a unique identity).
   const [currentCardName, setCurrentCardName] = useState<string | null>(() =>
     loadLastModelPick(agentId).card,
   );
@@ -1287,9 +1296,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // Session loading state (加载/创建会话中)
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [sessionLoadingLabel, setSessionLoadingLabel] = useState('');
+  /** False until first hydrate (or intentional New Chat) — blocks fake New Chat landing on refresh. */
+  const [sessionBootstrapped, setSessionBootstrapped] = useState(false);
   const newSessionPendingRef = useRef(false); // true after handleNewSession fires, cleared on next connected
   /** After New Chat succeeds, ignore hydrates that would snap back to an older sid. */
   const newSessionGuardRef = useRef<{ sid: string; until: number } | null>(null);
+  /**
+   * Sticky centered landing until the user actually sends on that sid.
+   * Timeline noise (empty workflow shells, sleep hints) must not dock the composer.
+   */
+  const composerLandingSessionsRef = useRef<Set<string>>(new Set());
+  const [, bumpComposerLandingEpoch] = useState(0);
+  const pinComposerLanding = useCallback((sid: string | null | undefined) => {
+    const id = String(sid || '').trim();
+    if (!id || composerLandingSessionsRef.current.has(id)) return;
+    composerLandingSessionsRef.current.add(id);
+    setSessionBootstrapped(true);
+    setIsLoadingSession(false);
+    bumpComposerLandingEpoch((n) => n + 1);
+  }, []);
+  const unpinComposerLanding = useCallback((sid: string | null | undefined) => {
+    const id = String(sid || '').trim();
+    if (!id || !composerLandingSessionsRef.current.has(id)) return;
+    composerLandingSessionsRef.current.delete(id);
+    bumpComposerLandingEpoch((n) => n + 1);
+  }, []);
 
   // Scroll button visibility
   const [showScrollTop, setShowScrollTop] = useState(false);
@@ -3271,6 +3302,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const seq = ++sessionReloadSeqRef.current;
       isHydratingSessionRef.current = true;
       sessionBootstrapDoneRef.current = false;
+      // Only clear chrome-ready on explicit loading hydrates (refresh/connect).
+      // Soft reloads must not flash the full-pane "加载会话中" over an open chat.
+      if (opts?.showLoading) {
+        setSessionBootstrapped(false);
+      }
       pendingHydrationMediaRef.current = [];
       pendingHydrationWorkflowEventsRef.current = [];
       diskSessionLoadedRef.current = false;
@@ -3647,6 +3683,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             setIsLoadingSession(false);
             isHydratingSessionRef.current = false;
+            setSessionBootstrapped(true);
+            if (!sessionBootstrapDoneRef.current) {
+              sessionBootstrapDoneRef.current = true;
+            }
             // Flush any workflow events that arrived between setTimeline and this
             // finally (race window while isHydratingSessionRef was still true).
             const lateWf = pendingHydrationWorkflowEventsRef.current;
@@ -4024,6 +4064,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         sessionBootstrapDoneRef.current = true;
         if (sid) {
           newSessionGuardRef.current = { sid, until: Date.now() + 20000 };
+          pinComposerLanding(sid);
         }
         // Keep empty timeline from handleNewSession; disk may still hold the old session.
         return;
@@ -4667,9 +4708,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, []);
 
   const requestWithdrawUserMessage = useCallback(
-    (entryUid: string, message: ChatMessage) => {
+    (entryUid: string, message: ChatMessage, sessionId?: string) => {
       if (!entryUid || message.role !== 'user' || changesBusy) return;
-      setRestoreConfirm({ entryUid, message });
+      setRestoreConfirm({ entryUid, message, sessionId });
     },
     [changesBusy],
   );
@@ -4677,7 +4718,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const handleWithdrawUserMessage = useCallback(
     async () => {
       if (!restoreConfirm) return;
-      const { entryUid, message } = restoreConfirm;
+      const { entryUid, message, sessionId: withdrawSid } = restoreConfirm;
       if (!entryUid || message.role !== 'user') {
         setRestoreConfirm(null);
         return;
@@ -4695,7 +4736,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         .trim()
         .replace(/\.\d{3}Z$/, 'Z');
       const refillText = composerTextFromUserMessage(message);
+      const targetSid = String(
+        withdrawSid || currentSessionIdRef.current || '',
+      ).trim();
       setChangesBusy(true);
+      // Route setTimeline into the session being withdrawn (pane / parallel).
+      eventSidRef.current = targetSid;
       try {
         // Avoid hydration merge resurrecting withdrawn turns from WS buffers.
         pendingHydrationMediaRef.current = [];
@@ -4708,11 +4754,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           message_id: checkpointId,
           timestamp: cutTs,
         });
-        setTimeline((prev) => {
+        const truncate = (prev: TimelineEntry[]) => {
           const idx = prev.findIndex((e) => e._uid === entryUid);
           if (idx < 0) return prev;
           return prev.slice(0, idx);
-        });
+        };
+        // Seed live bucket from cache when withdrawing a history-only tab.
+        if (targetSid) {
+          setLiveTimelinesBySession((prev) => {
+            const cur =
+              prev[targetSid]
+              ?? getCachedSessionTimeline(agentId, targetSid)
+              ?? [];
+            const next = truncate(Array.isArray(cur) ? cur : []);
+            putCachedSessionTimeline(agentId, targetSid, next, { complete: true });
+            const out = { ...prev, [targetSid]: next };
+            liveTimelinesBySessionRef.current = out;
+            return out;
+          });
+        }
+        setTimeline(truncate);
         setStreamingText('');
         streamingTextRef.current = '';
         setIsStreaming(false);
@@ -4735,6 +4796,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         console.warn('[withdraw] failed', err);
         window.alert(t('aiChat.restoreCheckpoint.failed'));
       } finally {
+        eventSidRef.current = '';
         setChangesBusy(false);
       }
     },
@@ -4749,6 +4811,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       refreshSessionChanges,
       clearOutboundTurnPending,
       composerTextFromUserMessage,
+      setTimeline,
       t,
     ],
   );
@@ -5496,6 +5559,78 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // history session while the empty "new" chat is still agent-current.
     const previousSid =
       agentCurrentSessionIdRef.current || currentSessionIdRef.current;
+    const boundPath = typeof projectPath === 'string' ? projectPath.trim() : '';
+
+    // Reuse empty draft: jump back to the cached New Session shell without
+    // minting another sid (backend also no-ops, but skip the round-trip).
+    const draftSid = String(previousSid || '').trim();
+    if (draftSid) {
+      const draftEntries =
+        liveTimelinesBySessionRef.current[draftSid]
+        ?? (draftSid === (currentSessionIdRef.current || '') ? timelineRef.current : null)
+        ?? [];
+      const draftEmpty = !timelineHasVisibleChatContent(
+        flattenArchivedSections(Array.isArray(draftEntries) ? draftEntries : []),
+      );
+      if (draftEmpty) {
+        pendingOpenSessionTabRef.current = true;
+        if (!pendingTargetPaneIdRef.current && focusedPaneId) {
+          pendingTargetPaneIdRef.current = focusedPaneId;
+        }
+        userStoppedRef.current = false;
+        setIsLoadingSession(false);
+        setSessionBootstrapped(true);
+        viewingHistorySessionRef.current = false;
+        setViewingHistorySession(false);
+        currentSessionIdRef.current = draftSid;
+        agentCurrentSessionIdRef.current = draftSid;
+        wsServiceRef.current?.setActiveSession(draftSid);
+        setCurrentSessionId(draftSid);
+        setTimeline([]);
+        setShellStreams({});
+        setOptionsProposals([]);
+        setModeApprovals([]);
+        setActiveGoal(null);
+        setPendingSkill(null);
+        setSessionChanges(null);
+        setFocusChangedNonce(Date.now());
+        streamingTextRef.current = '';
+        setStreamingText('');
+        finalizingRef.current = false;
+        diskSessionLoadedRef.current = false;
+        sessionBootstrapDoneRef.current = true;
+        setPlanSteps([]);
+        setImages([]);
+        setAttachments([]);
+        setPendingMessages([]);
+        clearOutboundTurnPending();
+        pinComposerLanding(draftSid);
+        if (activeWorkspace) {
+          const targetPane =
+            pendingTargetPaneIdRef.current || focusedPaneId || null;
+          pendingTargetPaneIdRef.current = null;
+          pendingOpenSessionTabRef.current = false;
+          openContentTab(
+            agentId,
+            activeWorkspace.id,
+            { kind: 'session', id: draftSid },
+            targetPane,
+          );
+          if (targetPane) setFocusedPane(agentId, targetPane);
+          refreshWsSnap();
+        }
+        if (boundPath) {
+          pendingProjectPathRef.current = boundPath;
+          setAgentCwd(boundPath);
+          const dirName = agentProfile?.dir_name || agentId;
+          void adminAPI.setWorkingDirectory(dirName, boundPath).catch((err: any) => {
+            console.error('[AIChatPage] Failed to set working directory for folder session:', err);
+          });
+        }
+        return;
+      }
+    }
+
     pendingOpenSessionTabRef.current = true;
     // Only abort in-flight work when something is actually running.
     // Unconditional stop_task sets a sticky agent-wide Stop latch that can
@@ -5511,6 +5646,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     newSessionPendingRef.current = true;
     userStoppedRef.current = false;
     setIsLoadingSession(false);
+    setSessionBootstrapped(true);
     // Optimistic clear so we never treat the pre-rotation empty sid as "new".
     currentSessionIdRef.current = null;
     setCurrentSessionId(null);
@@ -5555,7 +5691,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     pendingQueueHydratedKeyRef.current = null;
     pendingSessionTitleRef.current = null;
     // Folder-scoped new session: bind cwd to that project path immediately.
-    const boundPath = typeof projectPath === 'string' ? projectPath.trim() : '';
     if (boundPath) {
       pendingProjectPathRef.current = boundPath;
       setAgentCwd(boundPath);
@@ -5612,6 +5747,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       diskSessionLoadedRef.current = msgCount > 0;
       historyOffsetRef.current = msgCount;
       setHasMoreHistory(session?.has_more ?? false);
+      if (msgCount === 0 && !timelineHasVisibleChatContent(entries)) {
+        pinComposerLanding(currentSid);
+      }
       return true;
     };
     const hardTimeout = window.setTimeout(async () => {
@@ -6019,14 +6157,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   // ---- Workspace chrome (L1 / L2) ----
+  // Restore only previously open L2 tabs from localStorage — never seed from
+  // the full session list (that made every session reappear on each start).
   const refreshWsSnap = useCallback(() => {
-    setWsSnap(loadWorkspaceStore(agentId));
-  }, [agentId]);
+    setWsSnap(loadWorkspaceStoreResolved(agentId, [agentProfile?.dir_name]));
+  }, [agentId, agentProfile?.dir_name]);
 
   useEffect(() => {
-    setWsSnap(loadWorkspaceStore(agentId));
+    setWorkspaceStoreAliases(agentId, [
+      agentProfile?.dir_name,
+      agentProfile?.agent_id,
+    ]);
+    setWsSnap(loadWorkspaceStoreResolved(agentId, [agentProfile?.dir_name]));
     wsMigratedRef.current = false;
-  }, [agentId]);
+  }, [agentId, agentProfile?.dir_name, agentProfile?.agent_id]);
 
   useEffect(() => {
     const onCh = (e: Event) => {
@@ -6117,9 +6261,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       { kind: 'session', id: currentSessionId },
       targetPane,
     );
+    pinComposerLanding(currentSessionId);
     if (targetPane) setFocusedPane(agentId, targetPane);
     refreshWsSnap();
-  }, [currentSessionId, activeWorkspace?.id, agentId, refreshWsSnap, focusedPaneId]);
+  }, [currentSessionId, activeWorkspace?.id, agentId, refreshWsSnap, focusedPaneId, pinComposerLanding]);
 
   useEffect(() => {
     if (!sessionTitleUpdate) return;
@@ -6144,6 +6289,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       }
       return changed ? next : prev;
     });
+    // Prune L2 tabs for deleted sessions — never open the whole list as tabs.
+    // Protect agent-current / focused sid: new sessions often appear as L2 tabs
+    // before the HTTP list includes them; pruning flipped the active tab away
+    // and docked the empty composer while the user was still typing.
+    const ids = sessions.map((s) => s.id).filter(Boolean);
+    if (agentId && ids.length > 0) {
+      const protect = new Set(ids);
+      const cur = currentSessionIdRef.current;
+      const agentCur = agentCurrentSessionIdRef.current;
+      if (cur) protect.add(cur);
+      if (agentCur) protect.add(agentCur);
+      const pruned = pruneGoneSessionTabs(agentId, protect);
+      setWsSnap(pruned);
+    }
     // Prefetch recent session first pages into timeline cache (idle).
     if (!agentId || !sessions.length) return;
     const current = currentSessionIdRef.current;
@@ -6301,7 +6460,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   /** Open / continue a session in the currently anchored pane only. */
   const handleSidebarViewSession = (sessionId: string) => {
-    setSkillsViewOpen(false);
+    setLibraryView(null);
     if (activeWorkspace) {
       const pane = focusedPaneId;
       openContentTab(
@@ -6320,7 +6479,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleNewSessionInWorkspace = (projectPath?: string) => {
-    setSkillsViewOpen(false);
+    setLibraryView(null);
     const path = (projectPath || activeWorkspace?.rootPath || '').trim();
     // Sidebar / global new-session → anchored pane
     if (!pendingTargetPaneIdRef.current && focusedPaneId) {
@@ -6399,6 +6558,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     opts?: { stay?: boolean },
   ) => {
     if (!activeWorkspace) return;
+    // First real send leaves the centered new-session landing and promotes
+    // the draft into the sidebar session list.
+    unpinComposerLanding(sessionId);
+    requestSessionListRefresh(agentId, sessionId);
     setFocusedPane(agentId, paneId);
     if (!opts?.stay) {
       openContentTab(
@@ -6470,6 +6633,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const makePaneHandlers = (paneId: string): PaneShellHandlers => {
+    /** Centered landing until this session has real chat (not draft typing / lifecycle noise). */
+    const isSessionComposerLanding = (sessionId: string): boolean => {
+      if (!sessionId) return false;
+      // New Chat: keep centered until first send, regardless of timeline noise.
+      if (composerLandingSessionsRef.current.has(sessionId)) return true;
+      // Refresh / reconnect: empty timeline before hydrate must NOT look like New Chat.
+      if (!sessionBootstrapped || isLoadingSession) return false;
+      if (isStreamingBySession[sessionId]) return false;
+      if (sessionId === currentSessionId && isStreaming) return false;
+      const hasBucket = Object.prototype.hasOwnProperty.call(liveTimelinesBySession, sessionId);
+      const cached = !hasBucket && sessionId !== currentSessionId
+        ? getCachedSessionTimeline(agentId, sessionId)
+        : null;
+      const entries = hasBucket
+        ? (liveTimelinesBySession[sessionId] || [])
+        : sessionId === currentSessionId
+          ? timeline
+          : (cached || []);
+      // No local knowledge yet → loading / unknown, not landing.
+      if (!hasBucket && sessionId !== currentSessionId && !cached) return false;
+      return !timelineHasVisibleChatContent(flattenArchivedSections(entries));
+    };
+    const isSessionPaneLoading = (sessionId: string): boolean => {
+      if (!sessionId) return false;
+      if (composerLandingSessionsRef.current.has(sessionId)) return false;
+      // Refresh: before hydrate finishes, do not paint New Chat chrome.
+      if (!sessionBootstrapped || isLoadingSession) {
+        if (!currentSessionId || sessionId === currentSessionId) return true;
+      }
+      return false;
+    };
     const renderPendingFor = (sessionId: string): React.ReactNode => {
       const queue = pendingMessages.filter((m) => m.sessionId === sessionId);
       if (queue.length === 0) return null;
@@ -6673,6 +6867,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           columnClass={soloColumnClass}
           userName={currentUser?.name || undefined}
           agentName={agentProfile?.agent_name || undefined}
+          canWithdraw={!changesBusy}
+          onWithdrawUserMessage={(entryUid, message) =>
+            requestWithdrawUserMessage(entryUid, message, sessionId)
+          }
           onFocus={() => {
             if (focusedPaneId !== paneId) {
               setFocusedPane(agentId, paneId);
@@ -6687,10 +6885,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         key={`composer-${paneId}`}
         agentId={agentId}
         columnClass={soloColumnClass}
-        landing={
-          sessionId === currentSessionId && !hasContent && !isLoadingSession
-        }
-        disabled={isLoadingSession}
+        landing={isSessionComposerLanding(sessionId)}
+        disabled={isLoadingSession || (!sessionBootstrapped && !composerLandingSessionsRef.current.has(sessionId))}
         busy={isSessionBusy(sessionId)}
         agentMode={agentModeBySession[sessionId] ?? agentMode}
         onModeChange={(mode) => {
@@ -6821,8 +7017,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         statusHint={null}
       />
     ),
-    isComposerLanding: (sessionId: string) =>
-      sessionId === currentSessionId && !hasContent && !isLoadingSession,
+    isComposerLanding: isSessionComposerLanding,
+    isSessionLoading: isSessionPaneLoading,
+    sessionLoadingLabel: sessionLoadingLabel || t('aiChat.loadingSession'),
     onFileDirty: (relPath, dirty) => {
       setFileDirtyMap((prev) => {
         if (!!prev[relPath] === dirty) return prev;
@@ -6833,15 +7030,31 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   };
 
   const handleOpenSkills = () => {
-    setSkillsViewOpen((open) => {
-      const next = !open;
+    setLibraryView((cur) => {
+      const next = cur === 'skills' ? null : 'skills';
+      if (next) setSessionSidebarOpen(true);
+      return next;
+    });
+  };
+
+  const handleOpenPlugins = () => {
+    setLibraryView((cur) => {
+      const next = cur === 'plugins' ? null : 'plugins';
+      if (next) setSessionSidebarOpen(true);
+      return next;
+    });
+  };
+
+  const handleOpenRoles = () => {
+    setLibraryView((cur) => {
+      const next = cur === 'roles' ? null : 'roles';
       if (next) setSessionSidebarOpen(true);
       return next;
     });
   };
 
   const handleOpenScheduledTasks = () => {
-    setSkillsViewOpen(false);
+    setLibraryView(null);
     if (!activeWorkspace) return;
     const pane = focusedPaneId;
     openContentTab(agentId, activeWorkspace.id, { kind: 'scheduled-tasks', id: 'scheduled-tasks' }, pane);
@@ -6854,7 +7067,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const handler = (e: any) => {
       const sessionId: string | undefined = e?.detail?.sessionId;
       if (!sessionId || !activeWorkspace) return;
-      setSkillsViewOpen(false);
+      setLibraryView(null);
       const pane = focusedPaneId;
       openContentTab(agentId, activeWorkspace.id, { kind: 'session', id: sessionId }, pane);
       if (pane) setFocusedPane(agentId, pane);
@@ -6864,14 +7077,28 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return () => window.removeEventListener('opensquad-open-session-tab', handler as EventListener);
   }, [activeWorkspace, focusedPaneId, agentId, refreshWsSnap]);
 
-  // Open in-chat Skill 库 from nested views (e.g. ExecWorkflowView).
+  // Open in-chat Skill 库 / 插件 / 角色 from nested views.
   useEffect(() => {
-    const handler = () => {
-      setSkillsViewOpen(true);
+    const openSkills = () => {
+      setLibraryView('skills');
       setSessionSidebarOpen(true);
     };
-    window.addEventListener('opensquad-open-skills', handler as EventListener);
-    return () => window.removeEventListener('opensquad-open-skills', handler as EventListener);
+    const openPlugins = () => {
+      setLibraryView('plugins');
+      setSessionSidebarOpen(true);
+    };
+    const openRoles = () => {
+      setLibraryView('roles');
+      setSessionSidebarOpen(true);
+    };
+    window.addEventListener('opensquad-open-skills', openSkills as EventListener);
+    window.addEventListener('opensquad-open-plugins', openPlugins as EventListener);
+    window.addEventListener('opensquad-open-roles', openRoles as EventListener);
+    return () => {
+      window.removeEventListener('opensquad-open-skills', openSkills as EventListener);
+      window.removeEventListener('opensquad-open-plugins', openPlugins as EventListener);
+      window.removeEventListener('opensquad-open-roles', openRoles as EventListener);
+    };
   }, []);
 
   // ---- Image upload ----
@@ -7040,9 +7267,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
   // ---- Render helpers ----
 
-  // Check if timeline has any messages (for empty state)
-  const hasContent = timeline.length > 0 || isStreaming;
-
   // ---- Render ----
   return (
     <div
@@ -7087,8 +7311,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onSwitchAndReply={handleSwitchAndReply}
         onDeleteSession={handleDeleteSession}
         onOpenSkills={handleOpenSkills}
+        onOpenPlugins={handleOpenPlugins}
+        onOpenRoles={handleOpenRoles}
         onOpenScheduledTasks={handleOpenScheduledTasks}
-        skillsActive={skillsViewOpen}
+        skillsActive={libraryView === 'skills'}
+        pluginsActive={libraryView === 'plugins'}
+        rolesActive={libraryView === 'roles'}
         isOpen={sessionSidebarOpen}
         sessionTitleUpdate={sessionTitleUpdate}
         agentBusy={
@@ -7129,7 +7357,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         />
       )}
 
-      {skillsViewOpen ? (
+      {libraryView === 'skills' || libraryView === 'plugins' || libraryView === 'roles' ? (
         <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col os-depth-panel">
           <Suspense
             fallback={
@@ -7139,11 +7367,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               </div>
             }
           >
-            <SkillManagerPage
-              embedded
-              initialAgentId={agentProfile?.dir_name || agentId}
-              onBack={() => setSkillsViewOpen(false)}
-            />
+            {libraryView === 'skills' ? (
+              <SkillManagerPage
+                embedded
+                initialAgentId={agentProfile?.dir_name || agentId}
+                onBack={() => setLibraryView(null)}
+              />
+            ) : libraryView === 'plugins' ? (
+              <PluginManagerPage
+                embedded
+                initialAgentId={agentProfile?.dir_name || agentId}
+                onBack={() => setLibraryView(null)}
+              />
+            ) : (
+              <RolesPage
+                embedded
+                onBack={() => setLibraryView(null)}
+              />
+            )}
           </Suspense>
         </div>
       ) : (
@@ -7334,11 +7575,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 agentId,
                 canWithdraw:
                   entry.data.role === 'user' &&
-                  !viewingHistorySession &&
                   !changesBusy,
                 onWithdraw:
                   entry.data.role === 'user'
-                    ? () => requestWithdrawUserMessage(entryKey, entry.data)
+                    ? () => requestWithdrawUserMessage(entryKey, entry.data, currentSessionId || undefined)
                     : undefined,
               };
               // Classic: visualization iframes sit below the final assistant reply
@@ -7465,11 +7705,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                         agentId,
                         canWithdraw:
                           nested.data.role === 'user' &&
-                          !viewingHistorySession &&
                           !changesBusy,
                         onWithdraw:
                           nested.data.role === 'user'
-                            ? () => requestWithdrawUserMessage(nestedKey, nested.data)
+                            ? () => requestWithdrawUserMessage(nestedKey, nested.data, currentSessionId || undefined)
                             : undefined,
                       };
                       const replyEmbeds: HtmlEmbedPayload[] =

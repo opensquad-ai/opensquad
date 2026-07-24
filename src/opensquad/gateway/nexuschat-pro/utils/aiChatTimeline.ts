@@ -344,6 +344,8 @@ export function sealIncompleteWorkflows(
         : typeof fallbackStarted === 'number'
           ? fallbackStarted
           : wf.events[0]?.timestamp;
+    // Prefer wall-clock seal time so Stop freezes "Worked for" at the moment
+    // the user cancelled (even when the last tool event was much earlier).
     const elapsed =
       typeof wf.elapsed_ms === 'number'
         ? wf.elapsed_ms
@@ -422,6 +424,54 @@ export type TimelineEntry =
       entries: TimelineEntry[];
       collapsed: boolean;
     }; _uid: string };
+
+/** Lifecycle-only info text that never paints in the workflow UI. */
+function isLifecycleInfoText(text: string): boolean {
+  return /^New session started$/i.test(text) || /^Workflow started$/i.test(text);
+}
+
+/**
+ * True when the timeline has something that should leave the new-session
+ * centered landing and dock the composer (real messages / tools / thoughts).
+ * Status hints, prompt cards, and empty lifecycle-only workflow shells do NOT
+ * count — those used to flip landing→docked while the message area stayed blank.
+ */
+export function timelineHasVisibleChatContent(timeline: TimelineEntry[]): boolean {
+  for (const entry of timeline) {
+    if (entry.kind === 'message') {
+      const msg = entry.data;
+      const raw = msg?.content;
+      const text = typeof raw === 'string' ? raw.trim() : raw != null ? String(raw).trim() : '';
+      const hasMedia =
+        (Array.isArray(msg?.images) && msg.images.length > 0)
+        || (Array.isArray(msg?.attachments) && msg.attachments.length > 0);
+      if (text || hasMedia) return true;
+      continue;
+    }
+    if (entry.kind === 'workflow') {
+      const events = entry.data?.events || [];
+      for (const evt of events) {
+        if (evt.type === 'info') {
+          const infoObj =
+            typeof evt.content === 'object' && evt.content !== null ? (evt.content as any) : null;
+          const text =
+            typeof evt.content === 'string'
+              ? evt.content
+              : (infoObj?.text || infoObj?.message || '');
+          if (isLifecycleInfoText(String(text).trim())) continue;
+        }
+        return true;
+      }
+      continue;
+    }
+    if (entry.kind === 'archived_section' || entry.kind === 'task_fold') {
+      if (timelineHasVisibleChatContent(entry.data.entries || [])) return true;
+      continue;
+    }
+    // status_hint / prompt — keep landing until real chat appears
+  }
+  return false;
+}
 
 /** Fold agent-side process between the latest user message and an end-task report. */
 export function foldAroundEndTaskIndex(
@@ -1651,17 +1701,23 @@ export function buildTimelineFromSession(
     eventCursor += 1;
   }
   {
-    // Peek-convert to decide completed flag without double-flushing.
+    // End-of-history trailing block: always seal. A snapshot has no live turn
+    // after the last event — leaving it incomplete made "Worked for" keep
+    // climbing via Date.now()-started_ms after stop with no assistant reply.
     const peek = pendingRaw.filter((r) => r.type !== 'prompt_update');
     const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
-    const trailingDone =
-      peekWf.length > 0 &&
-      shouldTreatWorkflowComplete({
-        events: peekWf,
-        status: null,
-        completed: false,
-      });
-    flushPendingWorkflow({ completed: trailingDone });
+    let elapsedMs: number | undefined;
+    if (peekWf.length > 0) {
+      const start = peekWf[0]?.timestamp;
+      const end = peekWf[peekWf.length - 1]?.timestamp;
+      if (typeof start === 'number' && typeof end === 'number') {
+        elapsedMs = Math.max(0, end - start);
+      }
+    }
+    flushPendingWorkflow({
+      completed: peekWf.length > 0,
+      elapsedMs,
+    });
   }
 
   // CRITICAL: After building the timeline, orphaned tool_result events may be

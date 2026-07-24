@@ -17,8 +17,8 @@ export const ComposerLandingDock: React.FC<ComposerLandingDockProps> = ({
 }) => {
   return (
     <div
-      className={`os-composer-landing-dock min-h-0 flex flex-col ${
-        landing ? 'is-landing flex-1' : 'is-docked flex-shrink-0'
+      className={`os-composer-landing-dock min-h-0 flex flex-col flex-shrink-0 ${
+        landing ? 'is-landing' : 'is-docked'
       }`}
       data-landing={landing ? '1' : '0'}
     >
