@@ -2021,13 +2021,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             }}
             className={`px-2.5 py-1.5 text-[11px] relative transition-colors ${
               tab === t.id
-                ? 'text-textMuted font-medium'
+                ? 'text-textMain font-medium'
                 : 'text-textMuted/55 hover:text-textMuted'
             }`}
           >
             {t.label}
             {tab === t.id ? (
-              <span className="absolute left-2 right-2 bottom-0 h-[1.5px] rounded-full bg-textMuted/35" />
+              <span className="absolute left-2 right-2 bottom-0 h-[1.5px] rounded-full bg-textMain/50" />
             ) : null}
           </button>
         ))}

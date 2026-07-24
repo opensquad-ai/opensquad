@@ -978,7 +978,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             elif path.startswith("/api/agents/") and path.endswith("/model-card"):
                 name = path.split("/")[3]
                 body = self._read_body()
-                return self._handle_put_model_card(name, body)
+                # Assign card → agent config — do NOT write model_cards/{agent}.json
+                return self._handle_put_model_card_assign(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/working-directory"):
                 # PUT /api/agents/{name}/working-directory
                 # Sets the agent's session-level working directory (cwd) for
@@ -3578,7 +3579,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 "is_image_output": body.get("is_image_output", False),
                 "audio_output_voice": body.get("audio_output_voice", "alloy"),
                 "render_mode": body.get("render_mode", "strict"),
-                "_card": body.get("name", ""),
+                # Prefer explicit card_name from assign API; fall back to body.name
+                "_card": (body.get("card_name") or body.get("name") or "").strip(),
             }
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
