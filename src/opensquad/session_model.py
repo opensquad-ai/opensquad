@@ -131,29 +131,11 @@ async def bind_for_turn(
         return getattr(runner, "chat_api", None)
 
     preferred = (preferred_card or "").strip() or None
-    existing = get(runner, sid)
 
-    # Guard: a stale frontend closure may send the agent-default card name on
-    # every chat even after the user switched this pane to another card.
-    # If preferred == agent default and the session already has a different
-    # override, keep the session override.
-    if preferred and existing and preferred != existing:
-        default_card = None
-        mc = getattr(runner, "_model_config", None)
-        if isinstance(mc, dict):
-            default_card = str(mc.get("_card") or "").strip() or None
-        if not default_card:
-            root = getattr(runner, "_root_chat_api", None)
-            default_card = current_api_card(root)
-        if default_card and preferred == default_card:
-            logger.warning(
-                "[session_model] ignore stale preferred=%s sid=%s; keep session card=%s",
-                preferred,
-                sid,
-                existing,
-            )
-            preferred = None
-
+    # Explicit chat payload always wins. (Previously we ignored preferred when it
+    # equalled the agent default so a stale UI closure would not clobber a pane
+    # override — but Agent Web now persists the last UI pick as the agent
+    # default, so that guard would keep old session cards after refresh.)
     if preferred:
         set_session_card(runner, sid, preferred)
 

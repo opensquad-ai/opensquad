@@ -3,7 +3,9 @@ Runtime model switching + session-scoped card coordination.
 
 Authority
 ---------
-- Agent default: ``config.json`` / root ChatAPI (no ``session_id`` on switch).
+- Agent default: ``config.json`` / root ChatAPI. UI model picks (including
+  pane/session-scoped switches) also promote to this default so refresh and
+  restart keep the last manually selected card.
 - Session override: ``session_model`` store + ``session_data["model_card"]``.
 - Every parallel turn binds via ``session_model.bind_for_turn`` (chat payload
   preferred card wins).
@@ -376,7 +378,7 @@ async def switch_to_card(card_name: str, session_id: str | None = None) -> dict:
 
     try:
         if sid:
-            # Session-scoped: only this pane — never rewrite agent default config.
+            # Session-scoped bind for this pane…
             apis = session_api_map(_runner)
             api = apis.get(sid)
             if api is None:
@@ -389,6 +391,31 @@ async def switch_to_card(card_name: str, session_id: str | None = None) -> dict:
             if refreshed is not None:
                 apis[sid] = refreshed
             set_session_card(_runner, sid, card_name)
+
+            # …and also promote to agent default so refresh / restart / new chats
+            # keep the last UI-selected model (not the previous config default).
+            await apply_model_reload(_runner, new_cfg)
+            try:
+                from .tools.delegate import set_chat_api_cfg
+
+                set_chat_api_cfg(new_cfg)
+            except Exception as e:
+                logger.warning("[model_switch] Delegate cfg update failed: %s", e)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, _persist_config, _config_path, new_cfg)
+            except Exception:
+                _persist_config(_config_path, new_cfg)
+
+            # Sessions without their own override follow the new default.
+            for sess_id, other in list(apis.items()):
+                if other is None or sess_id == sid:
+                    continue
+                if session_get(_runner, sess_id):
+                    continue
+                refreshed_other = await apply_model_reload(_runner, new_cfg, chat_api=other)
+                if refreshed_other is not None:
+                    apis[sess_id] = refreshed_other
         else:
             # Agent default: root ChatAPI + config.json.
             await apply_model_reload(_runner, new_cfg)
@@ -454,9 +481,10 @@ async def switch_to_card(card_name: str, session_id: str | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # Reasoning effort (thinking depth) — Cursor-style low/medium/high
 # ---------------------------------------------------------------------------
-async def apply_reasoning_effort(effort: str) -> dict:
+async def apply_reasoning_effort(effort: str, session_id: str | None = None) -> dict:
     """Update live chat_api reasoning_effort and persist to config.json."""
     from opensquad.reasoning_effort import effort_to_claude_budget, normalize_effort
+    from opensquad.session_model import session_api_map
 
     if _ensure_runner() is None:
         return {"ok": False, "error": "model_switch not initialised (no runner)"}
@@ -466,10 +494,23 @@ async def apply_reasoning_effort(effort: str) -> dict:
     if chat_api is None:
         return {"ok": False, "error": "no chat_api"}
 
+    def _apply_to_api(api) -> None:
+        if api is None:
+            return
+        api.reasoning_effort = effort_n
+        if getattr(api, "is_think", False) and hasattr(api, "thinking_budget_tokens"):
+            api.thinking_budget_tokens = effort_to_claude_budget(effort_n)
+
     try:
-        chat_api.reasoning_effort = effort_n
-        if getattr(chat_api, "is_think", False) and hasattr(chat_api, "thinking_budget_tokens"):
-            chat_api.thinking_budget_tokens = effort_to_claude_budget(effort_n)
+        _apply_to_api(chat_api)
+        # Keep session-scoped clones in sync (composer is usually session-scoped).
+        sid = (session_id or "").strip()
+        apis = session_api_map(_runner)
+        if sid and sid in apis:
+            _apply_to_api(apis.get(sid))
+        else:
+            for api in list(apis.values()):
+                _apply_to_api(api)
     except Exception as e:
         logger.warning("[model_switch] Failed to apply reasoning_effort on chat_api: %s", e)
         return {"ok": False, "error": str(e)}
@@ -507,14 +548,15 @@ async def apply_reasoning_effort(effort: str) -> dict:
             logger.warning("[model_switch] Failed to persist reasoning_effort: %s", e)
 
     try:
-        await bus.emit_async(
-            "info",
-            {
-                "event": "reasoning_effort_changed",
-                "effort": effort_n,
-                "text": f"Reasoning effort set to {effort_n}",
-            },
-        )
+        info = {
+            "event": "reasoning_effort_changed",
+            "effort": effort_n,
+            "text": f"Reasoning effort set to {effort_n}",
+        }
+        sid = (session_id or "").strip()
+        if sid:
+            info["session_id"] = sid
+        await bus.emit_async("info", info)
     except Exception as e:
         logger.warning("[model_switch] reasoning_effort info emit failed: %s", e)
 
@@ -529,7 +571,10 @@ async def _on_reasoning_effort_requested(data: dict) -> None:
     if not effort:
         logger.warning("[model_switch] reasoning_effort requested with no effort: %s", data)
         return
-    await apply_reasoning_effort(str(effort))
+    await apply_reasoning_effort(
+        str(effort),
+        session_id=str(data.get("session_id") or "").strip() or None,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -178,6 +178,41 @@ interface AIChatPageProps {
   onOpenSettings?: () => void;
 }
 
+
+/** Last manually selected model / effort — survives refresh before config loads. */
+function lastModelStorageKey(agentId: string) {
+  return `opensquad.agent.${agentId}.lastModel`;
+}
+function loadLastModelPick(agentId: string): { card: string | null; effort: ReasoningEffort | null } {
+  try {
+    const raw = localStorage.getItem(lastModelStorageKey(agentId));
+    if (!raw) return { card: null, effort: null };
+    const parsed = JSON.parse(raw);
+    const card = typeof parsed?.card === 'string' && parsed.card.trim() ? parsed.card.trim() : null;
+    const effortRaw = parsed?.effort;
+    const effort =
+      effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high' ? effortRaw : null;
+    return { card, effort };
+  } catch {
+    return { card: null, effort: null };
+  }
+}
+function saveLastModelPick(
+  agentId: string,
+  patch: { card?: string | null; effort?: ReasoningEffort | null },
+) {
+  try {
+    const prev = loadLastModelPick(agentId);
+    const next = {
+      card: patch.card !== undefined ? patch.card : prev.card,
+      effort: patch.effort !== undefined ? patch.effort : prev.effort,
+    };
+    localStorage.setItem(lastModelStorageKey(agentId), JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+}
+
 // ---- Uploaded file info ----
 interface UploadedFile {
   path: string;
@@ -1198,14 +1233,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   // The currently-active card name (config.json model._card). Used to pinpoint
   // the selected <option> even when two cards from different vendors share the
   // same model_name (model_name alone is not a unique identity).
-  const [currentCardName, setCurrentCardName] = useState<string | null>(null);
+  const [currentCardName, setCurrentCardName] = useState<string | null>(() =>
+    loadLastModelPick(agentId).card,
+  );
   const [voiceBindings, setVoiceBindings] = useState({
     asr_card: '',
     tts_card: '',
     realtime_card: '',
     realtime_voice: '',
   });
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('high');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(
+    () => loadLastModelPick(agentId).effort || 'high',
+  );
   const [agentMode, setAgentMode] = useState<AgentMode>('build');
   /** Per-session overrides so split panes do not share Plan/Build or model. */
   const [agentModeBySession, setAgentModeBySession] = useState<Record<string, AgentMode>>({});
@@ -1586,9 +1625,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (mn) setModelName(mn);
           if (ap) setAgentApiProtocol(ap);
           if (pv) setAgentProvider(pv);
-          // Agent-default card only — never overwrite per-session picker state.
-          if (card) setCurrentCardName(card);
-          if (effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high') {
+          // Prefer last UI pick (localStorage) over stale config when both exist;
+          // otherwise seed from config.json (also updated on each UI switch).
+          const lastPick = loadLastModelPick(agentId);
+          if (lastPick.card) {
+            setCurrentCardName(lastPick.card);
+          } else if (card) {
+            setCurrentCardName(card);
+          }
+          if (lastPick.effort) {
+            setReasoningEffort(lastPick.effort);
+          } else if (effortRaw === 'low' || effortRaw === 'medium' || effortRaw === 'high') {
             setReasoningEffort(effortRaw);
           }
           const modeRaw: string | undefined = cfg?.config?.agent_mode;
@@ -2652,6 +2699,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const switchedModel = (detailed as any).model;
           const switchedCard = (detailed as any).card;
           const sid = String((detailed as any).session_id || '').trim();
+          // Always promote to agent-wide last pick (new chats + refresh default).
+          if (typeof switchedCard === 'string' && switchedCard) {
+            setCurrentCardName(switchedCard);
+            saveLastModelPick(agentId, { card: switchedCard });
+          }
+          if (typeof switchedModel === 'string' && switchedModel) {
+            setModelName(switchedModel);
+          }
           if (sid) {
             delete modelSwitchRevertRef.current[sid];
             if (typeof switchedCard === 'string' && switchedCard) {
@@ -2662,8 +2717,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
           } else {
-            if (typeof switchedModel === 'string' && switchedModel) setModelName(switchedModel);
-            if (typeof switchedCard === 'string' && switchedCard) setCurrentCardName(switchedCard);
             setSwitchingModel(false);
           }
         }
@@ -2701,10 +2754,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           const next = (detailed as any).effort;
           const sid = String((detailed as any).session_id || '').trim();
           if (next === 'low' || next === 'medium' || next === 'high') {
+            setReasoningEffort(next);
+            saveLastModelPick(agentId, { effort: next });
             if (sid) {
               setReasoningBySession((prev) => ({ ...prev, [sid]: next }));
-            } else {
-              setReasoningEffort(next);
             }
           }
           return; // don't spam timeline
@@ -3538,28 +3591,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             currentSessionIdRef.current = currentSid;
             wsServiceRef.current?.setActiveSession(currentSid);
             setCurrentSessionId(currentSid);
-            // Restore pane-scoped model from session_data when present.
-            // Never clobber an in-pane optimistic/confirmed card with agent default.
-            {
-              const sessionCard =
-                typeof (session as any)?.model_card === 'string'
-                  ? String((session as any).model_card).trim()
-                  : '';
-              if (sessionCard) {
-                setCardNameBySession((prev) =>
-                  prev[currentSid] === sessionCard ? prev : { ...prev, [currentSid]: sessionCard },
-                );
-                const cardMeta = modelCards.find((c) => c.name === sessionCard);
-                const label =
-                  (cardMeta && (cardMeta.title || cardMeta.model_name || cardMeta.name)) ||
-                  sessionCard;
-                setModelNameBySession((prev) =>
-                  prev[currentSid] === label ? prev : { ...prev, [currentSid]: String(label) },
-                );
-              }
-              // If disk has no override, leave cardNameBySession[currentSid] as-is
-              // (user may have just switched; agent default stays in currentCardName).
-            }
+            // Composer model/effort follow the last UI pick (currentCardName /
+            // reasoningEffort), not a stale per-session card from disk.
             viewingHistorySessionRef.current = false;
             setViewingHistorySession(false);
             loadingSessionIdRef.current = currentSid;
@@ -6680,15 +6713,36 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             model: String(prevModel || ''),
           };
           // Optimistic: update label immediately — never park on "Switching…".
-          setCardNameBySession((prev) => ({ ...prev, [sessionId]: cardName }));
-          setModelNameBySession((prev) => ({ ...prev, [sessionId]: String(nextModel) }));
+          // Promote to agent-wide last pick so new/old chats share the same default.
+          setCurrentCardName(cardName);
+          setModelName(String(nextModel));
+          setCardNameBySession((prev) => {
+            const next: Record<string, string> = {};
+            for (const k of Object.keys(prev)) next[k] = cardName;
+            next[sessionId] = cardName;
+            return next;
+          });
+          setModelNameBySession((prev) => {
+            const next: Record<string, string> = {};
+            for (const k of Object.keys(prev)) next[k] = String(nextModel);
+            next[sessionId] = String(nextModel);
+            return next;
+          });
           setSwitchingModelBySession((prev) => ({ ...prev, [sessionId]: false }));
+          saveLastModelPick(agentId, { card: cardName });
           console.info('[AIChatPage] switch_model', { sessionId, cardName });
           wsServiceRef.current?.switchModel(cardName, sessionId);
         }}
         reasoningEffort={reasoningBySession[sessionId] ?? reasoningEffort}
         onEffortChange={(effort) => {
-          setReasoningBySession((prev) => ({ ...prev, [sessionId]: effort }));
+          setReasoningEffort(effort);
+          setReasoningBySession((prev) => {
+            const next: Record<string, ReasoningEffort> = {};
+            for (const k of Object.keys(prev)) next[k] = effort;
+            next[sessionId] = effort;
+            return next;
+          });
+          saveLastModelPick(agentId, { effort });
           wsServiceRef.current?.setReasoningEffort(effort, sessionId);
         }}
         cwd={agentCwd || defaultCwd}
