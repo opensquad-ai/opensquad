@@ -305,7 +305,8 @@ const App: React.FC = () => {
           name: m.name,
           avatar: m.avatar || '',
           status: m.status as 'online' | 'offline' | 'busy',
-          is_agent: m.is_agent ?? false
+          is_agent: m.is_agent ?? false,
+          agent_id: m.agent_id ?? undefined
         };
       });
       setUsers(prev => ({ ...prev, ...newUsers }));

@@ -4,7 +4,7 @@
  */
 import type { TimelineEntry } from './aiChatTimeline';
 
-const CACHE_MAX = 24;
+const CACHE_MAX = 48;
 
 /** Default page size for first-paint / prefetch session history. */
 export const SESSION_HISTORY_PAGE_SIZE = 80;

@@ -569,8 +569,9 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           <span className={`text-[11px] font-medium ${isUser ? 'text-primary' : 'text-textMuted'}`}>
             {label}
           </span>
-          {!isStreaming && message.content && (
+          {!isStreaming && (message.content || (isUser && canWithdraw && onWithdraw)) && (
             <div className="flex items-center gap-0.5">
+              {message.content ? (
               <button
                 onClick={handleCopy}
                 className="opacity-0 group-hover:opacity-100 transition-opacity text-textMuted hover:text-primary p-0.5"
@@ -578,6 +579,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
               >
                 {copied ? <Check size={12} /> : <Copy size={12} />}
               </button>
+              ) : null}
               {isUser && canWithdraw && onWithdraw ? (
                 <button
                   type="button"
@@ -588,7 +590,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                   <Undo2 size={12} />
                 </button>
               ) : null}
-              {agentId && (
+              {agentId && message.content ? (
                 <button
                   onClick={() => void handleSpeak()}
                   disabled={ttsState === 'loading'}
@@ -607,7 +609,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                     <Volume2 size={12} />
                   )}
                 </button>
-              )}
+              ) : null}
             </div>
           )}
         </div>
@@ -632,12 +634,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   }
 
   // Classic: user = right bubble; agent = document stream (no bubble)
-  const actionRow = !isStreaming && message.content ? (
+  const actionRow = !isStreaming && (message.content || (isUser && canWithdraw && onWithdraw)) ? (
     <div
       className={`flex items-center gap-0.5 mt-1.5 transition-opacity ${
         ttsState !== 'idle' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
       } ${isUser ? 'justify-end' : 'justify-start'}`}
     >
+      {message.content ? (
       <button
         onClick={handleCopy}
         className="text-textMuted hover:text-primary p-0.5 border-0 bg-transparent cursor-pointer"
@@ -645,6 +648,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
       >
         {copied ? <Check size={13} /> : <Copy size={13} />}
       </button>
+      ) : null}
       {isUser && canWithdraw && onWithdraw ? (
         <button
           type="button"

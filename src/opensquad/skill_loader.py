@@ -416,6 +416,8 @@ def expand_user_send_skill(user_text: str) -> str:
     into the skill's full SKILL.md content (when loaded) plus the remaining
     user text, so behavior does not depend solely on the model calling
     read_skill().
+
+    Multiple tags (e.g. scheduled tasks with several skills) are all expanded.
     """
     if not user_text or "<user_send_skill>" not in user_text.lower():
         return user_text
@@ -424,45 +426,57 @@ def expand_user_send_skill(user_text: str) -> str:
         r"<user_send_skill>\s*([^<]+?)\s*</user_send_skill>",
         re.IGNORECASE | re.DOTALL,
     )
-    match = pattern.search(user_text)
-    if not match:
+    matches = list(pattern.finditer(user_text))
+    if not matches:
         return user_text
 
-    skill_name = (match.group(1) or "").strip()
-    remainder = (user_text[: match.start()] + user_text[match.end() :]).strip()
+    skill_names: list[str] = []
+    for match in matches:
+        skill_name = (match.group(1) or "").strip()
+        if skill_name and skill_name not in skill_names:
+            skill_names.append(skill_name)
 
-    skill_body = ""
-    skill_label = skill_name
-    for skill in get_loaded_skills():
-        if skill.name == skill_name or skill.display_name == skill_name:
-            skill_body = (skill.content or "").strip()
-            skill_label = skill.display_name or skill.name
-            break
+    remainder = pattern.sub("", user_text)
+    remainder = re.sub(r"\n{3,}", "\n\n", remainder).strip()
 
-    if not skill_body:
-        # Keep the tag visible so the model can still try read_skill(name).
-        logger.warning(
-            "[skill_loader] user_send_skill '%s' not found in loaded skills; leaving tag for model",
-            skill_name,
+    parts: list[str] = []
+    for skill_name in skill_names:
+        skill_body = ""
+        skill_label = skill_name
+        for skill in get_loaded_skills():
+            if skill.name == skill_name or skill.display_name == skill_name:
+                skill_body = (skill.content or "").strip()
+                skill_label = skill.display_name or skill.name
+                break
+
+        if not skill_body:
+            # Keep a readable hint so the model can still try read_skill(name).
+            logger.warning(
+                "[skill_loader] user_send_skill '%s' not found in loaded skills; leaving hint for model",
+                skill_name,
+            )
+            parts.append(
+                f"[User requested skill `{skill_name}` via <user_send_skill>. "
+                f"Call agent_setup.read_skill('{skill_name}') to load it, then follow the user's request.]"
+            )
+            continue
+
+        parts.extend(
+            [
+                f"[User-selected skill: {skill_label} (`{skill_name}`)]",
+                "Follow the skill instructions below to complete the user's request.",
+                "",
+                "----- BEGIN SKILL -----",
+                skill_body,
+                "----- END SKILL -----",
+            ]
         )
-        hint = (
-            f"[User requested skill `{skill_name}` via <user_send_skill>. "
-            f"Call agent_setup.read_skill('{skill_name}') to load it, then follow the user's request.]\n\n"
-        )
-        return hint + (remainder if remainder else user_text)
 
-    parts = [
-        f"[User-selected skill: {skill_label} (`{skill_name}`)]",
-        "Follow the skill instructions below to complete the user's request.",
-        "",
-        "----- BEGIN SKILL -----",
-        skill_body,
-        "----- END SKILL -----",
-    ]
     if remainder:
         parts.extend(["", "[User request]", remainder])
-    else:
-        parts.extend(["", "[User request]", f"(Apply the `{skill_name}` skill.)"])
+    elif skill_names:
+        labels = ", ".join(f"`{n}`" for n in skill_names)
+        parts.extend(["", "[User request]", f"(Apply the {labels} skill(s).)"])
     return "\n".join(parts)
 
 

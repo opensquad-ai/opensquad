@@ -80,10 +80,7 @@ import contextlib
 from opensquad import ToolRegistry, bus
 from opensquad._context import AgentContext, set_current_context
 from opensquad.agent_boot_phases import AgentBootPhases
-from opensquad.chat_api import ChatAPI
-from opensquad.claude_api import ClaudeAPI
 from opensquad.event_pipeline import event_pipeline
-from opensquad.google_api import GoogleAPI
 from opensquad.input_hub import input_hub
 from opensquad.log_setup import setup_logging as _setup_logging
 from opensquad.message_queue import message_queue
@@ -131,6 +128,8 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
         stream_parser = StreamingTagParser({})
 
     if provider in ("claude", "anthropic"):
+        from opensquad.claude_api import ClaudeAPI
+
         return ClaudeAPI(
             api_key=model_cfg.get("api_key", ""),
             base_url=model_cfg.get("base_url", ""),
@@ -151,6 +150,8 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
             reasoning_effort=model_cfg.get("reasoning_effort", "high"),
         )
     elif provider in ("google", "gemini"):
+        from opensquad.google_api import GoogleAPI
+
         return GoogleAPI(
             api_key=model_cfg.get("api_key", ""),
             base_url=model_cfg.get("base_url", ""),
@@ -168,6 +169,8 @@ def create_chat_api_from_config(model_cfg: dict, system_prompt: str, stream_pars
             top_k=model_cfg.get("top_k", 0),
         )
     else:
+        from opensquad.chat_api import ChatAPI
+
         return ChatAPI(
             api_key=model_cfg.get("api_key", ""),
             base_url=model_cfg.get("base_url", ""),

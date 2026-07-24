@@ -6,13 +6,13 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from opensquad.ingress_policy import resolve_primary_session_id, resolve_session_id
 from opensquad.input_hub import get_input_hub
 from opensquad.session_parallel import (
     MAX_PARALLEL_TURNS,
     ParallelTurnScheduler,
     get_tool_write_lock,
 )
-from opensquad.ingress_policy import resolve_primary_session_id, resolve_session_id
 
 if TYPE_CHECKING:
     from opensquad.runner import AgentRunner
@@ -144,12 +144,15 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
             primary = resolve_primary_session_id(sm)
             sid = str(item.get("session_id") or sid or primary or "").strip() or primary
             # Force external queue drains onto primary even if a stale sid arrived.
-            sid = resolve_session_id(
-                source=item.get("source") or "chatpro",
-                channel=item.get("channel") or "chatpro_group",
-                session_id=sid,
-                sm=sm,
-            ) or sid
+            sid = (
+                resolve_session_id(
+                    source=item.get("source") or "chatpro",
+                    channel=item.get("channel") or "chatpro_group",
+                    session_id=sid,
+                    sm=sm,
+                )
+                or sid
+            )
             formatted = await InputHandler().handle_queue_process(
                 runner,
                 hub,
@@ -183,13 +186,17 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
             "__REQUEST_TOKEN_STATS__",
             "__COMPRESS_CONTEXT__",
         )
-        if content in _AGENT_LEVEL or (
-            sid is None
-            and content.startswith("__")
-            and not content.startswith("__SWITCH_AND_REPLY__:")
-            and not content.startswith("__LOAD_SESSION__:")
-            and not content.startswith("__WITHDRAW_TURN__:")
-            and not content.startswith("__PROCESS_QUEUE__")
+        if (
+            content in _AGENT_LEVEL
+            or content.startswith("__REQUEST_TOKEN_STATS__:")
+            or (
+                sid is None
+                and content.startswith("__")
+                and not content.startswith("__SWITCH_AND_REPLY__:")
+                and not content.startswith("__LOAD_SESSION__:")
+                and not content.startswith("__WITHDRAW_TURN__:")
+                and not content.startswith("__PROCESS_QUEUE__")
+            )
         ):
             await runner._handle_agent_level_command(item)
             continue

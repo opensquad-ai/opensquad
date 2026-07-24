@@ -87,19 +87,98 @@ function ToolBtn({
   );
 }
 
+/** Shared mono metrics so highlight layer + textarea wrap identically. */
+const SOURCE_CODE_CLASS =
+  'm-0 p-2 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words [overflow-wrap:anywhere] [scrollbar-gutter:stable]';
+
+/**
+ * IDE-like source editor: syntax highlight + soft wrap + line numbers.
+ * Transparent textarea over a highlight.js layer (same approach as Diff/Preview).
+ */
 const SourceEditor: React.FC<{
   value: string;
   onChange: (v: string) => void;
+  fileName: string;
   readOnly?: boolean;
-}> = ({ value, onChange, readOnly }) => (
-  <textarea
-    className="flex-1 min-h-0 w-full resize-none bg-[#0d1117] text-gray-200 font-mono text-[11px] leading-5 p-2 outline-none border-0"
-    value={value}
-    readOnly={readOnly}
-    spellCheck={false}
-    onChange={(e) => onChange(e.target.value)}
-  />
-);
+}> = ({ value, onChange, fileName, readOnly }) => {
+  const lang = useMemo(() => getLangForFile(fileName), [fileName]);
+  const lines = useMemo(() => (value || '').split('\n'), [value]);
+  const highlightedHtml = useMemo(
+    () => lines.map((line) => highlightLine(line, lang)).join('\n'),
+    [lines, lang],
+  );
+  const gutterRef = useRef<HTMLDivElement>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const syncScroll = useCallback(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    if (preRef.current) {
+      preRef.current.scrollTop = ta.scrollTop;
+      preRef.current.scrollLeft = ta.scrollLeft;
+    }
+    if (gutterRef.current) {
+      gutterRef.current.scrollTop = ta.scrollTop;
+    }
+  }, []);
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (readOnly || e.key !== 'Tab') return;
+      e.preventDefault();
+      const ta = e.currentTarget;
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      const next = `${value.slice(0, start)}  ${value.slice(end)}`;
+      onChange(next);
+      requestAnimationFrame(() => {
+        ta.selectionStart = ta.selectionEnd = start + 2;
+      });
+    },
+    [onChange, readOnly, value],
+  );
+
+  return (
+    <div className="flex-1 min-h-0 flex bg-[#0d1117] overflow-hidden">
+      <style>{HLJS_THEME_CSS}</style>
+      {/* Line gutter — scroll synced with editor; soft-wrap may slightly drift on very long lines */}
+      <div
+        ref={gutterRef}
+        aria-hidden
+        className="shrink-0 overflow-hidden select-none border-r border-gray-800 bg-[#0d1117]"
+      >
+        <div className="py-2 pl-2 pr-2 text-[10px] leading-5 text-gray-600 tabular-nums font-mono text-right min-w-[2.25rem]">
+          {lines.map((_, i) => (
+            <div key={i}>{i + 1}</div>
+          ))}
+        </div>
+      </div>
+      <div className="relative flex-1 min-w-0 min-h-0">
+        <pre
+          ref={preRef}
+          aria-hidden
+          className={`absolute inset-0 overflow-auto pointer-events-none text-gray-200 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden ${SOURCE_CODE_CLASS}`}
+          dangerouslySetInnerHTML={{ __html: highlightedHtml || '&nbsp;' }}
+        />
+        <textarea
+          ref={taRef}
+          value={value}
+          readOnly={readOnly}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          onScroll={syncScroll}
+          onKeyDown={onKeyDown}
+          onChange={(e) => onChange(e.target.value)}
+          className={`absolute inset-0 w-full h-full resize-none overflow-auto bg-transparent outline-none border-0 caret-white text-transparent selection:bg-sky-500/35 ${SOURCE_CODE_CLASS}`}
+          style={{ WebkitTextFillColor: 'transparent', color: 'transparent' }}
+        />
+      </div>
+    </div>
+  );
+};
 
 const PreviewPane: React.FC<{ fileName: string; content: string; isMarkdown: boolean }> = ({
   fileName,
@@ -242,7 +321,12 @@ export const FileDocumentEditor: React.FC<FileDocumentEditorProps> = ({
   if (mode === 'source') {
     return (
       <div className="flex-1 min-h-0 flex flex-col">
-        <SourceEditor value={value} onChange={onChange} readOnly={readOnly} />
+        <SourceEditor
+          fileName={fileName}
+          value={value}
+          onChange={onChange}
+          readOnly={readOnly}
+        />
       </div>
     );
   }

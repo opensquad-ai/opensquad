@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,13 +101,47 @@ def _ensure_agent_user_avatar(user: User) -> str:
     return resolved
 
 
-def _member_info(user: User, status: str | None = None) -> GroupMemberInfo:
+_EMAIL_AGENT_ID_CACHE: dict[str, str] = {}
+_EMAIL_AGENT_ID_CACHE_TS: float = 0.0
+
+
+async def _build_email_agent_id_map() -> dict[str, str]:
+    """Build chat_email -> agent_id map from launcher /api/agents. Cached 60s.
+
+    Seed agent comm accounts have a numeric user.id that differs from the
+    agent's config ``agent_id`` (e.g. user.id="838168" vs agent_id="pm-001"),
+    so we resolve the real agent_id via the agent's group_chat email.
+    """
+    global _EMAIL_AGENT_ID_CACHE, _EMAIL_AGENT_ID_CACHE_TS
+    now = time.time()
+    if _EMAIL_AGENT_ID_CACHE and (now - _EMAIL_AGENT_ID_CACHE_TS) < 60:
+        return _EMAIL_AGENT_ID_CACHE
+    from app.ai_web.routes import _proxy_get
+
+    try:
+        data = await _proxy_get("/api/agents")
+    except Exception:
+        data = {"agents": []}
+    mapping: dict[str, str] = {}
+    for agent in data.get("agents", []):
+        agent_id = str(agent.get("agent_id", "") or agent.get("dir_name", "") or "")
+        cfg = agent.get("config", {}) or {}
+        email = (cfg.get("group_chat", {}) or {}).get("email", "") or ""
+        if agent_id and email:
+            mapping[email] = agent_id
+    _EMAIL_AGENT_ID_CACHE = mapping
+    _EMAIL_AGENT_ID_CACHE_TS = now
+    return mapping
+
+
+def _member_info(user: User, status: str | None = None, agent_id: str | None = None) -> GroupMemberInfo:
     return GroupMemberInfo(
         id=user.id,
         name=user.name,
         avatar=_ensure_agent_user_avatar(user),
         status=status if status is not None else user.status.value,
         is_agent=_is_agent_email(getattr(user, "email", None)),
+        agent_id=agent_id,
     )
 
 
@@ -736,6 +771,7 @@ async def get_group(
     )
     settings = settings_result.scalar_one_or_none()
 
+    email_agent_id_map = await _build_email_agent_id_map()
     member_statuses = {}
     members_info = []
     avatar_dirty = False
@@ -743,7 +779,10 @@ async def get_group(
         # Members already loaded via selectinload; no need to refresh again
         member_statuses[member.id] = member.status.value
         before = member.avatar or ""
-        info = _member_info(member, member_statuses[member.id])
+        member_agent_id = None
+        if _is_agent_email(getattr(member, "email", None)):
+            member_agent_id = email_agent_id_map.get(member.email or "")
+        info = _member_info(member, member_statuses[member.id], agent_id=member_agent_id)
         if (member.avatar or "") != before:
             avatar_dirty = True
         members_info.append(info)
@@ -812,6 +851,7 @@ async def update_group(
     # For safety, manually query members here.
     members_res = await db.execute(select(User).join(group_members).where(group_members.c.group_id == group_id))
     members_list = members_res.scalars().all()
+    email_agent_id_map = await _build_email_agent_id_map()
 
     response = GroupResponse(
         id=group.id,
@@ -819,7 +859,15 @@ async def update_group(
         avatar=group.avatar,
         description=group.description,
         is_private=group.is_private,
-        members=[_member_info(m) for m in members_list],
+        members=[
+            _member_info(
+                m,
+                agent_id=(
+                    email_agent_id_map.get(m.email or "") if _is_agent_email(getattr(m, "email", None)) else None
+                ),
+            )
+            for m in members_list
+        ],
         created_by=group.created_by,
         created_at=group.created_at,
         notification_sound_enabled=group.notification_sound_enabled,

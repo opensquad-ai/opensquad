@@ -86,19 +86,28 @@ const SplitDivider: React.FC<{
   );
 };
 
-/** Stable leaf that should host the live chatSlot for liveSessionId (tree order). */
+/** Stable leaf that should host the live chatSlot for liveSessionId.
+ * Prefer the leaf whose active tab is that session; otherwise any leaf that
+ * still has it in open tabs (so switching L2 tabs does not unmount live chat). */
 function findLiveOwnerPaneId(
   layout: SplitNode,
   liveSessionId: string | null | undefined,
 ): string | null {
   if (!liveSessionId) return null;
+  let fallback: string | null = null;
   for (const leaf of collectLeaves(layout)) {
     const active = parseContentTabKey(leaf.tabs.activeKey);
     if (active?.kind === 'session' && active.id === liveSessionId) {
       return leaf.id;
     }
+    if (
+      !fallback
+      && (leaf.tabs.open || []).some((t) => t.kind === 'session' && t.id === liveSessionId)
+    ) {
+      fallback = leaf.id;
+    }
   }
-  return null;
+  return fallback;
 }
 
 function NodeView({
@@ -148,17 +157,12 @@ function NodeView({
   if (node.type === 'leaf') {
     const canSplit = depth < MAX_SPLIT_DEPTH;
     const tabs: PaneTabs = node.tabs;
-    const active = parseContentTabKey(tabs.activeKey);
-    // Live chat mounts on the leaf whose active tab === liveSessionId.
-    // Must NOT require focusedPaneId — otherwise clicking to set the anchor
-    // remounts chatSlot / history and both panes' content appear to jump.
-    // When several leaves share the same session tab, only liveOwnerPaneId mounts it.
-    const ownsLiveSession =
-      !!liveOwnerPaneId &&
-      node.id === liveOwnerPaneId &&
-      active?.kind === 'session' &&
-      !!liveSessionId &&
-      active.id === liveSessionId;
+    // Keep live chatSlot mounted on this leaf as long as the live session tab
+    // is still open here — even when another L2 tab is active.
+    const hostsLiveSession =
+      !!liveOwnerPaneId
+      && node.id === liveOwnerPaneId
+      && !!liveSessionId;
     return (
       <WorkspacePaneShell
         paneId={node.id}
@@ -171,7 +175,8 @@ function NodeView({
         rootPath={rootPath}
         tabTitles={tabTitles}
         fileDirtyMap={fileDirtyMap}
-        chatSlot={ownsLiveSession ? renderChatSlot(node.id) : undefined}
+        liveSessionId={hostsLiveSession ? liveSessionId : null}
+        chatSlot={hostsLiveSession ? renderChatSlot(node.id) : undefined}
         handlers={handlers.makePaneHandlers(node.id)}
       />
     );

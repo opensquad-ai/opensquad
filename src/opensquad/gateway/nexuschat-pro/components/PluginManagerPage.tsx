@@ -30,6 +30,10 @@ import {
 
 interface PluginManagerPageProps {
   onBack: () => void;
+  /** Prefer this agent when the page opens (e.g. current Agent Web). */
+  initialAgentId?: string;
+  /** Embedded inside Agent Web (keep session sidebar); hide settings mobile-nav affordance. */
+  embedded?: boolean;
 }
 
 // ---- Helpers ----
@@ -165,7 +169,11 @@ const SYSTEM_TOOLS = [
 
 // ---- Main Component ----
 
-export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) => {
+export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
+  onBack,
+  initialAgentId,
+  embedded = false,
+}) => {
   const { t: tr } = useTranslation();
   const [plugins, setPlugins]   = useState<PluginInfo[]>([]);
   const [loading, setLoading]   = useState(true);
@@ -266,15 +274,22 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
     (async () => {
       try {
         const data = await adminAPI.getAgents();
-        setAgents(data.agents);
-        if (data.agents.length > 0) setSelectedAgent(data.agents[0].dir_name);
+        const list = data.agents || [];
+        setAgents(list);
+        if (list.length > 0) {
+          const preferred =
+            initialAgentId && list.some((a) => a.dir_name === initialAgentId)
+              ? initialAgentId
+              : list[0].dir_name;
+          setSelectedAgent(preferred);
+        }
       } catch {
         // agent 列表加载失败不影响全局插件功能
       } finally {
         setLoadingAgents(false);
       }
     })();
-  }, []);
+  }, [initialAgentId]);
 
   // 选中 agent 后加载其 config.json
   useEffect(() => {
@@ -518,13 +533,15 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({ onBack }) 
         >
           <ArrowLeft size={16} />
         </button>
-        <button
-          onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
-          className={`${adminHeaderNavBtn} md:hidden`}
-          aria-label="Navigation menu"
-        >
-          <Menu size={16} />
-        </button>
+        {!embedded && (
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
+            className={`${adminHeaderNavBtn} md:hidden`}
+            aria-label="Navigation menu"
+          >
+            <Menu size={16} />
+          </button>
+        )}
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <div className={adminHeaderIconBox}>
             <Puzzle className={`${adminHeaderIcon} w-3.5 h-3.5`} />

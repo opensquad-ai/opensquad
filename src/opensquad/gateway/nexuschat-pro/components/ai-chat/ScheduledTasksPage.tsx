@@ -11,6 +11,7 @@ import {
   type ScheduledExecution,
   type ScheduledTask,
 } from '../../services/api';
+import { getAiWsService, type AIWSMessage } from '../../services/aiWebSocket';
 import {
   ScheduledTaskForm,
   emptyFormValue,
@@ -18,15 +19,17 @@ import {
   type TaskFormValue,
 } from './ScheduledTaskForm';
 import { ExecWorkflowView } from './ExecWorkflowView';
+import type { PaneSessionBridge } from './WorkspacePaneShell';
 
 type SubTab = 'new' | 'execution' | 'task';
 
 interface Props {
   agentName: string;
   rootPath: string;
+  sessionBridge?: PaneSessionBridge;
 }
 
-export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => {
+export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessionBridge }) => {
   const { t } = useTranslation();
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [executions, setExecutions] = useState<ScheduledExecution[]>([]);
@@ -44,19 +47,61 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => 
         scheduledTaskAPI.executions(agentName),
       ]);
       setTasks(tr.tasks || []);
-      setExecutions((er.executions || []).slice().reverse());
+      const nextExecs = (er.executions || []).slice().reverse();
+      // Quiet poll: keep previous array identity when fingerprints match so
+      // ExecWorkflowView does not re-render every tick (selection / scroll).
+      setExecutions((prev) => {
+        if (prev.length !== nextExecs.length) return nextExecs;
+        for (let i = 0; i < prev.length; i++) {
+          const a = prev[i];
+          const b = nextExecs[i];
+          if (
+            a.id !== b.id
+            || a.status !== b.status
+            || a.session_id !== b.session_id
+            || a.started_at !== b.started_at
+            || a.ended_at !== b.ended_at
+            || a.task_name !== b.task_name
+            || a.error !== b.error
+          ) {
+            return nextExecs;
+          }
+        }
+        return prev;
+      });
     } finally {
       if (!opts?.quiet) setLoading(false);
     }
   }, [agentName]);
 
   useEffect(() => { reload(); }, [reload]);
-  // Quiet poll — do not flip loading (avoids list flicker) and do not remount
-  // the workflow pane; ExecWorkflowView soft-polls session history itself.
+
+  // Live execution updates from Gateway (session_id bind / terminal status).
   useEffect(() => {
-    const id = setInterval(() => { void reload({ quiet: true }); }, 8000);
-    return () => clearInterval(id);
-  }, [reload]);
+    if (!agentName) return;
+    const ws = getAiWsService(agentName);
+    ws.connect(agentName);
+    const unsub = ws.on('scheduled_execution', (msg: AIWSMessage) => {
+      const raw: any = msg.content ?? msg.data ?? msg;
+      if (!raw || typeof raw !== 'object' || !raw.id) return;
+      const next = raw as ScheduledExecution;
+      if (next.status === 'deleted') {
+        setExecutions((prev) => prev.filter((e) => e.id !== next.id));
+        setSelExecId((cur) => (cur === next.id ? null : cur));
+        return;
+      }
+      setExecutions((prev) => {
+        const idx = prev.findIndex((e) => e.id === next.id);
+        if (idx < 0) {
+          return [next, ...prev];
+        }
+        const copy = prev.slice();
+        copy[idx] = { ...copy[idx], ...next };
+        return copy;
+      });
+    });
+    return () => { unsub(); };
+  }, [agentName]);
 
   const selectedTask = useMemo(
     () => tasks.find(t => t.id === selTaskId) || null,
@@ -66,6 +111,35 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => 
     () => executions.find(e => e.id === selExecId) || null,
     [executions, selExecId],
   );
+
+  // Quiet poll — slow fallback; WS scheduled_execution is the primary path.
+  const watchingRunning = sub === 'execution' && !!selectedExec && selectedExec.status === 'running';
+  useEffect(() => {
+    const ms = watchingRunning ? 5000 : 15000;
+    const id = setInterval(() => { void reload({ quiet: true }); }, ms);
+    return () => clearInterval(id);
+  }, [reload, watchingRunning]);
+
+  // Task tab: default to the first task so the detail pane is never an empty
+  // "select a task" placeholder when the list is non-empty.
+  useEffect(() => {
+    if (tasks.length === 0) {
+      if (selTaskId) setSelTaskId(null);
+      return;
+    }
+    const stillValid = !!selTaskId && tasks.some((t) => t.id === selTaskId);
+    if (!stillValid) setSelTaskId(tasks[0].id);
+  }, [tasks, selTaskId]);
+
+  // Execution tab: same — default to the newest (first) execution.
+  useEffect(() => {
+    if (executions.length === 0) {
+      if (selExecId) setSelExecId(null);
+      return;
+    }
+    const stillValid = !!selExecId && executions.some((e) => e.id === selExecId);
+    if (!stillValid) setSelExecId(executions[0].id);
+  }, [executions, selExecId]);
 
   const startNew = () => { setEditing(emptyFormValue(rootPath)); setSub('new'); };
   const startEdit = (task: ScheduledTask) => {
@@ -83,7 +157,16 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => 
   const handleRun = async (task: ScheduledTask) => {
     try {
       await scheduledTaskAPI.runNow(agentName, task.id);
-      reload();
+      const er = await scheduledTaskAPI.executions(agentName);
+      const nextExecs = (er.executions || []).slice().reverse();
+      setExecutions(nextExecs);
+      const newest =
+        nextExecs.find((e) => e.task_id === task.id && e.status === 'running')
+        || nextExecs.find((e) => e.task_id === task.id)
+        || nextExecs[0]
+        || null;
+      if (newest) setSelExecId(newest.id);
+      setSub('execution');
     } catch (e: any) {
       // 409 already_running → apiRequest throws; inform instead of silently failing.
       const msg = e?.message || '';
@@ -142,7 +225,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => 
                 key={st}
                 type="button"
                 onClick={() => { setSub(st); setEditing(null); }}
-                className={`flex-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                className={`flex-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-default ${
                   sub === st ? 'bg-white dark:bg-black/40 shadow-sm text-text' : 'text-textMuted hover:text-text'
                 }`}
               >
@@ -203,6 +286,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath }) => 
             rootPath={rootPath}
             exec={selectedExec}
             task={tasks.find((t) => t.id === selectedExec.task_id) || null}
+            sessionBridge={sessionBridge}
             onRunAgain={() => {
               const tk = tasks.find((t) => t.id === selectedExec.task_id);
               if (tk) handleRun(tk);
@@ -237,6 +321,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, { c: string; Icon: React.FC<any> }> = {
     running: { c: 'bg-sky-500/15 text-sky-600', Icon: Loader2 },
     success: { c: 'bg-emerald-500/15 text-emerald-600', Icon: CheckCircle2 },
+    stopped: { c: 'bg-emerald-500/10 text-emerald-700', Icon: CheckCircle2 },
     failed: { c: 'bg-rose-500/15 text-rose-600', Icon: XCircle },
     missed: { c: 'bg-amber-500/15 text-amber-600', Icon: Clock },
   };

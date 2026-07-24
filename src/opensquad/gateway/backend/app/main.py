@@ -249,6 +249,15 @@ async def lifespan(app: FastAPI):
     """Application lifecycle management"""
     global _app_ready_lite, _app_ready
     _startup_log.info("Backend starting up...")
+    # Capture the gateway event loop for scheduled-task delivery so timer-
+    # fired tasks can route prompts to the Agent via the Gateway WS registry
+    # even before any admin route lazily created a ScheduledTaskManager.
+    try:
+        from opensquad.scheduled_tasks import set_gateway_loop
+
+        set_gateway_loop(asyncio.get_running_loop())
+    except Exception as _e:
+        _startup_log.warning(f"set_gateway_loop failed: {_e}")
     # Initialize database on startup (create tables)
     await init_db()
     _startup_log.info("Database initialized")

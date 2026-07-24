@@ -94,7 +94,32 @@ class PluginManager:
         # Set of plugin names that need forced unload+reload due to config change
         self._config_reload_needed: set = set()
 
-    def discover_and_load(self) -> list[str]:
+    @staticmethod
+    def _plugin_wanted_by_manifest(manifest: dict, wanted: set[str], dir_name: str) -> bool:
+        """True if this plugin should be imported for the given agent tool set.
+
+        Loads when:
+        - plugin name / directory name is in wanted
+        - any declared tool name is in wanted
+        - any tool has auto_register=true (always needed at boot)
+        - plugin declares hooks (may run without an explicit tool toggle)
+        """
+        plugin_name = str(manifest.get("name") or dir_name)
+        if plugin_name in wanted or dir_name in wanted:
+            return True
+        tools = manifest.get("tools") or []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            tname = str(tool.get("name") or "")
+            if tname and tname in wanted:
+                return True
+            if tool.get("auto_register"):
+                return True
+        hooks = manifest.get("hooks") or []
+        return bool(hooks)
+
+    def discover_and_load(self, wanted_names: list[str] | None = None) -> list[str]:
         """
         Scan plugins/ directory for plugin directories, load each plugin.
 
@@ -103,6 +128,12 @@ class PluginManager:
         2. Find class with __plugin_meta__ (@register decorator)
         3. Use decorator metadata, auto-generate plugin.json
 
+        Args:
+            wanted_names: optional agent ``config.tools`` list. When provided,
+                skip importing plugins that cannot contribute (not named, no
+                matching tool, no auto_register, no hooks). Pass ``None`` to
+                load every agent-capable plugin (tests / full scan).
+
         Returns:
             List of loaded plugin names.
         """
@@ -110,6 +141,11 @@ class PluginManager:
         if not os.path.isdir(self.plugins_dir):
             logger.warning(f"[PluginManager] Plugins directory not found: {self.plugins_dir}")
             return loaded
+
+        wanted: set[str] | None = None
+        if wanted_names is not None:
+            wanted = {str(n) for n in wanted_names if n}
+        skipped = 0
 
         for entry in sorted(os.listdir(self.plugins_dir)):
             plugin_dir = os.path.join(self.plugins_dir, entry)
@@ -123,6 +159,7 @@ class PluginManager:
             # Skip service_only plugins — they have no agent tools and should
             # never be imported into the agent process.
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
+            _pmeta: dict | None = None
             if os.path.isfile(plugin_json_path):
                 try:
                     with open(plugin_json_path, encoding="utf-8") as _f:
@@ -131,7 +168,22 @@ class PluginManager:
                         logger.info(f"[PluginManager] Plugin '{entry}' is service_only, skipping agent load.")
                         continue
                 except Exception:
-                    pass
+                    _pmeta = None
+
+            if wanted is not None:
+                if _pmeta is not None:
+                    if not self._plugin_wanted_by_manifest(_pmeta, wanted, entry):
+                        skipped += 1
+                        logger.debug(
+                            "[PluginManager] Skipping '%s' (not in agent tools / no auto_register / no hooks)",
+                            entry,
+                        )
+                        continue
+                elif entry not in wanted:
+                    # No manifest: only load when explicitly requested by dir name.
+                    skipped += 1
+                    logger.debug("[PluginManager] Skipping '%s' (no plugin.json and not in wanted)", entry)
+                    continue
 
             try:
                 name = self._load_plugin(plugin_dir, entry)
@@ -142,7 +194,10 @@ class PluginManager:
 
         self._hook_chain_cache.clear()
         self._plugin_hooks_index.clear()
-        logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
+        if skipped:
+            logger.info(f"[PluginManager] Loaded {len(loaded)} plugins (skipped {skipped} unused): {loaded}")
+        else:
+            logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
         return loaded
 
     def _load_plugin(self, plugin_dir: str, dir_name: str) -> str | None:

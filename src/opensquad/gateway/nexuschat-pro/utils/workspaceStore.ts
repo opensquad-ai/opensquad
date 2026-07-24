@@ -55,6 +55,9 @@ export type WorkspaceStoreSnapshot = {
   workspaces: Workspace[];
   chrome: OpenChromeState;
   migrated?: boolean;
+  /** Wall-clock ms when this snapshot was last written — used to pick the
+   *  freshest chrome when the same agent is keyed as agent_id vs dir_name. */
+  savedAt?: number;
 };
 
 /** Max nesting depth of the split tree (root leaf = 1). */
@@ -348,10 +351,11 @@ export function saveWorkspaceStore(agentId: string, snap: WorkspaceStoreSnapshot
     // Drop legacy flat map when saving so layout is the source of truth
     const chrome = { ...snap.chrome };
     delete chrome.tabsByWorkspace;
-    localStorage.setItem(
-      storageKey(agentId),
-      JSON.stringify({ ...snap, chrome }),
-    );
+    const savedAt = Date.now();
+    const payload = JSON.stringify({ ...snap, chrome, savedAt });
+    for (const key of aliasKeysFor(agentId)) {
+      localStorage.setItem(storageKey(key), payload);
+    }
   } catch {
     /* ignore */
   }
@@ -365,6 +369,147 @@ export function saveWorkspaceStore(agentId: string, snap: WorkspaceStoreSnapshot
 }
 
 export const WORKSPACES_CHANGED_EVENT = 'opensquad-workspaces-changed';
+
+/** Primary agentId → alternate keys (dir_name / agent_id) that must stay in sync. */
+const storeAliases = new Map<string, string[]>();
+
+/** Register identity aliases so tab chrome survives agent_id vs dir_name mismatch. */
+export function setWorkspaceStoreAliases(
+  primaryId: string,
+  aliases: Array<string | null | undefined>,
+): void {
+  const primary = (primaryId || '').trim();
+  if (!primary) return;
+  const list = Array.from(
+    new Set([primary, ...aliases.map((a) => (a || '').trim()).filter(Boolean)]),
+  );
+  storeAliases.set(primary, list);
+  for (const a of list) {
+    if (a !== primary) storeAliases.set(a, list);
+  }
+}
+
+function aliasKeysFor(agentId: string): string[] {
+  const hit = storeAliases.get(agentId);
+  if (hit?.length) return hit;
+  return agentId ? [agentId] : [];
+}
+
+function chromeTabScore(snap: WorkspaceStoreSnapshot): number {
+  let n = 0;
+  for (const layout of Object.values(snap.chrome.layoutByWorkspace || {})) {
+    for (const leaf of collectLeaves(layout)) {
+      n += leaf.tabs?.open?.length || 0;
+    }
+  }
+  return n;
+}
+
+/**
+ * Load chrome for an agent, merging alternate identity keys (agent_id vs
+ * dir_name). Prefer the newest savedAt so a close on one key is not overwritten
+ * by a stale full-tab snapshot under another key.
+ */
+export function loadWorkspaceStoreResolved(
+  agentId: string,
+  aliases: Array<string | null | undefined> = [],
+): WorkspaceStoreSnapshot {
+  const keys = Array.from(
+    new Set([
+      agentId,
+      ...aliases.map((a) => (a || '').trim()).filter(Boolean),
+      ...aliasKeysFor(agentId),
+    ]),
+  ).filter(Boolean);
+  if (keys.length === 0) return emptySnapshot();
+  if (keys.length === 1) return loadWorkspaceStore(keys[0]);
+
+  let best = loadWorkspaceStore(keys[0]);
+  let bestAt = Number(best.savedAt) || 0;
+  let bestScore = chromeTabScore(best);
+  let bestKey = keys[0];
+  for (let i = 1; i < keys.length; i++) {
+    const snap = loadWorkspaceStore(keys[i]);
+    const at = Number(snap.savedAt) || 0;
+    const score = chromeTabScore(snap);
+    // Newer write wins. When neither has savedAt (legacy), prefer the primary
+    // agentId key so a bloated alias snapshot cannot resurrect every session.
+    const better =
+      at > bestAt
+      || (at === bestAt && at > 0 && score > bestScore)
+      || (at === bestAt && at === 0 && keys[i] === agentId && bestKey !== agentId);
+    if (better) {
+      best = snap;
+      bestAt = at;
+      bestScore = score;
+      bestKey = keys[i];
+    }
+  }
+  // Mirror winner onto every alias without re-entering saveWorkspaceStore
+  // (avoids WORKSPACES_CHANGED storms).
+  try {
+    const chrome = { ...best.chrome };
+    delete chrome.tabsByWorkspace;
+    const payload = JSON.stringify({
+      ...best,
+      chrome,
+      savedAt: bestAt || Date.now(),
+    });
+    for (const k of keys) {
+      const raw = localStorage.getItem(storageKey(k));
+      if (raw !== payload) localStorage.setItem(storageKey(k), payload);
+    }
+  } catch {
+    /* ignore */
+  }
+  return best;
+}
+
+/** Drop L2 session tabs whose ids are no longer on disk (never bulk-add). */
+export function pruneGoneSessionTabs(
+  agentId: string,
+  validSessionIds: Iterable<string>,
+): WorkspaceStoreSnapshot {
+  const valid = new Set(
+    Array.from(validSessionIds).map((id) => String(id || '').trim()).filter(Boolean),
+  );
+  const snap = loadWorkspaceStoreResolved(agentId);
+  let changed = false;
+
+  const pruneTabs = (tabs: PaneTabs): PaneTabs => {
+    const nextOpen = (tabs.open || []).filter((t) => {
+      if (t.kind !== 'session') return true;
+      return valid.has(t.id);
+    });
+    if (nextOpen.length === (tabs.open || []).length) return tabs;
+    changed = true;
+    let activeKey = tabs.activeKey;
+    if (activeKey && !nextOpen.some((t) => contentTabKey(t) === activeKey)) {
+      const last = nextOpen[nextOpen.length - 1];
+      activeKey = last ? contentTabKey(last) : null;
+    }
+    return { open: nextOpen, activeKey };
+  };
+
+  const pruneNode = (node: SplitNode): SplitNode => {
+    if (node.type === 'leaf') {
+      return { ...node, tabs: pruneTabs(node.tabs || emptyPaneTabs()) };
+    }
+    return { ...node, a: pruneNode(node.a), b: pruneNode(node.b) };
+  };
+
+  const layoutByWorkspace: Record<string, SplitNode> = {};
+  for (const [wsId, layout] of Object.entries(snap.chrome.layoutByWorkspace || {})) {
+    layoutByWorkspace[wsId] = pruneNode(coerceSplitNode(layout));
+  }
+  if (!changed) return snap;
+  const next: WorkspaceStoreSnapshot = {
+    ...snap,
+    chrome: { ...snap.chrome, layoutByWorkspace },
+  };
+  saveWorkspaceStore(agentId, next);
+  return next;
+}
 
 export function ensureWorkspace(
   agentId: string,

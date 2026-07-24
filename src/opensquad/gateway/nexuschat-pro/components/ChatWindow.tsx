@@ -2497,7 +2497,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 title={sender?.name}
                                 onDoubleClick={!isSelf && sender?.is_agent ? () => {
                                     if (sender?.status === 'online') {
-                                        window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: sender.id } }));
+                                        window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: sender.agent_id || sender.id } }));
                                     } else {
                                         showCopyToast(t('chat.agentOffline'));
                                     }

@@ -268,9 +268,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                 didDragRef.current = true;
                 onReorder(fromTab, toTab);
               }}
-              className={`group flex min-w-0 flex-1 items-center gap-1 max-w-[180px] px-1.5 sm:px-2 h-7 rounded-lg text-[11px] select-none will-change-transform ${
-                onReorder ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
-              } ${
+              className={`group flex min-w-0 flex-1 items-center gap-1 max-w-[180px] px-1.5 sm:px-2 h-7 rounded-lg text-[11px] select-none will-change-transform cursor-default ${
                 active
                   ? 'bg-black/[0.08] dark:bg-white/15 text-textMain'
                   : 'text-textMuted hover:bg-primary/10'

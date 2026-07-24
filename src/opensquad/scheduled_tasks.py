@@ -283,6 +283,8 @@ class ScheduledTaskManager:
             prompt = task.get("prompt") or ""
             name = task.get("name") or "task"
             delegate_agent = (task.get("delegate_agent") or self.agent_id or "").strip()
+            skills = list(task.get("skills") or [])
+            model_card = task.get("model_card") or ""
         exec_id = uuid.uuid4().hex[:12]
         started = time.time()
         exec_record = {
@@ -313,17 +315,19 @@ class ScheduledTaskManager:
         # by user_id ("scheduled-task:{exec_id}") and fills session_id here
         # (see set_execution_session_by_exec_id).
         try:
-            content = f"[Scheduled Task: {name}]\n{prompt}"
-            sent = self._send_to_agent(delegate_agent, exec_id, content, task.get("model_card") or "")
+            content = self._build_fire_content(name, prompt, skills)
+            sent = self._send_to_agent(delegate_agent, exec_id, content, model_card)
             if not sent:
                 raise RuntimeError("delegate agent not connected")
             logger.info(
-                "[ScheduledTasks] fired task=%s exec=%s delegate=%s manual=%s",
+                "[ScheduledTasks] fired task=%s exec=%s delegate=%s skills=%s manual=%s",
                 task_id,
                 exec_id,
                 delegate_agent,
+                skills,
                 manual,
             )
+            self._notify_execution_changed(dict(exec_record))
         except Exception as e:
             with self._lock:
                 exec_record["status"] = "failed"
@@ -332,20 +336,54 @@ class ScheduledTaskManager:
                 task["last_status"] = "failed"
                 self._save_persisted()
             logger.error("[ScheduledTasks] fire failed: %s", e)
+            self._notify_execution_changed(dict(exec_record))
         return exec_id
 
-    def mark_execution_done(self, exec_id: str, status: str = "success") -> None:
+    @staticmethod
+    def _build_fire_content(name: str, prompt: str, skills: list | None = None) -> str:
+        """Build the initial auto-send content for a scheduled-task fire.
+
+        Mirrors Agent Web skill selection: prefix ``<user_send_skill>dir</user_send_skill>``
+        so the runner expands skill instructions the same way as a manual chip send.
+        """
+        body = (
+            f"[Scheduled Task: {name}]\n"
+            "You are in Scheduled Task mode. First call "
+            "`task_watch.start(description=..., check_interval=120)` "
+            "before executing; use `task_watch.update` for progress and "
+            "`task_watch.complete` when done.\n"
+            f"{prompt or ''}"
+        )
+        tags: list[str] = []
+        for raw in skills or []:
+            sid = (raw if isinstance(raw, str) else str(raw or "")).strip()
+            if sid:
+                tags.append(f"<user_send_skill>{sid}</user_send_skill>")
+        if not tags:
+            return body
+        return "\n".join(tags) + "\n\n" + body
+
+    def mark_execution_done(self, exec_id: str, status: str = "success") -> dict[str, Any] | None:
+        """Mark a running execution terminal. No-op if already finished."""
+        rec: dict[str, Any] | None = None
         with self._lock:
             for e in self._executions:
                 if e.get("id") == exec_id:
+                    if e.get("status") != "running":
+                        return dict(e)
                     e["status"] = status
                     e["ended_at"] = time.time()
+                    rec = dict(e)
                     break
+            if rec is None:
+                return None
             for t in self._tasks.values():
                 if t.get("last_status") == "running":
                     t["last_status"] = status
                     break
             self._save_persisted()
+        self._notify_execution_changed(rec)
+        return rec
 
     def stop_execution(self, exec_id: str) -> dict[str, Any] | None:
         """Cancel a running execution's in-flight turn and mark it stopped."""
@@ -353,6 +391,7 @@ class ScheduledTaskManager:
             sid = ""
             delegate_agent = ""
             found = False
+            changed = False
             for e in self._executions:
                 if e.get("id") == exec_id:
                     found = True
@@ -361,20 +400,25 @@ class ScheduledTaskManager:
                     if e.get("status") == "running":
                         e["status"] = "stopped"
                         e["ended_at"] = time.time()
+                        changed = True
                     break
             if not found:
                 return None
-            for t in self._tasks.values():
-                if t.get("last_status") == "running":
-                    t["last_status"] = "stopped"
-                    break
-            self._save_persisted()
+            if changed:
+                for t in self._tasks.values():
+                    if t.get("last_status") == "running":
+                        t["last_status"] = "stopped"
+                        break
+                self._save_persisted()
         # Cancel the in-flight turn in the AGENT process via the Gateway WS
         # (the turn runs in the agent, not the gateway, so gateway-local
         # request_stop_session would be a no-op).
         if sid and delegate_agent:
             self._send_stop_to_agent(delegate_agent, exec_id, sid)
-        return self.get_execution(exec_id)
+        rec = self.get_execution(exec_id)
+        if changed and rec:
+            self._notify_execution_changed(rec)
+        return rec
 
     def delete_execution(self, exec_id: str) -> bool:
         """Remove an execution record from the list.
@@ -395,6 +439,7 @@ class ScheduledTaskManager:
             was_running = target.get("status") == "running"
             sid = (target.get("session_id") or "").strip()
             delegate_agent = (target.get("delegate_agent") or self.agent_id or "").strip()
+            removed = dict(target)
             self._executions = [e for e in self._executions if e.get("id") != exec_id]
             if was_running:
                 for t in self._tasks.values():
@@ -404,6 +449,9 @@ class ScheduledTaskManager:
             self._save_persisted()
         if was_running and sid and delegate_agent:
             self._send_stop_to_agent(delegate_agent, exec_id, sid)
+        if removed:
+            removed["status"] = "deleted"
+            self._notify_execution_changed(removed)
         return True
 
     def set_execution_session(self, exec_id: str, session_id: str) -> bool:
@@ -415,14 +463,62 @@ class ScheduledTaskManager:
         """
         if not exec_id or not session_id:
             return False
+        changed = False
+        rec: dict[str, Any] | None = None
         with self._lock:
             for e in self._executions:
                 if e.get("id") == exec_id:
                     if not (e.get("session_id") or "").strip():
                         e["session_id"] = session_id
+                        changed = True
                     self._save_persisted()
-                    return True
-            return False
+                    rec = dict(e)
+                    break
+        if changed and rec:
+            self._notify_execution_changed(rec)
+        return rec is not None
+
+    def _notify_execution_changed(self, execution: dict[str, Any] | None) -> None:
+        """Push a scheduled_execution event to browsers watching this agent."""
+        if not execution:
+            return
+        loop = self._loop or _gateway_loop
+        if loop is None or not loop.is_running():
+            return
+        payload = {
+            "type": "scheduled_execution",
+            "content": dict(execution),
+            "data": dict(execution),
+        }
+        agent_ids: list[str] = []
+        aid = (self.agent_id or "").strip()
+        if aid:
+            agent_ids.append(aid)
+        try:
+            resolved = self._resolve_registry_agent_id(aid) if aid else ""
+            if resolved and resolved not in agent_ids:
+                agent_ids.append(resolved)
+        except Exception:
+            pass
+        if not agent_ids:
+            return
+
+        async def _broadcast() -> None:
+            try:
+                # Prefer the same import path the gateway WS loop uses.
+                try:
+                    from app.ai_web.websocket import user_handler as _uh
+                except Exception:
+                    from opensquad.gateway.backend.app.ai_web.websocket import user_handler as _uh
+                for target in agent_ids:
+                    await _uh.broadcast_to_agent(target, payload)
+            except Exception as e:
+                logger.debug("[ScheduledTasks] notify broadcast failed: %s", e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast(), loop)
+        except Exception as e:
+            logger.debug("[ScheduledTasks] notify schedule failed: %s", e)
 
     # -- agent delivery (gateway WS registry) --
 
@@ -521,14 +617,16 @@ class ScheduledTaskManager:
         if registry is None:
             return False
         target = self._resolve_registry_agent_id(agent_id)
-        # Extract task name from the "[Scheduled Task: {name}]\n..." prefix so
-        # the Agent can title the freshly spawned parallel session.
+        # Extract task name from "[Scheduled Task: {name}]" (may follow skill tags).
         session_title = ""
-        if content.startswith("[Scheduled Task:"):
-            try:
-                session_title = content.split("]", 1)[0].split(":", 1)[1].strip()
-            except Exception:
-                session_title = ""
+        try:
+            import re
+
+            m = re.search(r"\[Scheduled Task:\s*(.+?)\]", content or "")
+            if m:
+                session_title = m.group(1).strip()
+        except Exception:
+            session_title = ""
         message = {
             "type": "chat",
             "user_id": f"scheduled-task:{exec_id}",
@@ -584,6 +682,8 @@ class ScheduledTaskManager:
 # -- per-agent singleton registry --
 _managers: dict[str, ScheduledTaskManager] = {}
 _managers_lock = threading.Lock()
+# Sessions observed busy while a scheduled execution was running.
+_seen_busy_exec_sessions: set[str] = set()
 
 
 def get_task_manager(agent_id: str, data_dir: str | None = None) -> ScheduledTaskManager:
@@ -632,3 +732,49 @@ def set_execution_session_by_exec_id(exec_id: str, session_id: str) -> bool:
     with _managers_lock:
         managers = list(_managers.values())
     return any(m.set_execution_session(exec_id, session_id) for m in managers)
+
+
+def mark_execution_done_by_exec_id(exec_id: str, status: str = "success") -> dict[str, Any] | None:
+    """Mark an execution terminal by exec_id across all managers."""
+    if not exec_id:
+        return None
+    with _managers_lock:
+        managers = list(_managers.values())
+    for m in managers:
+        rec = m.mark_execution_done(exec_id, status=status)
+        if rec is not None:
+            return rec
+    return None
+
+
+def scheduled_execution_session_ids() -> set[str]:
+    """All session_ids bound to scheduled executions (for sidebar hide fallback)."""
+    out: set[str] = set()
+    with _managers_lock:
+        managers = list(_managers.values())
+    for m in managers:
+        with m._lock:
+            for e in m._executions:
+                sid = (e.get("session_id") or "").strip()
+                if sid:
+                    out.add(sid)
+    return out
+
+
+def reconcile_executions_for_busy_sessions(agent_id: str, busy_session_ids: list | set) -> int:
+    """Track busy sessions for scheduled executions — do NOT auto-complete.
+
+    Completing on ``busy_sessions`` edge (seen busy → not busy) races with the
+    dispatcher, which re-broadcasts busy every loop tick. A flicker marks
+    ``success`` while the parallel turn is still running. Terminal status must
+    come from ``scheduled_task_turn_done`` / ``stop_execution`` only.
+
+    Returns 0 always; kept as a hook so the gateway WS call site stays stable.
+    """
+    busy = {str(s).strip() for s in (busy_session_ids or []) if str(s).strip()}
+    global _seen_busy_exec_sessions
+    # Still record observations for debugging / future crash-recovery heuristics.
+    if busy:
+        _seen_busy_exec_sessions |= busy
+    _ = agent_id  # agent-scoped filtering reserved for a future recovery path
+    return 0

@@ -25,6 +25,8 @@ function stripFrontmatter(text: string): string {
 
 interface RolesPageProps {
   onBack: () => void;
+  /** Embedded inside Agent Web (keep session sidebar); hide settings mobile-nav affordance. */
+  embedded?: boolean;
 }
 
 type TabType = 'role' | 'collab';
@@ -103,7 +105,7 @@ function tagColor(tag: string | null): string {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
+const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
   const { t } = useTranslation();
   const [tab, setTab]     = useState<TabType>('role');
   const [cards, setCards] = useState<CardInfo[]>([]);
@@ -309,13 +311,15 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack }) => {
           >
             <ArrowLeft size={16} />
           </button>
-          <button
-            onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
-            className={`${adminHeaderNavBtn} md:hidden`}
-            aria-label="Navigation menu"
-          >
-            <Menu size={16} />
-          </button>
+          {!embedded && (
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
+              className={`${adminHeaderNavBtn} md:hidden`}
+              aria-label="Navigation menu"
+            >
+              <Menu size={16} />
+            </button>
+          )}
           <div className={`hidden md:flex ${adminHeaderIconBox}`}>
             <TabIcon size={14} className={adminHeaderIcon} />
           </div>

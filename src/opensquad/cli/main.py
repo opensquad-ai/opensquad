@@ -49,7 +49,16 @@ def main():
     p_start.add_argument("--no-launcher", action="store_true", help="Skip launcher service")
     p_start.add_argument("--no-gateway", action="store_true", help="Skip gateway backend")
     p_start.add_argument("--no-registry", action="store_true", help="Skip plugin registry")
-    p_start.add_argument("--no-frontend", action="store_true", help="Skip frontend dev server")
+    p_start.add_argument(
+        "--no-frontend",
+        action="store_true",
+        help="Skip frontend (Vite). Preferred when Gateway serves built dist/",
+    )
+    p_start.add_argument(
+        "--frontend",
+        action="store_true",
+        help="Force Vite dev server even when nexuschat-pro/dist exists",
+    )
     p_start.add_argument("--no-watchdog", action="store_true", help="Skip health-check watchdog")
     p_start.add_argument(
         "--detach",
@@ -325,12 +334,37 @@ def main():
         sys.exit(0)
 
     if not args.command:
+        # `opensquad --verbose` (no subcommand) == `opensquad web` + console log
+        # streaming: start all services in the FOREGROUND so their logs stream
+        # to this terminal, open the browser once ready, and block until Ctrl+C.
+        if getattr(args, "verbose", False):
+            from argparse import Namespace
+
+            from opensquad.cli.commands.start_cmd import run_start
+
+            run_start(
+                Namespace(
+                    command="start",
+                    verbose=True,
+                    open_browser=True,
+                    port=None,
+                    detach=False,
+                    no_gateway=False,
+                    no_launcher=False,
+                    no_registry=False,
+                    no_frontend=False,
+                    frontend=False,
+                    no_watchdog=False,
+                )
+            )
+            return
         print(
             "OpenSquad — just run:\n"
             "  opensquad code             # terminal TUI (auto-starts services)\n"
             "  opensquad web              # browser Web UI\n"
             "\n"
             "Optional: opensquad start --detach  (pre-warm) · stop · help · --version\n"
+            "         opensquad --verbose  # web UI + live service logs in this console\n"
         )
         sys.exit(0)
 

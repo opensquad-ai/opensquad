@@ -183,6 +183,7 @@ class AgentWebSocketHandler:
                     "voice_realtime_status",
                     "voice_audio_out",
                     "voice_transcript",
+                    "scheduled_task_turn_done",
                 ]:
                     # Agent's response message, forward to user
                     user_id = message.get("user_id")
@@ -203,7 +204,7 @@ class AgentWebSocketHandler:
                         if not _st_sess_id:
                             _st_c = message.get("content")
                             if isinstance(_st_c, dict):
-                                _st_sess_id = str(_st_c.get("id") or "").strip()
+                                _st_sess_id = str(_st_c.get("id") or _st_c.get("session_id") or "").strip()
                         if _st_exec_id and _st_sess_id:
                             try:
                                 from opensquad.scheduled_tasks import set_execution_session_by_exec_id
@@ -211,6 +212,29 @@ class AgentWebSocketHandler:
                                 set_execution_session_by_exec_id(_st_exec_id, _st_sess_id)
                             except Exception as _st_e:
                                 logger.warning("[WS] scheduled-task session capture failed: %s", _st_e)
+
+                    if msg_type == "scheduled_task_turn_done":
+                        try:
+                            from opensquad.scheduled_tasks import mark_execution_done_by_exec_id
+
+                            _pdata = message.get("content") or message.get("data") or {}
+                            if not isinstance(_pdata, dict):
+                                _pdata = {}
+                            _done_exec = str(_pdata.get("exec_id") or "").strip()
+                            if (
+                                not _done_exec
+                                and user_id
+                                and isinstance(user_id, str)
+                                and user_id.startswith("scheduled-task:")
+                            ):
+                                _done_exec = user_id.split(":", 1)[1]
+                            _done_status = str(_pdata.get("status") or "success").strip() or "success"
+                            if _done_status not in ("success", "failed", "stopped"):
+                                _done_status = "success"
+                            if _done_exec:
+                                mark_execution_done_by_exec_id(_done_exec, status=_done_status)
+                        except Exception as _done_e:
+                            logger.warning("[WS] scheduled-task turn done failed: %s", _done_e)
                     if msg_type == "info":
                         try:
                             info_payload = message.get("content") or message.get("data") or {}
@@ -264,6 +288,21 @@ class AgentWebSocketHandler:
                                     invalidate_reader(agent_id)
                         except Exception:
                             pass
+
+                    if msg_type == "busy_sessions":
+                        try:
+                            from opensquad.scheduled_tasks import reconcile_executions_for_busy_sessions
+
+                            _pdata = message.get("content") or message.get("data") or {}
+                            if isinstance(_pdata, list):
+                                _busy_sids = [str(s) for s in _pdata]
+                            elif isinstance(_pdata, dict):
+                                _busy_sids = [str(s) for s in (_pdata.get("sessions") or [])]
+                            else:
+                                _busy_sids = []
+                            reconcile_executions_for_busy_sessions(agent_id, _busy_sids)
+                        except Exception as _busy_e:
+                            logger.warning("[WS] scheduled-task busy reconcile failed: %s", _busy_e)
 
                     if msg_type == "current_session":
                         try:
@@ -321,6 +360,9 @@ class AgentWebSocketHandler:
                             # panes watching this agent receive live events (sid-
                             # filtered on the client) instead of HTTP-poll-only lag.
                             or user_id.startswith("scheduled-task:")
+                            # token_stats must reach every pane on this agent WS
+                            # (parallel sessions / exec view filter by sid).
+                            or msg_type == "token_stats"
                         ):
                             await user_handler.broadcast_to_agent(agent_id, message)
                         else:

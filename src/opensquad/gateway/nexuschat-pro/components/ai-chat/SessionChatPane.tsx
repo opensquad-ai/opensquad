@@ -21,7 +21,7 @@ import {
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { SoloMessage } from './SoloMessage';
-import { MessageBubble } from './MessageBubble';
+import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
 
 export interface SessionChatPaneProps {
@@ -43,6 +43,9 @@ export interface SessionChatPaneProps {
    * running (events land on disk; there is no live WS for the synthetic user).
    */
   pollIntervalMs?: number;
+  /** Allow withdraw on user turns (same as live chatSlot). */
+  canWithdraw?: boolean;
+  onWithdrawUserMessage?: (entryUid: string, message: ChatMessage) => void;
 }
 
 export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
@@ -56,6 +59,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   agentName,
   onFocus,
   pollIntervalMs,
+  canWithdraw = false,
+  onWithdrawUserMessage,
 }) => {
   const [prefLevel] = useWorkflowExpandLevel();
   const expandLevel = expandLevelProp ?? prefLevel;
@@ -117,16 +122,53 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     if (meta?.entries?.length) {
       setFetched(meta.entries);
       setLoading(false);
-      // Complete cache: skip network for instant tab switches.
-      if (meta.complete) {
-        setError(null);
-        return;
-      }
-    } else {
-      // Instant empty paint — no blocking overlay while history loads.
-      setFetched([]);
-      setLoading(true);
+      setError(null);
+      // Cache hit: paint instantly. Only background-refresh when incomplete.
+      if (meta.complete) return;
+      void (async () => {
+        try {
+          const resp = await agentSessionAPI.getSessionHistoryPaged(
+            agentId,
+            sessionId,
+            0,
+            SESSION_HISTORY_PAGE_SIZE,
+          );
+          if (cancelled) return;
+          const session = resp.session as
+            | {
+                messages?: any[];
+                events?: any[];
+                archived_messages?: any[];
+                archived_events?: any[];
+                has_more?: boolean;
+                total_messages?: number;
+              }
+            | undefined;
+          const messages = session?.messages || [];
+          const entries = buildTimelineFromSession(
+            messages,
+            session?.events || [],
+            session?.archived_messages,
+            session?.archived_events,
+          );
+          const hasMore = !!session?.has_more;
+          putCachedSessionTimeline(agentId, sessionId, entries, {
+            complete: !hasMore,
+            messageCount: messages.length,
+            totalMessages: session?.total_messages,
+          });
+          setFetched((prev) => rebaseTimelineUids(prev, entries));
+        } catch {
+          /* keep cached paint */
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
+    // Instant empty paint — no blocking overlay while history loads.
+    setFetched([]);
+    setLoading(true);
     setError(null);
     void (async () => {
       try {
@@ -206,8 +248,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           session?.archived_events,
         );
         putCachedSessionTimeline(agentId, sessionId, entries, {
-          // While polling a live turn, never mark complete — next tick must refetch.
-          complete: false,
+          complete: !session?.has_more,
           messageCount: messages.length,
           totalMessages: session?.total_messages,
         });
@@ -363,6 +404,15 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     message: entry.data,
                     senderName:
                       entry.data.role === 'user' ? userName : agentName,
+                    agentId,
+                    canWithdraw:
+                      canWithdraw &&
+                      entry.data.role === 'user' &&
+                      !!onWithdrawUserMessage,
+                    onWithdraw:
+                      entry.data.role === 'user' && onWithdrawUserMessage
+                        ? () => onWithdrawUserMessage(entryKey, entry.data)
+                        : undefined,
                   };
                   return isSolo ? (
                     <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />

@@ -8,8 +8,6 @@ import warnings
 from dataclasses import dataclass
 from typing import Any
 
-from opensquad.chat_api import ChatAPI
-from opensquad.claude_api import ClaudeAPI
 from opensquad.gateway_adapter import GatewayAdapter
 from opensquad.registry import ToolRegistry
 from opensquad.runner_boot_phases import RunnerBootPhases
@@ -28,7 +26,7 @@ class RunnerBootstrapResult:
     config_path: str
     agent_dir: str
     registry: ToolRegistry
-    chat_api: ChatAPI | ClaudeAPI
+    chat_api: Any
     vision_config: dict[str, Any]
     memory_manager: Any | None
     runner: AgentRunner
@@ -148,7 +146,7 @@ def _validate_api_key(config: dict[str, Any], api_key: str | None) -> None:
     )
 
 
-def create_chat_api(config: dict[str, Any], agent_dir: str) -> tuple[ChatAPI | ClaudeAPI, str]:
+def create_chat_api(config: dict[str, Any], agent_dir: str) -> tuple[Any, str]:
     model_conf = config.get("model", {})
     api_key = model_conf.get("api_key")
     base_url = model_conf.get("base_url")
@@ -161,10 +159,14 @@ def create_chat_api(config: dict[str, Any], agent_dir: str) -> tuple[ChatAPI | C
     stream_parser = StreamingTagParser(handlers={})
 
     if model_name.startswith("claude"):
+        from opensquad.claude_api import ClaudeAPI
+
         chat_api = ClaudeAPI(
             api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max
         )
     else:
+        from opensquad.chat_api import ChatAPI
+
         chat_api = ChatAPI(api_key, model_name, base_url, full_prompt, stream_parser=stream_parser, token_max=token_max)
 
     chat_api.history_dir = os.path.join(agent_dir, "history")

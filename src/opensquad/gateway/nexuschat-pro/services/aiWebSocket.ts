@@ -39,6 +39,8 @@ export interface AIWSMessage {
   data?: any;     // some events use 'data' instead of 'content'
   /** Session id for session-scoped events (token_stats, stream, …) */
   sid?: string;
+  /** Synthetic ids like scheduled-task:{exec_id} for non-browser turns */
+  user_id?: string;
 }
 
 /** Token stats payload */
@@ -87,6 +89,8 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   'token_stats',
   'busy_sessions',
   'primary_session',
+  'scheduled_execution',
+  'scheduled_task_turn_done',
   // System info (model switch confirm/fail, mode changes) must not be dropped
   // when sid ≠ activeSessionId — otherwise Switching… spinner never clears.
   'info',
@@ -218,9 +222,23 @@ class AIWebSocketService {
     this._sendCommand('compress_context');
   }
 
-  /** Ask the agent to rebroadcast latest context token stats. */
-  requestTokenStats() {
-    this._sendCommand('request_token_stats');
+  /** Ask the agent to rebroadcast latest context token stats (optionally for a session). */
+  requestTokenStats(sessionId?: string) {
+    const sid = (sessionId || '').trim();
+    this._sendCommand(
+      'request_token_stats',
+      sid ? { session_id: sid } : undefined,
+    );
+  }
+
+  /**
+   * Claim a parallel / scheduled-task session for this browser user so events
+   * and token_stats route like a normal Agent Web pane (not synthetic user_id).
+   */
+  watchSession(sessionId: string) {
+    const sid = (sessionId || '').trim();
+    if (!sid) return;
+    this._sendCommand('watch_session', { session_id: sid });
   }
 
   /**

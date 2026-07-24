@@ -128,6 +128,8 @@ class GatewayAdapter(BaseAgent):
         # Shell / background job live output for CMD-style web panel
         _sub("job_stdout", self.on_generic_event("job_stdout"))
         _sub("job_status", self.on_generic_event("job_status"))
+        _sub("busy_sessions", self.on_generic_event("busy_sessions"))
+        _sub("scheduled_task_turn_done", self.on_generic_event("scheduled_task_turn_done"))
         _sub("compression_progress", self.on_generic_event("compression_progress"))
 
     def dispose(self):
@@ -292,9 +294,32 @@ class GatewayAdapter(BaseAgent):
                 )
             return
 
+        if command == "watch_session":
+            # ExecWorkflowView / parallel pane: bind this browser user to a
+            # non-focused session so outbound events + token_stats route like
+            # normal Agent Web (forward_to_user) instead of synthetic scheduled-task.
+            sid = str(cmd_data.get("session_id") or "").strip()
+            if user_id and sid:
+                self._user_id_by_sid[sid] = user_id
+                logger.info("[Adapter] watch_session bind user=%s sid=%s", user_id, sid)
+            if sid:
+                payload = f"__REQUEST_TOKEN_STATS__:{sid}"
+                input_hub.push_urgent(payload, source="gateway", session_id=sid)
+                await self._try_wake_agent("urgent-command")
+            return
+
         if command == "request_token_stats":
-            logger.info(f"[Adapter] request_token_stats from user {user_id}")
-            input_hub.push_urgent("__REQUEST_TOKEN_STATS__", source="gateway")
+            # Optional session_id: scheduled-task / parallel panes need stats for
+            # a non-focused session. Without it the runner falls back to focused.
+            sid = str(cmd_data.get("session_id") or "").strip()
+            if user_id and sid:
+                # Same bind as watch_session — opening the exec pane claims the turn.
+                self._user_id_by_sid[sid] = user_id
+            logger.info(f"[Adapter] request_token_stats from user {user_id} sid={sid or '-'}")
+            payload = f"__REQUEST_TOKEN_STATS__:{sid}" if sid else "__REQUEST_TOKEN_STATS__"
+            input_hub.push_urgent(payload, source="gateway", session_id=sid or "")
+            # Wake so idle agents drain the urgent queue and rebroadcast soon.
+            await self._try_wake_agent("urgent-command")
             return
 
         if command == "new_session":
@@ -679,18 +704,33 @@ class GatewayAdapter(BaseAgent):
 
                 title = str(data.get("session_title") or "").strip()
                 if not title and isinstance(content, str):
-                    # Content is prefixed "[Scheduled Task: {name}]\n..." by
-                    # ScheduledTaskManager._execute — recover the name for UI.
+                    # Content includes "[Scheduled Task: {name}]" (may follow
+                    # <user_send_skill> tags) — recover the name for UI.
                     import re
 
-                    m = re.match(r"^\[Scheduled Task:\s*(.+?)\]\s*\n", content)
+                    m = re.search(r"\[Scheduled Task:\s*(.+?)\]", content)
                     if m:
                         title = m.group(1).strip()
-                sid = get_session_manager().create_parallel_session(title=title or None)
+                sid = get_session_manager().create_parallel_session(
+                    title=title or None,
+                    origin="scheduled_task",
+                )
                 session_id = sid
                 # Force web channel so IngressPolicy keeps the given sid
                 # (external would remap to primary and defeat per-exec isolation).
                 channel = "web"
+                # Bind BEFORE announcing so current_session carries
+                # user_id=scheduled-task:{exec} and the UI can ignore focus steal.
+                if session_id and user_id:
+                    self._user_id_by_sid[session_id] = user_id
+                # Scheduled tasks run unattended — always Build (no Plan approval gate).
+                try:
+                    from opensquad.agent_mode import MODE_BUILD
+                    from opensquad.model_switch import apply_agent_mode
+
+                    await apply_agent_mode(MODE_BUILD, session_id=session_id)
+                except Exception as mode_e:
+                    logger.debug("[Adapter] scheduled-task build mode set failed: %s", mode_e)
                 logger.info(
                     "[Adapter] Scheduled-task spawn parallel session=%s title=%s exec=%s",
                     sid,

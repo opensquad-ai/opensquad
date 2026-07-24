@@ -15,6 +15,7 @@ export interface User {
   avatar: string;
   status: 'online' | 'offline' | 'busy';
   is_agent?: boolean;
+  agent_id?: string;
 }
 
 export interface Attachment {

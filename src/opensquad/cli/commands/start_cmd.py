@@ -291,50 +291,46 @@ def _install_windows_console_close_handler() -> None:
 
 def _kill_port_owners(*ports: int) -> None:
     """Force-kill any process listening on the given ports.
-    Uses PowerShell Get-NetTCPConnection on Windows (accurate kernel-level PID),
-    falls back to netstat and lsof/fuser on Unix."""
-    all_ports = " ".join(str(p) for p in ports if isinstance(p, int) and p > 0)
-    if not all_ports.strip():
+
+    Windows: single ``netstat -ano`` parse (fast). Unix: lsof / fuser.
+    """
+    ports = [p for p in ports if isinstance(p, int) and p > 0]
+    if not ports:
         return
 
     if sys.platform == "win32":
-        # 1st: PowerShell Get-NetTCPConnection — reads kernel socket table directly, PID is accurate
-        ps_cmd = (
-            f"Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue "
-            f"| Where-Object {{ $_.LocalPort -in @({','.join(str(p) for p in ports)}) }} "
-            f"| ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}"
-        )
-        with contextlib.suppress(Exception):
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
+        wanted = {str(p) for p in ports}
+        pids: set[str] = set()
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
                 capture_output=True,
-                timeout=15,
+                text=True,
+                timeout=8,
             )
-
-        # 2nd: netstat fallback (for older Windows without Get-NetTCPConnection)
-        for port in ports:
-            try:
-                result = subprocess.run(
-                    f'netstat -ano | findstr ":{port} " | findstr "LISTENING"',
-                    shell=True,
+            for line in result.stdout.splitlines():
+                if "LISTENING" not in line.upper():
+                    continue
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local = parts[1]
+                port_str = local.rsplit(":", 1)[-1]
+                if port_str not in wanted:
+                    continue
+                pid = parts[-1]
+                if pid.isdigit() and pid != "0":
+                    pids.add(pid)
+        except Exception:
+            return
+        for pid in pids:
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", pid],
                     capture_output=True,
-                    text=True,
+                    check=False,
                     timeout=10,
                 )
-                for line in result.stdout.strip().splitlines():
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        pid = parts[-1]
-                        # Only kill if PID looks valid (digits only, not "0")
-                        if pid.isdigit() and pid != "0":
-                            subprocess.run(
-                                ["taskkill", "/F", "/PID", pid],
-                                capture_output=True,
-                                check=False,
-                                timeout=10,
-                            )
-            except Exception:
-                pass
         return
 
     # Unix: lsof / fuser
@@ -350,7 +346,6 @@ def _kill_port_owners(*ports: int) -> None:
                 if pid.strip() and pid.strip().isdigit():
                     subprocess.run(["kill", "-9", pid.strip()], capture_output=True, timeout=10)
         except FileNotFoundError:
-            # Fallback to fuser
             with contextlib.suppress(Exception):
                 subprocess.run(
                     ["fuser", "-k", f"{port}/tcp"],
@@ -359,6 +354,42 @@ def _kill_port_owners(*ports: int) -> None:
                 )
         except Exception:
             pass
+
+
+def _port_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.35) -> bool:
+    import socket
+
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _wait_ports_ready(
+    check_ports: dict[str, int | None],
+    *,
+    max_wait: float = 30.0,
+) -> None:
+    """Poll ports in parallel with backoff (no fixed multi-second sleep)."""
+    pending = {name: port for name, port in check_ports.items() if port is not None}
+    if not pending:
+        return
+    print("[start] Waiting for services to bind ports...")
+    deadline = time.perf_counter() + max_wait
+    delay = 0.05
+    while pending and time.perf_counter() < deadline:
+        for name in list(pending):
+            port = pending[name]
+            if _port_listening(int(port)):
+                print(f"  \u2705 {name}: port {port} ready")
+                del pending[name]
+        if pending:
+            time.sleep(delay)
+            delay = min(delay * 1.35, 0.4)
+    for name, port in pending.items():
+        print(f"  \u274c {name}: port {port} FAILED to start ({max_wait:.0f}s timeout)")
 
 
 def _setup_local_mode(_root):
@@ -510,9 +541,25 @@ def run_start(args):
 
     processes = _ACTIVE_PROCESSES
 
+    gateway_port = args.port or syscfg.port("gateway")
+    frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
+    frontend_dist = os.path.join(frontend_dir, "dist")
+    has_frontend_dist = os.path.isfile(os.path.join(frontend_dist, "index.html"))
+    force_frontend = bool(getattr(args, "frontend", False))
+    npm_exe = None
+    if args.no_frontend:
+        start_frontend = False
+    elif force_frontend:
+        start_frontend = True
+    elif has_frontend_dist:
+        # Prefer static SPA served by Gateway — avoids npm/Vite cold start.
+        start_frontend = False
+        print("[start] [3/4] Using built frontend dist via Gateway (skip Vite). Use --frontend to force Vite.")
+    else:
+        start_frontend = True
+
     # [1/4] Start gateway (FastAPI backend, default port 9555 per system_config)
     if not args.no_gateway:
-        gateway_port = args.port or syscfg.port("gateway")
         gateway_cwd = os.path.join(_root, "src", "opensquad", "gateway", "backend")
         gateway_script = os.path.join(gateway_cwd, "run.py")
 
@@ -558,9 +605,8 @@ def run_start(args):
         _track("registry", p)
         print(f"[start] Plugin Registry started (PID {p.pid})")
 
-    # [3/4] Start frontend dev server (Vite, port 5173)
-    if not args.no_frontend:
-        frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
+    # [3/4] Start frontend dev server (Vite) only when needed
+    if start_frontend:
         npm_exe = _find_npm()
 
         if os.path.isfile(os.path.join(frontend_dir, "package.json")):
@@ -571,10 +617,13 @@ def run_start(args):
                 print(f"[start] Frontend started (PID {p.pid})")
             except FileNotFoundError:
                 print("[start] Warning: npm not found. Install Node.js to run the frontend.")
+                start_frontend = False
             except Exception as e:
                 print(f"[start] Warning: Failed to start frontend: {e}")
+                start_frontend = False
         else:
             print("[start] [3/4] Skipping Frontend (package.json not found)")
+            start_frontend = False
 
     # [4/4] Start launcher (agent management, port 9600)
     launcher_port = (args.port + 1) if args.port else syscfg.port("launcher")
@@ -592,18 +641,41 @@ def run_start(args):
         _track("launcher", p)
         print(f"[start] Launcher started (PID {p.pid})")
 
-    # [5/5] Start watchdog (health check) — last so it has something to monitor
-    # NOTE: Must start AFTER Gateway/Registry/Frontend/Launcher are up, otherwise
-    # the watchdog's first check will see the services as "not yet started" and
-    # might trigger spurious recoveries.
+    if not processes:
+        print("[start] Nothing to start. Use selective flags to skip services.")
+        return
+
+    print(f"\n{'=' * 50}")
+    print("  OpenSquad All-in-One (Local Mode)")
+    print(f"{'=' * 50}")
+    print(f"  Gateway Backend : http://127.0.0.1:{gateway_port}")
+    print(f"  Plugin Registry : http://127.0.0.1:{syscfg.port('registry')}")
+    if start_frontend:
+        print(f"  Frontend Dev    : http://127.0.0.1:{_VITE_DEV_PORT}")
+    elif has_frontend_dist and not args.no_frontend:
+        print(f"  Frontend Static : http://127.0.0.1:{gateway_port}/  (dist)")
+    else:
+        print("  Frontend        : skipped")
+    print(f"  Launcher        : http://127.0.0.1:{launcher_port}")
+    print(f"{'=' * 50}")
+    print(f"\n[start] {len(processes)} service(s) running. Press Ctrl+C to stop.\n")
+    print("[start] Closing this window also stops services and frees ports.\n")
+
+    # ── Health check: poll ports with backoff (no fixed multi-second sleep) ──
+    _check_ports = {
+        "gateway": gateway_port if not args.no_gateway else None,
+        "registry": syscfg.port("registry") if not args.no_registry else None,
+        "frontend": _VITE_DEV_PORT if start_frontend else None,
+        "launcher": launcher_port if not args.no_launcher else None,
+    }
+    _wait_ports_ready(_check_ports, max_wait=30.0)
+
+    # Watchdog after ports are up — avoids spurious recoveries during bind.
     if not args.no_watchdog:
         watchdog_script = os.path.join(_root, "scripts", "opensquad_watchdog.py")
         if not os.path.isfile(watchdog_script):
             print(f"[start] Warning: watchdog script not found at {watchdog_script}, skipping")
         else:
-            # Give the other services a few seconds to bind their ports before
-            # the watchdog starts its first check.
-            time.sleep(2)
             print("[start] [5/5] Starting Health-Check Watchdog...")
             wd_cmd = [
                 python_exe,
@@ -618,7 +690,7 @@ def run_start(args):
                     wd_cmd,
                     cwd=_root,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,  # capture stderr for crash diagnostics
+                    stderr=subprocess.PIPE,
                     text=True,
                 )
                 _track("watchdog", wd_p)
@@ -626,53 +698,20 @@ def run_start(args):
             except Exception as e:
                 print(f"[start] Warning: Failed to start watchdog: {e}")
 
-    if not processes:
-        print("[start] Nothing to start. Use selective flags to skip services.")
-        return
+    # `opensquad --verbose` opens the browser once services are up, so it
+    # behaves like `opensquad web` while still streaming live logs here.
+    if getattr(args, "open_browser", False):
+        import webbrowser as _webbrowser
 
-    print(f"\n{'=' * 50}")
-    print("  OpenSquad All-in-One (Local Mode)")
-    print(f"{'=' * 50}")
-    print(f"  Gateway Backend : http://127.0.0.1:{args.port or syscfg.port('gateway')}")
-    print(f"  Plugin Registry : http://127.0.0.1:{syscfg.port('registry')}")
-    print(f"  Frontend Dev    : http://127.0.0.1:{_VITE_DEV_PORT}")
-    print(f"  Launcher        : http://127.0.0.1:{launcher_port}")
-    print("  Watchdog        : health-checking (15s interval)")
-    print(f"{'=' * 50}")
-    print(f"\n[start] {len(processes)} service(s) running. Press Ctrl+C to stop.\n")
-    print("[start] Closing this window also stops services and frees ports.\n")
-
-    # ── Health check: wait briefly then verify ports ──
-    _check_ports = {
-        "gateway": gateway_port if not args.no_gateway else None,
-        "registry": syscfg.port("registry") if not args.no_registry else None,
-        "frontend": _VITE_DEV_PORT if not args.no_frontend else None,
-        "launcher": launcher_port if not args.no_launcher else None,
-        "external_api": syscfg.port("external_adapter"),
-    }
-    print("[start] Waiting for services to bind ports...")
-    import socket as _socket
-    import time as _time
-
-    max_wait = 30
-    _time.sleep(3)
-    for name, port in _check_ports.items():
-        if port is None:
-            continue
-        ok = False
-        for attempt in range(max_wait):
-            try:
-                s = _socket.create_connection(("127.0.0.1", port), timeout=1)
-                s.close()
-                ok = True
-                break
-            except Exception:
-                if attempt < max_wait - 1:
-                    _time.sleep(1)
-        if ok:
-            print(f"  \u2705 {name}: port {port} ready")
+        if start_frontend and _port_listening(_VITE_DEV_PORT):
+            _web_url = f"http://127.0.0.1:{_VITE_DEV_PORT}"
         else:
-            print(f"  \u274c {name}: port {port} FAILED to start ({max_wait}s timeout)")
+            _web_url = f"http://127.0.0.1:{gateway_port}/"
+        try:
+            _webbrowser.open(_web_url)
+            print(f"[start] Opened browser: {_web_url}")
+        except Exception as _e:
+            print(f"[start] Could not open browser: {_e}\n  Open manually: {_web_url}", file=sys.stderr)
 
     def _signal_handler(sig, frame):
         _shutdown_supervised_services(reason=f"signal {sig}")

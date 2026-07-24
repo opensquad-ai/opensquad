@@ -878,15 +878,19 @@ class AgentRunner:
             input_hub.clear_stop_request()
             logger.info("[Runner] Stop handled (parallel) — latch cleared")
             return
-        if content == "__REQUEST_TOKEN_STATS__":
+        if content == "__REQUEST_TOKEN_STATS__" or (
+            isinstance(content, str) and content.startswith("__REQUEST_TOKEN_STATS__:")
+        ):
+            forced_sid = ""
+            if isinstance(content, str) and content.startswith("__REQUEST_TOKEN_STATS__:"):
+                forced_sid = content.split(":", 1)[1].strip()
             try:
-                sm = _get_session_manager()
-                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                if sid and sid != "unknown":
-                    self._turn_sid = sid
+                if not (forced_sid and forced_sid != "unknown"):
+                    sm = _get_session_manager()
+                    forced_sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
             except Exception:
                 pass
-            await self._broadcast_token_stats()
+            await self._broadcast_token_stats(forced_sid or None)
             return
         if content == "__NEW_SESSION__":
             input_hub.clear_stop_request()
@@ -1015,10 +1019,19 @@ class AgentRunner:
         tl = TurnLocal(sid=sid, chat_api=api)
         # Carry per-session Plan/Build into this turn (independent of other panes).
         try:
-            from opensquad.agent_mode import get_current_mode
+            from opensquad.agent_mode import MODE_BUILD, get_current_mode, set_session_mode
 
             modes = getattr(self, "_session_agent_modes", None)
-            if isinstance(modes, dict) and sid in modes:
+            uid = str(item.get("user_id") or "").strip()
+            # Unattended scheduled-task fires always run in Build (no Plan gate).
+            if uid.startswith("scheduled-task:"):
+                set_session_mode(sid, MODE_BUILD)
+                if not isinstance(modes, dict):
+                    modes = {}
+                    self._session_agent_modes = modes
+                modes[sid] = MODE_BUILD
+                tl.agent_mode = MODE_BUILD
+            elif isinstance(modes, dict) and sid in modes:
                 tl.agent_mode = modes[sid]
             else:
                 tl.agent_mode = get_current_mode()
@@ -1092,6 +1105,7 @@ class AgentRunner:
                 max_turns = 200
 
             stopped = False
+            turn_failed = False
             for turn in range(max_turns):
                 if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
                     logger.info("[Runner] Stop during parallel turn sid=%s", sid)
@@ -1127,6 +1141,7 @@ class AgentRunner:
                 except Exception as e:
                     logger.error("[Runner] parallel chat() failed sid=%s: %s", sid, e)
                     await self._emit("error", {"message": str(e)[:300]})
+                    turn_failed = True
                     break
 
                 # Stop may have arrived during streaming — do NOT execute tools.
@@ -1185,6 +1200,18 @@ class AgentRunner:
                 await self._emit("status", "Task stopped")
             await self._emit("state", "idle")
             await self._broadcast_token_stats()
+            # Explicit lifecycle for scheduled-task fires (Gateway marks exec done).
+            _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
+            if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
+                _status = "stopped" if stopped else ("failed" if turn_failed else "success")
+                await self._emit(
+                    "scheduled_task_turn_done",
+                    {
+                        "exec_id": _uid.split(":", 1)[1],
+                        "session_id": sid,
+                        "status": _status,
+                    },
+                )
         except asyncio.CancelledError:
             logger.info("[Runner] Parallel turn cancelled sid=%s", sid)
             try:
@@ -1198,6 +1225,16 @@ class AgentRunner:
                 )
                 await self._emit("status", "Task stopped")
                 await self._emit("state", "idle")
+                _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
+                if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
+                    await self._emit(
+                        "scheduled_task_turn_done",
+                        {
+                            "exec_id": _uid.split(":", 1)[1],
+                            "session_id": sid,
+                            "status": "stopped",
+                        },
+                    )
             except Exception:
                 pass
             raise
@@ -1206,6 +1243,16 @@ class AgentRunner:
             try:
                 await self._emit("error", {"message": str(e)[:300]})
                 await self._emit("state", "idle")
+                _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
+                if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
+                    await self._emit(
+                        "scheduled_task_turn_done",
+                        {
+                            "exec_id": _uid.split(":", 1)[1],
+                            "session_id": sid,
+                            "status": "failed",
+                        },
+                    )
             except Exception:
                 pass
         finally:
@@ -4629,24 +4676,66 @@ class AgentRunner:
                     return api
         return self.chat_api
 
-    async def _broadcast_token_stats(self):
+    def _req_for_token_stats(self, chat_api, sid: str = ""):
+        """Messages used for context % — session disk when parallel api is cold."""
+        sid = (sid or "").strip()
+        live = list(getattr(chat_api, "req", None) or [])
+        # Live parallel ChatAPI already has the turn context.
+        if live and chat_api is not self.chat_api:
+            return live
+        if not sid:
+            return live
+        # Root/focused api is the wrong context for a scheduled parallel sid.
+        # Rebuild a countable req from the session's persisted messages.
+        try:
+            sm = _get_session_manager()
+            data = sm.ensure_session_loaded(sid) or {}
+            msgs = list(data.get("messages") or [])
+            if not msgs:
+                return live
+            req: list[dict] = []
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                role = m.get("role")
+                if role not in ("system", "user", "assistant", "tool"):
+                    continue
+                content = m.get("content")
+                if content is None:
+                    content = ""
+                entry: dict = {"role": role, "content": content}
+                if role == "tool" and m.get("tool_call_id"):
+                    entry["tool_call_id"] = m.get("tool_call_id")
+                if role == "assistant" and m.get("tool_calls"):
+                    entry["tool_calls"] = m.get("tool_calls")
+                req.append(entry)
+            return req or live
+        except Exception:
+            logger.debug("[Runner] _req_for_token_stats disk load failed", exc_info=True)
+            return live
+
+    async def _broadcast_token_stats(self, sid: str | None = None):
         try:
             import json
 
             from opensquad.token_breakdown import compute_token_breakdown
 
-            sid = self._resolve_token_stats_sid()
+            forced = (sid or "").strip()
+            if forced and forced != "unknown":
+                self._turn_sid = forced
+            sid = forced or self._resolve_token_stats_sid()
             if sid and not (getattr(self, "_turn_sid", None) or "").strip():
                 self._turn_sid = sid
             chat_api = self._chat_api_for_token_stats(sid)
+            req = self._req_for_token_stats(chat_api, sid)
 
             tools = self._tools_for_token_stats()
-            total = chat_api._count_tokens(chat_api.req, tools)
+            total = chat_api._count_tokens(req, tools)
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
             encoding = getattr(chat_api, "encoding", None)
             stats = compute_token_breakdown(
-                chat_api.req,
+                req,
                 tools,
                 encoding=encoding,
                 total=total,
@@ -4702,7 +4791,7 @@ class AgentRunner:
                 total,
                 token_max,
                 (total / max(token_max, 1)) * 100,
-                len(getattr(chat_api, "req", []) or []),
+                len(req),
                 stats.get("system", 0),
                 stats.get("tool", 0),
                 stats.get("tool_defs", 0),

@@ -67,17 +67,28 @@ class InputHandler:
             input_hub.clear_stop_request()
             return True, None
 
-        # -- __REQUEST_TOKEN_STATS__ ----------------------------------------
-        if cmd == "__REQUEST_TOKEN_STATS__":
+        # -- __REQUEST_TOKEN_STATS__ / __REQUEST_TOKEN_STATS__:{sid} --------
+        if cmd == "__REQUEST_TOKEN_STATS__" or cmd.startswith("__REQUEST_TOKEN_STATS__:"):
             logger.info("[InputHandler] Command: Request token stats broadcast")
+            forced_sid = ""
+            if cmd.startswith("__REQUEST_TOKEN_STATS__:"):
+                forced_sid = cmd.split(":", 1)[1].strip()
             try:
-                sm = get_session_manager()
-                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                if sid and sid != "unknown":
-                    runner._turn_sid = sid
+                if forced_sid and forced_sid != "unknown":
+                    runner._turn_sid = forced_sid
+                else:
+                    sm = get_session_manager()
+                    sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                    if sid and sid != "unknown":
+                        runner._turn_sid = sid
             except Exception:
                 pass
-            await broadcast_token_stats()
+            # Prefer sid-aware runner method when available.
+            bcast = getattr(runner, "_broadcast_token_stats", None)
+            if callable(bcast):
+                await bcast(forced_sid or None)
+            else:
+                await broadcast_token_stats()
             return True, None
 
         # -- __RESUME_WORKFLOW__ -------------------------------------------

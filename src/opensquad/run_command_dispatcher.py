@@ -37,17 +37,21 @@ class RunCommandDispatcher:
             self.runner._input_hub.clear_stop_request()
             return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
 
-        if initial_query == "__REQUEST_TOKEN_STATS__":
+        if initial_query == "__REQUEST_TOKEN_STATS__" or (
+            isinstance(initial_query, str) and initial_query.startswith("__REQUEST_TOKEN_STATS__:")
+        ):
+            forced_sid = ""
+            if isinstance(initial_query, str) and initial_query.startswith("__REQUEST_TOKEN_STATS__:"):
+                forced_sid = initial_query.split(":", 1)[1].strip()
             try:
-                from opensquad.session_manager import get_session_manager
+                if not (forced_sid and forced_sid != "unknown"):
+                    from opensquad.session_manager import get_session_manager
 
-                sm = get_session_manager()
-                sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                if sid and sid != "unknown":
-                    self.runner._turn_sid = sid
+                    sm = get_session_manager()
+                    forced_sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
             except Exception:
                 pass
-            await self.runner._broadcast_token_stats()
+            await self.runner._broadcast_token_stats(forced_sid or None)
             return CommandDispatchResult(handled=True, next_query=None, should_continue=True)
 
         if initial_query == "__RESUME_WORKFLOW__":

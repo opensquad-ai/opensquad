@@ -538,7 +538,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                         loading="lazy"
                         onDoubleClick={user.is_agent ? () => {
                           if (user.status === 'online') {
-                            window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: user.id } }));
+                            window.dispatchEvent(new CustomEvent('openAgentChat', { detail: { agentId: user.agent_id || user.id } }));
                           } else {
                             showAgentToast(t('chat.agentOffline'));
                           }

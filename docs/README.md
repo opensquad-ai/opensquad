@@ -56,3 +56,6 @@ structure" for the full rules with examples.
 | `banner.svg` | resource | — |
 | `security_baseline.md` | maintainers | EN |
 | `GITHUB_SETTINGS.md` | maintainers | EN |
+| `desktop-known-issues.md` | maintainers | EN |
+| [`rust-hybrid-refactor.md`](rust-hybrid-refactor.md) | maintainers (architecture) | ZH |
+| [`contracts/`](contracts/) | maintainers — Launcher/Gateway freeze contracts for the Rust hybrid plan | EN |

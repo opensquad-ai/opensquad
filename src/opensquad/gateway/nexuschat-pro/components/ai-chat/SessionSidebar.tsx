@@ -12,6 +12,8 @@ import {
   Pencil,
   MessageSquarePlus,
   Sparkles,
+  Puzzle,
+  UserCircle,
   Archive,
   ChevronDown,
   ChevronRight,
@@ -49,9 +51,15 @@ interface SessionSidebarProps {
   /** Optional override for delete (e.g. abandon empty current via new_session first). */
   onDeleteSession?: (sessionId: string) => Promise<void>;
   onOpenSkills?: () => void;
+  onOpenPlugins?: () => void;
+  onOpenRoles?: () => void;
   onOpenScheduledTasks?: () => void;
   /** Highlight Skill 库 when the in-chat skills panel is open. */
   skillsActive?: boolean;
+  /** Highlight 插件 when the in-chat plugins panel is open. */
+  pluginsActive?: boolean;
+  /** Highlight 角色 when the in-chat roles panel is open. */
+  rolesActive?: boolean;
   isOpen: boolean;
   sessionTitleUpdate?: { id: string; title: string } | null;
   agentBusy?: boolean;
@@ -157,8 +165,12 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   onSwitchAndReply,
   onDeleteSession,
   onOpenSkills,
+  onOpenPlugins,
+  onOpenRoles,
   onOpenScheduledTasks,
   skillsActive = false,
+  pluginsActive = false,
+  rolesActive = false,
   isOpen,
   sessionTitleUpdate,
   agentBusy = false,
@@ -682,20 +694,20 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         <button
           type="button"
           disabled={!workspaceRootPath}
-          onClick={() => onOpenScheduledTasks?.()}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
-        >
-          <Clock size={16} className="text-violet-500" />
-          {t('aiChat.scheduledTasks')}
-        </button>
-        <button
-          type="button"
-          disabled={!workspaceRootPath}
           onClick={() => onNewSession(workspaceRootPath || undefined)}
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
           <MessageSquarePlus size={16} className="text-sky-500" />
           新建对话
+        </button>
+        <button
+          type="button"
+          disabled={!workspaceRootPath}
+          onClick={() => onOpenScheduledTasks?.()}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
+        >
+          <Clock size={16} className="text-violet-500" />
+          {t('aiChat.scheduledTasks')}
         </button>
         <button
           type="button"
@@ -708,6 +720,30 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         >
           <Sparkles size={16} className={skillsActive ? 'text-primary' : 'text-textMuted/70'} />
           Skill 库
+        </button>
+        <button
+          type="button"
+          onClick={() => onOpenPlugins?.()}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
+            pluginsActive
+              ? 'bg-primary/10 text-primary'
+              : 'text-textMain'
+          }`}
+        >
+          <Puzzle size={16} className={pluginsActive ? 'text-primary' : 'text-textMuted/70'} />
+          {t('nav.plugins')}
+        </button>
+        <button
+          type="button"
+          onClick={() => onOpenRoles?.()}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal os-interactive ${
+            rolesActive
+              ? 'bg-primary/10 text-primary'
+              : 'text-textMain'
+          }`}
+        >
+          <UserCircle size={16} className={rolesActive ? 'text-primary' : 'text-textMuted/70'} />
+          {t('nav.roles')}
         </button>
       </div>
 

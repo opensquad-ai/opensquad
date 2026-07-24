@@ -31,15 +31,28 @@ except ImportError:
 
 from .utils import CharPrinter
 
-try:
-    import google.generativeai as _genai_mod
-
-    _GENAI_AVAILABLE = True
-except ImportError:
-    _genai_mod = None
-    _GENAI_AVAILABLE = False
+# google.generativeai is very slow to import (~10s). Defer until GoogleAPI is
+# actually constructed so OpenAI/Claude agents are not taxed at boot.
+_genai_mod = None
+_GENAI_AVAILABLE: bool | None = None
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_genai() -> bool:
+    """Import google.generativeai on first use. Returns True if available."""
+    global _genai_mod, _GENAI_AVAILABLE
+    if _GENAI_AVAILABLE is not None:
+        return _GENAI_AVAILABLE
+    try:
+        import google.generativeai as genai
+
+        _genai_mod = genai
+        _GENAI_AVAILABLE = True
+    except ImportError:
+        _genai_mod = None
+        _GENAI_AVAILABLE = False
+    return _GENAI_AVAILABLE
 
 
 # - GoogleAPI -
@@ -159,8 +172,8 @@ class GoogleAPI:
         else:
             self.encoding = None
 
-        # Initialize Google Generative AI
-        if _GENAI_AVAILABLE:
+        # Initialize Google Generative AI (lazy import — see _ensure_genai)
+        if _ensure_genai():
             _genai_mod.configure(api_key=self.api_key)
             self._genai = _genai_mod
             logger.info(f"GoogleAPI Initialized. Model: {self.model}")
@@ -188,7 +201,7 @@ class GoogleAPI:
         self.is_image_output = model_cfg.get("is_image_output", self.is_image_output)
         self.top_k = model_cfg.get("top_k", self.top_k)
         # Re-configure Google GenAI with new API key
-        if _GENAI_AVAILABLE:
+        if _ensure_genai():
             _genai_mod.configure(api_key=self.api_key)
             self._genai = _genai_mod
         logger.info(f"[GoogleAPI] Model hot-reloaded: {old_model} -> {self.model}")

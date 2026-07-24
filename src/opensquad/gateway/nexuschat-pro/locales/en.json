@@ -730,11 +730,11 @@
       "deleteSessionFailed": "Failed to delete session",
       "renameSessionFailed": "Failed to rename session",
       "defaultFolder": "Default",
-      "externalBadge": "External",
+      "externalBadge": "Comms primary",
       "externalBadgeTitle": "External messages (group / Feishu / Telegram, etc.) only enter this session",
-      "setExternalSession": "Set as external communications session",
-      "setExternalPending": "Setting as external session…",
-      "setExternalFailed": "Failed to set external session; please retry"
+      "setExternalSession": "Set as comms primary",
+      "setExternalPending": "Setting as comms primary…",
+      "setExternalFailed": "Failed to set comms primary; please retry"
     },
     "workingDirModal": {
       "title": "Set working directory",

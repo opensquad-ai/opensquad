@@ -1,0 +1,7 @@
+{
+  "name": "cursor-api",
+  "display_name": "cursor-api",
+  "version": "1.0.0",
+  "description": "通过 Cursor REST API 调用智能体的完整指南，支持持续对话和流式输出（Server-Sent Events）",
+  "author": "Agent305"
+}

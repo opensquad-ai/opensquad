@@ -15,9 +15,6 @@ _bridge_bg_tasks: set[asyncio.Task] = set()
 _bridge_ws_tasks: set[asyncio.Task] = set()
 
 from opensquad import AgentRunner, bus
-from opensquad.chat_api import ChatAPI
-from opensquad.claude_api import ClaudeAPI
-from opensquad.google_api import GoogleAPI
 from opensquad.skill_loader import init_skill_runtime, load_skills_from_config, register_skill_tools
 from opensquad.system_config import syscfg
 from opensquad.xml_parser import StreamingTagParser
@@ -244,14 +241,20 @@ class AgentBootPhases:
             model_config.token_max = 1_000_000
 
         if provider in ["claude", "anthropic"]:
+            from opensquad.claude_api import ClaudeAPI
+
             agent_logger.info("[Boot] ENGINE SWITCH: Using ClaudeAPI (Anthropic Native Protocol)")
             agent_logger.info(f"   Model: {model_config.model}, Max Tokens: {model_config.token_max}")
             chat_api = ClaudeAPI(config=model_config, stream_parser=parser)
         elif provider in ["google", "gemini"]:
+            from opensquad.google_api import GoogleAPI
+
             agent_logger.info("[Boot] ENGINE SWITCH: Using GoogleAPI (Google Gemini Native Protocol)")
             agent_logger.info(f"   Model: {model_config.model}, Max Tokens: {model_config.token_max}")
             chat_api = GoogleAPI(config=model_config, stream_parser=parser)
         else:
+            from opensquad.chat_api import ChatAPI
+
             agent_logger.info("[Boot] ENGINE SWITCH: Using ChatAPI (OpenAI Compatible Protocol)")
             agent_logger.info(f"   Model: {model_config.model}, Max Tokens: {model_config.token_max}")
             chat_api = ChatAPI(config=model_config, stream_parser=parser)
@@ -409,12 +412,13 @@ class AgentBootPhases:
         t0 = __import__("time").perf_counter()
         plugin_manager = PluginManager(agent_id=config.get("agent_id", ""))
         t_plugin_discovery = __import__("time").perf_counter()
-        plugin_manager.discover_and_load()
+        agent_tool_names = config.get("tools", []) or []
+        plugin_manager.discover_and_load(wanted_names=agent_tool_names)
         t_plugin_register = __import__("time").perf_counter()
         plugin_tool_count = plugin_manager.register_tools_to_agent(
             registry=tool_registry,
             agent_id=config.get("agent_id", ""),
-            agent_tool_names=config.get("tools", []),
+            agent_tool_names=agent_tool_names,
             agent_tool_levels=config.get("tool_levels", {}),
         )
         if plugin_tool_count:

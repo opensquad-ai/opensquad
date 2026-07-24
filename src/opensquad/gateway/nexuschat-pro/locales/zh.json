@@ -730,11 +730,11 @@
       "deleteSessionFailed": "删除会话失败",
       "renameSessionFailed": "重命名会话失败",
       "defaultFolder": "默认",
-      "externalBadge": "对外",
+      "externalBadge": "通讯主体",
       "externalBadgeTitle": "外界消息（群聊 / 飞书 / Telegram 等）只进入此会话",
-      "setExternalSession": "设为对外通讯会话",
-      "setExternalPending": "正在设为对外通讯会话…",
-      "setExternalFailed": "设为对外通讯会话失败，请重试"
+      "setExternalSession": "设为通讯主体",
+      "setExternalPending": "正在设为通讯主体…",
+      "setExternalFailed": "设为通讯主体失败，请重试"
     },
     "workingDirModal": {
       "title": "设置工作目录",

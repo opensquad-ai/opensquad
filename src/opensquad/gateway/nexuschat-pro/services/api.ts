@@ -1733,10 +1733,11 @@ export interface ScheduledExecution {
   task_name: string;
   started_at: number;
   ended_at: number | null;
-  status: 'running' | 'success' | 'failed' | 'missed' | 'stopped';
-  manual: boolean;
+  status: 'running' | 'success' | 'failed' | 'missed' | 'stopped' | 'deleted';
+  manual?: boolean;
   session_id: string | null;
   error: string | null;
+  delegate_agent?: string | null;
 }
 
 export const scheduledTaskAPI = {
@@ -2047,6 +2048,8 @@ export interface AgentSession {
   created_at?: string | null;
   /** Last activity time (ISO). */
   last_updated?: string | null;
+  /** Hidden from interactive sidebar when ``scheduled_task``. */
+  origin?: string | null;
 }
 
 export interface AgentSessionData {

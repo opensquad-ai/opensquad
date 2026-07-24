@@ -289,12 +289,16 @@ class AgentSessionReader:
                 title = _extract_title(messages if isinstance(messages, list) else [], sid)
             preview = _extract_preview(messages if isinstance(messages, list) else [])
             created_at, last_updated = _pick_ts_light(data if isinstance(data, dict) else None, fp)
+            origin = ""
+            if isinstance(data, dict):
+                origin = str(data.get("origin") or "").strip()
             return {
                 "mtime": mtime,
                 "title": title or sid,
                 "preview": preview,
                 "created_at": created_at,
                 "last_updated": last_updated,
+                "origin": origin,
             }
 
         def _get_list_meta(sid: str, fp: str) -> dict[str, Any]:
@@ -326,26 +330,47 @@ class AgentSessionReader:
             self._list_meta_cache[sid] = meta
             return meta
 
+        # Hide scheduled-task sessions from the interactive sidebar. Prefer the
+        # persisted origin flag; also drop sids known to scheduled executions
+        # (legacy sessions created before origin was written).
+        try:
+            from opensquad.scheduled_tasks import scheduled_execution_session_ids
+
+            _sched_sids = scheduled_execution_session_ids()
+        except Exception:
+            _sched_sids = set()
+
+        def _hidden(sid: str, origin: str = "", data: dict | None = None) -> bool:
+            o = (origin or "").strip()
+            if not o and isinstance(data, dict):
+                o = str(data.get("origin") or "").strip()
+            if o == "scheduled_task":
+                return True
+            return bool(sid) and sid in _sched_sids
+
         # 1. Current session
         curr_id = self.session_data.get("id")
         primary_id = self._read_primary_session_id()
         if curr_id:
-            messages = self.session_data.get("messages", [])
-            title = self.session_data.get("title") or _extract_title(messages, curr_id)
-            preview = _extract_preview(messages)
-            created_at, last_updated = _pick_ts_light(self.session_data, self.current_session_file)
-            sessions.append(
-                {
-                    "id": curr_id,
-                    "title": title,
-                    "preview": preview,
-                    "current": True,
-                    "primary": curr_id == primary_id,
-                    "created_at": created_at,
-                    "last_updated": last_updated,
-                }
-            )
-            seen_ids.add(curr_id)
+            if _hidden(curr_id, data=self.session_data if isinstance(self.session_data, dict) else None):
+                seen_ids.add(curr_id)
+            else:
+                messages = self.session_data.get("messages", [])
+                title = self.session_data.get("title") or _extract_title(messages, curr_id)
+                preview = _extract_preview(messages)
+                created_at, last_updated = _pick_ts_light(self.session_data, self.current_session_file)
+                sessions.append(
+                    {
+                        "id": curr_id,
+                        "title": title,
+                        "preview": preview,
+                        "current": True,
+                        "primary": curr_id == primary_id,
+                        "created_at": created_at,
+                        "last_updated": last_updated,
+                    }
+                )
+                seen_ids.add(curr_id)
 
         # 2. History files
         if os.path.exists(self.history_dir):
@@ -363,17 +388,21 @@ class AgentSessionReader:
                         continue
                     fp = os.path.join(self.history_dir, f)
                     meta = _get_list_meta(sid, fp)
-                    sessions.append(
-                        {
-                            "id": sid,
-                            "title": meta.get("title") or sid,
-                            "preview": meta.get("preview") or "",
-                            "current": False,
-                            "primary": sid == primary_id,
-                            "created_at": meta.get("created_at"),
-                            "last_updated": meta.get("last_updated"),
-                        }
-                    )
+                    if _hidden(sid, origin=str(meta.get("origin") or "")):
+                        seen_ids.add(sid)
+                        continue
+                    entry = {
+                        "id": sid,
+                        "title": meta.get("title") or sid,
+                        "preview": meta.get("preview") or "",
+                        "current": False,
+                        "primary": sid == primary_id,
+                        "created_at": meta.get("created_at"),
+                        "last_updated": meta.get("last_updated"),
+                    }
+                    if meta.get("origin"):
+                        entry["origin"] = meta.get("origin")
+                    sessions.append(entry)
                     seen_ids.add(sid)
                 # Drop stale list-meta entries for deleted history files
                 stale = [k for k in self._list_meta_cache if k not in live_sids and k != curr_id]
