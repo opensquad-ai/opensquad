@@ -23,6 +23,11 @@ import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
+import {
+  SoloUserNavRail,
+  buildUserNavNodesFromTimeline,
+  userNavAnchorDomId,
+} from './SoloUserNavRail';
 
 export interface SessionChatPaneProps {
   agentId: string;
@@ -80,7 +85,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   const endRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
   const scrollHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const useLive = Array.isArray(liveTimeline);
+  // Empty array still counts as Array.isArray — treat it as a miss so we
+  // fetch disk history instead of painting a blank pane forever.
+  const useLive = Array.isArray(liveTimeline) && liveTimeline.length > 0;
   const liveOrFetched = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
   const {
     displayValue: timeline,
@@ -345,13 +352,39 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     };
   }, []);
 
+  const userNavNodes = useMemo(
+    () => buildUserNavNodesFromTimeline(timeline),
+    [timeline],
+  );
+
+  const jumpToUserMessage = useCallback((id: string) => {
+    const container = listRef.current;
+    const el = document.getElementById(userNavAnchorDomId(id));
+    if (!container || !el) return;
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    const top = eRect.top - cRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, []);
+
   return (
     <div
       className="flex-1 min-h-0 flex flex-col bg-panel relative"
       onMouseDown={() => onFocus?.()}
     >
       <div className="flex-1 relative min-h-0">
-        {isSolo && (showScrollTop || showScrollBottom) && (
+        {userNavNodes.length > 0 && (
+          <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-center justify-end pr-1 overflow-visible">
+            <div className="pointer-events-auto overflow-visible">
+              <SoloUserNavRail
+                nodes={userNavNodes}
+                activeId={userNavNodes[userNavNodes.length - 1]?.id}
+                onJump={jumpToUserMessage}
+              />
+            </div>
+          </div>
+        )}
+        {(showScrollTop || showScrollBottom) && (
           <div
             className="pointer-events-none absolute right-1 bottom-4 z-20 transition-opacity duration-300"
             style={{ opacity: scrollActive ? 1 : 0, pointerEvents: scrollActive ? undefined : 'none' }}
@@ -413,9 +446,10 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                       entry.data.role === 'user' && onWithdrawUserMessage
                         ? () => onWithdrawUserMessage(entryKey, entry.data)
                         : undefined,
+                    anchorId: entryKey,
                   };
                   return isSolo ? (
-                    <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
+                    <SoloMessage key={entryKey} {...msgProps} />
                   ) : (
                     <MessageBubble key={entryKey} {...msgProps} />
                   );

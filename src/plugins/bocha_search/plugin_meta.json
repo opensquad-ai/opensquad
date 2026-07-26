@@ -1,0 +1,19 @@
+{
+  "id": "bocha_search",
+  "name": "Bocha Search",
+  "version": "1.0.0",
+  "author": "OpenSquad",
+  "description": "Bocha (博查) search API for AI agents. Web search with summaries; optional AI search with vertical modality cards.",
+  "tags": [
+    "search",
+    "web",
+    "bocha"
+  ],
+  "type": "tool",
+  "created_at": "2026-07-26T00:00:00Z",
+  "likes": 0,
+  "icon_url": null,
+  "git_url": "",
+  "homepage": "https://open.bochaai.com",
+  "download_url": ""
+}

@@ -41,6 +41,38 @@ function putCache(key: string, entry: CacheEntry) {
   for (let i = 0; i < drop; i++) fileCache.delete(oldest[i][0]);
 }
 
+/** Read shared editor cache (used by ProjectFilesPanel hover prefetch). */
+export function getWorkspaceFileCache(
+  agentId: string,
+  rootPath: string,
+  relPath: string,
+): CacheEntry | null {
+  const p = (relPath || '').replace(/\\/g, '/');
+  if (!agentId || !rootPath || !p) return null;
+  return fileCache.get(cacheKey(agentId, rootPath, p)) || null;
+}
+
+/** Write shared editor cache so center-pane open can paint without a spinner. */
+export function putWorkspaceFileCache(
+  agentId: string,
+  rootPath: string,
+  relPath: string,
+  entry: {
+    content: string;
+    imageSrc?: string | null;
+    meta?: { truncated?: boolean; size?: number };
+  },
+): void {
+  const p = (relPath || '').replace(/\\/g, '/');
+  if (!agentId || !rootPath || !p) return;
+  putCache(cacheKey(agentId, rootPath, p), {
+    content: entry.content ?? '',
+    imageSrc: entry.imageSrc ?? null,
+    meta: entry.meta ?? {},
+    at: Date.now(),
+  });
+}
+
 function basename(path: string): string {
   const p = path.replace(/\\/g, '/');
   const i = p.lastIndexOf('/');
@@ -98,7 +130,8 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
       setShowSpinner(false);
       return;
     }
-    const t = window.setTimeout(() => setShowSpinner(true), 140);
+    // Prefer silent wait: hover-prefetch / open race often finishes <400ms.
+    const t = window.setTimeout(() => setShowSpinner(true), 450);
     return () => window.clearTimeout(t);
   }, [loading]);
 

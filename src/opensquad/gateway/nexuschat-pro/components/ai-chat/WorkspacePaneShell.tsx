@@ -1,7 +1,7 @@
 /**
  * WorkspacePaneShell — one split leaf: L2 tab bar + content (chat / file / preview) + composer.
  */
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
@@ -109,6 +109,14 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
     active.kind === 'session' &&
     !!handlers.renderComposer &&
     (handlers.isComposerLanding?.(active.id) ?? false);
+
+  // Active session tab → claim watch + refresh token stats for this sid.
+  useEffect(() => {
+    if (!active || active.kind !== 'session') return;
+    handlers.ensureSessionWatched?.(active.id);
+    // intentionally only when the active session tab changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.kind, active?.id]);
 
   return (
     <div

@@ -9,6 +9,7 @@ import {
 import { marked } from 'marked';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
 import { resolveChatAvatar, resolveChatName } from '../utils/image';
+import { filterCardsForVoiceSlot, withSelectedVoiceCard } from '../utils/voiceCardRole';
 import { useTranslation, Trans } from 'react-i18next';
 import {
   adminHeaderBar,
@@ -315,6 +316,22 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   useEffect(() => {
     pluginAPI.getPlugins().then(d => setAvailablePlugins(d.plugins || [])).catch(() => {});
     modelCardAPI.getCards().then(d => setModelCards(d.cards || [])).catch(() => {});
+  }, []);
+
+  // Desktop may create model cards while Agent Manager stays open.
+  useEffect(() => {
+    const refresh = () => {
+      modelCardAPI.getCards().then(d => setModelCards(d.cards || [])).catch(() => {});
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -967,21 +984,28 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             </p>
             <div className="grid grid-cols-1 gap-2">
               {([
-                { key: 'asr_card' as const, label: 'ASR 模型卡（语音输入）', hint: 'is_audio' },
+                { key: 'asr_card' as const, label: 'ASR 模型卡（语音输入）', hint: 'is_audio / builtin' },
                 { key: 'tts_card' as const, label: 'TTS 模型卡（语音输出）', hint: 'is_audio_output' },
                 { key: 'realtime_card' as const, label: 'Realtime 模型卡（双向）', hint: 'audio in+out' },
-              ]).map(({ key, label, hint }) => (
+              ]).map(({ key, label, hint }) => {
+                const selected = String(cfgGet(['voice', key], '') || '');
+                const options = withSelectedVoiceCard(
+                  filterCardsForVoiceSlot(modelCards, key),
+                  modelCards,
+                  selected,
+                );
+                return (
                 <div key={key}>
                   <label className="block text-[10px] font-semibold text-textMuted mb-1">
                     {label} <span className="font-normal opacity-60">({hint})</span>
                   </label>
                   <select
-                    value={cfgGet(['voice', key], '')}
+                    value={selected}
                     onChange={(e) => cfgSet(['voice', key], e.target.value)}
                     className={inputCls}
                   >
                     <option value="">(none)</option>
-                    {modelCards.map(card => (
+                    {options.map(card => (
                       <option key={card.name} value={card.name}>
                         {card.title || card.name}
                         {card.model_name ? ` · ${card.model_name}` : ''}
@@ -989,7 +1013,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     ))}
                   </select>
                 </div>
-              ))}
+                );
+              })}
               <div>
                 <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_voice（音色，可选）</label>
                 <input

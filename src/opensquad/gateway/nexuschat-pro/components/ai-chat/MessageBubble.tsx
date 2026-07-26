@@ -690,8 +690,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
   ) : null;
 
   if (isUser) {
+    const domId = anchorId ? `solo-msg-${anchorId}` : undefined;
     return (
-      <div className={`mb-5 w-full flex justify-end group ${isStreaming ? 'ai-streaming' : ''}`}>
+      <div
+        id={domId}
+        data-solo-msg-id={anchorId}
+        className={`mb-5 w-full flex justify-end group scroll-mt-4 ${isStreaming ? 'ai-streaming' : ''}`}
+      >
         <div className="max-w-[min(85%,36rem)] min-w-0">
           <div className="rounded-2xl rounded-br-md bg-black/[0.04] dark:bg-white/[0.08] border border-border/50 px-4 py-2.5 text-sm leading-relaxed text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
             {mediaAndBody}

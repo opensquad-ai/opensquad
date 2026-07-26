@@ -298,7 +298,11 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
               currentCardName={v.model_card || null}
               modelName={null}
               fallbackLabel={t('scheduledTasks.fModelDefault')}
+              placement="down"
               onSelect={(name) => set('model_card', name)}
+              onWillOpen={() => {
+                modelCardAPI.getCards().then(r => setCards(r.cards || [])).catch(() => {});
+              }}
               onAddModels={() => window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }))}
             />
             {v.model_card && (

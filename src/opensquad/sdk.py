@@ -6,12 +6,24 @@ Agent SDK - allows agents to self-register with the AI Web Gateway
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import websockets
 
 logger = logging.getLogger(__name__)
+
+# Protocol-level keepalive (websockets library). Detects dead TCP / NAT drops
+# after long idle; without these, send() can succeed into a half-open socket.
+_WS_PING_INTERVAL_S = 20
+_WS_PING_TIMEOUT_S = 20
+# Application heartbeat interval. Gateway uses last_heartbeat for liveness.
+_HEARTBEAT_INTERVAL_S = 20
+# If the message recv loop has not ticked for this long, stop heartbeating and
+# force reconnect. Catches "writer alive / reader dead" half-zombies where
+# CancelledError killed _message_loop but heartbeat still ran.
+_MESSAGE_LOOP_STALE_S = 45
 
 
 def _drain_task_cancellation() -> int:
@@ -66,10 +78,20 @@ class BaseAgent:
         self._dup_drop_count: int = 0  # duplicates dropped since last log
         self._dup_log_time: float = 0.0  # last time we logged duplicate summary
         self._reconnect_attempts: int = 0  # consecutive reconnect attempts for backoff
+        self._heartbeat_task: asyncio.Task | None = None
+        self._message_loop_alive_at: float = 0.0
 
     async def _disconnect(self) -> None:
         """Close the current Gateway WS connection (best-effort)."""
         self.connected = False
+        hb = self._heartbeat_task
+        self._heartbeat_task = None
+        if hb is not None and not hb.done():
+            hb.cancel()
+            try:
+                await hb
+            except (asyncio.CancelledError, Exception):
+                pass
         ws = self.ws
         self.ws = None
         if ws is not None:
@@ -133,6 +155,8 @@ class BaseAgent:
             proxy=None,
             open_timeout=15,
             close_timeout=5,
+            ping_interval=_WS_PING_INTERVAL_S,
+            ping_timeout=_WS_PING_TIMEOUT_S,
         )
         logger.info("Connected!")
 
@@ -158,22 +182,40 @@ class BaseAgent:
 
         if data.get("status") == "registered":
             self.connected = True
+            self._message_loop_alive_at = time.monotonic()
             logger.info(f"Registered successfully! Route: {data.get('assigned_route')}")
 
-            # Start heartbeat
-            asyncio.create_task(self._heartbeat_loop())
+            # Start heartbeat (cancel any leftover from a prior connection)
+            if self._heartbeat_task is not None and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         else:
             raise Exception(f"Registration failed: {data.get('message')}")
 
     async def _heartbeat_loop(self):
-        """Heartbeat loop."""
+        """Heartbeat loop — only while the message recv path is still alive."""
         while self.connected:
             try:
-                await asyncio.sleep(30)  # 30-second heartbeat
-                if self.ws and self.connected:
-                    await self.ws.send(
-                        json.dumps({"action": "heartbeat", "stats": {"load_percent": self._load_percent}})
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                if not (self.ws and self.connected):
+                    break
+                # Reader dead but writer still open: stop advertising online.
+                idle = time.monotonic() - (self._message_loop_alive_at or 0.0)
+                if self._message_loop_alive_at and idle > _MESSAGE_LOOP_STALE_S:
+                    logger.warning(
+                        "[SDK] Message loop stale for %.0fs — forcing reconnect (half-dead WS)",
+                        idle,
                     )
+                    self.connected = False
+                    ws = self.ws
+                    self.ws = None
+                    if ws is not None:
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                    break
+                await self.ws.send(json.dumps({"action": "heartbeat", "stats": {"load_percent": self._load_percent}}))
             except asyncio.CancelledError:
                 drained = _drain_task_cancellation()
                 logger.warning("[SDK] CancelledError in heartbeat loop (drained=%d), stopping heartbeat", drained)
@@ -186,6 +228,7 @@ class BaseAgent:
 
     async def _process_inbound_message(self, message: str) -> None:
         """Parse and dispatch one inbound Gateway WS frame."""
+        self._message_loop_alive_at = time.monotonic()
         data = json.loads(message)
         msg_type = data.get("type") or data.get("action")
 
@@ -245,6 +288,13 @@ class BaseAgent:
                     await rtm.handle_mouthpiece_utterance(audio, sample_rate=sample_rate)
             except Exception as e:
                 logger.error("[SDK] voice_mouthpiece_utterance failed: %s", e)
+        elif msg_type == "ping":
+            # Application-level liveness probe from Gateway (requires recv loop).
+            if self.ws and self.connected:
+                try:
+                    await self.ws.send(json.dumps({"type": "pong", "ts": data.get("ts"), "action": "pong"}))
+                except Exception as e:
+                    logger.warning("[SDK] ping reply failed: %s", e)
         elif msg_type == "pong":
             logger.debug("Received pong")
         else:
@@ -253,8 +303,10 @@ class BaseAgent:
     async def _message_loop(self):
         """Message processing loop (with deduplication and out-of-order detection)."""
         logger.info(f"[SDK] _message_loop STARTED for agent {self.config.agent_id}")
+        self._message_loop_alive_at = time.monotonic()
         try:
             async for message in self.ws:
+                self._message_loop_alive_at = time.monotonic()
                 try:
                     await self._process_inbound_message(message)
                 except asyncio.CancelledError:

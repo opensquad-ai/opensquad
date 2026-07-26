@@ -23,9 +23,10 @@ the gateway, and the Plugin Registry is not yet wired into the desktop bundle).
 Electron's `main.ts` spawns **two** instances of the same `run.exe`:
 
 1. `run.exe` — the Gateway (default mode, no `--service` flag).
-2. `run.exe --service launcher --mgmt-port 9600 --no-auto-start --no-services` —
-   the Launcher. `--no-services` skips plugin auto-start (frozen `run.exe` cannot
-   spawn plugin `service/main.py` via `sys.executable`).
+2. `run.exe --service launcher --mgmt-port 9600` — the Launcher.
+   Agents with `ui.auto_start_on_boot: true` start automatically via
+   `run.exe --service agent`. Plugin services still need the Agent Python
+   runtime from the setup wizard (see issue #1 below).
 
 `run.py` dispatches on `--service`:
 - `gateway` (default) runs the FastAPI app.

@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronsDown, Mic, Phone, PhoneOff, Settings2, X } from 'lucide-react';
 import { getUserMediaSafe } from '../../utils/mediaDevices';
 import type { ModelCardInfo } from '../../services/api';
+import { filterCardsForVoiceSlot, withSelectedVoiceCard } from '../../utils/voiceCardRole';
 import { VoiceRecordPill } from './VoiceRecordPill';
 
 export type VoiceMode = 'record' | 'realtime';
@@ -661,25 +662,11 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
               { key: 'tts_card' as const, label: 'TTS 输出' },
               { key: 'realtime_card' as const, label: 'Realtime 双向' },
             ]).map(({ key, label }) => {
-              const options =
-                key === 'asr_card'
-                  ? [
-                      ...modelCards.filter((c) => c.is_audio && !c.is_audio_output),
-                      ...modelCards.filter((c) => !(c.is_audio && !c.is_audio_output)),
-                    ]
-                  : key === 'tts_card'
-                    ? [
-                        ...modelCards.filter((c) => c.is_audio_output && !c.is_audio),
-                        ...modelCards.filter((c) => !(c.is_audio_output && !c.is_audio)),
-                      ]
-                    : modelCards;
-              // Deduplicate while keeping role-preferred cards first.
-              const seen = new Set<string>();
-              const ordered = options.filter((c) => {
-                if (seen.has(c.name)) return false;
-                seen.add(c.name);
-                return true;
-              });
+              const ordered = withSelectedVoiceCard(
+                filterCardsForVoiceSlot(modelCards, key),
+                modelCards,
+                draftBindings[key],
+              );
               return (
               <div key={key} className="flex items-center gap-2">
                 <span className="text-[10px] text-textMuted w-16 shrink-0">{label}</span>

@@ -139,6 +139,12 @@ class AgentWebSocketHandler:
                     registry.update_heartbeat(agent_id, stats)
                     await websocket.send_json({"action": "pong"})
 
+                elif msg_type == "pong" or action == "pong":
+                    # Application-level pong answering Gateway probe_agent ping.
+                    # Proves the agent *message recv loop* is alive (unlike
+                    # outbound heartbeats which only prove the writer works).
+                    registry.note_pong(agent_id)
+
                 elif action == "status":
                     # Status update (optional per-session)
                     status = message.get("status", "online")

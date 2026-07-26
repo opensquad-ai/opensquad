@@ -16,6 +16,53 @@ export function genTimelineUID(): string {
 }
 
 /**
+ * Assistant api_sync / history often stores raw LLM text: body outside
+ * `<to_user>` plus a short coda inside. Live UI only shows the coda; on
+ * refresh we must recompose preamble + tag body so the report is visible.
+ */
+export function composeAssistantDisplayContent(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  const tagNames = ['to_user_end_task', 'to_user_reply', 'to_user'] as const;
+  let chosen: { tag: string; inner: string; index: number; full: string } | null = null;
+  for (const tag of tagNames) {
+    const re = new RegExp(`<(${tag})\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+    const m = content.match(re);
+    if (m && typeof m.index === 'number') {
+      chosen = { tag, inner: m[2] || '', index: m.index, full: m[0] };
+      break;
+    }
+  }
+  if (!chosen) {
+    return content
+      .replace(/<\/?(?:thought|think|plan|tool_call|tool_result|to_system|state|wake|sleep|title|option|arguments|func)\b[^>]*>/gi, '')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim();
+  }
+
+  let preamble = content;
+  for (const tag of tagNames) {
+    preamble = preamble.replace(
+      new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'),
+      '',
+    );
+  }
+  preamble = preamble
+    .replace(/<\/?(?:thought|think|plan|tool_call|tool_result|to_system|state|wake|sleep|title|option|arguments|func)\b[^>]*>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim();
+  const inner = (chosen.inner || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim();
+
+  const parts: string[] = [];
+  if (preamble.length >= 40) parts.push(preamble);
+  if (inner) parts.push(inner);
+  return (parts.join('\n\n').trim() || inner || preamble || content);
+}
+
+/**
  * Collapse skill / goal payloads for chat display.
  * - `<user_send_skill>name</user_send_skill>` → `/name …`
  * - `<user_goal>…</user_goal>` → `/goal …`
@@ -1592,11 +1639,13 @@ export function buildTimelineFromSession(
 
     const cleanedContent = typeof m.content === 'string'
       ? formatUserSkillDisplayContent(
-          m.content
-            .replace(/\n?\s*<image>.*?<\/image>/gis, '')
-            // Strip both markdown-link and path=/type= forms of [File: ...]
-            .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
-            .trim(),
+          composeAssistantDisplayContent(
+            m.content
+              .replace(/\n?\s*<image>.*?<\/image>/gis, '')
+              // Strip both markdown-link and path=/type= forms of [File: ...]
+              .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
+              .trim(),
+          ),
         )
       : m.content;
 
@@ -1701,13 +1750,18 @@ export function buildTimelineFromSession(
     eventCursor += 1;
   }
   {
-    // End-of-history trailing block: always seal. A snapshot has no live turn
-    // after the last event — leaving it incomplete made "Worked for" keep
-    // climbing via Date.now()-started_ms after stop with no assistant reply.
+    // End-of-history trailing block: seal when settled (done summary / all
+    // tools have results). Keep incomplete when Native-FC args are still
+    // partial or a tool_call has no result — otherwise refresh mid-turn
+    // seals the fold and live tool_call_delta cannot resume into it.
     const peek = pendingRaw.filter((r) => r.type !== 'prompt_update');
     const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
+    const hasStartedOnly = peek.some((r) => workflowStartedMsFromRaw(r) != null);
+    const inProgress =
+      (peekWf.length > 0 && !isWorkflowSettled(peekWf))
+      || (peekWf.length === 0 && hasStartedOnly);
     let elapsedMs: number | undefined;
-    if (peekWf.length > 0) {
+    if (!inProgress && peekWf.length > 0) {
       const start = peekWf[0]?.timestamp;
       const end = peekWf[peekWf.length - 1]?.timestamp;
       if (typeof start === 'number' && typeof end === 'number') {
@@ -1715,7 +1769,7 @@ export function buildTimelineFromSession(
       }
     }
     flushPendingWorkflow({
-      completed: peekWf.length > 0,
+      completed: !inProgress,
       elapsedMs,
     });
   }

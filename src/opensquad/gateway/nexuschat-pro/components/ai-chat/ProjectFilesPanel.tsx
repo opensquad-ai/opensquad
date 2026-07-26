@@ -35,6 +35,10 @@ import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkd
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
+import {
+  getWorkspaceFileCache,
+  putWorkspaceFileCache,
+} from './WorkspaceFileEditor';
 
 export type ProjectFileOpenRequest = {
   /** Path relative to project root, or absolute under root */
@@ -138,6 +142,13 @@ function putModuleFileCache(
 ): void {
   const key = fileCacheKey(agentId, rootPath, relPath);
   moduleFileContentCache.set(key, { ...entry, at: Date.now() });
+  // Mirror into WorkspaceFileEditor cache — hover prefetch must warm the
+  // center-pane editor or every open flashes「加载中」.
+  putWorkspaceFileCache(agentId, rootPath, relPath, {
+    content: entry.content,
+    imageSrc: entry.imageSrc,
+    meta: { truncated: entry.meta?.truncated, size: entry.meta?.size },
+  });
   if (moduleFileContentCache.size <= MODULE_FILE_CACHE_MAX) return;
   const oldest = [...moduleFileContentCache.entries()].sort((a, b) => a[1].at - b[1].at);
   const drop = moduleFileContentCache.size - MODULE_FILE_CACHE_MAX;
@@ -149,7 +160,16 @@ function getModuleFileCache(
   rootPath: string,
   relPath: string,
 ): ModuleFileCacheEntry | null {
-  return moduleFileContentCache.get(fileCacheKey(agentId, rootPath, relPath)) || null;
+  const hit = moduleFileContentCache.get(fileCacheKey(agentId, rootPath, relPath));
+  if (hit) return hit;
+  const shared = getWorkspaceFileCache(agentId, rootPath, relPath);
+  if (!shared) return null;
+  return {
+    content: shared.content,
+    imageSrc: shared.imageSrc,
+    meta: { truncated: shared.meta?.truncated, size: shared.meta?.size },
+    at: shared.at,
+  };
 }
 
 function buildChildrenMap(entries: TreeEntry[]): Map<string, TreeEntry[]> {

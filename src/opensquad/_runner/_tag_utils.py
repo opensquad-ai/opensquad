@@ -169,6 +169,76 @@ def extract_tag(response: str, tag: str) -> str | None:
     return None
 
 
+# Minimum preamble length to treat as "body left outside <to_user>" (not a stray token).
+_OUTSIDE_TO_USER_MIN_LEN = 40
+
+
+def compose_user_visible_message(full_response: str) -> tuple[str, str | None]:
+    """Build the user-visible reply from a raw LLM response.
+
+    Models sometimes write the real answer *outside* ``<to_user>`` / ``<to_user_reply>``
+    / ``<to_user_end_task>`` and put only a short coda inside the tag (e.g. "以上为完整报告").
+    Extract-tag-only then drops the body. This helper keeps substantial outside text
+    and appends the tag body.
+
+    Returns ``(visible_text, tag_name_or_None)``.
+    """
+    if not full_response or not str(full_response).strip():
+        return "", None
+
+    interfering = [
+        "thought",
+        "think",
+        "plan",
+        "tool_call",
+        "tool_result",
+        "to_system",
+        "state",
+        "wake",
+        "sleep",
+        "option",
+        "title",
+        "func",
+        "arguments",
+    ]
+    clean = remove_tags(full_response, interfering)
+
+    chosen_tag: str | None = None
+    inner = ""
+    for tag in ("to_user_end_task", "to_user_reply", "to_user"):
+        found = extract_tag(clean, tag)
+        if found is not None:
+            chosen_tag = tag
+            inner = found
+            break
+
+    if not chosen_tag:
+        return remove_all_tags(clean), None
+
+    # Drop every to_user* block so only the outside body remains.
+    preamble = clean
+    for tag in ("to_user_end_task", "to_user_reply", "to_user"):
+        preamble = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}>",
+            "",
+            preamble,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        preamble = re.sub(rf"<{tag}\b[^>]*/>", "", preamble, flags=re.IGNORECASE)
+    preamble = remove_all_tags(preamble).strip()
+    inner_clean = remove_all_tags(inner).strip() if inner else ""
+
+    parts: list[str] = []
+    if preamble and len(preamble) >= _OUTSIDE_TO_USER_MIN_LEN:
+        parts.append(preamble)
+    if inner_clean:
+        parts.append(inner_clean)
+    visible = "\n\n".join(parts).strip()
+    if not visible:
+        visible = inner_clean or preamble
+    return visible, chosen_tag
+
+
 def extract_text_before_tool(text: str) -> str | None:
     """Extract text content before a tool call marker."""
     if not text:

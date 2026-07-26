@@ -221,7 +221,7 @@
     "basicInfo": "Basic Information",
     "displayNameSyncHint": "(Synced with bound account display name)",
     "navShortcut": "Navigation Shortcut",
-    "navShortcutHint": "When enabled, the agent avatar will appear at the top of the left navigation bar. Click to quickly open its AI chat page.",
+    "navShortcutHint": "When enabled, the agent avatar appears in the group list bottom menu bar. Click to open its web conversation task flow.",
     "autoStartOnBoot": "Start on Boot",
     "autoStartOnBootHint": "When enabled, this agent will start automatically on next program launch.",
     "commaSeparated": "(comma-separated)",

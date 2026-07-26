@@ -151,6 +151,22 @@ def test_extract_user_facing_message_prefers_streamed_content():
     assert runner._awaiting_user_reply is True
 
 
+def test_extract_user_facing_message_merges_body_outside_to_user():
+    """Model put the report outside <to_user> and only a coda inside — keep both."""
+    runner = DummyRunner()
+    runner._streamed_user_text = ["以上为完整报告，请查收。"]
+    runner._streamed_user_tag = "to_user"
+    handler = TurnResultHandler(runner)
+
+    body = "# 全球股票市场行情周报\n\n" + ("行情数据详细分析。" * 8)
+    full = f"{body}\n\n<to_user>\n以上为完整报告，请查收。\n</to_user>"
+    result = handler.extract_user_facing_message(full)
+
+    assert "全球股票市场行情周报" in result.user_msg
+    assert "以上为完整报告" in result.user_msg
+    assert result.user_msg_from_tag == "to_user"
+
+
 def test_extract_user_facing_message_prefers_end_task_tag():
     runner = DummyRunner()
     handler = TurnResultHandler(runner)

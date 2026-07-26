@@ -221,7 +221,7 @@
     "basicInfo": "基本信息",
     "displayNameSyncHint": "（与绑定账号 display name 双向同步）",
     "navShortcut": "导航栏快捷窗口",
-    "navShortcutHint": "开启后将在左侧导航栏顶部显示该 Agent 头像，点击可快速进入其 AI 对话页。",
+    "navShortcutHint": "开启后将在群列表底部菜单栏显示该 Agent 头像，点击可快速进入其 Web 对话任务流页面。",
     "autoStartOnBoot": "设为默认启动",
     "autoStartOnBootHint": "开启后程序下次启动时将自动启动该 Agent。",
     "commaSeparated": "（逗号分隔）",

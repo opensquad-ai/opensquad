@@ -1624,17 +1624,23 @@ class AgentRunner:
                     initial_query = None
                     continue
 
-                # New client connection: request immediate broadcast of current token stats
-                if initial_query == "__REQUEST_TOKEN_STATS__":
+                # New client / pane: rebroadcast token stats (optional :sid).
+                if initial_query == "__REQUEST_TOKEN_STATS__" or (
+                    isinstance(initial_query, str) and initial_query.startswith("__REQUEST_TOKEN_STATS__:")
+                ):
                     logger.info("[Runner] Command: Request token stats broadcast")
+                    forced_sid = ""
+                    if isinstance(initial_query, str) and initial_query.startswith("__REQUEST_TOKEN_STATS__:"):
+                        forced_sid = initial_query.split(":", 1)[1].strip()
                     try:
-                        sm = _get_session_manager()
-                        sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                        if sid and sid != "unknown":
-                            self._turn_sid = sid
+                        if not (forced_sid and forced_sid != "unknown"):
+                            sm = _get_session_manager()
+                            forced_sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
+                        if forced_sid and forced_sid != "unknown":
+                            self._turn_sid = forced_sid
                     except Exception:
                         pass
-                    await self._broadcast_token_stats()
+                    await self._broadcast_token_stats(forced_sid or None)
                     initial_query = None
                     continue
 
@@ -3400,9 +3406,14 @@ class AgentRunner:
         # so its output is the authoritative source. This avoids the bug where
         # _remove_all_tags() would incorrectly strip tag names appearing as
         # explanatory text (e.g. AI explains "<to_user>" in a markdown table).
+        # When the model leaves the real body *outside* <to_user> and only a
+        # coda inside, upgrade to compose_user_visible_message (preamble+coda).
+        from opensquad._runner._tag_utils import compose_user_visible_message
+
         streamed = "".join(getattr(self, "_streamed_user_text", []))
         user_msg_from_tag = None
         self._last_user_msg_from_to_user = False
+        composed, composed_tag = compose_user_visible_message(full_response)
         if streamed.strip():
             user_msg = streamed.strip()
             user_msg_from_tag = getattr(self, "_streamed_user_tag", None) or "to_user"
@@ -3413,44 +3424,15 @@ class AgentRunner:
                 cleaned_end = self._remove_all_tags(end_only).strip()
                 if cleaned_end:
                     user_msg = cleaned_end
+            if composed and len(composed) > len(user_msg) + 80:
+                user_msg = composed
+                if composed_tag:
+                    user_msg_from_tag = composed_tag
             self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
-            # Fallback: extract from full_response (non-streaming API or
-            # stream_parser not set up)
-            interfering_tags = [
-                "thought",
-                "think",
-                "plan",
-                "tool_call",
-                "tool_result",
-                "to_system",
-                "state",
-                "wake",
-                "sleep",
-                "option",
-                "title",
-                "func",
-            ]
-            clean_context = self._remove_tags(full_response, interfering_tags)
-
-            # Priority: to_user_end_task > to_user_reply > to_user
-            user_msg = self._extract_tag(clean_context, "to_user_end_task")
-            if user_msg:
-                user_msg_from_tag = "to_user_end_task"
-            else:
-                user_msg = self._extract_tag(clean_context, "to_user_reply")
-                if user_msg:
-                    user_msg_from_tag = "to_user_reply"
-                else:
-                    user_msg = self._extract_tag(clean_context, "to_user")
-                    if user_msg:
-                        user_msg_from_tag = "to_user"
-                        self._last_user_msg_from_to_user = True
-            if not user_msg:
-                # If there is no explicit to_user*, treat the remainder as the reply
-                user_msg = self._remove_all_tags(clean_context)
-            else:
-                user_msg = self._remove_all_tags(user_msg)
+            user_msg = composed
+            user_msg_from_tag = composed_tag
+            self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
 
         if user_msg_from_tag == "to_user_reply":
             self._awaiting_user_reply = True
@@ -4677,21 +4659,44 @@ class AgentRunner:
         return self.chat_api
 
     def _req_for_token_stats(self, chat_api, sid: str = ""):
-        """Messages used for context % — session disk when parallel api is cold."""
+        """Messages used for context % / breakdown.
+
+        Prefer the live ChatAPI.req whenever it has content — it includes
+        native tool_calls / role=tool IO. Session disk ``messages`` often omit
+        those (tool IO lives in ``events``); enrich from events when needed.
+        Cold panes with an empty live req fall back to disk + events.
+        """
+        from opensquad.token_breakdown import (
+            enrich_req_with_session_tool_events,
+            req_has_tool_io,
+        )
+
         sid = (sid or "").strip()
         live = list(getattr(chat_api, "req", None) or [])
-        # Live parallel ChatAPI already has the turn context.
-        if live and chat_api is not self.chat_api:
+
+        def _events_for_sid() -> list:
+            if not sid:
+                return []
+            try:
+                sm = _get_session_manager()
+                data = sm.ensure_session_loaded(sid) or {}
+                return list(data.get("events") or [])
+            except Exception:
+                return []
+
+        if live:
+            if sid and not req_has_tool_io(live):
+                return enrich_req_with_session_tool_events(live, _events_for_sid())
             return live
         if not sid:
             return live
-        # Root/focused api is the wrong context for a scheduled parallel sid.
-        # Rebuild a countable req from the session's persisted messages.
+
+        # Cold pane / empty live: rebuild from disk messages + tool events.
         try:
             sm = _get_session_manager()
             data = sm.ensure_session_loaded(sid) or {}
             msgs = list(data.get("messages") or [])
-            if not msgs:
+            if not msgs and not data.get("events"):
                 return live
             req: list[dict] = []
             for m in msgs:
@@ -4708,8 +4713,10 @@ class AgentRunner:
                     entry["tool_call_id"] = m.get("tool_call_id")
                 if role == "assistant" and m.get("tool_calls"):
                     entry["tool_calls"] = m.get("tool_calls")
+                if role == "assistant" and m.get("reasoning_content"):
+                    entry["reasoning_content"] = m.get("reasoning_content")
                 req.append(entry)
-            return req or live
+            return enrich_req_with_session_tool_events(req, data.get("events") or []) or live
         except Exception:
             logger.debug("[Runner] _req_for_token_stats disk load failed", exc_info=True)
             return live

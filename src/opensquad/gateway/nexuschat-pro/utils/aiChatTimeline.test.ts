@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
+  composeAssistantDisplayContent,
   foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
   genTimelineUID,
@@ -217,6 +218,17 @@ describe('formatUserSkillDisplayContent', () => {
       'fix the open PR',
     ].join('\n');
     expect(formatUserSkillDisplayContent(expanded)).toBe('/babysit fix the open PR');
+  });
+});
+
+describe('composeAssistantDisplayContent', () => {
+  it('keeps report body outside to_user plus the coda', () => {
+    const body = '# Weekly report\n\n' + 'market data line.\n'.repeat(10);
+    const raw = `${body}\n\n<to_user>\nAbove is the full report.\n</to_user>`;
+    const out = composeAssistantDisplayContent(raw);
+    expect(out).toContain('Weekly report');
+    expect(out).toContain('Above is the full report');
+    expect(out).not.toContain('<to_user>');
   });
 });
 

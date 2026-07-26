@@ -33,6 +33,14 @@ class BingRegion:
         q = quote_plus((query or "").strip())
         return f"{self.base_url}/search?q={q}&mkt={self.market}&setlang={self.setlang}&cc={self.country_code}&FORM=QBRE"
 
+    def build_news_search_url(self, query: str) -> str:
+        """Bing News vertical — better for 新闻/资讯 queries than degraded web SERPs."""
+        q = quote_plus((query or "").strip())
+        return (
+            f"{self.base_url}/news/search?q={q}"
+            f"&mkt={self.market}&setlang={self.setlang}&cc={self.country_code}&FORM=NWRFSH"
+        )
+
 
 def detect_bing_region(query: str) -> BingRegion:
     """

@@ -456,6 +456,9 @@ export const ExecWorkflowView: React.FC<Props> = ({
         modelName={selectedCard?.model_name || selectedCard?.title || modelCard || ''}
         fallbackLabel={t('scheduledTasks.fModelDefault')}
         onSelectModel={handleSelectModel}
+        onRefreshModelCards={() => {
+          modelCardAPI.getCards().then((r) => setCards(r.cards || [])).catch(() => {});
+        }}
         reasoningEffort={effort}
         onEffortChange={handleEffortChange}
         cwd={task?.workspace || rootPath}

@@ -121,6 +121,131 @@ def make_count_str(encoding: Any | None) -> Callable[[str | None], int]:
     return _count_str
 
 
+def synthesize_tool_messages_from_events(events: list | None) -> list[dict]:
+    """Build OpenAI-style assistant(tool_calls)+tool messages from session events.
+
+    Session persistence often keeps only user/assistant text in ``messages`` and
+    stores tool_call / tool_result payloads in ``events``. Token breakdown needs
+    those events reconstructed as countable chat messages.
+    """
+    calls: dict[str, dict[str, str]] = {}
+    results: dict[str, str] = {}
+    order: list[str] = []
+
+    for e in events or []:
+        if not isinstance(e, dict):
+            continue
+        et = e.get("type")
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        if not data:
+            # Some emitters put fields on the event itself
+            data = e
+        cid = str(data.get("id") or data.get("call_id") or data.get("tool_call_id") or "").strip()
+        if not cid:
+            continue
+        if et == "tool_call":
+            if cid not in calls:
+                order.append(cid)
+            args = data.get("args")
+            if args is None:
+                args = data.get("arguments")
+            if args is None:
+                args = ""
+            if not isinstance(args, str):
+                try:
+                    args = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args = str(args)
+            calls[cid] = {
+                "name": str(data.get("name") or ""),
+                "args": args,
+            }
+        elif et == "tool_result":
+            result = data.get("result")
+            if result is None:
+                result = data.get("content")
+            if result is None:
+                result = ""
+            if not isinstance(result, str):
+                try:
+                    result = json.dumps(result, ensure_ascii=False)
+                except Exception:
+                    result = str(result)
+            results[cid] = result
+            if cid not in calls:
+                order.append(cid)
+                args = data.get("args")
+                if args is None:
+                    args = data.get("arguments") or ""
+                if not isinstance(args, str):
+                    try:
+                        args = json.dumps(args, ensure_ascii=False)
+                    except Exception:
+                        args = str(args)
+                calls[cid] = {
+                    "name": str(data.get("name") or ""),
+                    "args": args,
+                }
+
+    out: list[dict] = []
+    for cid in order:
+        info = calls.get(cid) or {}
+        out.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": cid,
+                        "type": "function",
+                        "function": {
+                            "name": info.get("name") or "",
+                            "arguments": info.get("args") or "",
+                        },
+                    }
+                ],
+            }
+        )
+        if cid in results:
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": cid,
+                    "content": results[cid],
+                }
+            )
+    return out
+
+
+def req_has_tool_io(messages: list | None) -> bool:
+    """True when messages already carry native tool_calls / role=tool IO."""
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "tool":
+            return True
+        if m.get("tool_calls"):
+            return True
+        content = m.get("content")
+        if isinstance(content, str) and ("<tool_call" in content or "<tool_result" in content):
+            return True
+    return False
+
+
+def enrich_req_with_session_tool_events(
+    messages: list | None,
+    events: list | None,
+) -> list[dict]:
+    """Return messages, appending synthesized tool IO from events when missing."""
+    req = [m for m in (messages or []) if isinstance(m, dict)]
+    if req_has_tool_io(req):
+        return req
+    synth = synthesize_tool_messages_from_events(events)
+    if not synth:
+        return req
+    return [*req, *synth]
+
+
 def compute_token_breakdown(
     messages: list[dict],
     tools: list[dict] | None = None,

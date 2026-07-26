@@ -16,6 +16,7 @@ import {
   adminHeaderSubtitle,
   adminHeaderTitle,
 } from './admin/adminShellStyles';
+import { voiceRoleOf, type VoiceRole } from '../utils/voiceCardRole';
 
 // ── Preset types ──────────────────────────────────────────────────────────────
 
@@ -78,34 +79,6 @@ function saveFavorites(s: Set<string>) {
 
 function domainOf(url: string): string {
   try { return new URL(url).hostname; } catch { return url; }
-}
-
-/** Voice capability of a model card (null = chat / LLM card). */
-type VoiceRole = 'asr' | 'tts' | 'realtime';
-
-function voiceRoleOf(card: {
-  is_audio?: boolean;
-  is_audio_output?: boolean;
-  model_name?: string;
-}): VoiceRole | null {
-  const audioIn = !!card.is_audio;
-  const audioOut = !!card.is_audio_output;
-  const mn = (card.model_name || '').toLowerCase();
-  const looksVoice = /realtime|tts|asr|stepaudio|whisper|speech|audio-/.test(mn);
-
-  // Dual audio flags ⇒ realtime voice card (StepAudio realtime preset).
-  if (audioIn && audioOut) return 'realtime';
-  // Output-only ⇒ TTS.
-  if (audioOut && !audioIn) return 'tts';
-  // Input-only: only treat as ASR when the model id looks like a voice model,
-  // so multimodal chat cards with is_audio stay LLM cards.
-  if (audioIn && !audioOut) return looksVoice ? 'asr' : null;
-  if (looksVoice) {
-    if (mn.includes('realtime')) return 'realtime';
-    if (mn.includes('tts')) return 'tts';
-    if (mn.includes('asr')) return 'asr';
-  }
-  return null;
 }
 
 function voiceCardKey(role: VoiceRole): 'asr_card' | 'tts_card' | 'realtime_card' {
@@ -365,6 +338,26 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   }, []);
 
   useEffect(() => { loadCards(); loadAgents(); }, []);
+
+  // Desktop / other tabs may create cards while this page stays mounted.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        void loadCards();
+        void loadAgents();
+      }
+    };
+    const onFocus = () => {
+      void loadCards();
+      void loadAgents();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [loadCards, loadAgents]);
 
   // Load presets from backend API (优先读缓存，有效则不请求后台)
   useEffect(() => {

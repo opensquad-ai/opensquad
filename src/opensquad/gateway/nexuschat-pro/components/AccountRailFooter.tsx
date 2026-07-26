@@ -19,6 +19,8 @@ interface AccountRailFooterProps {
   onOpenSettings: () => void;
   /** Extra icon buttons rendered before the settings gear. */
   actions?: React.ReactNode;
+  /** Same-row extras between profile and action icons (e.g. agent nav shortcuts). */
+  shortcuts?: React.ReactNode;
 }
 
 export const AccountRailFooter: React.FC<AccountRailFooterProps> = ({
@@ -26,6 +28,7 @@ export const AccountRailFooter: React.FC<AccountRailFooterProps> = ({
   onOpenProfile,
   onOpenSettings,
   actions,
+  shortcuts,
 }) => {
   const { t } = useTranslation();
   const name = currentUser?.name?.trim() || t('profile.displayName');
@@ -60,6 +63,7 @@ export const AccountRailFooter: React.FC<AccountRailFooterProps> = ({
           )}
           <span className="min-w-0 truncate text-[12px] font-medium text-textMain">{name}</span>
         </button>
+        {shortcuts}
         <div className="flex shrink-0 items-center gap-0.5">
           {actions}
           <button

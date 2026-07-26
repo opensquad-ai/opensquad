@@ -68,17 +68,18 @@ function samePath(a: string, b: string): boolean {
 
 const SEGMENTS: Array<{
   key: keyof SoloTokenBreakdown;
-  label: string;
+  labelKey: string;
+  fallback: string;
   color: string;
   bar: string;
 }> = [
-  { key: 'system', label: 'System prompt', color: '#94a3b8', bar: 'bg-slate-400' },
-  { key: 'tool_defs', label: 'Tool definitions', color: '#a78bfa', bar: 'bg-violet-400' },
-  { key: 'thought', label: 'Thought', color: '#34d399', bar: 'bg-emerald-400' },
-  { key: 'tool', label: 'Tools', color: '#fbbf24', bar: 'bg-amber-400' },
-  { key: 'user', label: 'Conversation', color: '#fb923c', bar: 'bg-orange-400' },
-  { key: 'response', label: 'Assistant', color: '#60a5fa', bar: 'bg-blue-400' },
-  { key: 'overhead', label: 'Other', color: '#64748b', bar: 'bg-slate-500' },
+  { key: 'system', labelKey: 'contextViewer.kindPrompt', fallback: 'System prompt', color: '#94a3b8', bar: 'bg-slate-400' },
+  { key: 'tool_defs', labelKey: 'contextViewer.kindToolDefs', fallback: 'Tool definitions', color: '#a78bfa', bar: 'bg-violet-400' },
+  { key: 'thought', labelKey: 'contextViewer.kindThought', fallback: 'Thought', color: '#34d399', bar: 'bg-emerald-400' },
+  { key: 'tool', labelKey: 'contextViewer.kindToolCall', fallback: 'Tool calls', color: '#fbbf24', bar: 'bg-amber-400' },
+  { key: 'user', labelKey: 'contextViewer.kindUser', fallback: 'Conversation', color: '#fb923c', bar: 'bg-orange-400' },
+  { key: 'response', labelKey: 'contextViewer.kindAssistant', fallback: 'Assistant', color: '#60a5fa', bar: 'bg-blue-400' },
+  { key: 'overhead', labelKey: 'contextViewer.kindOverhead', fallback: 'Other', color: '#64748b', bar: 'bg-slate-500' },
 ];
 
 const TokenRing: React.FC<{ pct: number; size?: number }> = ({ pct, size = 14 }) => {
@@ -142,9 +143,10 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
     if (!bd) return [];
     return SEGMENTS.map((s) => ({
       ...s,
+      label: t(s.labelKey, { defaultValue: s.fallback }),
       val: Number(bd[s.key] ?? 0),
     })).filter((s) => s.val > 0);
-  }, [tokenStats?.breakdown]);
+  }, [tokenStats?.breakdown, t]);
 
   const barMax = max > 0 ? max : 1;
 

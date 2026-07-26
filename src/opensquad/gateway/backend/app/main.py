@@ -253,11 +253,27 @@ async def lifespan(app: FastAPI):
     # fired tasks can route prompts to the Agent via the Gateway WS registry
     # even before any admin route lazily created a ScheduledTaskManager.
     try:
-        from opensquad.scheduled_tasks import set_gateway_loop
+        from opensquad.scheduled_tasks import set_gateway_loop, warm_all_task_managers
 
-        set_gateway_loop(asyncio.get_running_loop())
+        _loop = asyncio.get_running_loop()
+        set_gateway_loop(_loop)
+        # Arm persisted scheduled-task timers immediately (do not wait for the
+        # admin UI to open the scheduled-tasks page).
+        try:
+            n = warm_all_task_managers(_loop)
+            _startup_log.info(f"Scheduled-task managers warmed: {n}")
+        except Exception as _warm_e:
+            _startup_log.warning(f"warm_all_task_managers failed: {_warm_e}")
     except Exception as _e:
         _startup_log.warning(f"set_gateway_loop failed: {_e}")
+    # Agent WS liveness sweeper: drop half-dead connections where send_text
+    # succeeds but the agent message loop never processes chat.
+    try:
+        from app.ai_web.registry import registry as _agent_registry
+
+        _agent_registry.ensure_liveness_loop(asyncio.get_running_loop())
+    except Exception as _e:
+        _startup_log.warning(f"agent liveness sweeper start failed: {_e}")
     # Initialize database on startup (create tables)
     await init_db()
     _startup_log.info("Database initialized")

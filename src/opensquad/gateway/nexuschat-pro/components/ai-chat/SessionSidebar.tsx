@@ -32,11 +32,18 @@ import {
   SESSION_LIST_REFRESH_EVENT,
   type SessionProjectMeta,
 } from '../../utils/sessionProjectMeta';
+import {
+  getCachedSessionTimeline,
+  putCachedSessionTimeline,
+  SESSION_HISTORY_PAGE_SIZE,
+} from '../../utils/sessionTimelineCache';
+import { buildTimelineFromSession } from '../../utils/aiChatTimeline';
 import { pathsEqual } from '../../utils/workspaceStore';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
 import { formatRelativeAge } from '../../utils/time';
 import { PulseDotsOrbit } from './PulseDotsStatus';
 import { AccountRailFooter, type AccountUser } from '../AccountRailFooter';
+import { AgentNavShortcutAvatars } from '../AgentNavShortcutAvatars';
 import { navigateAppView } from '../../utils/appNavItems';
 
 interface SessionSidebarProps {
@@ -202,6 +209,47 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const prefetchInflightRef = useRef(new Set<string>());
+
+  /** Warm timeline cache on hover so opening a session paints without「加载中」. */
+  const prefetchSessionTimeline = useCallback(
+    (sessionId: string) => {
+      const sid = (sessionId || '').trim();
+      if (!agentId || !sid) return;
+      if (getCachedSessionTimeline(agentId, sid)?.length) return;
+      if (prefetchInflightRef.current.has(sid)) return;
+      prefetchInflightRef.current.add(sid);
+      void (async () => {
+        try {
+          const resp = await agentSessionAPI.getSessionHistoryPaged(
+            agentId,
+            sid,
+            0,
+            SESSION_HISTORY_PAGE_SIZE,
+          );
+          const session = resp.session;
+          if (!session) return;
+          const entries = buildTimelineFromSession(
+            session.messages || [],
+            session.events || [],
+            session.archived_messages,
+            session.archived_events,
+          );
+          if (entries.length === 0) return;
+          putCachedSessionTimeline(agentId, sid, entries, {
+            complete: !(session.has_more ?? false),
+            messageCount: session.messages?.length || 0,
+            totalMessages: session.total_messages,
+          });
+        } catch {
+          /* ignore prefetch errors */
+        } finally {
+          prefetchInflightRef.current.delete(sid);
+        }
+      })();
+    },
+    [agentId],
+  );
 
   const reloadMeta = useCallback(() => {
     setMetaMap((prev) => {
@@ -483,6 +531,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           if (editing || confirming) return;
           onViewSession(session.id);
         }}
+        onMouseEnter={() => prefetchSessionTimeline(session.id)}
         onDoubleClick={(e) => {
           e.stopPropagation();
           onSwitchAndReply(session.id);
@@ -799,6 +848,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           currentUser={currentUser}
           onOpenProfile={() => onOpenProfile?.()}
           onOpenSettings={() => onOpenSettings?.()}
+          shortcuts={<AgentNavShortcutAvatars />}
           actions={
             <>
               <button

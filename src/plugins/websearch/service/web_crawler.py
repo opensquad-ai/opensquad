@@ -32,13 +32,20 @@ _CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# When Bing treats an automated session as a bot, Chinese weather queries may
-# collapse to generic city pages (百科 / 旅游 / 政府站) with zero weather hits.
+# When Bing treats an automated cold /search?q= jump as a bot, SERPs may collapse
+# to lower-relevance generic pages (e.g. for Chinese weather: 百科 / 旅游 / 政府站).
 _WEATHER_QUERY_RE = re.compile(r"(天气|气温|温度|预报|气象|降雨|降水|weather|forecast|tianqi)", re.I)
 _WEATHER_RESULT_RE = re.compile(
     r"(天气|气温|温度|预报|气象|降雨|降水|weather|forecast|tianqi|nmc\.cn|weather\.com)",
     re.I,
 )
+_NEWS_QUERY_RE = re.compile(
+    r"(新闻|资讯|头条|快讯|要闻|消息|驱动事件|市场动态|rolling|headline|\bnews\b)",
+    re.I,
+)
+# Low "约 N 个结果" vs normal tens-of-thousands is a strong bot-degraded signal.
+_RESULT_COUNT_RE = re.compile(r"([\d,，\.\s]+)\s*个结果")
+_DEGRADED_RESULT_COUNT = 2000
 
 
 def _contains_chinese(text: str) -> bool:
@@ -52,6 +59,10 @@ def _query_looks_like_weather(query: str) -> bool:
     return bool(_WEATHER_QUERY_RE.search(query or ""))
 
 
+def _query_looks_like_news(query: str) -> bool:
+    return bool(_NEWS_QUERY_RE.search(query or ""))
+
+
 def _results_look_like_weather(results: list[dict]) -> bool:
     if not results:
         return False
@@ -62,6 +73,55 @@ def _results_look_like_weather(results: list[dict]) -> bool:
         if _WEATHER_RESULT_RE.search(blob):
             return True
     return False
+
+
+def _host_key(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url or "").netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:
+        return ""
+
+
+def _results_look_degraded(results: list[dict], result_count: int | None) -> bool:
+    """
+    Bot-shaped SERPs often show a tiny result count and/or dump many hits from one
+    low-value domain (e.g. all 52pojie.cn for an A-share news query).
+    """
+    if result_count is not None and 0 < result_count < _DEGRADED_RESULT_COUNT:
+        return True
+    hosts = [_host_key(r.get("url", "")) for r in (results or [])[:6]]
+    hosts = [h for h in hosts if h]
+    return bool(len(hosts) >= 4 and len(set(hosts)) == 1)
+
+
+async def _read_serp_result_count(page) -> int | None:
+    try:
+        text = await page.evaluate(
+            """() => {
+                const el =
+                    document.querySelector('.sb_count')
+                    || document.querySelector('#b_tween .sb_count')
+                    || document.querySelector('#b_tween');
+                return el ? (el.textContent || '') : '';
+            }"""
+        )
+    except Exception:
+        return None
+    m = _RESULT_COUNT_RE.search(text or "")
+    if not m:
+        return None
+    digits = re.sub(r"[^\d]", "", m.group(1))
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
 def _parse_geolocation() -> dict | None:
@@ -92,6 +152,138 @@ async def _new_search_context(browser: Browser, region) -> object:
     return await browser.new_context(**kwargs)
 
 
+# Bing homepage search box selectors (CN / global layouts vary).
+_BING_SEARCH_INPUT_SELECTORS = (
+    "#sb_form_q",
+    "textarea[name='q']",
+    "input[name='q']",
+    "#sb_form textarea",
+    "#sb_form input[type='search']",
+)
+
+# Prefer clicking Bing's search button (same path as many manual users) before Enter.
+_BING_SEARCH_SUBMIT_SELECTORS = (
+    "#search_icon",
+    "label[for='sb_form_go']",
+    "#sb_form_go",
+    "#sb_form button[type='submit']",
+    "button#search_icon",
+    ".b_searchboxSubmit",
+)
+
+
+def _prefer_search_box_nav() -> bool:
+    """
+    Default: homepage → type → submit (higher-relevance SERP, closer to manual search).
+
+    Override with WEBSEARCH_NAV=direct|url|goto to force cold /search?q=... jumps.
+    """
+    mode = os.environ.get("WEBSEARCH_NAV", "search_box").strip().lower()
+    return mode not in {"direct", "url", "goto", "0", "false", "off", "no"}
+
+
+def _env_ms(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        print(f"[WebSearch] Ignoring invalid {name}={raw!r}")
+        return default
+
+
+async def _locate_first_visible(page, selectors: tuple[str, ...], timeout_ms: int = 5000):
+    """Return (locator, None) on success, or (None, last_error) if none visible."""
+    last_err: Exception | None = None
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=timeout_ms)
+            return loc, None
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+    return None, last_err
+
+
+async def _navigate_via_search_box(
+    page,
+    region,
+    query: str,
+    *,
+    start_url: str | None = None,
+) -> str:
+    """
+    Open Bing homepage (or News home), fill query once, submit.
+
+    Tunables:
+      WEBSEARCH_HOME_SETTLE_MS  pause after homepage is interactive (default 500)
+      WEBSEARCH_SUGGEST_WAIT_MS pause after fill before submit (default 200)
+    """
+    home = (start_url or (region.base_url.rstrip("/") + "/")).rstrip("/") + "/"
+    home_settle = _env_ms("WEBSEARCH_HOME_SETTLE_MS", 500)
+    suggest_wait = _env_ms("WEBSEARCH_SUGGEST_WAIT_MS", 200)
+    print(
+        f"--- Navigating via Bing search box ({home}); "
+        f"settle={home_settle}ms suggest_wait={suggest_wait}ms (one-shot fill) ---"
+    )
+    await page.goto(home, timeout=60000, wait_until="domcontentloaded")
+    try:
+        await page.wait_for_load_state("load", timeout=15000)
+    except PlaywrightError:
+        pass
+
+    search_input, last_err = await _locate_first_visible(page, _BING_SEARCH_INPUT_SELECTORS, timeout_ms=8000)
+    if search_input is None:
+        raise PlaywrightError(f"Bing search box not found on {home} (last error: {last_err})")
+
+    if home_settle:
+        await asyncio.sleep(home_settle / 1000.0)
+
+    await search_input.click()
+    await search_input.fill(query)
+
+    if suggest_wait:
+        await asyncio.sleep(suggest_wait / 1000.0)
+
+    submitted = False
+    for sel in _BING_SEARCH_SUBMIT_SELECTORS:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() == 0:
+                continue
+            if not await btn.is_visible():
+                continue
+            await btn.click(timeout=3000)
+            submitted = True
+            print(f"--- Submitted via search button ({sel}) ---")
+            break
+        except Exception:
+            continue
+    if not submitted:
+        await search_input.press("Enter")
+        print("--- Submitted via Enter ---")
+
+    try:
+        await page.wait_for_url(re.compile(r".*/(?:news/)?search\?.*"), timeout=20000)
+    except PlaywrightError:
+        pass
+    try:
+        await page.wait_for_selector(
+            "#b_results, #b_content, .news-card, .card-with-cluster",
+            state="attached",
+            timeout=20000,
+        )
+    except PlaywrightError:
+        # Still return current URL for logging; scraper will surface the failure.
+        pass
+
+    final_url = page.url
+    print(f"--- After form submit, landed on: {final_url} ---")
+    return final_url
+
+
 async def _wait_for_organic_text(page, timeout_ms: int = 8000) -> None:
     """
     Bing often paints li.b_algo shells before hydrating title/snippet text.
@@ -103,12 +295,15 @@ async def _wait_for_organic_text(page, timeout_ms: int = 8000) -> None:
     try:
         await page.wait_for_function(
             """() => {
-                const items = document.querySelectorAll('li.b_algo');
+                const items = document.querySelectorAll('li.b_algo, .news-card, .card-with-cluster');
                 for (const item of items) {
-                    const title = (item.querySelector('h2 a')?.textContent || '').trim();
+                    const title = (
+                        item.querySelector('h2 a, a.title, h2, h3')?.textContent || ''
+                    ).trim();
                     const caption = (
                         item.querySelector('div.b_caption p')?.textContent
                         || item.querySelector('div.b_caption')?.textContent
+                        || item.querySelector('.snippet, p')?.textContent
                         || ''
                     ).trim();
                     if (title.length >= 2 || caption.length >= 8) {
@@ -137,6 +332,13 @@ async def _extract_organics_from_page(page, region_label: str, limit: int) -> li
     raw = await page.evaluate(
         """(limit) => {
             const rows = [];
+            const seen = new Set();
+            const push = (title, url, summary) => {
+                if (!url || seen.has(url)) return;
+                if (!title && !summary) return;
+                seen.add(url);
+                rows.push({ title: title || '', url, summary: summary || '' });
+            };
             const items = document.querySelectorAll('li.b_algo');
             for (const item of items) {
                 if (rows.length >= limit) break;
@@ -165,9 +367,26 @@ async def _extract_organics_from_page(page, region_label: str, limit: int) -> li
                     const text = (el && el.textContent || '').trim().replace(/\\s+/g, ' ');
                     if (text) { summary = text; break; }
                 }
-                if (!url) continue;
-                if (!title && !summary) continue;
-                rows.push({ title: title || '', url, summary: summary || '' });
+                push(title, url, summary);
+            }
+            // Bing News vertical cards (when li.b_algo is sparse / different layout).
+            if (rows.length < limit) {
+                const newsNodes = document.querySelectorAll(
+                    '.news-card, .card-with-cluster, .newsitem, div[class*="news-card"]'
+                );
+                for (const item of newsNodes) {
+                    if (rows.length >= limit) break;
+                    const a = item.querySelector('a[href*="http"]') || item.querySelector('a[href]');
+                    if (!a) continue;
+                    const url = a.href || '';
+                    const title = (
+                        (item.querySelector('a.title, h2, h3, .title') || a).textContent || ''
+                    ).trim();
+                    const summary = (
+                        item.querySelector('.snippet, .b_caption, p')?.textContent || ''
+                    ).trim().replace(/\\s+/g, ' ');
+                    push(title, url, summary);
+                }
             }
             return rows;
         }""",
@@ -220,10 +439,19 @@ async def search_with_bing_playwright(
     page = None
     region = detect_bing_region(query)
     search_url = region.build_search_url(query)
+    news_url = region.build_news_search_url(query)
+    # Experiment: new tab → https://cn.bing.com/ → one-shot fill → submit.
+    # News vertical only as degraded fallback (not first hop).
+    prefer_form = _prefer_search_box_nav()
+    prefer_news = False
+    last_serp_count: int | None = None
+    bing_home = region.base_url.rstrip("/") + "/"
     print(f"--- Bing region: {region.label} ({region.base_url}, locale={region.locale}, mkt={region.market}) ---")
-    print(f"--- Bing SERP URL: {search_url} ---")
+    print(f"--- Bing home (new-tab target): {bing_home} ---")
+    print(f"--- Bing SERP URL (direct fallback): {search_url} ---")
+    print(f"--- Navigate mode: new_tab → {bing_home} → fill ---")
 
-    async def _open_page():
+    async def _open_page(*, via_form: bool, use_news: bool):
         nonlocal context, owned_context, page
         if page is not None:
             try:
@@ -234,7 +462,6 @@ async def search_with_bing_playwright(
         if shared_context is not None:
             context = shared_context
             owned_context = False
-            page = await context.new_page()
         else:
             if context and owned_context:
                 try:
@@ -245,30 +472,56 @@ async def search_with_bing_playwright(
                 raise RuntimeError("search_with_bing_playwright requires browser or shared_context")
             context = await _new_search_context(browser, region)
             owned_context = True
-            page = await context.new_page()
+
+        # Explicit new tab — same idea as manually opening a tab, then visiting Bing.
+        page = await context.new_page()
+        print(f"--- Opened new browser tab (total tabs≈{len(context.pages)}) ---")
         await stealth_async(page)
-        await page.goto(search_url, timeout=60000, wait_until="domcontentloaded")
+
+        target_direct = news_url if use_news else search_url
+        start_home = region.base_url.rstrip("/") + ("/news/" if use_news else "/")
+        if via_form:
+            try:
+                print(f"--- New tab → goto {start_home} → fill query → submit ---")
+                await _navigate_via_search_box(page, region, query, start_url=start_home)
+            except Exception as form_exc:  # noqa: BLE001
+                print(f"--- Search-box navigation failed ({form_exc}); falling back to direct URL ---")
+                await page.goto(target_direct, timeout=60000, wait_until="domcontentloaded")
+        else:
+            await page.goto(target_direct, timeout=60000, wait_until="domcontentloaded")
+        print(f"--- Active page URL: {page.url} ---")
         return page
 
-    async def _scrape_once(*, shot_path: str | None) -> list[dict]:
-        active = await _open_page()
+    async def _scrape_once(*, shot_path: str | None, via_form: bool, use_news: bool) -> list[dict]:
+        nonlocal last_serp_count
+        active = await _open_page(via_form=via_form, use_news=use_news)
         collected: list[dict] = []
         page_num = 1
         while len(collected) < max_results:
             print(f"--- Scraping page {page_num} for '{query}' ---")
 
-            await active.wait_for_selector("#b_content", state="attached", timeout=10000)
+            try:
+                await active.wait_for_selector(
+                    "#b_content, #b_results, .news-card",
+                    state="attached",
+                    timeout=10000,
+                )
+            except PlaywrightError:
+                pass
             await active.evaluate(
                 "document.getElementById('b_content') && "
                 "(document.getElementById('b_content').style.visibility = 'visible')"
             )
 
             try:
-                await active.wait_for_selector("#b_results", state="visible", timeout=10000)
+                await active.wait_for_selector(
+                    "#b_results, li.b_algo, .news-card",
+                    state="visible",
+                    timeout=10000,
+                )
             except PlaywrightError as e:
                 print(
-                    f"--- [FAIL] Critical Error on page {page_num} for '{query}': "
-                    f"Could not find visible results. ---"
+                    f"--- [FAIL] Critical Error on page {page_num} for '{query}': Could not find visible results. ---"
                 )
                 print("--- Saving debug info to help diagnose... ---")
                 try:
@@ -292,6 +545,9 @@ async def search_with_bing_playwright(
                 break
 
             await _wait_for_organic_text(active)
+            if page_num == 1:
+                last_serp_count = await _read_serp_result_count(active)
+                print(f"--- SERP result count: {last_serp_count} ---")
 
             if shot_path and page_num == 1:
                 os.makedirs(os.path.dirname(os.path.abspath(shot_path)) or ".", exist_ok=True)
@@ -348,13 +604,28 @@ async def search_with_bing_playwright(
         return collected
 
     try:
-        results_data = await _scrape_once(shot_path=screenshot_path)
-        if _query_looks_like_weather(query) and not _results_look_like_weather(results_data):
-            print(
-                "--- Weather query got non-weather SERP (likely bot/degraded). "
-                "Retrying once with a fresh page ---"
+        results_data = await _scrape_once(shot_path=screenshot_path, via_form=prefer_form, use_news=prefer_news)
+        degraded = _results_look_degraded(results_data, last_serp_count)
+        weather_bad = _query_looks_like_weather(query) and not _results_look_like_weather(results_data)
+        need_retry = (not results_data) or degraded or weather_bad
+        if need_retry:
+            # Prefer News vertical on retry for news/degraded SERPs; else flip form↔direct.
+            retry_news = prefer_news or degraded or _query_looks_like_news(query)
+            if prefer_news and degraded:
+                # Already tried news and still bad — flip to web + opposite form style.
+                retry_news = False
+            retry_via_form = not prefer_form if not degraded else prefer_form
+            reason = (
+                "empty SERP"
+                if not results_data
+                else (f"degraded SERP (count={last_serp_count})" if degraded else "weather query got non-weather SERP")
             )
-            results_data = await _scrape_once(shot_path=None)
+            print(
+                f"--- {reason}. Retrying once via "
+                f"{'news+' if retry_news else 'web+'}"
+                f"{'search_box' if retry_via_form else 'direct_url'} ---"
+            )
+            results_data = await _scrape_once(shot_path=None, via_form=retry_via_form, use_news=retry_news)
     except PlaywrightError as e:
         print(f"A top-level error occurred during async search for '{query}': {e}")
 

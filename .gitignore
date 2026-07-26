@@ -150,6 +150,10 @@ src/agents/*/data/ai_state.json.bak
 src/agents/*/data/profile.json
 src/agents/*/data/images/
 
+# ── Local runtime logs / headed-browser captures (screenshots, session dumps) ──
+/logs/
+logs/
+
 # ── Temp / test artifacts ──────────────────────────────────────
 .spec-workflow/
 .pytest_cache/

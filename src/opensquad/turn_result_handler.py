@@ -150,9 +150,14 @@ class TurnResultHandler:
         return False, "", False
 
     def extract_user_facing_message(self, full_response: str) -> UserFacingMessage:
+        from opensquad._runner._tag_utils import compose_user_visible_message
+
         streamed = "".join(getattr(self.runner, "_streamed_user_text", []))
         user_msg_from_tag = None
         self.runner._last_user_msg_from_to_user = False
+
+        composed, composed_tag = compose_user_visible_message(full_response)
+
         if streamed.strip():
             user_msg = streamed.strip()
             user_msg_from_tag = getattr(self.runner, "_streamed_user_tag", None) or "to_user"
@@ -162,45 +167,23 @@ class TurnResultHandler:
                 cleaned_end = self.runner._remove_all_tags(end_only).strip()
                 if cleaned_end:
                     user_msg = cleaned_end
+            # Stream parser may only have accumulated the <to_user> coda while the
+            # real body sat outside the tag — upgrade to the composed visible text.
+            if composed and len(composed) > len(user_msg) + 80:
+                user_msg = composed
+                if composed_tag:
+                    user_msg_from_tag = composed_tag
             self.runner._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
-            interfering_tags = [
-                "thought",
-                "think",
-                "plan",
-                "tool_call",
-                "tool_result",
-                "to_system",
-                "state",
-                "wake",
-                "sleep",
-                "option",
-                "title",
-                "func",
-            ]
-            clean_context = self.runner._remove_tags(full_response, interfering_tags)
-            user_msg = self.runner._extract_tag(clean_context, "to_user_end_task")
-            if user_msg:
-                user_msg_from_tag = "to_user_end_task"
-            else:
-                user_msg = self.runner._extract_tag(clean_context, "to_user_reply")
-                if user_msg:
-                    user_msg_from_tag = "to_user_reply"
-                else:
-                    user_msg = self.runner._extract_tag(clean_context, "to_user")
-                    if user_msg:
-                        user_msg_from_tag = "to_user"
-                        self.runner._last_user_msg_from_to_user = True
-            if not user_msg:
-                user_msg = self.runner._remove_all_tags(clean_context)
-            else:
-                user_msg = self.runner._remove_all_tags(user_msg)
+            user_msg = composed
+            user_msg_from_tag = composed_tag
+            self.runner._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
 
         if user_msg_from_tag == "to_user_reply":
             self.runner._awaiting_user_reply = True
 
         return UserFacingMessage(
-            user_msg=user_msg,
+            user_msg=user_msg or "",
             user_msg_from_tag=user_msg_from_tag,
             saved_msg=None,
             saved_output_media=None,

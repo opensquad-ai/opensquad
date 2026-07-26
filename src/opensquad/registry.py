@@ -174,7 +174,7 @@ class ToolRegistry:
             return list(self._openai_tools_cache[cache_key])
 
         # Define high-frequency and medium-frequency tool namespaces
-        HIGH_FREQ_NAMESPACES = {"filesystem", "system", "websearch", "long_memory", "memory", "help"}
+        HIGH_FREQ_NAMESPACES = {"filesystem", "system", "websearch", "bocha_search", "long_memory", "memory", "help"}
         MEDIUM_FREQ_NAMESPACES = {"git", "api_process", "vision", "mcp_query", "im", "media", "translate_tool"}
 
         # Determine which namespaces to include

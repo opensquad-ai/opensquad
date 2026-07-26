@@ -1,0 +1,75 @@
+{
+  "name": "bocha_search",
+  "display_name": "Bocha Search",
+  "version": "1.0.0",
+  "type": "tool",
+  "enabled": true,
+  "node_scope": "all",
+  "description": "Bocha (博查) web search API for AI. Returns high-quality webpage titles, URLs, summaries, site names, and publish dates — no browser scraping.",
+  "author": "OpenSquad",
+  "tags": [
+    "search"
+  ],
+  "tools": [
+    {
+      "name": "bocha_search",
+      "module": "proxy",
+      "level": "core",
+      "auto_register": true,
+      "requires_agent_id": false
+    }
+  ],
+  "hooks": [],
+  "config": {
+    "schema": {
+      "api_key": {
+        "type": "string",
+        "default": "",
+        "description": "Bocha API key (or set BOCHA_API_KEY env)."
+      },
+      "base_url": {
+        "type": "string",
+        "default": "https://api.bocha.cn",
+        "description": "Bocha API base URL"
+      },
+      "default_count": {
+        "type": "integer",
+        "default": 10,
+        "description": "Default number of results (1-50)"
+      },
+      "timeout_sec": {
+        "type": "integer",
+        "default": 30,
+        "description": "HTTP request timeout in seconds"
+      }
+    }
+  },
+  "config_schema": {
+    "api_key": {
+      "type": "string",
+      "default": "",
+      "description": "Bocha API key (or set BOCHA_API_KEY env)."
+    },
+    "base_url": {
+      "type": "string",
+      "default": "https://api.bocha.cn",
+      "description": "Bocha API base URL"
+    },
+    "default_count": {
+      "type": "integer",
+      "default": 10,
+      "description": "Default number of results (1-50)"
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "default": 30,
+      "description": "HTTP request timeout in seconds"
+    }
+  },
+  "contributes": {},
+  "dependencies": {
+    "pip": [
+      "requests"
+    ]
+  }
+}

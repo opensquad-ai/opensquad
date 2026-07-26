@@ -3,15 +3,37 @@
  * Visually matches the main AIChatPage composer: changes bar, rounded input,
  * attach / mode / model / effort / mic / send, and context footer.
  */
-import React, { useCallback, useRef, useState } from 'react';
+import React, {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { FileIcon, FileText, Mic, Send, Square, X } from 'lucide-react';
 import { agentSessionAPI, type ModelCardInfo, type SkillInfo } from '../../services/api';
+import { blobToWavFile } from '../../utils/mediaDevices';
 import { ModePicker, type AgentMode } from './ModePicker';
 import { SoloModelPicker } from './SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './EffortPicker';
 import { SoloAttachMenu } from './SoloAttachMenu';
 import { SoloContextFooter, type SoloTokenStats } from './SoloContextFooter';
 import { SessionChangesBar, type SessionChangesSummary } from './SessionChangesBar';
+import { SlashMenu } from './SlashMenu';
+import { VoicePanel, type VoiceCardBindings } from './VoicePanel';
+import { VoiceRecordPill } from './VoiceRecordPill';
+import {
+  filterGoalSubcommands,
+  filterSkillsForSlash,
+  filterSlashCommands,
+  parseGoalSendQuery,
+  parseSlashInput,
+  slashCommandTriggerText,
+  type GoalSubcommandDef,
+  type SlashCommandDef,
+} from './slashCommands';
 
 export type ComposerUploadedFile = {
   path: string;
@@ -33,6 +55,13 @@ export type ComposerSendPayload = {
   attachments: ComposerUploadedFile[];
   skillDir?: string;
   skillName?: string;
+};
+
+/** Parent (AIChatPage) uses this for withdraw refill + window file drops. */
+export type AgentWebComposerHandle = {
+  setText: (text: string) => void;
+  focus: () => void;
+  uploadFiles: (files: File[]) => Promise<void>;
 };
 
 function formatFileSize(bytes: number): string {
@@ -58,6 +87,8 @@ export interface AgentWebComposerProps {
   fallbackLabel: string;
   switchingModel?: boolean;
   onSelectModel: (cardName: string) => void;
+  /** Re-fetch model cards when the picker opens (keeps list in sync with desktop). */
+  onRefreshModelCards?: () => void;
   reasoningEffort: ReasoningEffort;
   onEffortChange: (effort: ReasoningEffort) => void;
   cwd: string | null;
@@ -74,9 +105,17 @@ export interface AgentWebComposerProps {
   planPanel?: React.ReactNode;
   /** Queued outbound messages — below Changes, above Plan/input stack */
   pendingPanel?: React.ReactNode;
+  /** Mode-switch / propose-options approval cards — above pending & composer */
+  approvalPanel?: React.ReactNode;
   availableSkills: SkillInfo[];
   skillsLoading?: boolean;
+  /** Prefetch / open skill list (also used when typing `/skill `). */
   onOpenSkills?: () => void;
+  /** `/goal` lifecycle actions (pause / resume / clear / set / status). */
+  onGoalAction?: (
+    action: 'set' | 'pause' | 'resume' | 'clear' | 'status',
+    objective?: string,
+  ) => void;
   autoSpeechEnabled?: boolean;
   onToggleAutoSpeech?: (enabled: boolean) => void;
   onSend: (payload: ComposerSendPayload) => void | Promise<void>;
@@ -84,54 +123,188 @@ export interface AgentWebComposerProps {
   onActivate?: () => void;
   /** Extra status line (e.g. multi-pane queue hint) */
   statusHint?: string | null;
+  /** Voice panel / realtime call (agent-level; only host pane should open UI). */
+  voicePanelOpen?: boolean;
+  onVoicePanelOpenChange?: (open: boolean) => void;
+  /** Mount VoicePanel only on the focused pane (avoids duplicate mic capture). */
+  voiceHost?: boolean;
+  voiceRealtimeStatus?: string;
+  voiceRealtimeError?: string;
+  voiceTranscript?: string;
+  voiceBindings?: VoiceCardBindings;
+  onVoiceBindingsChange?: (next: VoiceCardBindings) => void | Promise<void>;
+  onRealtimeStart?: (opts?: { forceAskAgent?: boolean }) => void;
+  onRealtimeStop?: () => void;
+  onAudioChunk?: (pcm16Base64: string) => void;
+  onMouthpieceUtterance?: (pcm16Base64: string, sampleRate: number) => void;
+  onForceAskAgentChange?: (force: boolean) => void;
 }
 
-export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
-  agentId,
-  columnClass = 'max-w-3xl mx-auto w-full',
-  disabled = false,
-  landing = false,
-  busy = false,
-  agentMode,
-  onModeChange,
-  modelCards,
-  currentCardName,
-  modelName,
-  fallbackLabel,
-  switchingModel = false,
-  onSelectModel,
-  reasoningEffort,
-  onEffortChange,
-  cwd,
-  tokenStats,
-  onViewReport,
-  onCompressContext,
-  compressing = false,
-  compressDisabled = false,
-  sessionChanges,
-  changesBusy = false,
-  onOpenChanges,
-  onCommitPush,
-  planPanel = null,
-  pendingPanel = null,
-  availableSkills,
-  skillsLoading = false,
-  onOpenSkills,
-  autoSpeechEnabled = false,
-  onToggleAutoSpeech,
-  onSend,
-  onStop,
-  onActivate,
-  statusHint = null,
-}) => {
+export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebComposerProps>(function AgentWebComposer(
+  {
+    agentId,
+    columnClass = 'max-w-3xl mx-auto w-full',
+    disabled = false,
+    landing = false,
+    busy = false,
+    agentMode,
+    onModeChange,
+    modelCards,
+    currentCardName,
+    modelName,
+    fallbackLabel,
+    switchingModel = false,
+    onSelectModel,
+    onRefreshModelCards,
+    reasoningEffort,
+    onEffortChange,
+    cwd,
+    tokenStats,
+    onViewReport,
+    onCompressContext,
+    compressing = false,
+    compressDisabled = false,
+    sessionChanges,
+    changesBusy = false,
+    onOpenChanges,
+    onCommitPush,
+    planPanel = null,
+    pendingPanel = null,
+    approvalPanel = null,
+    availableSkills,
+    skillsLoading = false,
+    onOpenSkills,
+    onGoalAction,
+    autoSpeechEnabled = false,
+    onToggleAutoSpeech,
+    onSend,
+    onStop,
+    onActivate,
+    statusHint = null,
+    voicePanelOpen = false,
+    onVoicePanelOpenChange,
+    voiceHost = true,
+    voiceRealtimeStatus = 'idle',
+    voiceRealtimeError = '',
+    voiceTranscript = '',
+    voiceBindings,
+    onVoiceBindingsChange,
+    onRealtimeStart,
+    onRealtimeStop,
+    onAudioChunk,
+    onMouthpieceUtterance,
+    onForceAskAgentChange,
+  },
+  ref,
+) {
   const [inputText, setInputText] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<ComposerUploadedFile[]>([]);
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [sending, setSending] = useState(false);
+  const [slashHighlight, setSlashHighlight] = useState(0);
+  const [sttDictating, setSttDictating] = useState(false);
+  const [voiceCapture, setVoiceCapture] = useState({
+    recording: false,
+    durationSec: 0,
+    level: 0,
+  });
+  const voiceCaptureApiRef = useRef<{ stopRecord: () => void } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const voiceEnabled = typeof onVoicePanelOpenChange === 'function';
+  const voiceCallActive =
+    voiceRealtimeStatus === 'connected' ||
+    voiceRealtimeStatus === 'tool_running' ||
+    voiceRealtimeStatus === 'connecting';
+
+  const appendTranscript = useCallback((text: string) => {
+    setInputText((prev) => {
+      const cur = prev.trimEnd();
+      if (!cur) return text;
+      const joiner = /[\s\n]$/.test(prev) ? '' : ' ';
+      return `${prev}${joiner}${text}`;
+    });
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    });
+  }, []);
+
+  const handleSendVoiceMessage = useCallback(
+    async (blob: Blob, _durationSec: number) => {
+      try {
+        setSttDictating(true);
+        const file = await blobToWavFile(blob, `voice_${Date.now()}.wav`);
+        const res = await agentSessionAPI.transcribe(agentId, file, {
+          filename: file.name,
+          language: 'zh',
+        });
+        const text = (res.text || '').trim();
+        if (!text) {
+          console.warn('[AgentWebComposer] STT returned empty text');
+          return;
+        }
+        appendTranscript(text);
+        onVoicePanelOpenChange?.(false);
+      } catch (err) {
+        console.error('[AgentWebComposer] STT failed', err);
+        throw err instanceof Error ? err : new Error(String(err));
+      } finally {
+        setSttDictating(false);
+      }
+    },
+    [agentId, appendTranscript, onVoicePanelOpenChange],
+  );
+
+  const toggleVoicePanel = useCallback(() => {
+    onActivate?.();
+    onVoicePanelOpenChange?.(!voicePanelOpen);
+  }, [onActivate, onVoicePanelOpenChange, voicePanelOpen]);
+
+  const slashMode = useMemo(() => parseSlashInput(inputText), [inputText]);
+  const slashResetKey = slashMode ? `${slashMode.kind}:${slashMode.query}` : null;
+  const slashCommandOptions = useMemo(
+    () => (slashMode?.kind === 'commands' ? filterSlashCommands(slashMode.query) : []),
+    [slashMode],
+  );
+  const slashGoalOptions = useMemo(
+    () => (slashMode?.kind === 'goal' ? filterGoalSubcommands(slashMode.query) : []),
+    [slashMode],
+  );
+  const slashSkillOptions = useMemo(
+    () => (slashMode?.kind === 'skill' ? filterSkillsForSlash(availableSkills, slashMode.query) : []),
+    [slashMode, availableSkills],
+  );
+  const slashOptionCount =
+    slashMode?.kind === 'skill'
+      ? slashSkillOptions.length
+      : slashMode?.kind === 'goal'
+        ? slashGoalOptions.length
+        : slashMode?.kind === 'plan'
+          ? 1
+          : slashCommandOptions.length;
+
+  useEffect(() => {
+    if (slashMode?.kind !== 'skill') return;
+    onOpenSkills?.();
+  }, [slashMode?.kind, onOpenSkills]);
+
+  useEffect(() => {
+    setSlashHighlight(0);
+  }, [slashResetKey]);
+
+  useEffect(() => {
+    if (slashResetKey === null) return;
+    if (slashHighlight >= slashOptionCount) {
+      setSlashHighlight(Math.max(0, slashOptionCount - 1));
+    }
+  }, [slashResetKey, slashHighlight, slashOptionCount]);
 
   const clearComposer = useCallback(() => {
     setInputText('');
@@ -140,6 +313,50 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
     setPendingSkill(null);
     if (inputRef.current) inputRef.current.style.height = 'auto';
   }, []);
+
+  const focusInputEnd = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    });
+  }, []);
+
+  const selectSlashCommand = useCallback(
+    (cmd: SlashCommandDef) => {
+      setInputText(slashCommandTriggerText(cmd));
+      focusInputEnd();
+    },
+    [focusInputEnd],
+  );
+
+  const selectSkillFromSlash = useCallback(
+    (skill: SkillInfo) => {
+      const dir = (skill.dir || skill.name || '').trim();
+      if (!dir) return;
+      setPendingSkill({
+        dir,
+        name: skill.display_name || skill.name || dir,
+      });
+      setInputText('');
+      requestAnimationFrame(() => {
+        if (inputRef.current) inputRef.current.style.height = 'auto';
+        inputRef.current?.focus();
+      });
+    },
+    [],
+  );
+
+  const selectGoalSubcommand = useCallback(
+    (cmd: GoalSubcommandDef) => {
+      onGoalAction?.(cmd.id);
+      setInputText('');
+      focusInputEnd();
+    },
+    [onGoalAction, focusInputEnd],
+  );
 
   const uploadFiles = useCallback(
     async (fileArray: File[]) => {
@@ -166,8 +383,91 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
     [agentId],
   );
 
+  const setTextAndFocus = useCallback(
+    (text: string) => {
+      setInputText(text);
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      });
+    },
+    [],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      setText: setTextAndFocus,
+      focus: focusInputEnd,
+      uploadFiles,
+    }),
+    [setTextAndFocus, focusInputEnd, uploadFiles],
+  );
+
   const submit = useCallback(async () => {
     if (disabled || sending) return;
+
+    const slash = parseSlashInput(inputText);
+    if (slash?.kind === 'plan') {
+      const topic = slash.query.trim() || 'Plan the next change';
+      onModeChange('plan');
+      onActivate?.();
+      setSending(true);
+      try {
+        await onSend({
+          text: `<user_plan>${topic}</user_plan>`,
+          images: [...images],
+          attachments: attachments.map((a) => ({ ...a })),
+          skillDir: pendingSkill?.dir,
+          skillName: pendingSkill?.name,
+        });
+        clearComposer();
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+    if (slash?.kind === 'goal') {
+      const parsed = parseGoalSendQuery(slash.query);
+      if (
+        parsed.action === 'status' ||
+        parsed.action === 'pause' ||
+        parsed.action === 'resume' ||
+        parsed.action === 'clear'
+      ) {
+        onGoalAction?.(parsed.action);
+        setInputText('');
+        return;
+      }
+      const objective = (parsed.objective || '').trim();
+      if (!objective) {
+        onGoalAction?.('status');
+        setInputText('');
+        return;
+      }
+      onGoalAction?.('set', objective);
+      onActivate?.();
+      setSending(true);
+      try {
+        await onSend({
+          text: `<user_goal>${objective}</user_goal>`,
+          images: [...images],
+          attachments: attachments.map((a) => ({ ...a })),
+          skillDir: pendingSkill?.dir,
+          skillName: pendingSkill?.name,
+        });
+        clearComposer();
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
     const text = inputText.trim();
     if (!text && images.length === 0 && attachments.length === 0 && !pendingSkill) return;
     onActivate?.();
@@ -193,10 +493,60 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
     pendingSkill,
     onSend,
     onActivate,
+    onModeChange,
+    onGoalAction,
     clearComposer,
   ]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashMode) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (slashOptionCount === 0) return;
+        setSlashHighlight((i) => (i + 1) % slashOptionCount);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (slashOptionCount === 0) return;
+        setSlashHighlight((i) => (i - 1 + slashOptionCount) % slashOptionCount);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setInputText('');
+        return;
+      }
+      if (slashMode.kind === 'goal') {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const cmd = slashGoalOptions[slashHighlight];
+          if (cmd) selectGoalSubcommand(cmd);
+          return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          void submit();
+          return;
+        }
+      } else if (slashMode.kind === 'plan') {
+        if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+          e.preventDefault();
+          void submit();
+          return;
+        }
+      } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        e.preventDefault();
+        if (slashMode.kind === 'commands') {
+          const cmd = slashCommandOptions[slashHighlight];
+          if (cmd) selectSlashCommand(cmd);
+        } else {
+          const skill = slashSkillOptions[slashHighlight];
+          if (skill) selectSkillFromSlash(skill);
+        }
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void submit();
@@ -252,7 +602,13 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
         </div>
       ) : null}
 
-      {/* Order: Changes → pending → Plan (behind) overlapping input (front) */}
+      {/* Order: Changes → approvals → pending → Plan (behind) overlapping input (front) */}
+      {approvalPanel ? (
+        <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
+          <div className={columnClass}>{approvalPanel}</div>
+        </div>
+      ) : null}
+
       {pendingPanel ? (
         <div className="px-2 sm:px-4 pt-2 flex-shrink-0">
           <div className={columnClass}>{pendingPanel}</div>
@@ -340,6 +696,68 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
               } ${disabled ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'}`}
             >
+            {slashMode?.kind === 'commands' ? (
+              <SlashMenu
+                mode="commands"
+                commands={slashCommandOptions}
+                highlightIndex={slashHighlight}
+                onHighlightIndexChange={setSlashHighlight}
+                onSelectCommand={selectSlashCommand}
+              />
+            ) : null}
+            {slashMode?.kind === 'skill' ? (
+              <SlashMenu
+                mode="skill"
+                skills={slashSkillOptions}
+                loading={skillsLoading}
+                highlightIndex={slashHighlight}
+                onHighlightIndexChange={setSlashHighlight}
+                onSelectSkill={selectSkillFromSlash}
+              />
+            ) : null}
+            {slashMode?.kind === 'goal' ? (
+              <SlashMenu
+                mode="goal"
+                subcommands={slashGoalOptions}
+                highlightIndex={slashHighlight}
+                onHighlightIndexChange={setSlashHighlight}
+                onSelectSubcommand={selectGoalSubcommand}
+              />
+            ) : null}
+            {slashMode?.kind === 'plan' ? (
+              <SlashMenu
+                mode="plan"
+                topicHint={slashMode.query}
+                highlightIndex={slashHighlight}
+                onHighlightIndexChange={setSlashHighlight}
+                onConfirmTopic={() => void submit()}
+              />
+            ) : null}
+            {voiceEnabled && voiceHost ? (
+              <VoicePanel
+                open={voicePanelOpen}
+                onClose={() => onVoicePanelOpenChange?.(false)}
+                onOpen={() => onVoicePanelOpenChange?.(true)}
+                disabled={disabled}
+                realtimeStatus={voiceRealtimeStatus}
+                realtimeError={voiceRealtimeError}
+                transcript={voiceTranscript}
+                dictating={sttDictating}
+                modelCards={modelCards}
+                voiceBindings={voiceBindings}
+                onVoiceBindingsChange={onVoiceBindingsChange}
+                onSendVoiceMessage={handleSendVoiceMessage}
+                onRealtimeStart={(opts) => onRealtimeStart?.(opts)}
+                onRealtimeStop={() => onRealtimeStop?.()}
+                onAudioChunk={(b64) => onAudioChunk?.(b64)}
+                onMouthpieceUtterance={(b64, sampleRate) =>
+                  onMouthpieceUtterance?.(b64, sampleRate)
+                }
+                onForceAskAgentChange={onForceAskAgentChange}
+                onCaptureStateChange={setVoiceCapture}
+                captureApiRef={voiceCaptureApiRef}
+              />
+            ) : null}
             {pendingSkill ? (
               <div className="px-3.5 pt-3 pb-0">
                 <button
@@ -453,6 +871,7 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
                   switching={switchingModel}
                   disabled={disabled}
                   onSelect={onSelectModel}
+                  onWillOpen={onRefreshModelCards}
                   onAddModels={() => {
                     window.dispatchEvent(new CustomEvent('switchView', { detail: 'models' }));
                   }}
@@ -475,15 +894,42 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
                     />
                   );
                 })()}
-                <button
-                  type="button"
-                  disabled={disabled}
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-textMuted hover:text-textMain hover:bg-primary/10 bg-transparent border-0 cursor-pointer disabled:opacity-50"
-                  title="语音（请在焦点窗格使用完整语音面板）"
-                  onClick={onActivate}
-                >
-                  <Mic size={18} strokeWidth={1.75} />
-                </button>
+                {voiceEnabled && (voiceCapture.recording || sttDictating) ? (
+                  <VoiceRecordPill
+                    durationSec={voiceCapture.durationSec}
+                    level={voiceCapture.level}
+                    dictating={sttDictating}
+                    disabled={disabled}
+                    onClick={() => {
+                      if (sttDictating) return;
+                      voiceCaptureApiRef.current?.stopRecord();
+                    }}
+                    title={sttDictating ? '正在转写…' : '点击停止并转写'}
+                  />
+                ) : voiceEnabled ? (
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={toggleVoicePanel}
+                    className={`w-8 h-8 rounded-full flex items-center justify-center relative border-0 cursor-pointer transition-colors ${
+                      voicePanelOpen
+                        ? 'bg-primary/20 text-primary'
+                        : voiceCallActive
+                          ? 'bg-emerald-500/20 text-emerald-500'
+                          : 'text-textMuted hover:text-textMain hover:bg-primary/10 bg-transparent'
+                    }`}
+                    title={
+                      voiceCallActive
+                        ? '实时通话进行中（点击展开/折叠）'
+                        : '语音消息 / 实时通话'
+                    }
+                  >
+                    <Mic size={18} strokeWidth={1.75} />
+                    {voiceCallActive ? (
+                      <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    ) : null}
+                  </button>
+                ) : null}
                 {busy ? (
                   <>
                     <button
@@ -546,4 +992,4 @@ export const AgentWebComposer: React.FC<AgentWebComposerProps> = ({
       />
     </div>
   );
-};
+});

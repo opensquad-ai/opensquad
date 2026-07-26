@@ -10,6 +10,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { parse } from 'marked';
 import { openThemeSettings } from '../utils/themeStore';
 import { AccountRailFooter } from './AccountRailFooter';
+import { AgentNavShortcutAvatars } from './AgentNavShortcutAvatars';
 import { navigateAppView } from '../utils/appNavItems';
 
 interface ChatListProps {
@@ -808,6 +809,7 @@ export const ChatList: React.FC<ChatListProps> = ({
         currentUser={currentUser}
         onOpenProfile={handleOpenProfile}
         onOpenSettings={() => onOpenSettings?.()}
+        shortcuts={<AgentNavShortcutAvatars />}
         actions={
           <>
             <button

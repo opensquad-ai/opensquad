@@ -19,6 +19,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# How long after a successful send we wait for Agent to spawn a session and
+# bind session_id. Half-dead WS: send_text returns True but chat never reaches
+# GatewayAdapter — without this watchdog executions stay "running" forever.
+_SESSION_SPAWN_TIMEOUT_S = 45.0
+# Extra redeliveries after the initial fire (probe + send again).
+_MAX_REDELIVERIES = 2
+# Delay between redelivery attempts.
+_REDELIVER_GAP_S = 5.0
+
 # The gateway's main asyncio event loop, captured at gateway startup (see
 # set_gateway_loop) so scheduled (timer-thread) fires can route prompts to the
 # Agent via the Gateway WS registry even before any admin route lazily created
@@ -92,6 +101,10 @@ class ScheduledTaskManager:
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # exec_id -> Timer watching for session_id after fire
+        self._spawn_watchdogs: dict[str, threading.Timer] = {}
+        # exec_id -> payload needed to redeliver (content, model_card, delegate, …)
+        self._pending_deliveries: dict[str, dict[str, Any]] = {}
 
     # -- lifecycle --
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -104,6 +117,10 @@ class ScheduledTaskManager:
             for t in self._timers.values():
                 t.cancel()
             self._timers.clear()
+            for t in self._spawn_watchdogs.values():
+                t.cancel()
+            self._spawn_watchdogs.clear()
+            self._pending_deliveries.clear()
         logger.info("[ScheduledTasks] stopped agent=%s", self.agent_id)
 
     # -- persistence --
@@ -120,6 +137,16 @@ class ScheduledTaskManager:
         with self._lock:
             self._tasks = {k: v for k, v in (data.get("tasks") or {}).items()}
             self._executions = list(data.get("executions") or [])
+            # Gateway/agent restart: in-flight turns are gone. Leave no zombie
+            # "running" rows that block run_now and show empty workflow panes.
+            for e in self._executions:
+                if e.get("status") == "running":
+                    e["status"] = "failed"
+                    e["ended_at"] = now_ts
+                    e["error"] = e.get("error") or "interrupted (process restart)"
+            for task in self._tasks.values():
+                if task.get("last_status") == "running":
+                    task["last_status"] = "failed"
         for tid, task in list(self._tasks.items()):
             if not task.get("enabled", True):
                 continue
@@ -316,7 +343,7 @@ class ScheduledTaskManager:
         # (see set_execution_session_by_exec_id).
         try:
             content = self._build_fire_content(name, prompt, skills)
-            sent = self._send_to_agent(delegate_agent, exec_id, content, model_card)
+            sent = self._send_to_agent(delegate_agent, exec_id, content, model_card, verified=True)
             if not sent:
                 raise RuntimeError("delegate agent not connected")
             logger.info(
@@ -326,6 +353,15 @@ class ScheduledTaskManager:
                 delegate_agent,
                 skills,
                 manual,
+            )
+            self._arm_spawn_watchdog(
+                exec_id,
+                {
+                    "delegate_agent": delegate_agent,
+                    "content": content,
+                    "model_card": model_card,
+                    "attempts": 0,
+                },
             )
             self._notify_execution_changed(dict(exec_record))
         except Exception as e:
@@ -338,6 +374,104 @@ class ScheduledTaskManager:
             logger.error("[ScheduledTasks] fire failed: %s", e)
             self._notify_execution_changed(dict(exec_record))
         return exec_id
+
+    def _cancel_spawn_watchdog(self, exec_id: str) -> None:
+        with self._lock:
+            t = self._spawn_watchdogs.pop(exec_id, None)
+            self._pending_deliveries.pop(exec_id, None)
+        if t:
+            t.cancel()
+
+    def _arm_spawn_watchdog(self, exec_id: str, delivery: dict[str, Any]) -> None:
+        """Fail / redeliver if Agent never binds a session_id after fire."""
+        self._cancel_spawn_watchdog(exec_id)
+        with self._lock:
+            self._pending_deliveries[exec_id] = dict(delivery)
+
+        def _on_timeout() -> None:
+            self._on_spawn_timeout(exec_id)
+
+        timer = threading.Timer(_SESSION_SPAWN_TIMEOUT_S, _on_timeout)
+        timer.daemon = True
+        with self._lock:
+            self._spawn_watchdogs[exec_id] = timer
+        timer.start()
+
+    def _on_spawn_timeout(self, exec_id: str) -> None:
+        """Called when session_id was not bound in time after fire/redeliver."""
+        with self._lock:
+            self._spawn_watchdogs.pop(exec_id, None)
+            delivery = dict(self._pending_deliveries.get(exec_id) or {})
+            rec = None
+            for e in self._executions:
+                if e.get("id") == exec_id:
+                    rec = e
+                    break
+            if rec is None:
+                self._pending_deliveries.pop(exec_id, None)
+                return
+            # Already bound or already terminal — nothing to do.
+            if (rec.get("session_id") or "").strip() or rec.get("status") != "running":
+                self._pending_deliveries.pop(exec_id, None)
+                return
+            attempts = int(delivery.get("attempts") or 0)
+
+        if attempts < _MAX_REDELIVERIES and delivery:
+            logger.warning(
+                "[ScheduledTasks] exec=%s no session after %.0fs — redelivering (%d/%d)",
+                exec_id,
+                _SESSION_SPAWN_TIMEOUT_S,
+                attempts + 1,
+                _MAX_REDELIVERIES,
+            )
+            time.sleep(_REDELIVER_GAP_S)
+            # Re-check after gap (session may have arrived late).
+            with self._lock:
+                still = None
+                for e in self._executions:
+                    if e.get("id") == exec_id:
+                        still = e
+                        break
+                if still is None or (still.get("session_id") or "").strip() or still.get("status") != "running":
+                    self._pending_deliveries.pop(exec_id, None)
+                    return
+            sent = self._send_to_agent(
+                delivery.get("delegate_agent") or "",
+                exec_id,
+                delivery.get("content") or "",
+                delivery.get("model_card") or "",
+                verified=True,
+            )
+            if sent:
+                delivery["attempts"] = attempts + 1
+                self._arm_spawn_watchdog(exec_id, delivery)
+                return
+            err = "delegate agent not connected (redeliver failed)"
+        else:
+            err = (
+                f"agent did not spawn session within {_SESSION_SPAWN_TIMEOUT_S:.0f}s "
+                f"(delivery timeout after {attempts} redeliveries)"
+            )
+
+        with self._lock:
+            self._pending_deliveries.pop(exec_id, None)
+            for e in self._executions:
+                if e.get("id") == exec_id and e.get("status") == "running":
+                    e["status"] = "failed"
+                    e["ended_at"] = time.time()
+                    e["error"] = err
+                    rec = dict(e)
+                    break
+            else:
+                rec = None
+            for t in self._tasks.values():
+                if t.get("last_status") == "running":
+                    t["last_status"] = "failed"
+                    break
+            self._save_persisted()
+        logger.error("[ScheduledTasks] exec=%s marked failed: %s", exec_id, err)
+        if rec:
+            self._notify_execution_changed(rec)
 
     @staticmethod
     def _build_fire_content(name: str, prompt: str, skills: list | None = None) -> str:
@@ -365,6 +499,7 @@ class ScheduledTaskManager:
 
     def mark_execution_done(self, exec_id: str, status: str = "success") -> dict[str, Any] | None:
         """Mark a running execution terminal. No-op if already finished."""
+        self._cancel_spawn_watchdog(exec_id)
         rec: dict[str, Any] | None = None
         with self._lock:
             for e in self._executions:
@@ -387,6 +522,7 @@ class ScheduledTaskManager:
 
     def stop_execution(self, exec_id: str) -> dict[str, Any] | None:
         """Cancel a running execution's in-flight turn and mark it stopped."""
+        self._cancel_spawn_watchdog(exec_id)
         with self._lock:
             sid = ""
             delegate_agent = ""
@@ -428,6 +564,7 @@ class ScheduledTaskManager:
         """
         if not exec_id:
             return False
+        self._cancel_spawn_watchdog(exec_id)
         with self._lock:
             target = None
             for e in self._executions:
@@ -474,6 +611,9 @@ class ScheduledTaskManager:
                     self._save_persisted()
                     rec = dict(e)
                     break
+        # Session bound — cancel delivery watchdog / pending redeliveries.
+        if rec is not None:
+            self._cancel_spawn_watchdog(exec_id)
         if changed and rec:
             self._notify_execution_changed(rec)
         return rec is not None
@@ -591,7 +731,15 @@ class ScheduledTaskManager:
                 return aid
         return agent_id
 
-    def _send_to_agent(self, agent_id: str, exec_id: str, content: str, model_card: str) -> bool:
+    def _send_to_agent(
+        self,
+        agent_id: str,
+        exec_id: str,
+        content: str,
+        model_card: str,
+        *,
+        verified: bool = True,
+    ) -> bool:
         """Push a chat message to the delegated Agent via the Gateway WS registry.
 
         Runs the async registry.send_to_agent on the gateway event loop (captured
@@ -600,6 +748,10 @@ class ScheduledTaskManager:
         back to legacy gateway-local push_ingress when no loop/registry is
         available so the feature still functions (session then lives in the
         gateway workspace — the old, "Session not found"-prone behavior).
+
+        When *verified* is True (default), an application-level ping/pong probe
+        runs first so we refuse to "successfully" fire into a half-dead WS
+        (send_text would return True but chat never reaches GatewayAdapter).
         """
         loop = self._loop or _gateway_loop
         if loop is None or not loop.is_running():
@@ -640,9 +792,17 @@ class ScheduledTaskManager:
             message["session_title"] = session_title
         if model_card:
             message["model_card"] = model_card
+
+        async def _deliver() -> bool:
+            send_fn = getattr(registry, "send_to_agent_verified", None)
+            if verified and callable(send_fn):
+                return bool(await send_fn(target, message, probe=True))
+            return bool(await registry.send_to_agent(target, message))
+
         try:
-            fut = asyncio.run_coroutine_threadsafe(registry.send_to_agent(target, message), loop)
-            return bool(fut.result(timeout=10))
+            fut = asyncio.run_coroutine_threadsafe(_deliver(), loop)
+            # Probe (upto ~8s) + send — allow generous budget.
+            return bool(fut.result(timeout=20))
         except Exception as e:
             logger.warning("[ScheduledTasks] send_to_agent failed: %s", e)
             return False
@@ -717,6 +877,41 @@ def get_task_manager(agent_id: str, data_dir: str | None = None) -> ScheduledTas
             except RuntimeError:
                 pass
         return m
+
+
+def warm_all_task_managers(loop: asyncio.AbstractEventLoop | None = None) -> int:
+    """Load every persisted ``*_scheduled_tasks.json`` and arm timers.
+
+    Called from gateway startup so fires work even if nobody opens the
+    scheduled-tasks admin page (which used to be the only lazy trigger).
+    """
+    try:
+        from opensquad.system_config import syscfg
+
+        data_dir = syscfg.workspace_data_dir("scheduled_tasks")
+    except Exception as e:
+        logger.warning("[ScheduledTasks] warm: data dir unavailable: %s", e)
+        return 0
+    if not data_dir or not os.path.isdir(data_dir):
+        return 0
+    count = 0
+    suffix = "_scheduled_tasks.json"
+    for name in os.listdir(data_dir):
+        if not name.endswith(suffix):
+            continue
+        agent_id = name[: -len(suffix)]
+        if not agent_id:
+            continue
+        try:
+            m = get_task_manager(agent_id, data_dir)
+            if loop is not None:
+                m._loop = loop
+            elif m._loop is None:
+                m._loop = _gateway_loop
+            count += 1
+        except Exception as e:
+            logger.warning("[ScheduledTasks] warm failed for %s: %s", agent_id, e)
+    return count
 
 
 def set_execution_session_by_exec_id(exec_id: str, session_id: str) -> bool:
