@@ -386,17 +386,17 @@ export const ExecWorkflowView: React.FC<Props> = ({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-2.5 border-b border-border shrink-0">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold truncate">{exec.task_name}</h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-sm font-semibold truncate min-w-0 max-w-full">{exec.task_name}</h3>
             <StatusBadge status={exec.status} />
           </div>
           <div className="mt-0.5 text-[10px] text-textMuted truncate">
             {fmtTime(exec.started_at)}{exec.manual ? ' · manual' : ''}{exec.session_id ? ` · ${exec.session_id.slice(-8)}` : ''}
           </div>
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
           {task && (
             <button type="button" onClick={onRunAgain}
               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-border hover:bg-black/5 dark:hover:bg-white/10">

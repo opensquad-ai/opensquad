@@ -28,6 +28,8 @@ def _clone_chat_api(base) -> Any:
     rewriting ``base.config``, which caused clones to keep calling the old
     provider (e.g. OpenCode after switching away).
     """
+    from opensquad.xml_parser import StreamingTagParser
+
     cfg = getattr(base, "config", None)
     if isinstance(cfg, dict):
         cfg = dict(cfg)
@@ -45,15 +47,19 @@ def _clone_chat_api(base) -> Any:
         if isinstance(card, dict) and card.get("_card"):
             cfg["_card"] = card["_card"]
     cls = type(base)
+    # Each parallel session needs its own stream parser — sharing (or None)
+    # causes handler clobber / silent no-stream across concurrent turns.
+    stream_parser = StreamingTagParser(handlers={})
     try:
         if cfg is not None:
-            api = cls(config=cfg)
+            api = cls(config=cfg, stream_parser=stream_parser)
         else:
             api = cls(
                 api_key=getattr(base, "api_key", None),
                 model=getattr(base, "model", None),
                 base_url=getattr(base, "base_url", None),
                 prompt=getattr(base, "prompt", None),
+                stream_parser=stream_parser,
             )
     except TypeError:
         api = cls()
@@ -72,6 +78,16 @@ def _clone_chat_api(base) -> Any:
                     setattr(api, attr, getattr(base, attr))
                 except Exception:
                     pass
+        try:
+            api.stream_parser = stream_parser
+        except Exception:
+            pass
+    else:
+        if getattr(api, "stream_parser", None) is None:
+            try:
+                api.stream_parser = stream_parser
+            except Exception:
+                pass
     return api
 
 

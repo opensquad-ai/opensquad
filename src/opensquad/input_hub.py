@@ -629,12 +629,8 @@ class InputHub:
                 sched.request_stop_session(sid)
         except Exception:
             logger.debug("[InputHub] session turn cancel on stop skipped", exc_info=True)
-        try:
-            from opensquad.tools.system import abort_all_tool_processes
-
-            abort_all_tool_processes("stop_task")
-        except Exception:
-            logger.debug("[InputHub] abort_all_tool_processes on session stop skipped", exc_info=True)
+        # Do NOT abort_all_tool_processes here — that kills shell/HTTP children for
+        # every parallel session. Agent-wide stop (request_stop) still aborts all.
 
     def clear_session_stop(self, session_id: str) -> None:
         self._stop_sessions.discard(session_id or "")

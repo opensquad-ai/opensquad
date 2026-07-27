@@ -262,12 +262,28 @@ class GatewayAdapter(BaseAgent):
         if command == "stop_task":
             stop_sid = str(cmd_data.get("session_id") or "").strip()
             stop_all = bool(cmd_data.get("all"))
-            if stop_all or not stop_sid:
+            if stop_all:
                 input_hub.request_stop()
                 logger.info(f"[Adapter] Stop task (all) requested by user {user_id}")
-            else:
+            elif stop_sid:
                 input_hub.request_stop_session(stop_sid)
                 logger.info(f"[Adapter] Stop task for session {stop_sid} by user {user_id}")
+            else:
+                # Legacy callers omitted session_id. Prefer focused session only —
+                # never cancel every parallel turn (that froze the other pane).
+                focused = ""
+                try:
+                    from opensquad.session_manager import get_session_manager
+
+                    focused = str(get_session_manager().get_focused_session_id() or "").strip()
+                except Exception:
+                    focused = ""
+                if focused:
+                    input_hub.request_stop_session(focused)
+                    logger.info(f"[Adapter] Stop task (legacy no-sid) → focused session {focused} by user {user_id}")
+                else:
+                    input_hub.request_stop()
+                    logger.info(f"[Adapter] Stop task (legacy no-sid, no focus) → all by user {user_id}")
             return
 
         if command == "set_primary_session":

@@ -257,33 +257,5 @@
   <body class="bg-bgLight text-textMain min-h-screen w-full overflow-hidden">
     <div id="root" class="h-full w-full overflow-hidden"></div>
   <script type="module" src="/index.tsx"></script>
-  <!-- Mobile Auto Reload -->
-  <script>
-    (function() {
-      // 只在移动端启用自动刷新
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-      if (!isMobile) return;
-
-      let lastModified = null;
-      const checkInterval = 2000; // 每2秒检查一次
-
-      setInterval(async () => {
-        try {
-          const response = await fetch('/index.tsx', { method: 'HEAD', cache: 'no-cache' });
-          const currentModified = response.headers.get('last-modified');
-
-          if (lastModified && currentModified !== lastModified) {
-            console.log('[AutoReload] File changed, reloading...');
-            window.location.reload();
-          }
-          lastModified = currentModified;
-        } catch (e) {
-          // 忽略错误
-        }
-      }, checkInterval);
-
-      console.log('[AutoReload] Mobile auto-reload enabled');
-    })();
-  </script>
 </body>
 </html>

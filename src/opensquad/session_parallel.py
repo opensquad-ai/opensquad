@@ -60,6 +60,7 @@ class TurnLocal:
     last_user_msg_from_to_user: bool = False
     auto_continue_retries: int = 0
     streamed_user_tag: Any = None
+    streamed_user_text: list = field(default_factory=list)
     dynamic_context_prefix: str = ""
     current_tools: Any = None
     current_tool_choice: str = "auto"

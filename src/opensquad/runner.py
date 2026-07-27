@@ -599,6 +599,54 @@ class AgentRunner:
     def _current_tool_choice(self, value):
         self._active_tl().current_tool_choice = value or "auto"
 
+    @property
+    def _last_user_input(self):
+        return self._active_tl().last_user_input
+
+    @_last_user_input.setter
+    def _last_user_input(self, value):
+        self._active_tl().last_user_input = value or ""
+
+    @property
+    def _tool_result_images(self):
+        return self._active_tl().tool_result_images
+
+    @_tool_result_images.setter
+    def _tool_result_images(self, value):
+        self._active_tl().tool_result_images = value if value is not None else []
+
+    @property
+    def _tool_result_image_paths(self):
+        return self._active_tl().tool_result_image_paths
+
+    @_tool_result_image_paths.setter
+    def _tool_result_image_paths(self, value):
+        self._active_tl().tool_result_image_paths = value if value is not None else []
+
+    @property
+    def _dynamic_context_prefix(self):
+        return self._active_tl().dynamic_context_prefix
+
+    @_dynamic_context_prefix.setter
+    def _dynamic_context_prefix(self, value):
+        self._active_tl().dynamic_context_prefix = value or ""
+
+    @property
+    def _streamed_user_text(self):
+        return self._active_tl().streamed_user_text
+
+    @_streamed_user_text.setter
+    def _streamed_user_text(self, value):
+        self._active_tl().streamed_user_text = value if value is not None else []
+
+    @property
+    def _streamed_user_tag(self):
+        return self._active_tl().streamed_user_tag
+
+    @_streamed_user_tag.setter
+    def _streamed_user_tag(self, value):
+        self._active_tl().streamed_user_tag = value
+
     async def _emit(self, etype, data):
         """Event push with session_id (uses the sid captured at turn start to avoid routing errors on session switch)"""
         sid = self._turn_sid
@@ -1126,8 +1174,10 @@ class AgentRunner:
                 _is_first_turn = turn == 0
                 self._setup_event_dispatch() if hasattr(self, "_setup_event_dispatch") else None
 
-                lock = getattr(self, "_tool_write_lock", None)
                 try:
+                    # Parallel tool turns run concurrently (no agent-wide write
+                    # lock around the whole result). Mutating tools should take
+                    # get_tool_write_lock() themselves if they need exclusion.
                     ai_response = await self.chat_api.chat(
                         current_input,
                         image_path=_native_images,
@@ -1165,20 +1215,13 @@ class AgentRunner:
                 finish_reason = ai_response.get("finish_reason")
                 stream_error = bool(ai_response.get("stream_error"))
 
-                async def _do_handle():
-                    return await self._handle_turn_result(
-                        full_response,
-                        tool_data_from_api=tool_data,
-                        output_media=output_media,
-                        finish_reason=finish_reason,
-                        stream_error=stream_error,
-                    )
-
-                if lock is not None:
-                    async with lock:
-                        stop, next_input, went_to_sleep = await _do_handle()
-                else:
-                    stop, next_input, went_to_sleep = await _do_handle()
+                stop, next_input, went_to_sleep = await self._handle_turn_result(
+                    full_response,
+                    tool_data_from_api=tool_data,
+                    output_media=output_media,
+                    finish_reason=finish_reason,
+                    stream_error=stream_error,
+                )
 
                 if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
                     logger.info("[Runner] Stop after tools (parallel) sid=%s", sid)

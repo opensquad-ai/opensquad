@@ -2,16 +2,20 @@
  * ScheduledTasksPage — delegated timed tasks manager.
  * Rendered as an L2 "scheduled-tasks" content tab in the middle pane.
  * Three internal sub-views: 新建任务 / 执行列表 / 任务列表.
+ *
+ * Desktop: list | detail side-by-side.
+ * Mobile (≤767px): master–detail — list OR detail fills the viewport.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Plus, Pencil, Play, Trash2, Zap, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, Clock, Plus, Pencil, Trash2, Zap, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
 import {
   scheduledTaskAPI,
   type ScheduledExecution,
   type ScheduledTask,
 } from '../../services/api';
 import { getAiWsService, type AIWSMessage } from '../../services/aiWebSocket';
+import { useIsMobileViewport } from '../../hooks/useMatchMedia';
 import {
   ScheduledTaskForm,
   emptyFormValue,
@@ -31,6 +35,7 @@ interface Props {
 
 export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessionBridge }) => {
   const { t } = useTranslation();
+  const isMobile = useIsMobileViewport();
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [executions, setExecutions] = useState<ScheduledExecution[]>([]);
   const [sub, setSub] = useState<SubTab>('task');
@@ -38,6 +43,8 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
   const [selExecId, setSelExecId] = useState<string | null>(null);
   const [editing, setEditing] = useState<TaskFormValue | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Mobile master–detail: false = list, true = detail / form. */
+  const [mobileDetail, setMobileDetail] = useState(false);
 
   const reload = useCallback(async (opts?: { quiet?: boolean }) => {
     if (!opts?.quiet) setLoading(true);
@@ -141,16 +148,22 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
     if (!stillValid) setSelExecId(executions[0].id);
   }, [executions, selExecId]);
 
-  const startNew = () => { setEditing(emptyFormValue(rootPath)); setSub('new'); };
+  const startNew = () => {
+    setEditing(emptyFormValue(rootPath));
+    setSub('new');
+    setMobileDetail(true);
+  };
   const startEdit = (task: ScheduledTask) => {
     setEditing(taskToFormValue(task));
     setSelTaskId(task.id);
     setSub('new');
+    setMobileDetail(true);
   };
   const onSaved = (task: ScheduledTask) => {
     setEditing(null);
     setSelTaskId(task.id);
     setSub('task');
+    setMobileDetail(true);
     reload();
   };
 
@@ -167,6 +180,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
         || null;
       if (newest) setSelExecId(newest.id);
       setSub('execution');
+      setMobileDetail(true);
     } catch (e: any) {
       // 409 already_running → apiRequest throws; inform instead of silently failing.
       const msg = e?.message || '';
@@ -199,10 +213,22 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
     }
   };
 
+  const backToList = () => {
+    setMobileDetail(false);
+    setEditing(null);
+  };
+
+  const showList = !isMobile || !mobileDetail;
+  const showDetail = !isMobile || mobileDetail;
+
   return (
     <div className="flex h-full min-h-0">
-      {/* Left: list */}
-      <div className="w-64 shrink-0 flex flex-col min-h-0 border-r border-border bg-panel">
+      {/* Left: list — full width on mobile when not in detail */}
+      <div
+        className={`${showList ? 'flex' : 'hidden'} ${
+          isMobile ? 'w-full flex-1' : 'w-64 shrink-0'
+        } flex-col min-h-0 border-r border-border bg-panel`}
+      >
         <div className="px-3 py-3 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-1.5 text-sm font-semibold">
             <Clock size={14} className="text-violet-500" />
@@ -224,7 +250,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
               <button
                 key={st}
                 type="button"
-                onClick={() => { setSub(st); setEditing(null); }}
+                onClick={() => { setSub(st); setEditing(null); if (isMobile) setMobileDetail(false); }}
                 className={`flex-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors cursor-default ${
                   sub === st ? 'bg-white dark:bg-black/40 shadow-sm text-text' : 'text-textMuted hover:text-text'
                 }`}
@@ -249,7 +275,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
                   key={e.id}
                   exec={e}
                   active={e.id === selExecId}
-                  onClick={() => { setSelExecId(e.id); setEditing(null); }}
+                  onClick={() => { setSelExecId(e.id); setEditing(null); setMobileDetail(true); }}
                   onDelete={() => handleDeleteExec(e)}
                 />
               ))
@@ -262,7 +288,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
                 key={tk.id}
                 task={tk}
                 active={tk.id === selTaskId && !editing}
-                onClick={() => { setSelTaskId(tk.id); setEditing(null); setSub('task'); }}
+                onClick={() => { setSelTaskId(tk.id); setEditing(null); setSub('task'); setMobileDetail(true); }}
                 onToggle={(en) => handleToggle(tk, en)}
               />
             ))
@@ -270,14 +296,26 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
         </div>
       </div>
 
-      {/* Right: detail */}
-      <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+      {/* Right: detail — full width on mobile when in detail */}
+      <div className={`${showDetail ? 'flex' : 'hidden'} flex-1 min-w-0 min-h-0 flex-col`}>
+        {isMobile && (
+          <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border bg-panel">
+            <button
+              type="button"
+              onClick={backToList}
+              className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-[12px] font-medium text-textMuted hover:text-text hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+            >
+              <ArrowLeft size={14} />
+              {t('scheduledTasks.backToList')}
+            </button>
+          </div>
+        )}
         {editing ? (
           <ScheduledTaskForm
             agentName={agentName}
             rootPath={rootPath}
             value={editing}
-            onCancel={() => { setEditing(null); }}
+            onCancel={() => { setEditing(null); if (isMobile) setMobileDetail(false); }}
             onSaved={onSaved}
           />
         ) : sub === 'execution' && selectedExec ? (
@@ -382,7 +420,7 @@ const ExecRow: React.FC<{
             type="button"
             title={t('scheduledTasks.deleteExec')}
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-textMuted hover:text-rose-600 hover:bg-rose-500/10 transition-opacity"
+            className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-0.5 rounded text-textMuted hover:text-rose-600 hover:bg-rose-500/10 transition-opacity"
           >
             <Trash2 size={11} />
           </button>
@@ -425,17 +463,17 @@ const InfoCell: React.FC<{ label: string; value: React.ReactNode }> = ({ label, 
 
 const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () => void; onDelete: () => void; onToggle: (en: boolean) => void }> = ({ task, onEdit, onRun, onDelete, onToggle }) => (
   <div className="flex flex-col h-full min-h-0">
-    <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-3 sm:px-4 py-3 border-b border-border shrink-0">
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold truncate">{task.name}</h3>
-          <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${task.enabled ? 'bg-emerald-500/15 text-emerald-600' : 'bg-black/10 text-textMuted'}`}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <h3 className="text-sm font-semibold truncate max-w-full">{task.name}</h3>
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${task.enabled ? 'bg-emerald-500/15 text-emerald-600' : 'bg-black/10 text-textMuted'}`}>
             {task.enabled ? 'enabled' : 'disabled'}
           </span>
         </div>
-        <div className="mt-0.5 text-[10px] text-textMuted">{scheduleSummary(task)} · {task.workspace || '--'}</div>
+        <div className="mt-0.5 text-[10px] text-textMuted truncate">{scheduleSummary(task)} · {task.workspace || '--'}</div>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
         <button type="button" onClick={onRun} title="Run now"
           className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium border border-border hover:bg-black/5 dark:hover:bg-white/10">
           <Zap size={11} className="text-amber-500" /> Run now
