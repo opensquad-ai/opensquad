@@ -268,6 +268,9 @@ def _build_app_class():
             self._compress_clear_at: float = 0.0
             # Message FIFO (solo)
             self._send_queue: deque[tuple[str, list, dict[str, str] | None]] = deque()
+            # After Ctrl+C stop: keep queue, do not auto-drain; next user Enter
+            # merges held queue + new input into one agent turn.
+            self._hold_queue_after_stop: bool = False
             # Live thinking paint throttle
             self._think_paint_at: float = 0.0
             # Side stream (Ctrl+X)
@@ -299,6 +302,11 @@ def _build_app_class():
             self._group_oldest_id: str | None = None
             # Dedup first-turn agent reply (stream flush vs final on_line race)
             self._last_agent_reply: str = ""
+            # Strip positions of the last committed green agent block — used to
+            # in-place upgrade when a longer final arrives after a truncated flush
+            # (common when Web + TUI share the same agent and WS fan-out delays
+            # the complete message behind an early stream flush).
+            self._committed_agent_meta: dict[str, Any] | None = None
             # This turn's user text — drop WS echoes painted as agent output
             self._turn_user_text: str = ""
             # Production defaults: hide boot chatter; fold long thinking/tools
@@ -426,8 +434,10 @@ def _build_app_class():
                 return False
             try:
                 self._last_agent_reply = ""
+                self._committed_agent_meta = None
                 self._session_current_id = None
                 self._send_queue.clear()
+                self._hold_queue_after_stop = False
                 self._stream_buf = ""
                 self._reply_flushed = False
                 self._session_out_tokens = 0
@@ -1710,7 +1720,15 @@ def _build_app_class():
             provider = self._escape_markup(getattr(self, "_model_provider_label", None) or "").strip()
             effort = self._escape_markup((getattr(self, "_reasoning_effort", None) or "high").lower())
             qn = len(getattr(self, "_send_queue", ()) or ())
-            qbit = f" · Q:{qn}" if qn else ""
+            held = bool(getattr(self, "_hold_queue_after_stop", False))
+            if held and qn:
+                qbit = f" · held:{qn}"
+            elif held:
+                qbit = " · held"
+            elif qn:
+                qbit = f" · Q:{qn}"
+            else:
+                qbit = ""
             live = ""
             hub = getattr(self, "_side_hub", None)
             if hub and any(s.active for s in hub.streams.values()):
@@ -1913,7 +1931,7 @@ def _build_app_class():
 
             # Chokepoint: never print the same agent reply twice (stream vs final race).
             # Second copy often arrives with style="" (no · agent label) — still drop it.
-            # Exception: allow a longer final to replace a truncated stream prefix.
+            # Longer final after a truncated flush → in-place upgrade (not a 2nd block).
             if body and style in ("agent", ""):
                 if self._is_user_echo(body):
                     return
@@ -1924,6 +1942,10 @@ def _build_app_class():
                 if last and _is_truncated_prefix(body, last):
                     # Incoming body is shorter than what we already showed — ignore
                     self._reply_flushed = True
+                    return
+                if last and _is_truncated_prefix(last, body):
+                    # Already painted an incomplete reply; replace it with the full final
+                    self._upgrade_committed_agent_reply(body)
                     return
                 # Claim synchronously before call_from_thread so a racing write is dropped
                 if style == "agent" or (style == "" and body and not body.startswith(("  ⚙", "  ✓", "  ·", "[", "/"))):
@@ -1947,10 +1969,15 @@ def _build_app_class():
                     w(self._thinking_markup(raw))
                     w("")
                 elif style == "agent":
-                    w("")
-                    self._write_agent_body(raw, w, lamp="done")
-                    w(self._agent_footer_markup())
-                    w("")
+                    try:
+                        meta = self._chat_write_markups(self._final_reply_items(raw), follow=True)
+                        self._committed_agent_meta = meta
+                    except Exception:
+                        w("")
+                        self._write_agent_body(raw, w, lamp="done")
+                        w(self._agent_footer_markup())
+                        w("")
+                        self._committed_agent_meta = None
                 elif style == "error":
                     w(f"{self._signal_lamp('error')}[bold red]{safe}[/]", follow=True)
                 elif style == "system":
@@ -1963,8 +1990,13 @@ def _build_app_class():
                     else:
                         # Plain agent-like reply may still contain markdown tables
                         if self._looks_like_agent_prose(raw):
-                            self._write_agent_body(raw, w, lamp="done")
-                            w("")
+                            try:
+                                meta = self._chat_write_markups(self._final_reply_items(raw), follow=True)
+                                self._committed_agent_meta = meta
+                            except Exception:
+                                self._write_agent_body(raw, w, lamp="done")
+                                w("")
+                                self._committed_agent_meta = None
                         else:
                             w(f"{self._signal_lamp('done')}[#e6edf3]{safe}[/]")
                             w("")
@@ -2634,6 +2666,11 @@ def _build_app_class():
             if last and _is_truncated_prefix(body, last) and getattr(self, "_reply_flushed", False) and not live:
                 self._stream_buf = ""
                 return
+            # Already committed a short green block; upgrade it instead of appending
+            if last and _is_truncated_prefix(last, body) and not live:
+                self._upgrade_committed_agent_reply(body)
+                self._stream_buf = ""
+                return
             self._last_agent_reply = body
             self._reply_flushed = True
             self._stream_buf = ""
@@ -2646,9 +2683,9 @@ def _build_app_class():
                 items = self._final_reply_items(body)
                 try:
                     if snap_meta and int(snap_meta.get("strips", 0) or 0) > 0:
-                        self._chat_replace_markups(snap_meta, items, follow=True)
+                        self._committed_agent_meta = self._chat_replace_markups(snap_meta, items, follow=True)
                     else:
-                        self._chat_write_markups(items, follow=True)
+                        self._committed_agent_meta = self._chat_write_markups(items, follow=True)
                 except Exception:
                     # Fallback: plain log write path already claimed — best-effort
                     try:
@@ -2659,6 +2696,36 @@ def _build_app_class():
                         w("")
                     except Exception:
                         pass
+                    self._committed_agent_meta = None
+
+            try:
+                self._schedule_ui(_do)
+            except Exception:
+                try:
+                    _do()
+                except Exception:
+                    pass
+
+        def _upgrade_committed_agent_reply(self, text: str) -> None:
+            """Replace the last green agent block with a longer final (no duplicate)."""
+            body = (text or "").strip()
+            if not body or self._is_user_echo(body):
+                return
+            self._last_agent_reply = body
+            self._reply_flushed = True
+            self._stream_buf = ""
+            meta = getattr(self, "_committed_agent_meta", None)
+
+            def _do() -> None:
+                items = self._final_reply_items(body)
+                try:
+                    if meta and int(meta.get("strips", 0) or 0) > 0:
+                        self._committed_agent_meta = self._chat_replace_markups(meta, items, follow=True)
+                    else:
+                        # No strip handle — skip second paint rather than duplicate
+                        self._committed_agent_meta = meta
+                except Exception:
+                    self._committed_agent_meta = meta
 
             try:
                 self._schedule_ui(_do)
@@ -2823,6 +2890,12 @@ def _build_app_class():
 
             if last and _same_reply(final_text, last):
                 self._reply_flushed = True
+                return
+
+            # Incomplete green block already committed → upgrade in place (Web+TUI
+            # fan-out often delivers a truncated flush before the full final).
+            if last and _is_truncated_prefix(last, final_text):
+                self._upgrade_committed_agent_reply(final_text)
                 return
 
             # Incomplete stream already committed → still write the complete final
@@ -2997,6 +3070,11 @@ def _build_app_class():
                 self.log_line(display, style="user")
                 self._turn_user_text = line.strip()
 
+            # After Ctrl+C: merge held queue + this input into one turn.
+            if getattr(self, "_hold_queue_after_stop", False):
+                self._resume_after_stop(line, skill_snap)
+                return
+
             # Solo FIFO: queue while a turn is in flight
             if self._sending:
                 snap = list(self.pending_media)
@@ -3010,6 +3088,60 @@ def _build_app_class():
             self._follow_chat = True
             self._sending = True
             self._send_solo(line, skill=skill_snap)
+
+        def _resume_after_stop(self, line: str, skill_snap: dict[str, str] | None) -> None:
+            """Merge held queue + new input and send as a single agent turn."""
+            parts: list[str] = []
+            media_all: list = []
+            skill = skill_snap
+            while self._send_queue:
+                item = self._send_queue.popleft()
+                if len(item) == 3:
+                    qline, qsnap, qskill = item
+                else:
+                    qline, qsnap = item[0], item[1]
+                    qskill = None
+                if (qline or "").strip():
+                    parts.append(qline.strip())
+                if qsnap:
+                    media_all.extend(list(qsnap))
+                if qskill:
+                    skill = qskill
+            if (line or "").strip():
+                parts.append(line.strip())
+            if self.pending_media:
+                media_all.extend(list(self.pending_media))
+                self.pending_media.clear()
+            if skill_snap:
+                skill = skill_snap
+
+            self._hold_queue_after_stop = False
+            if not parts and not media_all:
+                self._refresh_chrome()
+                self._focus_input()
+                return
+
+            merged = "\n\n".join(parts) if parts else "(attachment)"
+            n = len(parts)
+            self.log_line(
+                f"Resuming — sending {n} message(s) as one turn" + (f" (+{len(media_all)} media)" if media_all else ""),
+                style="system",
+            )
+            self.pending_media = list(media_all)
+
+            # Stop turn may still be winding down — park merged payload for drain.
+            if self._sending:
+                self._send_queue.clear()
+                self._send_queue.append((merged, list(media_all), skill))
+                self.pending_media.clear()
+                self._refresh_chrome()
+                self._focus_input()
+                return
+
+            self._follow_chat = True
+            self._sending = True
+            self._refresh_chrome()
+            self._send_solo(merged, skill=skill)
 
         def _handle_slash(self, line: str) -> None:
             import contextlib
@@ -3123,13 +3255,26 @@ def _build_app_class():
                 self.notify(t("ctrl_c_cleared"), timeout=2)
                 return
 
-            if self.bridge and self._sending:
+            if self.bridge and (
+                self._sending or getattr(self, "_turn_started_at", None) is not None or bool(self._send_queue)
+            ):
+                nq = len(self._send_queue)
                 try:
-                    self.bridge.send_command("stop_task")
-                    self.log_line("[system] stop requested", style="system")
+                    # Agent-wide stop so parallel/tool work also aborts.
+                    self.bridge.send_command("stop_task", {"all": True})
+                    self.log_line("[system] stop requested (all)", style="system")
                 except Exception:
                     pass
-                self.notify(t("ctrl_c_stopped"), timeout=2)
+                # Keep queue for the next Enter — merge into one turn.
+                self._hold_queue_after_stop = True
+                if nq:
+                    self.notify(
+                        t("ctrl_c_stopped_held").format(n=nq),
+                        timeout=3,
+                    )
+                else:
+                    self.notify(t("ctrl_c_stopped"), timeout=2)
+                self._refresh_chrome()
                 return
 
             self.notify(t("ctrl_c_again"), timeout=2)
@@ -4149,6 +4294,7 @@ def _build_app_class():
                 self._stop_shimmer_timer()
                 self._stop_turn_meter_timer()
                 self._last_agent_reply = ""
+                self._committed_agent_meta = None
                 self._turn_user_text = ""
                 self._sending = False
                 try:
@@ -4297,6 +4443,7 @@ def _build_app_class():
             self._stop_shimmer_timer()
             self._stop_turn_meter_timer()
             self._last_agent_reply = ""
+            self._committed_agent_meta = None
             self._turn_user_text = (line or "").strip() or getattr(self, "_turn_user_text", "")
             self._think_buf_latest = ""
             self._think_pending = False
@@ -4383,6 +4530,10 @@ def _build_app_class():
 
         def _drain_send_queue(self) -> None:
             if self._sending or self.mode == "group":
+                return
+            # Ctrl+C hold: wait for the next user Enter to merge+resume.
+            if getattr(self, "_hold_queue_after_stop", False):
+                self._refresh_chrome()
                 return
             if not self._send_queue:
                 self._refresh_chrome()
@@ -5885,7 +6036,8 @@ def _build_app_class():
                 if name == "stop":
                     nq = len(self._send_queue)
                     self._send_queue.clear()
-                    self.bridge.send_command("stop_task")
+                    self._hold_queue_after_stop = False
+                    self.bridge.send_command("stop_task", {"all": True})
                     self.bridge.turn_done()
                     self._sending = False
                     self.log_line(

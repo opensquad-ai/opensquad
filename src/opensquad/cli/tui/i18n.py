@@ -35,8 +35,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "zh": "已清空 · 再按 Ctrl+C 退出",
     },
     "ctrl_c_stopped": {
-        "en": "Stop requested · press Ctrl+C again to exit",
-        "zh": "已请求停止 · 再按 Ctrl+C 退出",
+        "en": "Stopped · next Enter resumes (queue held) · Ctrl+C again to exit",
+        "zh": "已停止 · 下次回车继续（队列已保留）· 再按 Ctrl+C 退出",
+    },
+    "ctrl_c_stopped_held": {
+        "en": "Stopped · {n} queued held · next Enter sends all together · Ctrl+C again to exit",
+        "zh": "已停止 · 保留 {n} 条排队 · 下次回车一并发送 · 再按 Ctrl+C 退出",
     },
     "ctrl_c_again": {
         "en": "Press Ctrl+C again to exit",

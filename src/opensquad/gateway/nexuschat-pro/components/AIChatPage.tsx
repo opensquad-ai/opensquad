@@ -118,7 +118,7 @@ import { RestoreCheckpointModal } from './ai-chat/RestoreCheckpointModal';
 import { WorkspaceTabBar } from './ai-chat/WorkspaceTabBar';
 import { CloseWorkspaceModal } from './ai-chat/CloseWorkspaceModal';
 import { CreateWorkspaceModal } from './ai-chat/CreateWorkspaceModal';
-import { confirmDiscardFileDirty, prefetchWorkspaceFile } from './ai-chat/WorkspaceFileEditor';
+import { confirmDiscardFileDirty, prefetchWorkspaceFile, getWorkspaceFileCache } from './ai-chat/WorkspaceFileEditor';
 import { PaneSplitLayout } from './ai-chat/PaneSplitLayout';
 import type { PaneShellHandlers } from './ai-chat/WorkspacePaneShell';
 import { SessionChatPane } from './ai-chat/SessionChatPane';
@@ -1164,7 +1164,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const ws = wsId ? snap.workspaces.find((w) => w.id === wsId) : null;
     if (wsId && ws) {
       void (async () => {
-        await prefetchWorkspaceFile(agentId, ws.rootPath, p);
+        // Prefer agentId here — agentProfile is declared later in this component
+        // (TDZ). Cache keys also accept agentId; dir_name is used when opening
+        // from the files panel (handleOpenFileInTab) after profile is loaded.
+        if (!getWorkspaceFileCache(agentId, ws.rootPath, p)) {
+          await prefetchWorkspaceFile(agentId, ws.rootPath, p);
+        }
         openContentTab(agentId, wsId, { kind: 'file', id: p });
         setWsSnap(loadWorkspaceStore(agentId));
       })();
@@ -6864,17 +6869,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     const wsId = activeWorkspace.id;
     // Always open into the anchored (focused) pane — never touch other panes
     const pane = focusedPaneId;
-    // Warm editor cache before mounting the tab when possible (hover may have
-    // already filled it via ProjectFilesPanel → shared WorkspaceFileEditor cache).
-    void prefetchWorkspaceFile(agentDir, root, p);
-    openContentTab(agentId, wsId, { kind: 'file', id: p }, pane);
-    if (pane) setFocusedPane(agentId, pane);
-    refreshWsSnap();
-    // Mobile: close the files drawer so the center editor is visible.
-    if (isCompactLayout) {
-      setFilesPanelOpen(false);
-      setSessionSidebarOpen(false);
+    const openNow = () => {
+      openContentTab(agentId, wsId, { kind: 'file', id: p }, pane);
+      if (pane) setFocusedPane(agentId, pane);
+      refreshWsSnap();
+      // Mobile: close the files drawer so the center editor is visible.
+      if (isCompactLayout) {
+        setFilesPanelOpen(false);
+        setSessionSidebarOpen(false);
+      }
+    };
+    // Cache hit → open instantly. Miss → await prefetch so the keep-alive
+    // editor mounts with content (no spinner flash on first paint).
+    if (getWorkspaceFileCache(agentDir, root, p)) {
+      openNow();
+      return;
     }
+    void (async () => {
+      await prefetchWorkspaceFile(agentDir, root, p);
+      openNow();
+    })();
   };
 
   const handleContentTabSelect = (tab: ContentTab, paneId?: string) => {

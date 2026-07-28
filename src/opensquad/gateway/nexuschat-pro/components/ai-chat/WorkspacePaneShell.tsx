@@ -1,7 +1,7 @@
 /**
  * WorkspacePaneShell — one split leaf: L2 tab bar + content (chat / file / preview) + composer.
  */
-import React, { useMemo, useEffect } from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
@@ -99,6 +99,32 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
     () => tabs.open.filter((t) => t.kind === 'session'),
     [tabs.open],
   );
+  const openFileTabs = useMemo(
+    () => tabs.open.filter((t) => t.kind === 'file'),
+    [tabs.open],
+  );
+  // Lazy keep-alive: only mount file editors after the user has opened them
+  // once in this pane. Revisit = instant (no TipTap remount). Closing a tab
+  // drops it from the set so we do not keep stale editors forever.
+  const [mountedFileIds, setMountedFileIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!active || active.kind !== 'file') return;
+    setMountedFileIds((prev) => (prev.includes(active.id) ? prev : [...prev, active.id]));
+  }, [active?.kind, active?.id]);
+  useEffect(() => {
+    const open = new Set(openFileTabs.map((t) => t.id));
+    setMountedFileIds((prev) => {
+      const next = prev.filter((id) => open.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [openFileTabs]);
+  const keptFileTabs = useMemo(() => {
+    const ids = new Set(mountedFileIds);
+    // Include active file synchronously so first open does not wait a frame
+    // for the mount-tracking effect (would otherwise flash empty).
+    if (active?.kind === 'file') ids.add(active.id);
+    return openFileTabs.filter((t) => ids.has(t.id));
+  }, [openFileTabs, mountedFileIds, active]);
   const sessionLoading =
     !!active &&
     active.kind === 'session' &&
@@ -109,6 +135,9 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
     active.kind === 'session' &&
     !!handlers.renderComposer &&
     (handlers.isComposerLanding?.(active.id) ?? false);
+  const showSessions = !!active && active.kind === 'session';
+  const showFiles = !!active && active.kind === 'file';
+  const showScheduled = !!active && active.kind === 'scheduled-tasks';
 
   // Active session tab → claim watch + refresh token stats for this sid.
   useEffect(() => {
@@ -172,14 +201,30 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
           >
             无打开的标签 — 点击 + 新建对话，或从右侧打开文件
           </div>
-        ) : active.kind === 'file' ? (
-          <WorkspaceFileEditor
-            agentId={agentId}
-            rootPath={rootPath}
-            relPath={active.id}
-            onDirtyChange={(dirty) => handlers.onFileDirty?.(active.id, dirty)}
-          />
-        ) : active.kind === 'scheduled-tasks' ? (
+        ) : null}
+
+        {/* Keep every open file tab mounted (hidden when inactive) — same
+            pattern as sessions. Remounting TipTap/FileDocumentEditor on each
+            L2 switch was the main “wait to load” cost even with content cache. */}
+        {keptFileTabs.map((tab) => {
+          const isActive = showFiles && !!active && active.id === tab.id;
+          return (
+            <div
+              key={`keep-file-${paneId}-${tab.id}`}
+              className={isActive ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}
+              aria-hidden={!isActive}
+            >
+              <WorkspaceFileEditor
+                agentId={agentId}
+                rootPath={rootPath}
+                relPath={tab.id}
+                onDirtyChange={(dirty) => handlers.onFileDirty?.(tab.id, dirty)}
+              />
+            </div>
+          );
+        })}
+
+        {showScheduled ? (
           <ScheduledTasksPage
             agentName={agentId}
             rootPath={rootPath}
@@ -193,9 +238,18 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
               ensureSessionWatched: handlers.ensureSessionWatched,
             }}
           />
-        ) : (
+        ) : null}
+
+        {/* Session shell stays mounted while any session tab is open, so
+            file ↔ session ↔ file also stays warm. */}
+        {openSessionTabs.length > 0 || showSessions ? (
           <div
-            className={`os-chat-session-shell relative ${landing ? 'is-landing' : 'is-docked'}`}
+            className={
+              showSessions
+                ? `os-chat-session-shell relative flex-1 min-h-0 ${landing ? 'is-landing' : 'is-docked'}`
+                : 'hidden'
+            }
+            aria-hidden={!showSessions}
           >
             {sessionLoading ? (
               <div
@@ -210,10 +264,8 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
               </div>
             ) : null}
             <div className="os-chat-session-messages relative min-h-0 flex-1">
-              {/* Keep every open session tab mounted (hidden when inactive) so
-                  switching L2 tabs is seamless — no remount / refetch flash. */}
               {openSessionTabs.map((tab) => {
-                const isActive = !!active && active.kind === 'session' && active.id === tab.id;
+                const isActive = showSessions && active.id === tab.id;
                 const useLiveSlot = !!chatSlot && !!liveSessionId && tab.id === liveSessionId;
                 return (
                   <div
@@ -236,7 +288,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                   </div>
                 );
               })}
-              {active?.kind === 'session' && openSessionTabs.length === 0 ? (
+              {showSessions && openSessionTabs.length === 0 ? (
                 <div
                   className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
                   onClick={handlers.onFocus}
@@ -245,13 +297,13 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                 </div>
               ) : null}
             </div>
-            {handlers.renderComposer && active?.kind === 'session' && !sessionLoading ? (
+            {handlers.renderComposer && showSessions && !sessionLoading ? (
               <ComposerLandingDock landing={landing} seedKey={active.id}>
                 {handlers.renderComposer(active.id)}
               </ComposerLandingDock>
             ) : null}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
