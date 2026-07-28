@@ -220,6 +220,12 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
 
     # For web calls (no internal auth), enforce first-user-only.
     if not internal_call:
+        email_l = str(user_data.email or "").strip().lower()
+        if email_l.endswith("@ai"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please use a personal email for the web account (@ai is reserved for agents).",
+            )
         web_user_exists = await _has_web_user(db)
         if web_user_exists:
             raise HTTPException(

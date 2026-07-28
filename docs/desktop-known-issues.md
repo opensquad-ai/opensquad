@@ -44,13 +44,23 @@ The desktop app separates two directories:
 
 | Directory | Purpose | Example (Windows) |
 |-----------|---------|-------------------|
-| **App data** (`OPENSQUAD_APP_DATA`) | Fixed Electron userData; stores app prefs such as `desktop-workspace.json` | `%APPDATA%\OpenSquad\` (older builds used `nexuschat-pro\`) |
+| **App data** (`OPENSQUAD_APP_DATA`) | Fixed Electron userData; stores app prefs such as `desktop-workspace.json` | `%APPDATA%\OpenSquad\` (older builds used `nexuschat-pro\`); macOS: `~/Library/Application Support/OpenSquad/` |
 | **Workspace** (`OPENSQUAD_USER_DATA`) | Chat DB, uploads, agents, logs — user data | Defaults to app data on first run; can be changed |
 
 On first launch the workspace defaults to the app data dir. The gateway/launcher
 init it: create `data/uploads`, `data/logs`, `agents/`, copy
 `system_config.json` from the bundled template, and seed default model cards
 and the pm/coder/qa agents.
+
+**Mac: “register again every launch”.** The first-run wizard appears when
+`chat.db` has no web user. Common causes: (1) Electron userData flipped between
+`nexuschat-pro` and `OpenSquad` (fixed by top-level `productName` + legacy
+recovery); (2) workspace pointed at a DMG/`/Volumes/…` path that disappears
+after eject — pick a permanent path under **System Settings → Workspace**;
+(3) registering with an `*@ai` email (agent-reserved) so registration never
+closes. After a good register, confirm
+`~/Library/Application Support/OpenSquad/gateway/backend/chat.db` exists
+(or the legacy `nexuschat-pro` folder if recovered).
 
 **Changing the workspace:** open **System Settings → Workspace**. You can create
 a workspace at a custom path, switch to an existing one, or use **Migrate

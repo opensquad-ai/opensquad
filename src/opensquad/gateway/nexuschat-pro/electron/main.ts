@@ -5,7 +5,7 @@ import path from 'path'
 import http from 'http'
 import fs from 'fs'
 import { buildElectronPopupMenus, isElectronMenuId } from './electron-menus'
-import { resolveDesktopWorkspace } from './desktop-workspace'
+import { resolveDesktopWorkspace, writeDesktopWorkspace } from './desktop-workspace'
 import { runDesktopUpdate, type UpdateStatus } from './desktop-updater'
 import { checkForUpdates, type UpdateChannel } from './update-checker'
 import { agentPythonForBackendEnv, isAgentRuntimeReady } from './agent-runtime'
@@ -37,6 +37,71 @@ const APP_URL       = DEV_MODE
   : `http://127.0.0.1:${BACKEND_PORT}`
 const STARTUP_TIMEOUT_MS = 45_000   // 后端最长等待时间
 const APP_DISPLAY_NAME = 'OpenSquad'
+/** Must match package.json productName — drives Electron userData on all platforms. */
+const STABLE_APP_NAME = 'OpenSquad'
+
+/**
+ * Pin a stable userData folder and recover accounts from the legacy
+ * ``nexuschat-pro`` Application Support / AppData directory.
+ *
+ * Without a top-level package.json ``productName``, Electron used
+ * ``name`` ("nexuschat-pro") for userData while the packaged .app was
+ * branded "OpenSquad". Switching builds (or Mac DMG vs installed) could
+ * land on an empty workspace → registration wizard every launch.
+ */
+function ensureStableUserData(): void {
+  try {
+    app.setName(STABLE_APP_NAME)
+  } catch (err) {
+    console.warn('[electron] app.setName failed:', err)
+  }
+
+  const appDataRoot = app.getPath('appData')
+  const stableUserData = path.join(appDataRoot, STABLE_APP_NAME)
+  try {
+    // Explicit path beats Electron's default (package.json ``name``).
+    app.setPath('userData', stableUserData)
+  } catch (err) {
+    console.warn('[electron] app.setPath(userData) failed:', err)
+  }
+
+  const userData = app.getPath('userData')
+  fs.mkdirSync(userData, { recursive: true })
+
+  const cfgPath = path.join(userData, 'desktop-workspace.json')
+  // Only skip recovery when we already have a *usable* workspace pointer
+  // (or local accounts). A stale cfg pointing at a vanished DMG path must
+  // not block legacy recovery.
+  try {
+    const resolved = resolveDesktopWorkspace(userData)
+    const hasLocalDb = fs.existsSync(path.join(userData, 'gateway', 'backend', 'chat.db'))
+    const hasResolvedDb = fs.existsSync(path.join(resolved, 'gateway', 'backend', 'chat.db'))
+    if (fs.existsSync(cfgPath) && (hasLocalDb || hasResolvedDb)) return
+    if (hasLocalDb) return
+  } catch {
+    /* continue to recovery */
+  }
+
+  const legacyDirs = [
+    path.join(appDataRoot, 'nexuschat-pro'),
+    path.join(appDataRoot, 'OpenSquad'),
+  ]
+  for (const legacy of legacyDirs) {
+    if (!legacy || path.resolve(legacy) === path.resolve(userData)) continue
+    const hasMeta = fs.existsSync(path.join(legacy, '.opensquad'))
+    const hasDb = fs.existsSync(path.join(legacy, 'gateway', 'backend', 'chat.db'))
+    if (!hasMeta && !hasDb) continue
+    try {
+      writeDesktopWorkspace(userData, legacy)
+      console.log(`[electron] Recovered workspace from legacy userData: ${legacy}`)
+    } catch (err) {
+      console.warn('[electron] Failed to point at legacy userData:', legacy, err)
+    }
+    break
+  }
+}
+
+ensureStableUserData()
 
 function resolvePackagedAsset(name: string): string {
   const devPath = path.join(__dirname, '..', 'assets', name)

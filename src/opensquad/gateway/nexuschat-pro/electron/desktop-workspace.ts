@@ -10,7 +10,13 @@ export interface DesktopWorkspaceConfig {
 }
 
 function isValidWorkspaceDir(dir: string): boolean {
-  return fs.existsSync(dir) && fs.existsSync(path.join(dir, '.opensquad'))
+  if (!dir || !fs.existsSync(dir)) return false
+  // Prefer the formal marker; also accept a chat DB (accounts) so Mac
+  // recovery from a legacy userData folder still counts as valid.
+  return (
+    fs.existsSync(path.join(dir, '.opensquad')) ||
+    fs.existsSync(path.join(dir, 'gateway', 'backend', 'chat.db'))
+  )
 }
 
 /** Read the user-chosen workspace path from appData; default to appData itself. */
