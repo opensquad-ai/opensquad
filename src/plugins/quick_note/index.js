@@ -80,6 +80,15 @@ var pluginAPI = {
     return resp.json();
   }
 };
+function asTagList(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((t2) => String(t2).trim()).filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    return raw.replace(/;/g, ",").split(",").map((t2) => t2.trim()).filter(Boolean);
+  }
+  return [];
+}
 var QuickNoteDashboard = ({ onBack }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -144,7 +153,7 @@ var QuickNoteDashboard = ({ onBack }) => {
   const startEdit = (note) => {
     setEditingId(note.id);
     setEditContent(note.content);
-    setEditTags(note.tags.join(", "));
+    setEditTags(asTagList(note.tags).join(", "));
   };
   const handleSaveEdit = async () => {
     if (!editingId || !editContent.trim())
@@ -260,7 +269,7 @@ var QuickNoteDashboard = ({ onBack }) => {
           }
         )
       ] }),
-      data && data.tags.length > 0 && /* @__PURE__ */ jsx("div", { className: "flex flex-wrap gap-2 mt-3", children: data.tags.map((tag) => /* @__PURE__ */ jsxs(
+      data && asTagList(data.tags).length > 0 && /* @__PURE__ */ jsx("div", { className: "flex flex-wrap gap-2 mt-3", children: asTagList(data.tags).map((tag) => /* @__PURE__ */ jsxs(
         "button",
         {
           onClick: () => setSelectedTag(selectedTag === tag ? "" : tag),
@@ -353,13 +362,18 @@ var QuickNoteDashboard = ({ onBack }) => {
               )
             ] })
           ] }),
-          (note.tags?.length > 0 || note.created_at) && /* @__PURE__ */ jsxs("div", { className: "mt-3 flex items-center justify-between ml-10", children: [
-            /* @__PURE__ */ jsx("div", { className: "flex flex-wrap gap-1", children: note.tags.map((tag) => /* @__PURE__ */ jsxs("span", { className: "text-[10px] font-bold text-slate-400 uppercase tracking-wider", children: [
-              "#",
-              tag
-            ] }, tag)) }),
-            /* @__PURE__ */ jsx("span", { className: "text-[10px] text-slate-300 font-medium", children: formatDate(note.created_at) })
-          ] })
+          (() => {
+            const tags = asTagList(note.tags);
+            if (tags.length === 0 && !note.created_at)
+              return null;
+            return /* @__PURE__ */ jsxs("div", { className: "mt-3 flex items-center justify-between ml-10", children: [
+              /* @__PURE__ */ jsx("div", { className: "flex flex-wrap gap-1", children: tags.map((tag) => /* @__PURE__ */ jsxs("span", { className: "text-[10px] font-bold text-slate-400 uppercase tracking-wider", children: [
+                "#",
+                tag
+              ] }, tag)) }),
+              /* @__PURE__ */ jsx("span", { className: "text-[10px] text-slate-300 font-medium", children: formatDate(note.created_at) })
+            ] });
+          })()
         ] })
       },
       note.id

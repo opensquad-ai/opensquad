@@ -59,6 +59,8 @@ async def _proxy_get(
             full_path = f"{path}?{urlencode(params)}"
         try:
             return await launcher_handler.rpc(node_id, "GET", full_path, timeout=timeout)
+        except HTTPException:
+            raise
         except Exception:
             pass  # Fall through to HTTP fallback
     # No explicit launcher_url and WS tunnel not connected; raise error directly (no HTTP fallback needed)
@@ -876,9 +878,10 @@ async def admin_put_plugin_config(name: str, request: Request, current_user: Use
 @admin_router.get("/admin/plugins/{name}/data")
 async def admin_get_plugin_data(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Proxy plugin data query to launcher (e.g. token_analytics dashboard)"""
-    # Forward all query params
+    # Forward all query params. Analytics queries scan a large SQLite DB and
+    # routinely exceed the default 5s proxy timeout → opaque HTTP 502.
     params = dict(request.query_params)
-    return await _proxy_get(f"/api/plugins/{name}/data", params=params)
+    return await _proxy_get(f"/api/plugins/{name}/data", params=params, timeout=60.0)
 
 
 @admin_router.post("/admin/plugins/{name}/action")
@@ -1204,6 +1207,7 @@ async def admin_delete_model_card_unassign(name: str, current_user: User = Depen
 # Scheduled Tasks (delegated timed tasks)
 # ============================================================
 
+
 def _task_mgr(name: str):
     from opensquad.scheduled_tasks import get_task_manager
 
@@ -1216,12 +1220,16 @@ async def admin_list_scheduled_tasks(name: str, current_user: User = Depends(get
 
 
 @admin_router.post("/admin/agents/{name}/scheduled-tasks")
-async def admin_create_scheduled_task(name: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+async def admin_create_scheduled_task(
+    name: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)
+):
     return {"task": _task_mgr(name).create_task(body or {})}
 
 
 @admin_router.put("/admin/agents/{name}/scheduled-tasks/{task_id}")
-async def admin_update_scheduled_task(name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+async def admin_update_scheduled_task(
+    name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)
+):
     res = _task_mgr(name).update_task(task_id, body or {})
     if res is None:
         return JSONResponse({"error": "task not found"}, status_code=404)
@@ -1272,7 +1280,9 @@ async def admin_delete_scheduled_execution(name: str, exec_id: str, current_user
 
 
 @admin_router.put("/admin/agents/{name}/scheduled-tasks/{task_id}/enabled")
-async def admin_toggle_scheduled_task(name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)):
+async def admin_toggle_scheduled_task(
+    name: str, task_id: str, body: dict = Body(default_factory=dict), current_user: User = Depends(get_current_user_dep)
+):
     res = _task_mgr(name).set_enabled(task_id, bool((body or {}).get("enabled", True)))
     if res is None:
         return JSONResponse({"error": "task not found"}, status_code=404)
@@ -1280,7 +1290,9 @@ async def admin_toggle_scheduled_task(name: str, task_id: str, body: dict = Body
 
 
 @admin_router.get("/admin/agents/{name}/scheduled-tasks/executions")
-async def admin_list_scheduled_executions(name: str, task_id: str | None = Query(default=None), current_user: User = Depends(get_current_user_dep)):
+async def admin_list_scheduled_executions(
+    name: str, task_id: str | None = Query(default=None), current_user: User = Depends(get_current_user_dep)
+):
     return {"executions": _task_mgr(name).list_executions(task_id)}
 
 
@@ -1312,8 +1324,9 @@ async def admin_send_scheduled_followup(
     delegate_agent = (exec_rec.get("delegate_agent") or name or "").strip() or name
     model_card = (body or {}).get("model_card") or ""
     try:
-        from ..registry import registry
         from opensquad.scheduled_tasks import ScheduledTaskManager
+
+        from ..registry import registry
 
         # delegate_agent may be the on-disk dir_name (e.g. "agent305"); resolve
         # to the registered WS agent_id (e.g. "agent305-001") before sending.
@@ -1329,9 +1342,7 @@ async def admin_send_scheduled_followup(
             message["model_card"] = model_card
         sent = await registry.send_to_agent(target, message)
         if not sent:
-            return JSONResponse(
-                {"error": "delegate agent not connected"}, status_code=503
-            )
+            return JSONResponse({"error": "delegate agent not connected"}, status_code=503)
     except Exception as e:  # pragma: no cover - defensive
         return JSONResponse({"error": str(e)}, status_code=500)
     return {"ok": True, "session_id": sid}

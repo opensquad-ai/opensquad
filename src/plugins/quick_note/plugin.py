@@ -36,14 +36,42 @@ class QuickNotePlugin(Plugin):
         if not os.path.exists(self.data_file):
             self._save_notes([])
 
+    @staticmethod
+    def _normalize_tags(raw: Any) -> list[str]:
+        """Coerce tags to list[str]. Agents often pass a comma-separated string."""
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+        if isinstance(raw, (list, tuple, set)):
+            out: list[str] = []
+            for item in raw:
+                if item is None:
+                    continue
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+            return out
+        s = str(raw).strip()
+        return [s] if s else []
+
     def _load_notes(self) -> list[dict]:
         try:
             with open(self.data_file, encoding="utf-8") as f:
-                return json.load(f)
+                notes = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return []
+        if not isinstance(notes, list):
+            return []
+        for note in notes:
+            if isinstance(note, dict):
+                note["tags"] = self._normalize_tags(note.get("tags"))
+        return notes
 
     def _save_notes(self, notes: list[dict]):
+        for note in notes:
+            if isinstance(note, dict):
+                note["tags"] = self._normalize_tags(note.get("tags"))
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(notes, f, ensure_ascii=False, indent=2)
 
@@ -53,7 +81,7 @@ class QuickNotePlugin(Plugin):
         note = {
             "id": str(uuid.uuid4())[:8],
             "content": content,
-            "tags": tags or [],
+            "tags": self._normalize_tags(tags),
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "done": False,
@@ -112,7 +140,7 @@ class QuickNotePlugin(Plugin):
                 if content is not None:
                     note["content"] = content
                 if tags is not None:
-                    note["tags"] = tags
+                    note["tags"] = self._normalize_tags(tags)
                 note["updated_at"] = datetime.now().isoformat()
                 self._save_notes(notes)
                 return {"success": True, "note": note}

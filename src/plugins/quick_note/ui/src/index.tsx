@@ -43,12 +43,12 @@ const pluginAPI = {
         if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
-        
+
         // Correct path for Gateway proxy
         const resp = await fetch(`/api/ai-web/admin/plugins/${id}/data?${query}`, {
             headers
         });
-        
+
         if (!resp.ok) {
             if (resp.status === 401) throw new Error('Unauthorized');
             const errData = await resp.json().catch(() => ({}));
@@ -71,7 +71,7 @@ const pluginAPI = {
             headers,
             body: JSON.stringify({ action, data: body }) // Changed to {action, data: ...} to match launcher expectation
         });
-        
+
         if (!resp.ok) {
             if (resp.status === 401) throw new Error('Unauthorized');
             const errData = await resp.json().catch(() => ({}));
@@ -92,12 +92,27 @@ interface DashboardData {
   notes: Array<{
     id: string;
     content: string;
-    tags: string[];
+    tags: string[] | string;
     created_at: string;
     updated_at: string;
     done: boolean;
   }>;
   tags: string[];
+}
+
+/** Coerce note.tags to string[] — stored data may be a comma-separated string. */
+function asTagList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((t) => String(t).trim()).filter(Boolean);
+  }
+  if (typeof raw === 'string') {
+    return raw
+      .replace(/;/g, ',')
+      .split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+  return [];
 }
 
 export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
@@ -107,7 +122,7 @@ export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
   const [selectedTag, setSelectedTag] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showDone, setShowDone] = useState(false);
-  
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editTags, setEditTags] = useState('');
@@ -163,10 +178,10 @@ export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
     }
   };
 
-  const startEdit = (note: { id: string; content: string; tags: string[] }) => {
+  const startEdit = (note: { id: string; content: string; tags: string[] | string }) => {
     setEditingId(note.id);
     setEditContent(note.content);
-    setEditTags(note.tags.join(', '));
+    setEditTags(asTagList(note.tags).join(', '));
   };
 
   const handleSaveEdit = async () => {
@@ -277,9 +292,9 @@ export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
             {t('quickNote.resetFilter')}
           </button>
         </div>
-        {data && data.tags.length > 0 && (
+        {data && asTagList(data.tags).length > 0 && (
           <div className="flex flex-wrap gap-2 mt-3">
-            {data.tags.map((tag) => (
+            {asTagList(data.tags).map((tag) => (
               <button
                 key={tag}
                 onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
@@ -370,10 +385,13 @@ export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
                         </button>
                       </div>
                     </div>
-                    {(note.tags?.length > 0 || note.created_at) && (
+                    {(() => {
+                      const tags = asTagList(note.tags);
+                      if (tags.length === 0 && !note.created_at) return null;
+                      return (
                       <div className="mt-3 flex items-center justify-between ml-10">
                         <div className="flex flex-wrap gap-1">
-                          {note.tags.map((tag) => (
+                          {tags.map((tag) => (
                             <span key={tag} className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                               #{tag}
                             </span>
@@ -383,7 +401,8 @@ export const QuickNoteDashboard: React.FC<PluginViewProps> = ({ onBack }) => {
                           {formatDate(note.created_at)}
                         </span>
                       </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 )}
               </div>

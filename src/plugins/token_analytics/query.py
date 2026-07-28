@@ -146,14 +146,19 @@ def query_data(project_root: str, params: dict) -> dict:
 # ── Internal helpers ──
 
 
-def _connect(db_path: str) -> sqlite3.Connection | None:
-    """Open a read-only connection to the analytics DB."""
+def _connect(db_path: str, *, query_only: bool = True) -> sqlite3.Connection | None:
+    """Open a connection to the analytics DB.
+
+    ``query_only=True`` is safe for simple SELECTs. Dashboard queries that
+    materialize a TEMP table need ``query_only=False``.
+    """
     if not os.path.isfile(db_path):
         return None
-    conn = sqlite3.connect(db_path, timeout=5)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA query_only=ON")
+    if query_only:
+        conn.execute("PRAGMA query_only=ON")
     return conn
 
 
@@ -212,7 +217,8 @@ def query_dashboard(
     if metric not in _METRIC_DELTA_COLS:
         metric = "total"
 
-    conn = _connect(db_path)
+    # Need TEMP table for one-shot delta materialization (avoids 5× full scans).
+    conn = _connect(db_path, query_only=False)
     if conn is None:
         return {
             "metric": metric,
@@ -241,11 +247,21 @@ def query_dashboard(
         params.append(agent_id)
 
     try:
-        summary = _query_summary(conn, cutoff, agent_filter, params, time_range)
-        timeline = _query_timeline(conn, cutoff, agent_filter, params, time_range, metric)
-        timeline_by_model = _query_timeline_by_model(conn, cutoff, agent_filter, params, time_range, metric)
-        by_model = _query_by_model(conn, cutoff, agent_filter, params, time_range, metric)
-        by_agent = _query_by_agent(conn, cutoff, agent_filter, params, time_range, metric)
+        bucket_expr, bucket_label = _bucket_expr(time_range)
+        deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
+        # Materialize per-call deltas ONCE. Previously each of summary /
+        # timeline / by_model / by_agent rebuilt the window-function CTE over
+        # the full token_snapshots table (~5× cost → Gateway 5s proxy 502).
+        conn.execute("DROP TABLE IF EXISTS _ta_deltas")
+        conn.execute(f"CREATE TEMP TABLE _ta_deltas AS WITH {deltas_cte} SELECT * FROM deltas")
+        conn.execute("CREATE INDEX IF NOT EXISTS _ta_deltas_ts ON _ta_deltas(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS _ta_deltas_agent ON _ta_deltas(agent_id)")
+
+        summary = _query_summary(conn, agent_filter, params)
+        timeline = _query_timeline(conn, agent_filter, params, bucket_label, metric)
+        timeline_by_model = _query_timeline_by_model(conn, agent_filter, params, metric)
+        by_model = _query_by_model(conn, agent_filter, params, metric)
+        by_agent = _query_by_agent(conn, agent_filter, params, metric)
         top_tools = _query_top_tools(conn, cutoff, agent_filter, params)
         recent = _query_recent_snapshots(conn, cutoff, agent_filter, params)
     finally:
@@ -285,18 +301,9 @@ def _empty_summary() -> dict[str, Any]:
     }
 
 
-def _query_summary(
-    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str
-) -> dict[str, Any]:
-    """Aggregate summary stats from token_snapshots.
-
-    All token columns come from SUM(delta_*) so each call is counted once,
-    even though the stored columns are running totals per agent.
-    """
-    bucket_expr, _ = _bucket_expr(time_range)
-    deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
+def _query_summary(conn: sqlite3.Connection, agent_filter: str, params: list) -> dict[str, Any]:
+    """Aggregate summary stats from materialized per-call deltas."""
     sql = f"""
-        WITH {deltas_cte}
         SELECT
             COALESCE(SUM(delta_total), 0) AS total_tokens,
             COUNT(*) AS total_requests,
@@ -306,7 +313,7 @@ def _query_summary(
             COUNT(DISTINCT agent_id) AS unique_agents,
             COALESCE(SUM(delta_cache_read), 0) AS total_cache_read,
             COALESCE(SUM(delta_cache_creation), 0) AS total_cache_creation
-        FROM deltas
+        FROM _ta_deltas
         WHERE timestamp >= ?{agent_filter}
     """
     row = conn.execute(sql, params).fetchone()
@@ -325,19 +332,20 @@ def _query_summary(
 
 
 def _query_timeline(
-    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+    conn: sqlite3.Connection,
+    agent_filter: str,
+    params: list,
+    bucket_label: str,
+    metric: str = "total",
 ) -> list[dict[str, Any]]:
     """Per-bucket totals + request counts for a simple line/bar chart."""
-    bucket_expr, bucket_label = _bucket_expr(time_range)
-    deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
     delta_col = _metric_delta_col(metric)
     sql = f"""
-        WITH {deltas_cte}
         SELECT
             bucket,
             COALESCE(SUM({delta_col}), 0) AS tokens,
             COUNT(*) AS requests
-        FROM deltas
+        FROM _ta_deltas
         WHERE timestamp >= ?{agent_filter}
         GROUP BY bucket
         ORDER BY bucket ASC
@@ -350,25 +358,16 @@ def _query_timeline(
 
 
 def _query_timeline_by_model(
-    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+    conn: sqlite3.Connection, agent_filter: str, params: list, metric: str = "total"
 ) -> list[dict[str, Any]]:
-    """
-    Per-bucket × per-model token breakdown — drives the stacked bar chart.
-
-    Bucket size adapts to time_range (10-min / hourly / daily) so the chart
-    stays informative at any zoom level. Each cell is SUM(delta_*) over the
-    per-call increments.
-    """
-    bucket_expr, _ = _bucket_expr(time_range)
-    deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
+    """Per-bucket × per-model token breakdown — drives the stacked bar chart."""
     delta_col = _metric_delta_col(metric)
     sql = f"""
-        WITH {deltas_cte}
         SELECT
             bucket,
             model,
             COALESCE(SUM({delta_col}), 0) AS tokens
-        FROM deltas
+        FROM _ta_deltas
         WHERE timestamp >= ?{agent_filter}
         GROUP BY bucket, model
         ORDER BY bucket ASC, tokens DESC
@@ -388,21 +387,18 @@ def _query_timeline_by_model(
 
 
 def _query_by_model(
-    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+    conn: sqlite3.Connection, agent_filter: str, params: list, metric: str = "total"
 ) -> list[dict[str, Any]]:
     """Per-model totals (metric-aware) + cache fields (absolute)."""
-    bucket_expr, _ = _bucket_expr(time_range)
-    deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
     delta_col = _metric_delta_col(metric)
     sql = f"""
-        WITH {deltas_cte}
         SELECT
             model,
             COALESCE(SUM({delta_col}), 0) AS tokens,
             COUNT(*) AS requests,
             COALESCE(SUM(delta_cache_read), 0) AS cache_read_tokens,
             COALESCE(SUM(delta_cache_creation), 0) AS cache_creation_tokens
-        FROM deltas
+        FROM _ta_deltas
         WHERE timestamp >= ?{agent_filter}
         GROUP BY model
         ORDER BY tokens DESC
@@ -422,21 +418,18 @@ def _query_by_model(
 
 
 def _query_by_agent(
-    conn: sqlite3.Connection, cutoff: str, agent_filter: str, params: list, time_range: str, metric: str = "total"
+    conn: sqlite3.Connection, agent_filter: str, params: list, metric: str = "total"
 ) -> list[dict[str, Any]]:
     """Per-agent totals (metric-aware) + cache fields (absolute)."""
-    bucket_expr, _ = _bucket_expr(time_range)
-    deltas_cte = _DELTAS_CTE_TEMPLATE.format(bucket_expr=bucket_expr)
     delta_col = _metric_delta_col(metric)
     sql = f"""
-        WITH {deltas_cte}
         SELECT
             agent_id,
             COALESCE(SUM({delta_col}), 0) AS tokens,
             COUNT(*) AS requests,
             COALESCE(SUM(delta_cache_read), 0) AS cache_read_tokens,
             COALESCE(SUM(delta_cache_creation), 0) AS cache_creation_tokens
-        FROM deltas
+        FROM _ta_deltas
         WHERE timestamp >= ?{agent_filter}
         GROUP BY agent_id
         ORDER BY tokens DESC

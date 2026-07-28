@@ -556,7 +556,13 @@ def _get_category_icon(agent_type: str) -> str:
 # ============================================================
 
 
-async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | None = None) -> dict:
+async def _proxy_get(
+    path: str,
+    params: dict | None = None,
+    launcher_url: str | None = None,
+    *,
+    timeout: float = 5.0,
+) -> dict:
     """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
     # WS tunnel: no inbound port needed on home machine
     if launcher_url is None and launcher_handler.has_connections():
@@ -567,7 +573,9 @@ async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | 
 
             full_path = f"{path}?{urlencode(params)}"
         try:
-            return await launcher_handler.rpc(node_id, "GET", full_path, timeout=5.0)
+            return await launcher_handler.rpc(node_id, "GET", full_path, timeout=timeout)
+        except HTTPException:
+            raise
         except Exception:
             pass  # Fall through to HTTP fallback
     # No explicit launcher_url and WS tunnel not connected; raise error directly (no HTTP fallback needed)
@@ -577,7 +585,7 @@ async def _proxy_get(path: str, params: dict | None = None, launcher_url: str | 
     base = launcher_url or LAUNCHER_URL
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.get(f"{base}{path}", params=params)
             if resp.status_code >= 400:
@@ -1186,9 +1194,9 @@ async def admin_put_plugin_config(name: str, request: Request, current_user: Use
 @router.get("/admin/plugins/{name}/data")
 async def admin_get_plugin_data(name: str, request: Request, current_user: User = Depends(get_current_user_dep)):
     """Proxy plugin data query to launcher (e.g. token_analytics dashboard)"""
-    # Forward all query params
+    # Analytics queries can take >5s on large DBs; default proxy timeout → 502.
     params = dict(request.query_params)
-    return await _proxy_get(f"/api/plugins/{name}/data", params=params)
+    return await _proxy_get(f"/api/plugins/{name}/data", params=params, timeout=60.0)
 
 
 @router.post("/admin/plugins/{name}/action")

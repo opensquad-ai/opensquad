@@ -431,7 +431,13 @@ def _start_launcher_ws_tunnel(management_port: int):
                             path = msg.get("path", "/")
                             body = msg.get("body")
 
-                            # Relay to local HTTP management server
+                            # Relay to local HTTP management server.
+                            # Plugin data queries (token_analytics) can take
+                            # several seconds on large DBs — keep above Gateway's
+                            # 60s plugin-data proxy timeout.
+                            _admin_timeout = 60
+                            if "/api/plugins/" in path and path.rstrip("/").endswith("/data"):
+                                _admin_timeout = 90
                             try:
                                 data = json.dumps(body).encode("utf-8") if body else None
                                 headers = {"Content-Type": "application/json"} if data else {}
@@ -441,7 +447,7 @@ def _start_launcher_ws_tunnel(management_port: int):
                                     headers=headers,
                                     method=method,
                                 )
-                                with _ureq.urlopen(req, timeout=15) as resp:
+                                with _ureq.urlopen(req, timeout=_admin_timeout) as resp:
                                     resp_body = json.loads(resp.read())
                                 await ws.send(
                                     json.dumps(

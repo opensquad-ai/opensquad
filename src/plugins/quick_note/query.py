@@ -4,13 +4,40 @@ import json
 import os
 import uuid
 from datetime import datetime
+from typing import Any
 
 DATA_FILE_NAME = "notes.json"
 
 
+def _normalize_tags(raw: Any) -> list[str]:
+    """Coerce tags to list[str]. Agents often pass a comma-separated string."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        out: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            s = str(item).strip()
+            if s:
+                out.append(s)
+        return out
+    s = str(raw).strip()
+    return [s] if s else []
+
+
+def _normalize_note(note: dict) -> dict:
+    if not isinstance(note, dict):
+        return note
+    note["tags"] = _normalize_tags(note.get("tags"))
+    return note
+
+
 def query_data(project_root: str, params: dict) -> dict:
     """Standard entry point for GET requests."""
-    notes = _load_notes(project_root)
+    notes = [_normalize_note(n) for n in _load_notes(project_root)]
 
     tag = params.get("tag")
     done = params.get("done")
@@ -36,7 +63,7 @@ def query_data(project_root: str, params: dict) -> dict:
     done_count = len([n for n in notes if n.get("done")])
     todo_count = total - done_count
 
-    all_tags = set()
+    all_tags: set[str] = set()
     for n in notes:
         all_tags.update(n.get("tags", []))
 
@@ -59,7 +86,7 @@ def query_data(project_root: str, params: dict) -> dict:
 
 def handle_action(project_root: str, action: str, data: dict) -> dict:
     """Handle POST actions from Web UI."""
-    notes = _load_notes(project_root)
+    notes = [_normalize_note(n) for n in _load_notes(project_root)]
 
     if action == "add":
         content = data.get("content", "").strip()
@@ -68,7 +95,7 @@ def handle_action(project_root: str, action: str, data: dict) -> dict:
         note = {
             "id": str(uuid.uuid4())[:8],
             "content": content,
-            "tags": data.get("tags", []),
+            "tags": _normalize_tags(data.get("tags", [])),
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
             "done": False,
@@ -86,7 +113,7 @@ def handle_action(project_root: str, action: str, data: dict) -> dict:
                 if "content" in data:
                     note["content"] = data["content"]
                 if "tags" in data:
-                    note["tags"] = data["tags"]
+                    note["tags"] = _normalize_tags(data["tags"])
                 note["updated_at"] = datetime.now().isoformat()
                 _save_notes(project_root, notes)
                 return {"success": True, "note": note}
