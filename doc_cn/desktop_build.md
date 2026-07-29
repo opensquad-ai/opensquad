@@ -510,11 +510,21 @@ CI：`build-desktop.yml` 在 Windows backend job 的 PyInstaller 之后自动跑
 - 先 `chmod +x <file>.AppImage` 再跑。
 - 没有 FUSE 的环境要加 `--appimage-extract-and-run` 兜底。也可以用 `.deb`。
 
+### macOS 最低系统版本
+
+- 桌面端目标：**macOS 12 Monterey 及以上**（与 Electron 40 官方下限一致）。
+- CI 固定 `macos-15` runner，并设置 `MACOSX_DEPLOYMENT_TARGET=12.0` /
+  `minimumSystemVersion: 12.0`，避免 `macos-latest` 用过新 SDK 把 Mach-O
+  minOS 抬到 13+。本地 mac 构建脚本同样默认 `MACOSX_DEPLOYMENT_TARGET=12.0`。
+
 ### 代码签名（macOS / Windows）
 
-- 仓库里**没配**。macOS build 是没签的（首次开会有 Gatekeeper 警告，
-  右键 → 打开 绕过）。Windows 同理。签名是项目级决定，含义见
-  [RELEASING.md](../RELEASING.md)。
+- **macOS**：electron-builder 已启用 Hardened Runtime + entitlements；
+  `afterSign` 钩子（`scripts/notarize.cjs`）在提供 Apple 凭证时做公证。
+  仓库 **Secrets 未配置时** CI 仍打**未签名**包（首次打开需右键 → 打开）。
+  需要签名/公证时配置的 Secrets 列表见 [RELEASING.md](../RELEASING.md)
+  「macOS code signing & notarization」。
+- **Windows**：签名仍未强制；未配置证书时产物为未签名安装包。
 
 ### 产物在**项目根**的 `build/release/`，不在 `nexuschat-pro/`
 

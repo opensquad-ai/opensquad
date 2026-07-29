@@ -5,6 +5,11 @@ This document captures the known limitations of the OpenSquad **desktop app**
 It is intended for users running the installer and for maintainers packaging
 future releases.
 
+**Supported desktop OS (packaged app):** Windows 10+, macOS **12 Monterey+**,
+modern Linux (AppImage/deb). macOS builds pin `MACOSX_DEPLOYMENT_TARGET=12.0`
+in CI; see [desktop_build.md](../doc_en/desktop_build.md) and
+[RELEASING.md](../RELEASING.md).
+
 ## How the desktop app starts its services
 
 The desktop app is a thin Electron shell around a single PyInstaller binary

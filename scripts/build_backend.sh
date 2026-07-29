@@ -18,6 +18,9 @@ PYTHON_VERSION="3.11"
 # 根据平台决定输出目录名
 if [[ "$(uname)" == "Darwin" ]]; then
   ARTIFACT_NAME="backend-mac"
+  # Match CI / electron-builder: ship binaries that run on macOS 12 Monterey+.
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+  echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
 else
   ARTIFACT_NAME="backend-linux"
 fi

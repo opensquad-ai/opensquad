@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.5]                                                                | 2026-07-29 | [0.8.2 → 0.8.5](https://github.com/opensquad-ai/opensquad/compare/v0.8.2...v0.8.5)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.5)  |
 | [0.8.0]                                                                | 2026-07-22 | [0.6.0 → 0.8.0](https://github.com/opensquad-ai/opensquad/compare/v0.6.0...v0.8.0)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.0)  |
 | [0.6.0]                                                                | 2026-07-15 | [0.5.1 → 0.6.0](https://github.com/opensquad-ai/opensquad/compare/v0.5.1...v0.6.0)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.6.0)  |
 | [0.5.1]                                                                | 2026-07-14 | [0.5.0 → 0.5.1](https://github.com/opensquad-ai/opensquad/compare/v0.5.0...v0.5.1)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.5.1)  |
@@ -28,6 +29,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.5] — 2026-07-29
+
+> Desktop macOS: target Monterey 12+, pin CI runner, optional signing/notarization.
+
+### Fixed
+
+- **desktop/macOS:** CI builds on pinned `macos-15` with
+  `MACOSX_DEPLOYMENT_TARGET=12.0` and `minimumSystemVersion: 12.0` so packaged
+  apps run on macOS 12 Monterey and newer (avoids `macos-latest` raising Mach-O
+  minOS). Backend artifact minOS is gated with `otool` in CI.
+
+### Changed
+
+- **desktop/macOS:** Hardened Runtime + entitlements; `afterSign` notarization
+  when Apple / Developer ID secrets are configured (unsigned fallback when not).
 
 ---
 

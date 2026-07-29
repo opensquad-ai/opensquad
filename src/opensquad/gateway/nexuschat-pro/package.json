@@ -2,7 +2,7 @@
   "name": "nexuschat-pro",
   "productName": "OpenSquad",
   "private": true,
-  "version": "0.8.2",
+  "version": "0.8.5",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "description": "OpenSquad desktop app — local-first multi-agent collaboration gateway",
@@ -135,6 +135,7 @@
       "createStartMenuShortcut": true,
       "include": "assets/installer.nsh"
     },
+    "afterSign": "scripts/notarize.cjs",
     "mac": {
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "target": [
@@ -155,10 +156,11 @@
       ],
       "icon": "assets/icon.icns",
       "category": "public.app-category.productivity",
-      "signIgnore": [
-        "backend-mac/.*",
-        "Contents/Resources/backend-mac/.*"
-      ]
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist"
     },
     "linux": {
       "artifactName": "${productName}-${version}-linux-${arch}.${ext}",

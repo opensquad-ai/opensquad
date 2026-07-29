@@ -374,7 +374,11 @@ Desktop builds are **not** produced by `release.yml`. They come from
 tag push:
 
 1. **build-backend** — PyInstaller on Windows / macOS / Linux (matrix).
-2. **build-electron** — electron-builder installers per OS.
+   macOS uses a **pinned `macos-15` runner** with
+   `MACOSX_DEPLOYMENT_TARGET=12.0` so the frozen backend runs on
+   **macOS 12 Monterey and newer** (do not use `macos-latest` for this job).
+2. **build-electron** — electron-builder installers per OS (same macOS pin +
+   deployment target; `minimumSystemVersion: 12.0`).
 3. **attach-to-release** — uploads `.exe` / `.dmg` / `.AppImage` / `.deb` to
    the GitHub Release with the same tag name (`overwrite_files: true` replaces
    same-named assets).
@@ -382,6 +386,31 @@ tag push:
 `release.yml` creates the Release page and notes first; `build-desktop.yml`
 only **adds/replaces** binary assets (~10–15 minutes later). Do not panic if
 the Release page appears before the installers show up.
+
+### macOS code signing & notarization (optional, recommended)
+
+Without Apple credentials, CI still produces **unsigned** `.dmg` / `.zip`
+(Gatekeeper requires right-click → Open). To ship signed + notarized builds,
+add these **repository secrets** and re-run `build-desktop.yml`:
+
+| Secret | Purpose |
+|--------|---------|
+| `CSC_LINK` | Base64-encoded Developer ID Application `.p12` (or file path on self-hosted) |
+| `CSC_KEY_PASSWORD` | Password for that `.p12` |
+| `APPLE_ID` | Apple ID used for notarization |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for that Apple ID |
+| `APPLE_TEAM_ID` | 10-character Team ID |
+
+Alternatively (App Store Connect API key instead of Apple ID password):
+
+| Secret | Purpose |
+|--------|---------|
+| `APPLE_API_KEY` | Contents or path of the `.p8` key |
+| `APPLE_API_KEY_ID` | Key ID |
+| `APPLE_API_ISSUER` | Issuer UUID |
+
+`scripts/notarize.cjs` (electron-builder `afterSign`) runs only when one of
+those auth sets is present; missing secrets keep the unsigned path.
 
 ### Cut a release with fresh desktop Assets (normal flow)
 

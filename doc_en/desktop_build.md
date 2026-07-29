@@ -525,12 +525,22 @@ These bugs **never appear in dev mode** — only in the frozen bundle:
 - Some FUSE-less environments need `--appimage-extract-and-run` as a
   fallback. Or use the `.deb` instead.
 
+### macOS minimum version
+
+- Desktop target: **macOS 12 Monterey and newer** (matches Electron 40).
+- CI pins the **`macos-15`** runner and sets `MACOSX_DEPLOYMENT_TARGET=12.0`
+  / `minimumSystemVersion: 12.0` so `macos-latest` cannot silently raise
+  Mach-O minOS above 12. Local `scripts/build_backend.sh` defaults to the
+  same deployment target on Darwin.
+
 ### Code signing (macOS / Windows)
 
-- **Not configured** in this repo. macOS builds will be unsigned (Gatekeeper
-  warning on first launch, right-click → Open to bypass). Windows builds
-  are similarly unsigned. Adding signing is a project-level decision;
-  see [RELEASING.md](../RELEASING.md) for the implications.
+- **macOS**: Hardened Runtime + entitlements are enabled; `afterSign`
+  (`scripts/notarize.cjs`) notarizes when Apple credentials are present.
+  Without repo Secrets, CI still ships **unsigned** builds (Gatekeeper:
+  right-click → Open). Secret names are listed in
+  [RELEASING.md](../RELEASING.md) under “macOS code signing & notarization”.
+- **Windows**: Signing remains optional; unsigned installers if no cert.
 
 ### Output is in `build/release/` at the **project root**, not in `nexuschat-pro/`
 

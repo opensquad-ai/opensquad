@@ -14,6 +14,11 @@ on:
         required: false
         type: string
 
+# macOS desktop floor: Monterey 12+ (Electron 40). Pin macos-15 — do not use
+# macos-latest (newer Xcode/SDK can raise Mach-O minOS when deployment target
+# is unset). macos-13 is retired; macos-14 is deprecating. Set
+# MACOSX_DEPLOYMENT_TARGET=12.0 only on macOS job steps below.
+
 jobs:
   # ── 第一步：各平台分别构建 Python 后端 ──────────────────────────────────────
   build-backend:
@@ -25,7 +30,7 @@ jobs:
           - os: windows-latest
             artifact: backend-win
             exe_name: run.exe
-          - os: macos-latest
+          - os: macos-15
             artifact: backend-mac
             exe_name: run
           - os: ubuntu-latest
@@ -51,6 +56,9 @@ jobs:
           pip install pyinstaller
           pip install Pillow playwright
           playwright install chromium
+        env:
+          # Also applies when compiling any source wheels on macOS.
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '12.0' || '' }}
 
       - name: Build desktop app icons
         working-directory: .
@@ -78,9 +86,39 @@ jobs:
         # which interprets the leading '--' of --distpath / --workpath as
         # the unary decrement operator.
         run: pyinstaller src/opensquad/gateway/backend/opensquad_backend.spec --distpath build/${{ matrix.artifact }} --workpath build/.pyinstaller-work --clean --noconfirm
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '12.0' || '' }}
 
       - name: Verify PyInstaller bundle is Python 3.11
         run: python scripts/check_build_python.py --bundle build/${{ matrix.artifact }}/run
+
+      - name: Check macOS deployment target (backend)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="build/${{ matrix.artifact }}/run/run"
+          echo "Inspecting minOS on $BIN"
+          # Prefer LC_BUILD_VERSION minos; fall back to LC_VERSION_MIN_MACOSX.
+          MINOS=$(otool -l "$BIN" | awk '
+            /LC_BUILD_VERSION/ { in_bv=1; next }
+            /LC_VERSION_MIN_MACOSX/ { in_vmin=1; next }
+            in_bv && /minos/ { print $2; exit }
+            in_vmin && /version/ { print $2; exit }
+            /^Load command/ { in_bv=0; in_vmin=0 }
+          ')
+          echo "Detected minOS: ${MINOS:-unknown}"
+          if [[ -z "${MINOS}" ]]; then
+            echo "::warning::Could not parse minOS from $BIN (otool layout may differ)"
+            exit 0
+          fi
+          # Fail if minOS major > 12 (e.g. 13.0 / 14.0 / 15.0).
+          MAJOR="${MINOS%%.*}"
+          if [[ "$MAJOR" =~ ^[0-9]+$ ]] && (( MAJOR > 12 )); then
+            echo "::error::Backend binary minOS is $MINOS (want <= 12.x for macOS Monterey+). Check MACOSX_DEPLOYMENT_TARGET."
+            exit 1
+          fi
+          echo "Backend minOS $MINOS is OK for macOS 12+"
 
       - name: Static check frozen writable paths
         if: runner.os == 'Windows'
@@ -116,7 +154,7 @@ jobs:
           - os: windows-latest
             backend_artifact: backend-win
             npm_script: electron:win
-          - os: macos-latest
+          - os: macos-15
             backend_artifact: backend-mac
             npm_script: electron:mac
           - os: ubuntu-latest
@@ -164,9 +202,32 @@ jobs:
 
       - name: Build Electron app
         working-directory: src/opensquad/gateway/nexuschat-pro
-        run: npm run ${{ matrix.npm_script }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Without a Developer ID cert, force unsigned packaging so CI does not
+          # fail looking for a keychain identity. When CSC_LINK is set in repo
+          # secrets, electron-builder signs; notarize.cjs runs if Apple creds exist.
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            if [[ -z "${CSC_LINK:-}" ]]; then
+              export CSC_IDENTITY_AUTO_DISCOVERY=false
+              echo "No CSC_LINK secret — building unsigned macOS app (Gatekeeper will warn)."
+            else
+              echo "CSC_LINK present — signing macOS app (notarize if Apple credentials set)."
+            fi
+          fi
+          npm run ${{ matrix.npm_script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '12.0' || '' }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
