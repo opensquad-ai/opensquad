@@ -53,8 +53,12 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   );
 };
 
-const fmtTime = (ts: number | null) =>
-  ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--';
+const fmtDateTime = (ts: number | null) => {
+  if (!ts) return '--';
+  const d = new Date(ts * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 
 export const ExecWorkflowView: React.FC<Props> = ({
   agentName,
@@ -393,7 +397,7 @@ export const ExecWorkflowView: React.FC<Props> = ({
             <StatusBadge status={exec.status} />
           </div>
           <div className="mt-0.5 text-[10px] text-textMuted truncate">
-            {fmtTime(exec.started_at)}{exec.manual ? ' · manual' : ''}{exec.session_id ? ` · ${exec.session_id.slice(-8)}` : ''}
+            {fmtDateTime(exec.started_at)}{exec.manual ? ' · manual' : ''}{exec.session_id ? ` · ${exec.session_id.slice(-8)}` : ''}
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap">

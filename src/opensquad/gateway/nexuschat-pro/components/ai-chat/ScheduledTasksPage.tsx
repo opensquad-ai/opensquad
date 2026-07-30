@@ -373,8 +373,12 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   );
 };
 
-const fmtTime = (ts: number | null) => (ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--');
-const fmtDate = (ts: number | null) => (ts ? new Date(ts * 1000).toLocaleDateString() : '--');
+const fmtDateTime = (ts: number | null) => {
+  if (!ts) return '--';
+  const d = new Date(ts * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
 
 const scheduleSummary = (task: ScheduledTask): string => {
   const s = task.schedule || ({} as any);
@@ -415,7 +419,7 @@ const ExecRow: React.FC<{
       <div className="flex items-center justify-between gap-1">
         <span className="text-[11px] font-medium truncate">{exec.task_name}</span>
         <div className="flex items-center gap-1 shrink-0">
-          <span className="text-[10px] text-textMuted">{fmtTime(exec.started_at)}</span>
+          <span className="text-[10px] text-textMuted">{fmtDateTime(exec.started_at)}</span>
           <button
             type="button"
             title={t('scheduledTasks.deleteExec')}
@@ -496,7 +500,7 @@ const TaskDetail: React.FC<{ task: ScheduledTask; onEdit: () => void; onRun: () 
       <div className="grid grid-cols-2 gap-3 rounded-lg bg-black/[0.02] dark:bg-white/[0.03] p-3">
         <InfoCell label="Schedule" value={scheduleSummary(task)} />
         <InfoCell label="Next run" value={relTime(task.next_run_ts)} />
-        <InfoCell label="Last run" value={task.last_run_ts ? `${fmtDate(task.last_run_ts)} ${fmtTime(task.last_run_ts)}` : '--'} />
+        <InfoCell label="Last run" value={fmtDateTime(task.last_run_ts)} />
         <InfoCell label="Run count" value={task.run_count} />
         <InfoCell label="Delegate agent" value={task.delegate_agent || '--'} />
         <InfoCell label="Model" value={task.model_card || 'default'} />
