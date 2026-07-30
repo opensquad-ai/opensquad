@@ -633,6 +633,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 # plus the permanent workspace root.
                 name = path.split("/")[3]
                 return self._handle_get_working_directory(name)
+            elif path.startswith("/api/agents/") and path.endswith("/web-ui-state"):
+                # GET /api/agents/{name}/web-ui-state — Agent Web workspace chrome
+                # + session↔project bindings (shared across browser origins / LAN).
+                name = path.split("/")[3]
+                return self._handle_get_web_ui_state(name)
             elif path.startswith("/api/agents/") and path.endswith("/fs/list"):
                 # GET /api/agents/{name}/fs/list?path=&root=
                 name = path.split("/")[3]
@@ -995,6 +1000,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 name = path.split("/")[3]
                 body = self._read_body()
                 return self._handle_set_working_directory(name, body)
+            elif path.startswith("/api/agents/") and path.endswith("/web-ui-state"):
+                name = path.split("/")[3]
+                body = self._read_body()
+                return self._handle_put_web_ui_state(name, body)
             elif path.startswith("/api/agents/") and path.endswith("/role-prompt"):
                 name = path.split("/")[3]
                 body = self._read_body()
@@ -1072,6 +1081,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "restart_count": 0,
                             "started_at": None,
                             "config": cfg,
+                            "auto_start_on_boot": bool(
+                                (cfg.get("ui") or {}).get("auto_start_on_boot", False)
+                                if isinstance(cfg.get("ui"), dict)
+                                else False
+                            ),
                             "token_stats": None,
                             "chat_profile": self._read_chat_profile(info["name"]),
                         }
@@ -1653,6 +1667,111 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     "status": "success",
                     "message": f"Working directory set to: {path}",
                     "path": payload.get("path") or os.path.abspath(path),
+                }
+            )
+
+        def _web_ui_state_path(self, agent_dir: str) -> str:
+            return os.path.join(agent_dir, ".agent_web_ui.json")
+
+        def _handle_get_web_ui_state(self, name: str):
+            """GET /api/agents/{name}/web-ui-state
+
+            Agent Web workspace registry + session↔project bindings.
+            Stored on the agent host so LAN / different browser origins
+            (localhost vs 192.168.x.x) share the same chrome.
+            """
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
+            if not os.path.isdir(agent_dir):
+                return self._send_json({"error": "Agent directory not found"}, 404)
+            fp = self._web_ui_state_path(agent_dir)
+            if not os.path.isfile(fp):
+                return self._send_json(
+                    {
+                        "agent": name,
+                        "savedAt": 0,
+                        "workspaces": None,
+                        "session_project_meta": {},
+                    }
+                )
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception as e:
+                return self._send_json({"error": f"Failed to read web UI state: {e}"}, 500)
+            return self._send_json(
+                {
+                    "agent": name,
+                    "savedAt": int(data.get("savedAt") or 0),
+                    "workspaces": data.get("workspaces"),
+                    "session_project_meta": data.get("session_project_meta")
+                    if isinstance(data.get("session_project_meta"), dict)
+                    else {},
+                }
+            )
+
+        def _handle_put_web_ui_state(self, name: str, body: dict):
+            """PUT /api/agents/{name}/web-ui-state — persist Agent Web UI chrome."""
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
+            if not os.path.isdir(agent_dir):
+                return self._send_json({"error": "Agent directory not found"}, 404)
+            if not isinstance(body, dict):
+                return self._send_json({"error": "Invalid body"}, 400)
+
+            fp = self._web_ui_state_path(agent_dir)
+            existing: dict = {}
+            if os.path.isfile(fp):
+                try:
+                    with open(fp, encoding="utf-8") as f:
+                        raw = json.load(f)
+                    if isinstance(raw, dict):
+                        existing = raw
+                except Exception:
+                    existing = {}
+
+            incoming_at = int(body.get("savedAt") or 0)
+            existing_at = int(existing.get("savedAt") or 0)
+            # Last-write-wins by savedAt; equal/older keeps existing to avoid
+            # racing two browsers into a silent wipe.
+            if existing_at and incoming_at and incoming_at < existing_at:
+                return self._send_json(
+                    {
+                        "status": "skipped",
+                        "message": "stale client state",
+                        "savedAt": existing_at,
+                        "workspaces": existing.get("workspaces"),
+                        "session_project_meta": existing.get("session_project_meta") or {},
+                    }
+                )
+
+            next_state = {
+                "version": 1,
+                "savedAt": incoming_at or int(time.time() * 1000),
+                "workspaces": body.get("workspaces", existing.get("workspaces")),
+                "session_project_meta": body.get("session_project_meta")
+                if isinstance(body.get("session_project_meta"), dict)
+                else (existing.get("session_project_meta") or {}),
+            }
+            tmp = fp + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(next_state, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, fp)
+            except Exception as e:
+                try:
+                    if os.path.isfile(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+                return self._send_json({"error": f"Failed to write web UI state: {e}"}, 500)
+
+            return self._send_json(
+                {
+                    "status": "success",
+                    "savedAt": next_state["savedAt"],
+                    "workspaces": next_state.get("workspaces"),
+                    "session_project_meta": next_state.get("session_project_meta") or {},
                 }
             )
 
@@ -4232,41 +4351,23 @@ def _auto_start_plugin_services_parallel(plugin_ids: list[str]) -> None:
     threading.Thread(target=_run, daemon=True, name="plugin-autostart-pool").start()
 
 
-def _cli_last_agent_name() -> str | None:
-    """Last agent from ``opensquad code`` credentials (warm-start on launcher boot)."""
-    try:
-        cred_path = os.path.join(os.path.expanduser("~"), ".opensquad", "cli_credentials.json")
-        with open(cred_path, encoding="utf-8") as f:
-            data = json.load(f)
-        name = str((data or {}).get("last_agent") or "").strip()
-        return name or None
-    except Exception:
-        return None
-
-
 def _auto_start_agents(args, agents_info):
-    """Phase 8: Auto-start agents with auto_start_on_boot=true (unless --no-auto-start)."""
+    """Phase 8: Auto-start agents with auto_start_on_boot=true (unless --no-auto-start).
+
+    Only the per-agent UI flag is honored. Do **not** warm-start the last CLI
+    agent from ``~/.opensquad/cli_credentials.json`` — that used to start
+    agents even when 「设为默认启动」 was off, which surprised desktop users.
+    ``opensquad code`` still boots the last agent on demand when the CLI runs.
+    """
     if not args.no_auto_start and agents_info:
         used_ports = [p.actual_port for p in _processes.values() if p.is_alive()]
-        boot_started: set[str] = set()
         for _name, ap in _processes.items():
             auto_flag = bool((ap.config or {}).get("ui", {}).get("auto_start_on_boot", False))
             if not auto_flag:
                 continue
             ap.start(allocated_ports=used_ports)
-            boot_started.add(_name)
             if ap.actual_port:
                 used_ports.append(ap.actual_port)
-
-        # Warm-start last CLI agent for fast ``opensquad code`` (Phase 2 keep-alive)
-        last_cli = _cli_last_agent_name()
-        if last_cli and last_cli in _processes and last_cli not in boot_started:
-            ap = _processes[last_cli]
-            if not ap.is_alive():
-                _log.info(f"[Launcher] Warm-starting last CLI agent '{last_cli}'")
-                ap.start(allocated_ports=used_ports)
-                if ap.actual_port:
-                    used_ports.append(ap.actual_port)
 
 
 def _setup_signal_handler():

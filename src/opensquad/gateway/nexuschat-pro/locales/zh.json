@@ -223,7 +223,7 @@
     "navShortcut": "导航栏快捷窗口",
     "navShortcutHint": "开启后将在群列表底部菜单栏显示该 Agent 头像，点击可快速进入其 Web 对话任务流页面。",
     "autoStartOnBoot": "设为默认启动",
-    "autoStartOnBootHint": "开启后程序下次启动时将自动启动该 Agent。",
+    "autoStartOnBootHint": "开启后，下次启动程序与 CLI 会自动使用该 Agent（同时只会保留一个默认启动）。关闭后需手动 /start。切换会立即保存。",
     "commaSeparated": "（逗号分隔）",
     "modelSettings": "模型设置",
     "importFromModelCard": "从模型卡导入",

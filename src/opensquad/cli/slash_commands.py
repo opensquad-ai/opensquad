@@ -59,6 +59,13 @@ COMMANDS: tuple[SlashCommand, ...] = (
         aliases=("agents",),
         category="session",
     ),
+    SlashCommand(
+        "autostart",
+        "Show/set default boot agent (synced with Web)",
+        "/autostart [name|off|list]",
+        aliases=("boot-default",),
+        category="session",
+    ),
     SlashCommand("status", "Show gateway / mode / login", "/status", category="session"),
     SlashCommand(
         "debug",

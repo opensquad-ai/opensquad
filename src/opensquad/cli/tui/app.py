@@ -80,11 +80,10 @@ def run_tui(*, gateway: str | None = None, agent: str | None = None, no_start: b
 
     apply_win_ime_patch()
 
-    from opensquad.cli.api_client import GatewayClient, last_agent
+    from opensquad.cli.api_client import GatewayClient
 
     client = GatewayClient(gateway_url=gateway)
-    if not agent:
-        agent = last_agent()
+    # Without --agent, leave unset until preflight resolves auto_start_on_boot.
     app = OpenSquadApp(client=client, agent=agent, no_start=no_start)
     app.run()
 
@@ -405,10 +404,7 @@ def _build_app_class():
                 if not self.client.token:
                     self.log_line(t("not_logged_in"), style="system")
                 elif not self.agent:
-                    self.log_line(
-                        "No agent selected. /agent list then /start <name>",
-                        style="system",
-                    )
+                    self.log_line(t("no_autostart_agent"), style="system")
             self._maybe_hint_windows_terminal()
 
         def _maybe_hint_windows_terminal(self) -> None:

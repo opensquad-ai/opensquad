@@ -327,6 +327,7 @@ export function loadWorkspaceStore(agentId: string): WorkspaceStoreSnapshot {
       workspaces: parsed.workspaces,
       chrome,
       migrated: !!parsed.migrated,
+      savedAt: typeof parsed.savedAt === 'number' ? parsed.savedAt : undefined,
     };
     // Persist coerced ids / migrated layouts so paneId stays stable across loads
     try {

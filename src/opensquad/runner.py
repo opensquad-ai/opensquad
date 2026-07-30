@@ -4988,6 +4988,24 @@ if __name__ == "__main__":
     base_url = model_conf.get("base_url")
     model_name = model_conf.get("model_name", "gpt-3.5-turbo")
 
+    # Inherit api_key from model card when config has _card reference but empty api_key.
+    card_name = model_conf.get("_card", "")
+    if card_name and not api_key:
+        try:
+            from opensquad.model_switch import resolve_card
+
+            card = resolve_card(card_name)
+            card_api_key = card.get("api_key", "").strip()
+            if card_api_key:
+                api_key = card_api_key
+                model_conf["api_key"] = card_api_key
+                logger.info(
+                    "[Boot] Inherited api_key from model card '%s'",
+                    card_name,
+                )
+        except Exception as exc:
+            logger.debug("[Boot] Could not resolve model card '%s' to inherit api_key: %s", card_name, exc)
+
     # Validate api_key early — provide a clear error message instead of silent failure
     if not api_key or api_key in (None, ""):
         agent_name = config.get("agent_name", "unknown")

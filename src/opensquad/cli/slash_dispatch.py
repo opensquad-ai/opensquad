@@ -140,6 +140,9 @@ def dispatch_slash(line: str, ctx: dict[str, Any]) -> bool:
     if cmd.name == "agent" or name == "agents":
         return _agent_session(ctx, args)
 
+    if cmd.name in ("autostart", "boot-default"):
+        return _autostart_session(ctx, args)
+
     if cmd.name in ("start", "boot"):
         handler = ctx.get("start_agent")
         name = args[0] if args else None
@@ -320,6 +323,39 @@ def _agent_session(ctx, args: list[str]) -> bool:
     else:
         print("/agent switch not available")
     return True
+
+
+def _autostart_session(ctx, args: list[str]) -> bool:
+    """Slash /autostart — same flag as Web 「设为默认启动」."""
+    from opensquad.cli.api_client import list_autostart_agents, set_agent_autostart
+
+    client = ctx.get("client")
+    if client is None:
+        print("/autostart requires Gateway client")
+        return True
+    try:
+        if not args or args[0] in ("list", "ls", "show", "status"):
+            cur = list_autostart_agents(client)
+            print(f"autostart: {', '.join(cur) if cur else '(none)'}")
+            if not cur:
+                print("  Set: /autostart <dir>   or   opensquad agent autostart <dir>")
+            return True
+        if args[0] in ("off", "clear", "none", "disable"):
+            cur = list_autostart_agents(client)
+            for n in cur:
+                set_agent_autostart(client, n, enabled=False, exclusive=False)
+            print(f"autostart cleared: {', '.join(cur) if cur else '(none)'}")
+            return True
+        dir_name = set_agent_autostart(client, args[0], enabled=True, exclusive=True)
+        print(f"autostart set: {dir_name}")
+        # Optionally connect now if TUI exposes start_agent
+        start = ctx.get("start_agent")
+        if callable(start) and not ctx.get("agent"):
+            start(dir_name)
+        return True
+    except Exception as e:
+        print(f"/autostart failed: {e}")
+        return True
 
 
 def _run_group_shell(ctx, args: list[str]) -> bool:
@@ -604,7 +640,16 @@ def _run_agentctl(ctx, args: list[str]) -> None:
         name=rest[0] if rest else None,
         set_json=None,
         tail=50,
+        clear=False,
+        keep_others=False,
     )
     if action == "config" and len(rest) >= 3 and rest[1] == "--set-json":
         ns.set_json = rest[2]
+    if action == "autostart":
+        if rest and rest[0] in ("--clear", "clear", "off"):
+            ns.clear = True
+            ns.name = None
+        elif "--keep-others" in rest:
+            ns.keep_others = True
+            ns.name = next((x for x in rest if not x.startswith("-")), None)
     run_agent(ns)

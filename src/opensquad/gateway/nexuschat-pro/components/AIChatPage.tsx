@@ -68,6 +68,12 @@ import {
   requestSessionListRefresh,
 } from '../utils/sessionProjectMeta';
 import {
+  bindAgentWebUiSyncPush,
+  pullAgentWebUiState,
+  schedulePushAgentWebUiState,
+  setAgentWebUiSyncTarget,
+} from '../utils/agentWebUiSync';
+import {
   loadWorkspaceStore,
   loadWorkspaceStoreResolved,
   setWorkspaceStoreAliases,
@@ -6618,6 +6624,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setWsSnap(loadWorkspaceStoreResolved(agentId, [agentProfile?.dir_name]));
     wsMigratedRef.current = false;
   }, [agentId, agentProfile?.dir_name, agentProfile?.agent_id]);
+
+  // Persist workspace chrome + session↔project bindings on the agent host so
+  // LAN / different origins (localhost vs 192.168.x.x) share the same state.
+  useEffect(() => {
+    if (!agentId) return;
+    const serverName = (agentProfile?.dir_name || agentId).trim();
+    setAgentWebUiSyncTarget(agentId, serverName, [
+      agentProfile?.dir_name,
+      agentProfile?.agent_id,
+    ]);
+    const unbind = bindAgentWebUiSyncPush();
+    let cancelled = false;
+    void (async () => {
+      const applied = await pullAgentWebUiState();
+      if (cancelled) return;
+      if (applied) {
+        refreshWsSnap();
+        requestSessionListRefresh(agentId);
+      } else {
+        // Seed server from this browser if it already has local chrome.
+        schedulePushAgentWebUiState(200);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unbind();
+    };
+  }, [agentId, agentProfile?.dir_name, agentProfile?.agent_id, refreshWsSnap]);
 
   useEffect(() => {
     const onCh = (e: Event) => {

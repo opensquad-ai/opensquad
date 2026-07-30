@@ -39,16 +39,25 @@ const getBackendHost = () => {
   return BACKEND_HOST;
 };
 
-// HTTPS 页面（含反向代理）必须用同协议；否则 Safari 会拦混合内容 / 麦克风。
-// 仅在 HTTPS 下跟 window.location.host（便于 :9443→:9555 反代）。
-// HTTP 的 Vite :5173 不能跟页面端口——Vite 未代理 /ai-web/ws，否则会一直 Disconnected。
+// Prefer same-origin authority when the page host already proxies the backend:
+// - HTTPS reverse proxy (:9443 → gateway)
+// - Vite DEV (:5173 proxies /api + /ai-web/ws) — critical for LAN; clients only
+//   need the frontend port open, not :9555.
 const getBackendAuthority = () => {
-  if (typeof window !== 'undefined' && isPageHttps()) {
+  if (typeof window !== 'undefined') {
     const pageHost = window.location.hostname;
     const pagePort = window.location.port;
-    const backendHost = getBackendHost();
-    if (pageHost === backendHost && pagePort) {
-      return `${pageHost}:${pagePort}`;
+    const pageAuthority = pagePort ? `${pageHost}:${pagePort}` : pageHost;
+    if (isPageHttps()) {
+      const backendHost = getBackendHost();
+      if (pageHost === backendHost && pagePort) {
+        return pageAuthority;
+      }
+    }
+    // Vite DEV: HTTP page → use page host so WS hits the Vite proxy
+    // (`/ai-web` → gateway) instead of dialing :9555 directly.
+    if (Boolean((import.meta as any).env?.DEV)) {
+      return pageAuthority;
     }
   }
   return `${getBackendHost()}:${BACKEND_PORT}`;
@@ -814,6 +823,8 @@ export interface ChatProfile {
   chat_profile: ChatProfile | null;
   role_card?: string | null;
   model_card?: string | null;
+  /** Synced with Agent Manager 「设为默认启动」 / CLI autostart */
+  auto_start_on_boot?: boolean;
   node_id?: string;
   node_label?: string;
 }
@@ -854,6 +865,36 @@ export const adminAPI = {
     return apiRequest<{ status: string; path: string }>(`/ai-web/admin/agents/${name}/working-directory`, {
       method: 'PUT',
       body: JSON.stringify({ path }),
+    });
+  },
+
+  /** Agent Web 工作区 chrome + 会话↔项目绑定（跨浏览器 origin / 局域网共享） */
+  getWebUiState: async (name: string) => {
+    return apiRequest<{
+      agent: string;
+      savedAt: number;
+      workspaces: any | null;
+      session_project_meta: Record<string, any>;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/web-ui-state`);
+  },
+
+  putWebUiState: async (
+    name: string,
+    body: {
+      savedAt: number;
+      workspaces?: any | null;
+      session_project_meta?: Record<string, any>;
+    },
+  ) => {
+    return apiRequest<{
+      status: string;
+      savedAt: number;
+      workspaces?: any | null;
+      session_project_meta?: Record<string, any>;
+      message?: string;
+    }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/web-ui-state`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     });
   },
 

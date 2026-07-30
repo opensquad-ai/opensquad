@@ -378,9 +378,36 @@ def load_config(agent_dir: str) -> dict:
 
     try:
         validated = validate_agent_config(raw)
-        return validated
     except ConfigValidationError:
         raise
+
+    # Inherit api_key from model card when config has _card reference but empty api_key.
+    # This ensures users who configure their key in the model card (via UI or file edit)
+    # don't need to also manually set it in every agent's config.json.
+    model = validated.get("model", {})
+    card_name = model.get("_card", "")
+    api_key = model.get("api_key", "")
+    if card_name and not api_key:
+        try:
+            from opensquad.model_switch import resolve_card
+
+            card = resolve_card(card_name)
+            card_api_key = card.get("api_key", "").strip()
+            if card_api_key:
+                validated["model"]["api_key"] = card_api_key
+                logger.info(
+                    "[Boot] Inherited api_key from model card '%s' for agent '%s'",
+                    card_name,
+                    validated.get("agent_name", "?"),
+                )
+        except Exception as exc:
+            logger.debug(
+                "[Boot] Could not resolve model card '%s' to inherit api_key: %s",
+                card_name,
+                exc,
+            )
+
+    return validated
 
 
 def _resolve_tool_format(config: dict) -> str:

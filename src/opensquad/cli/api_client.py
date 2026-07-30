@@ -56,7 +56,7 @@ def clear_credentials() -> None:
 
 
 def remember_agent(dir_name: str | None) -> None:
-    """Persist last-used agent dir_name for next `opensquad code`."""
+    """Cache last-connected agent dir_name (session hint only; not the boot default)."""
     name = (dir_name or "").strip()
     if not name:
         return
@@ -72,28 +72,117 @@ def last_agent() -> str | None:
     return name or None
 
 
+def _agent_dir_name(a: dict[str, Any]) -> str | None:
+    name = (a.get("dir_name") or a.get("agent_id") or "").strip()
+    return name or None
+
+
+def _agent_is_autostart(a: dict[str, Any]) -> bool:
+    if "auto_start_on_boot" in a:
+        return bool(a.get("auto_start_on_boot"))
+    cfg = a.get("config") if isinstance(a.get("config"), dict) else {}
+    ui = cfg.get("ui") if isinstance(cfg.get("ui"), dict) else {}
+    return bool(ui.get("auto_start_on_boot", False))
+
+
+def list_autostart_agents(client: GatewayClient) -> list[str]:
+    """Dir names with ``ui.auto_start_on_boot`` (same flag as Agent Manager)."""
+    data = client.admin_get("agents")
+    out: list[str] = []
+    for a in data.get("agents") or []:
+        if not _agent_is_autostart(a):
+            continue
+        name = _agent_dir_name(a)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _unwrap_agent_config(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    cfg = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def set_agent_autostart(
+    client: GatewayClient,
+    name: str,
+    *,
+    enabled: bool = True,
+    exclusive: bool = True,
+) -> str:
+    """Set ``ui.auto_start_on_boot`` on disk (same as Web Agent Manager).
+
+    When ``exclusive`` and enabling, clear the flag on every other agent so
+    CLI/Web share a single default boot agent.
+    """
+    target = (name or "").strip()
+    if not target:
+        raise ValueError("agent name required")
+
+    data = client.admin_get("agents")
+    agents = list(data.get("agents") or [])
+    match = next(
+        (
+            a
+            for a in agents
+            if a.get("dir_name") == target or a.get("agent_id") == target or a.get("agent_name") == target
+        ),
+        None,
+    )
+    if not match:
+        raise ValueError(f"agent not found: {target}")
+    dir_name = str(match.get("dir_name") or target)
+
+    def _write(dir_n: str, flag: bool) -> None:
+        raw = client.admin_get(f"agents/{dir_n}/config")
+        cfg = _unwrap_agent_config(raw)
+        ui = cfg.get("ui") if isinstance(cfg.get("ui"), dict) else {}
+        ui = dict(ui)
+        ui["auto_start_on_boot"] = flag
+        cfg["ui"] = ui
+        client.admin_put(f"agents/{dir_n}/config", {"config": cfg})
+
+    if exclusive and enabled:
+        for a in agents:
+            other = _agent_dir_name(a)
+            if not other or other == dir_name:
+                continue
+            if _agent_is_autostart(a):
+                _write(other, False)
+
+    _write(dir_name, enabled)
+    if enabled:
+        remember_agent(dir_name)
+    elif last_agent() == dir_name:
+        creds = load_credentials()
+        creds.pop("last_agent", None)
+        save_credentials(creds)
+    return dir_name
+
+
 def pick_default_agent(client: GatewayClient) -> str | None:
-    """Prefer last-used agent, then first ready, then first listed."""
+    """CLI default agent = first agent with auto_start_on_boot (synced with UI).
+
+    Does **not** fall back to an arbitrary ready agent — if none is marked
+    for auto-start, return None so the user must ``/start <name>`` or
+    ``opensquad agent autostart <name>``.
+    """
+    try:
+        names = list_autostart_agents(client)
+    except Exception:
+        return None
+    if not names:
+        return None
     try:
         data = client.admin_get("agents")
+        agents = data.get("agents") or []
+        by_dir = {_agent_dir_name(a): a for a in agents if _agent_dir_name(a)}
+        ready = [n for n in names if (by_dir.get(n) or {}).get("ready")]
+        return (ready or names)[0]
     except Exception:
-        return last_agent()
-    agents = data.get("agents") or []
-    if not agents:
-        return last_agent()
-
-    def _name(a: dict[str, Any]) -> str | None:
-        return a.get("dir_name") or a.get("agent_id")
-
-    saved = last_agent()
-    if saved:
-        for a in agents:
-            if a.get("dir_name") == saved or a.get("agent_id") == saved:
-                return a.get("dir_name") or saved
-
-    ready = [a for a in agents if a.get("ready")]
-    pool = ready or agents
-    return _name(pool[0]) if pool else saved
+        return names[0]
 
 
 def resolve_gateway_url(explicit: str | None = None) -> str:

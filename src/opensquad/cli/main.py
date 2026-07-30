@@ -117,6 +117,26 @@ def main():
     p_agent_logs = agent_sub.add_parser("logs", help="Show agent logs")
     p_agent_logs.add_argument("name", help="Agent dir_name")
     p_agent_logs.add_argument("--tail", type=int, default=50, help="Tail lines")
+    p_agent_boot = agent_sub.add_parser(
+        "autostart",
+        help="Show/set default boot agent (synced with Web 「设为默认启动」)",
+    )
+    p_agent_boot.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Agent dir_name to mark as auto-start (omit to show current)",
+    )
+    p_agent_boot.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear auto-start on all agents",
+    )
+    p_agent_boot.add_argument(
+        "--keep-others",
+        action="store_true",
+        help="Do not clear other agents when setting this one",
+    )
 
     # ── mcp ──
     p_mcp = sub.add_parser("mcp", help="Manage MCP servers")

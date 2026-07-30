@@ -52,6 +52,11 @@ class AgentHandlerMixin:
                         "restart_count": 0,
                         "started_at": None,
                         "config": cfg,
+                        "auto_start_on_boot": bool(
+                            (cfg.get("ui") or {}).get("auto_start_on_boot", False)
+                            if isinstance(cfg.get("ui"), dict)
+                            else False
+                        ),
                         "token_stats": None,
                         "chat_profile": self._read_chat_profile(info["name"]),
                     }

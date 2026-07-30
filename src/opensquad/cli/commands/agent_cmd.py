@@ -1,17 +1,24 @@
-"""opensquad agent — list / start / stop / restart / config / logs"""
+"""opensquad agent — list / start / stop / restart / config / logs / autostart"""
 
 from __future__ import annotations
 
 import json
 import sys
 
-from opensquad.cli.api_client import GatewayClient, handle_api_error, print_json, print_table
+from opensquad.cli.api_client import (
+    GatewayClient,
+    handle_api_error,
+    list_autostart_agents,
+    print_json,
+    print_table,
+    set_agent_autostart,
+)
 
 
 def run_agent(args) -> None:
     action = getattr(args, "agent_action", None)
     if not action:
-        print("[agent] Usage: opensquad agent {list|show|start|stop|restart|config|logs}")
+        print("[agent] Usage: opensquad agent {list|show|start|stop|restart|config|logs|autostart}")
         sys.exit(1)
 
     client = GatewayClient(gateway_url=getattr(args, "gateway", None))
@@ -30,6 +37,8 @@ def run_agent(args) -> None:
             _config(client, args)
         elif action == "logs":
             _logs(client, args.name, getattr(args, "tail", 50))
+        elif action == "autostart":
+            _autostart(client, args)
         else:
             print(f"[agent] Unknown action: {action}")
             sys.exit(1)
@@ -50,6 +59,7 @@ def _list(client: GatewayClient) -> None:
                 "name": a.get("agent_name") or "",
                 "status": a.get("process_status") or "",
                 "ready": "yes" if a.get("ready") else "no",
+                "boot": "yes" if a.get("auto_start_on_boot") else "",
                 "model": a.get("model_card") or "",
                 "role": a.get("role_card") or "",
             }
@@ -61,6 +71,7 @@ def _list(client: GatewayClient) -> None:
             ("name", "NAME"),
             ("status", "STATUS"),
             ("ready", "READY"),
+            ("boot", "AUTOBOOT"),
             ("model", "MODEL"),
             ("role", "ROLE"),
         ],
@@ -112,3 +123,35 @@ def _logs(client: GatewayClient, name: str, tail: int) -> None:
         print_json(data)
     else:
         print(data)
+
+
+def _autostart(client: GatewayClient, args) -> None:
+    """Show or set the default boot agent (``ui.auto_start_on_boot``, synced with Web)."""
+    clear = bool(getattr(args, "clear", False))
+    name = (getattr(args, "name", None) or "").strip() or None
+    keep_others = bool(getattr(args, "keep_others", False))
+
+    if clear:
+        current = list_autostart_agents(client)
+        if not current:
+            print("[agent] autostart: (none)")
+            return
+        for n in current:
+            set_agent_autostart(client, n, enabled=False, exclusive=False)
+        print(f"[agent] autostart cleared: {', '.join(current)}")
+        return
+
+    if not name:
+        current = list_autostart_agents(client)
+        if not current:
+            print("[agent] autostart: (none)")
+            print("  Set with: opensquad agent autostart <dir_name>")
+            print("  Or enable 「设为默认启动」 in Agent Manager.")
+            return
+        print(f"[agent] autostart: {', '.join(current)}")
+        return
+
+    dir_name = set_agent_autostart(client, name, enabled=True, exclusive=not keep_others)
+    print(f"[agent] autostart set: {dir_name}")
+    if not keep_others:
+        print("  (cleared other agents' auto-start flags)")

@@ -306,6 +306,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "[yellow]Not logged in — /login[/]",
         "zh": "[yellow]未登录 — /login[/]",
     },
+    "no_autostart_agent": {
+        "en": "No auto-start agent. /start <name>  or  /autostart <name>  (synced with Web)",
+        "zh": "未设置默认启动 Agent。/start <名称>  或  /autostart <名称>（与网页「设为默认启动」同步）",
+    },
 }
 
 _current: str = DEFAULT_LOCALE

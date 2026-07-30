@@ -226,6 +226,10 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
                 role_card = prompt_cfg.get("role")
 
         registry_online = reg is not None and reg.status != "offline" if reg else False
+        ui_cfg = agent_config.get("ui") if isinstance(agent_config.get("ui"), dict) else {}
+        auto_boot = agent.get("auto_start_on_boot")
+        if auto_boot is None:
+            auto_boot = bool(ui_cfg.get("auto_start_on_boot", False))
         merged.append(
             {
                 # launcher process info
@@ -253,6 +257,8 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
                 # Card assignments (from launcher or config fallback)
                 "model_card": model_card,
                 "role_card": role_card,
+                # Synced with Agent Manager 「设为默认启动」 / CLI autostart
+                "auto_start_on_boot": bool(auto_boot),
             }
         )
 
@@ -317,6 +323,18 @@ async def admin_set_working_directory(
     needed.
     """
     return await _proxy_put(f"/api/agents/{name}/working-directory", body, http_only=True)
+
+
+@admin_router.get("/admin/agents/{name}/web-ui-state")
+async def admin_get_web_ui_state(name: str, current_user: User = Depends(get_current_user_dep)):
+    """Agent Web workspace chrome + session↔project meta (cross-origin / LAN)."""
+    return await _proxy_get(f"/api/agents/{name}/web-ui-state", http_only=True)
+
+
+@admin_router.put("/admin/agents/{name}/web-ui-state")
+async def admin_put_web_ui_state(name: str, body: dict = Body(...), current_user: User = Depends(get_current_user_dep)):
+    """Persist Agent Web workspace chrome + session↔project meta on the agent host."""
+    return await _proxy_put(f"/api/agents/{name}/web-ui-state", body, http_only=True)
 
 
 @admin_router.post("/admin/system/pick-directory")

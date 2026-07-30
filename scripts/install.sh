@@ -23,7 +23,7 @@ error() { echo -e "  ${RED}[ERROR]${NC} $1"; }
 # ── 1. Check Python 3.11+ ──
 echo "[1/6] Checking Python version..."
 PYTHON=""
-for cmd in python3 python; do
+for cmd in python3 python python3.11 python3.12 python3.13; do
     if command -v "$cmd" &>/dev/null; then
         ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
         major="${ver%.*}"
@@ -34,6 +34,19 @@ for cmd in python3 python; do
         fi
     fi
 done
+# Homebrew installs Python with versioned binary (e.g. python3.11) but the
+# unversioned symlink lives in $(brew --prefix)/opt/python@3.11/libexec/bin
+# which is not on the default PATH.  Try brew --prefix as a fallback.
+if [ -z "$PYTHON" ] && command -v brew &>/dev/null; then
+    for ver in 3.11 3.12 3.13; do
+        brew_python="$(brew --prefix "python@$ver" 2>/dev/null)/bin/python$ver"
+        if [ -x "$brew_python" ]; then
+            PYTHON="$brew_python"
+            info "Found Homebrew Python: $($PYTHON --version)"
+            break
+        fi
+    done
+fi
 if [ -z "$PYTHON" ]; then
     error "Python 3.11+ not found. Please install it first."
     exit 1
@@ -104,7 +117,11 @@ echo ""
 # ── 4. Install frontend dependencies ──
 echo "[4/6] Installing frontend dependencies..."
 cd "$ROOTDIR/src/opensquad/gateway/nexuschat-pro"
-npm install --silent 2>/dev/null || warn "npm install had issues, continuing..."
+# Use --ignore-scripts + ELECTRON_SKIP_BINARY_DOWNLOAD=1 to prevent Electron
+# from downloading its binary (~150 MB).  The Vite dev server does not need
+# Electron; it is only required for building desktop app packages.
+ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install --ignore-scripts --silent 2>/dev/null || \
+    warn "npm install had issues, continuing..."
 cd "$ROOTDIR"
 info "Frontend dependencies installed."
 echo ""

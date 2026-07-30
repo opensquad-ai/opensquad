@@ -123,7 +123,14 @@ export default defineConfig(({ mode }) => {
           '/uploads': {
             target: backendUrl,
             changeOrigin: true,
-          }
+          },
+          // Agent WebSocket — same-origin via Vite so LAN clients only need :5173
+          // (browsers would otherwise hit :9555 directly and fail behind firewalls).
+          '/ai-web': {
+            target: backendUrl,
+            changeOrigin: true,
+            ws: true,
+          },
         }
       },
       plugins: [react()],

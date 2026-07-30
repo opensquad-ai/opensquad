@@ -218,6 +218,38 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
     });
   }, []);
 
+  /** Persist auto-start flag immediately; enabling one clears others (CLI-synced default). */
+  const setAutoStartOnBoot = useCallback(async (enabled: boolean) => {
+    if (!detailAgent) return;
+    const clone = JSON.parse(JSON.stringify(configObj || {}));
+    if (!clone.ui || typeof clone.ui !== 'object') clone.ui = {};
+    clone.ui.auto_start_on_boot = enabled;
+    setConfigObj(clone);
+    try {
+      await adminAPI.updateConfig(getAgentKey(detailAgent), clone);
+      if (enabled) {
+        const others = agents.filter(a => getAgentKey(a) !== getAgentKey(detailAgent));
+        await Promise.all(
+          others.map(async (a) => {
+            try {
+              const raw = await adminAPI.getConfig(getAgentKey(a));
+              const cfg = (raw && (raw as any).config) ? (raw as any).config : raw;
+              if (!cfg || typeof cfg !== 'object') return;
+              const ui = (cfg.ui && typeof cfg.ui === 'object') ? { ...cfg.ui } : {};
+              if (!ui.auto_start_on_boot) return;
+              ui.auto_start_on_boot = false;
+              await adminAPI.updateConfig(getAgentKey(a), { ...cfg, ui });
+            } catch {
+              /* best-effort exclusive clear */
+            }
+          }),
+        );
+      }
+    } catch (e: any) {
+      alert(`Save failed: ${e.message}`);
+    }
+  }, [detailAgent, configObj, agents]);
+
   const cfgToggleTool = useCallback((tool: string) => {
     setConfigObj((prev: any) => {
       const clone = JSON.parse(JSON.stringify(prev || {}));
@@ -685,7 +717,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
               <span className="text-xs font-medium text-textMain">{t('agentManager.autoStartOnBoot')}</span>
               <Toggle
                 value={cfgGet(['ui', 'auto_start_on_boot'], false)}
-                onChange={v => cfgSet(['ui', 'auto_start_on_boot'], v)}
+                onChange={v => { void setAutoStartOnBoot(v); }}
               />
             </div>
             <p className="text-[10px] text-textMuted/70 -mt-1">

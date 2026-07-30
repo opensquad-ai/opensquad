@@ -223,7 +223,7 @@
     "navShortcut": "Navigation Shortcut",
     "navShortcutHint": "When enabled, the agent avatar appears in the group list bottom menu bar. Click to open its web conversation task flow.",
     "autoStartOnBoot": "Start on Boot",
-    "autoStartOnBootHint": "When enabled, this agent will start automatically on next program launch.",
+    "autoStartOnBootHint": "When enabled, the next app/CLI launch uses this agent (only one default at a time). When off, start manually. Saves immediately.",
     "commaSeparated": "(comma-separated)",
     "modelSettings": "Model Settings",
     "importFromModelCard": "Import from Model Card",

@@ -345,15 +345,19 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
 
 
 def pick_agent_name(client: Any, preferred: str | None = None) -> str | None:
-    """Pick agent name without blocking on start/ready (network list only)."""
-    from opensquad.cli.api_client import last_agent, pick_default_agent
+    """Pick agent name without blocking on start/ready (network list only).
+
+    Prefer explicit CLI flag, else the Web/CLI auto-start agent. No silent
+    fallback to an arbitrary agent.
+    """
+    from opensquad.cli.api_client import pick_default_agent
 
     chosen = (preferred or "").strip() or None
     if chosen:
         return chosen
     if client.token:
         return pick_default_agent(client)
-    return last_agent()
+    return None
 
 
 def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 60.0) -> str | None:
@@ -387,24 +391,26 @@ def ensure_agent(client: Any, preferred: str | None = None, *, timeout: float = 
         from opensquad.cli.api_client import pick_default_agent
 
         target = pick_default_agent(client)
-    if target:
-        hit = _match(target)
-        if not hit:
-            print(f"[code] Agent not found: {target}", file=sys.stderr)
-            return None
-    else:
-        ready = [a for a in agents if a.get("ready")]
-        pool = ready or agents
-        hit = pool[0]
-        target = hit.get("dir_name") or hit.get("agent_id")
+    if not target:
+        print(
+            "[code] No auto-start agent configured.\n"
+            "  Start one:  /start <dir>   or   opensquad agent start <dir>\n"
+            "  Set default: opensquad agent autostart <dir>   (same as Web 「设为默认启动」)",
+            file=sys.stderr,
+        )
+        return None
+
+    hit = _match(target)
+    if not hit:
+        print(f"[code] Agent not found: {target}", file=sys.stderr)
+        return None
 
     assert target
-    hit = _match(target) or hit
-    if hit and hit.get("ready"):
+    if hit.get("ready"):
         return target
 
     try:
-        if hit and hit.get("process_status") == "running" and not hit.get("ready"):
+        if hit.get("process_status") == "running" and not hit.get("ready"):
             print(f"[code] {target} running but registry offline — restarting…")
             client.admin_post(f"agents/{target}/restart")
         else:
@@ -447,11 +453,15 @@ def prepare_code_session_fast(
     gateway: str | None = None,
     agent: str | None = None,
 ) -> tuple[Any, str | None]:
-    """Instant path: GatewayClient + cached agent name (no network blocking)."""
-    from opensquad.cli.api_client import GatewayClient, last_agent
+    """Instant path: GatewayClient + optional agent name (no network blocking).
+
+    Without an explicit ``--agent``, leave agent unset until preflight resolves
+    the auto-start agent from config (do not use stale last_agent as boot default).
+    """
+    from opensquad.cli.api_client import GatewayClient
 
     client = GatewayClient(gateway_url=gateway)
-    chosen = (agent or "").strip() or last_agent()
+    chosen = (agent or "").strip() or None
     return client, chosen
 
 
@@ -494,6 +504,11 @@ def prepare_code_session(
         chosen = ensure_agent(client, preferred=chosen)
         if chosen:
             remember_agent(chosen)
+    elif client.token and not chosen:
+        print(
+            "[code] No auto-start agent — open TUI and /start <name>, or: opensquad agent autostart <name>",
+            file=sys.stderr,
+        )
     return client, chosen
 
 

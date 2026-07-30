@@ -17,13 +17,15 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
-    # 3.12/3.13 暂不声明：anyio 4.x CancelScope 与 Python 3.12+ 的
-    # _num_cancels_requested 计数器存在已知交互问题，会导致 LLM API 调用
-    # 抛出 CancelledError。统一锁定 3.11，待 anyio 5.x 或 Python 后续
-    # 小版本修复后再放开。
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    # 3.12+ 兼容性说明：anyio 4.x 的 CancelScope 与 Python 3.12+ 的
+    # _num_cancels_requested 计数器存在已知交互问题，但 anyio_patches.py 中的
+    # 补丁已禁用（它破坏了 httpx 的 connect_tcp），runner.py 有自己的
+    # CancelledError 安全网处理超时泄漏。因此 3.12/3.13 可以正常使用。
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",

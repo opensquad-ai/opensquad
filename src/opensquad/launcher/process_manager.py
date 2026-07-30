@@ -762,6 +762,8 @@ class AgentProcess:
 
     def get_status(self) -> dict:
         """Return process status information"""
+        cfg = self.config if isinstance(self.config, dict) else {}
+        ui = cfg.get("ui") if isinstance(cfg.get("ui"), dict) else {}
         return {
             "dir_name": self.dir_name,
             "agent_id": self.agent_id,
@@ -773,6 +775,7 @@ class AgentProcess:
             "restart_count": self.restart_count,
             "started_at": self.started_at,
             "config": self.config,
+            "auto_start_on_boot": bool(ui.get("auto_start_on_boot", False)),
             "health_ok": self._last_health_ok,
             "health_port": self._health_port,
         }
