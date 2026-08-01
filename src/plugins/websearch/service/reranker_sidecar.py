@@ -72,6 +72,79 @@ def _model_path() -> str:
     )
 
 
+# ── Model auto-download ────────────────────────────────────────────────
+# The 1.2GB weights are excluded from git. On first run (or when a deployment
+# lacks them) we fetch them from Hugging Face in the background so the reranker
+# sidecar can start once the download completes. Download never blocks the
+# websearch service boot; search keeps Bing order until weights exist.
+_MODEL_REPO_ID = "Qwen/Qwen3-Reranker-0.6B"
+_MODEL_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+_download_started = False
+_download_lock = threading.Lock()
+
+
+def _model_is_complete(model_dir: str) -> bool:
+    """Minimal completeness check: the safetensors weight must be present."""
+    if not os.path.isdir(model_dir):
+        return False
+    for name in ("config.json", "tokenizer.json"):
+        if not os.path.isfile(os.path.join(model_dir, name)):
+            return False
+    # weights file may be split into shards
+    return any(f.endswith(".safetensors") for f in os.listdir(model_dir))
+
+
+def _auto_download_model(model_dir: str) -> bool:
+    """Return True if a download was (or already is) running / completed.
+
+    Spawns a daemon thread so it never blocks the service; the guardian or the
+    next start will pick up the model once it is on disk.
+    """
+    global _download_started
+    if _model_is_complete(model_dir):
+        return True
+    with _download_lock:
+        if _download_started:
+            return True
+        _download_started = True
+
+    if not _env_truthy("WEBSEARCH_RERANKER_AUTO_DOWNLOAD", "1"):
+        print("[WebSearch] Reranker auto-download disabled (WEBSEARCH_RERANKER_AUTO_DOWNLOAD=0)")
+        return False
+
+    try:
+        import huggingface_hub
+    except ImportError:
+        print("[WebSearch] huggingface_hub not available for model auto-download")
+        return False
+
+    def _do_download() -> None:
+        try:
+            os.makedirs(model_dir, exist_ok=True)
+            print(f"[WebSearch] Downloading {_MODEL_REPO_ID}@{_MODEL_REVISION[:8]} → {model_dir} (1.2GB)…")
+            # Default to the hf-mirror endpoint (fast in CN); override with
+            # WEBSEARCH_HF_ENDPOINT (e.g. https://huggingface.co) if needed.
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            huggingface_hub.snapshot_download(
+                repo_id=_MODEL_REPO_ID,
+                revision=_MODEL_REVISION,
+                local_dir=model_dir,
+                local_dir_use_symlinks=False,
+            )
+            if _model_is_complete(model_dir):
+                print("[WebSearch] Reranker model downloaded; starting sidecar")
+                start_reranker_sidecar()
+            else:
+                print("[WebSearch] Reranker model download incomplete; retry on next start")
+        except Exception as e:
+            print(f"[WebSearch] Reranker model download failed (non-fatal): {e}")
+
+    t = threading.Thread(target=_do_download, name="reranker-model-download", daemon=True)
+    t.start()
+    print("[WebSearch] Reranker model download started in background")
+    return True
+
+
 def start_reranker_sidecar() -> None:
     """Best-effort start of the local :8111 reranker. Never blocks websearch boot."""
     global _reranker_proc
@@ -99,13 +172,15 @@ def start_reranker_sidecar() -> None:
 
     model = _model_path()
     if not os.path.isdir(model):
-        print(
-            f"[WebSearch] Reranker model missing at {model}; "
-            "skipping sidecar (set WEBSEARCH_RERANKER_MODEL_PATH to override). "
-            'Deploy it with: python -c "from huggingface_hub import snapshot_download; '
-            "snapshot_download('Qwen/Qwen3-Reranker-0.6B', local_dir=r'{model}')\" "
-            "or copy the weights from a machine that has them."
-        )
+        print(f"[WebSearch] Reranker model missing at {model}; auto-downloading…")
+        if not _auto_download_model(model):
+            print(
+                f"[WebSearch] Auto-download unavailable/failed for {model}. "
+                "Search keeps Bing order until the weights exist. "
+                'Manual deploy: python -c "from huggingface_hub import snapshot_download; '
+                "snapshot_download('Qwen/Qwen3-Reranker-0.6B', local_dir=r'{model}')\" "
+                "or copy the weights from a machine that has them."
+            )
         return
 
     for mod in ("torch", "transformers"):
