@@ -101,7 +101,10 @@ def start_reranker_sidecar() -> None:
     if not os.path.isdir(model):
         print(
             f"[WebSearch] Reranker model missing at {model}; "
-            "skipping sidecar (set WEBSEARCH_RERANKER_MODEL_PATH to override)"
+            "skipping sidecar (set WEBSEARCH_RERANKER_MODEL_PATH to override). "
+            'Deploy it with: python -c "from huggingface_hub import snapshot_download; '
+            "snapshot_download('Qwen/Qwen3-Reranker-0.6B', local_dir=r'{model}')\" "
+            "or copy the weights from a machine that has them."
         )
         return
 

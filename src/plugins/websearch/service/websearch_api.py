@@ -44,10 +44,12 @@ except ImportError:
 # service is down, results keep Bing's native order (graceful fallback).
 _RERANKER_URL = os.environ.get("WEBSEARCH_RERANKER_URL", "http://127.0.0.1:8111").rstrip("/")
 _RERANKER_ENABLED = os.environ.get("WEBSEARCH_RERANKER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-# Rerank cap: score at most this many results per search. On slow GPUs
-# (e.g. GTX 1060) 30 rows can take ~4.5s — capping keeps p95 well under the
-# HTTP timeout while still ranking the meaningful top of the SERP.
-_RERANK_MAX_ROWS = 20
+# Rerank cap: score at most this many results per search.
+# - GTX 1060 (GPU): 20 rows ~4.5s, 10 rows ~1.7s.
+# - Agent Python (CPU, torch+cpu): 20 rows ~14.3s (right at the 15s timeout),
+#   10 rows ~7s — the cap is 10 so CPU deployments keep a comfortable margin
+#   while still ranking the meaningful top of the SERP.
+_RERANK_MAX_ROWS = 10
 # Skip reranker calls for this long after a failure (avoid per-request timeouts).
 _reranker_down_until = 0.0
 
