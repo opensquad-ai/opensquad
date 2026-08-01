@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -549,6 +550,96 @@ def _detect_region_for_query(query: str) -> dict[str, str]:
     }
 
 
+# ── Query decomposition (borrowed from proxyless-llm-websearch, rule-based) ──
+# proxyless uses an LLM to split a question into sub-queries. We emulate the
+# key benefit locally with cheap rules: for multi-topic / bilingual queries,
+# fetch a few focused variants and merge by URL, so the reranker sees a richer
+# candidate set. Expansion is bounded and only enabled when it is likely to help.
+_QUERY_JOINERS = re.compile(r"\s+(?:and|与|和|及|跟|以及|还有|、|,|，)\s+", re.I)
+# Trailing generic words whose removal yields a more focused query.
+_QUERY_TAIL_WORDS = (
+    "教程",
+    "应用",
+    "最新",
+    "大全",
+    "排名",
+    "报告",
+    "是什么",
+    "怎么",
+    "如何",
+    "介绍",
+    "推荐",
+    "大模型",
+    "llm",
+    "用法",
+)
+# Chinese technical terms → focused English variant (Bing global indexes them
+# differently, often catching the exact topic when zh SERP drifts).
+_ZH_EN_VARIANTS = {
+    "人工智能": "AI artificial intelligence",
+    "大模型": "LLM large language model",
+    "检索增强生成": "RAG retrieval augmented generation",
+    "机器学习": "machine learning",
+    "深度学习": "deep learning",
+    "神经网络": "neural network",
+    "异步": "asyncio async",
+    "并发": "concurrency parallel",
+    "搜索引擎": "search engine",
+    "websearch": "web search",
+}
+
+
+def _query_variants(query: str) -> list[str]:
+    """Return [query] plus focused variants, deduped, max 3 total."""
+    q = (query or "").strip()
+    if not q or len(q) < 6:
+        return [q]
+
+    variants: list[str] = [q]
+    seen = {q}
+
+    # 1) Split on topic joiners: "python asyncio 并发 教程" -> "python asyncio".
+    parts = [p.strip() for p in _QUERY_JOINERS.split(q) if p.strip()]
+    if len(parts) >= 2 and all(len(p) >= 3 for p in parts):
+        for part in parts:
+            if part not in seen and len(part) >= 4:
+                seen.add(part)
+                variants.append(part)
+
+    # 2) Drop a trailing generic word ("教程/应用/最新") to sharpen the core topic.
+    low = q.lower()
+    for tail in _QUERY_TAIL_WORDS:
+        if low.endswith(tail) and len(q) - len(tail) >= 6:
+            core = q[: -len(tail)].strip()
+            if core not in seen:
+                seen.add(core)
+                variants.append(core)
+            break
+
+    # 3) Bilingual pair: pure Latin/English form for mixed CJK+Latin queries.
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", q))
+    has_latin = bool(re.search(r"[a-zA-Z]{3,}", q))
+    if has_cjk and has_latin:
+        latin_only = re.sub(r"[\u4e00-\u9fff]+", " ", q).strip()
+        latin_only = re.sub(r"\s+", " ", latin_only)
+        if len(latin_only) >= 4 and latin_only not in seen:
+            seen.add(latin_only)
+            variants.append(latin_only)
+
+    # 4) Chinese technical term → English variant.
+    if has_cjk:
+        zh_tokens = re.findall(r"[\u4e00-\u9fff]{2,8}", q)
+        for token in zh_tokens:
+            en = _ZH_EN_VARIANTS.get(token)
+            if en and en not in seen and len(variants) < 3:
+                # Keep the English as a standalone focused variant.
+                seen.add(en)
+                variants.append(en)
+
+    # Keep at most 3 variants to bound scraping cost.
+    return variants[:3]
+
+
 # ── API 1: Search ─────────────────────────────────────────────────────
 async def search_links_async(queries: list[str], max_results_per_query: int = 30, headless: bool | None = None) -> dict:
     """Search Bing and optionally rerank. Returns a dict for the agent tool.
@@ -579,89 +670,127 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     # Try to serve the whole request with httpx first; only fall back to
     # Playwright for queries where the http path failed. This skips Chrome
     # launch/render entirely on the hot path (~1-2s vs 5-10s).
+    #
+    # Query decomposition (borrowed from proxyless): each input query expands
+    # into up to 3 focused variants (split on joiners / bilingual), fetched
+    # concurrently over httpx, then merged by URL so the reranker sees a richer
+    # candidate set. The original query always comes first.
+    variant_map: dict[str, list[str]] = {q: _query_variants(q) for q in queries}
     http_rows: dict[str, list] = {}
     http_ok = 0
-    for q in queries:
-        region = _detect_region_for_query(q)
-        try:
-            rows = await asyncio.to_thread(
-                fetch_serp_http,
-                q,
-                base_url=region["base_url"],
-                market=region["market"],
-                setlang=region["setlang"],
-                country_code=region["country_code"],
-                max_results=max_results_per_query,
-            )
-        except Exception as e:
-            print(f"[WebSearch] http-direct error for {q!r}: {e}")
-            rows = None
-        if rows:
-            http_rows[q] = rows
-            http_ok += 1
+    total_variants = sum(len(vs) for vs in variant_map.values())
+    variant_index: list[tuple[str, str]] = []  # (original_query, variant)
+    for q, vs in variant_map.items():
+        variant_index.extend((q, v) for v in vs)
 
-    if http_ok == len(queries):
-        search_results_list = [http_rows[q] for q in queries]
-        print(f"[WebSearch] http-direct search: all {len(queries)} queries served (fast path)")
-        shared_context = None
-    else:
-        # Fallback queries need Playwright.
-        fallback_queries = [q for q in queries if q not in http_rows]
-        print(f"[WebSearch] http-direct partial ({http_ok}/{len(queries)}); Playwright for {len(fallback_queries)}")
+    if total_variants > 0:
 
-        browser, shared_context = await _get_search_handle(headless)
-        serial = resolve_serial_search() or shared_context is not None
-
-        # Multi-query parallelism: when there is more than one query, spawn one
-        # ephemeral context per query on the shared browser so scrapes run
-        # concurrently instead of linearly (persistent-profile scrapes stay
-        # serial because a single on-disk profile cannot safely share tabs).
-        if len(fallback_queries) > 1 and browser is not None and not serial:
-            print(f"[WebSearch] parallel scrape {len(fallback_queries)} queries on ephemeral contexts")
-
-            async def _run_parallel(query: str):
-                ctx = await browser.new_context(
-                    ignore_https_errors=True,
-                    user_agent=_CHROME_UA,
-                    locale="zh-CN",
+        async def _fetch_variant(q: str, v: str):
+            region = _detect_region_for_query(v)
+            try:
+                rows = await asyncio.to_thread(
+                    fetch_serp_http,
+                    v,
+                    base_url=region["base_url"],
+                    market=region["market"],
+                    setlang=region["setlang"],
+                    country_code=region["country_code"],
+                    max_results=max_results_per_query,
                 )
-                try:
-                    return await search_with_bing_playwright(
-                        None,
-                        query,
-                        max_results=max_results_per_query,
-                        shared_context=ctx,
-                    )
-                finally:
-                    try:
-                        await ctx.close()
-                    except Exception:
-                        pass
+            except Exception as e:
+                print(f"[WebSearch] http-direct error for {v!r}: {e}")
+                return q, v, None
+            return q, v, rows
 
-            fallback_rows = await asyncio.gather(*[_run_parallel(q) for q in fallback_queries])
+        fetched = await asyncio.gather(*[_fetch_variant(q, v) for q, v in variant_index])
+        for q, v, rows in fetched:
+            if rows:
+                http_rows[v] = rows
+                http_ok += 1
+        print(f"[WebSearch] http-direct fetched {http_ok}/{total_variants} variants")
+
+        # Merge variants per original query: original query's rows first, then
+        # variant rows (dedup by url). The result is a per-original-query list.
+        def _merge_variants(q: str) -> list:
+            merged: list[dict] = []
+            seen: set[str] = set()
+            for v in variant_map[q]:
+                for r in http_rows.get(v, []):
+                    u = r.get("url")
+                    if u and u not in seen:
+                        seen.add(u)
+                        merged.append(r)
+            return merged
+
+        # Only treat as full-fast-path if every original query got >=1 row.
+        search_results_list = [_merge_variants(q) for q in queries]
+        if all(bool(rows) for rows in search_results_list):
+            print("[WebSearch] http-direct search: all queries served (fast path)")
+            shared_context = None
         else:
+            # Some originals empty — fall through to Playwright for those.
+            fallback_queries = [q for q, rows in zip(queries, search_results_list, strict=True) if not rows]
+            partial_rows: dict[str, list] = {
+                q: rows for q, rows in zip(queries, search_results_list, strict=True) if rows
+            }
+            print(
+                f"[WebSearch] http-direct partial ({len(partial_rows)}/{len(queries)}); Playwright for {len(fallback_queries)}"
+            )
 
-            async def _run_one(query: str):
-                if serial:
-                    async with _bing_search_lock:
+            browser, shared_context = await _get_search_handle(headless)
+            serial = resolve_serial_search() or shared_context is not None
+
+            if len(fallback_queries) > 1 and browser is not None and not serial:
+
+                async def _run_parallel(query: str):
+                    ctx = await browser.new_context(
+                        ignore_https_errors=True,
+                        user_agent=_CHROME_UA,
+                        locale="zh-CN",
+                    )
+                    try:
                         return await search_with_bing_playwright(
-                            browser,
+                            None,
                             query,
                             max_results=max_results_per_query,
-                            shared_context=shared_context,
+                            shared_context=ctx,
                         )
-                return await search_with_bing_playwright(
-                    browser,
-                    query,
-                    max_results=max_results_per_query,
-                    shared_context=shared_context,
-                )
+                    finally:
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
 
-            fallback_rows = await asyncio.gather(*[_run_one(q) for q in fallback_queries])
+                fallback_rows = await asyncio.gather(*[_run_parallel(q) for q in fallback_queries])
+            else:
 
-        # Assemble in original query order: http rows where available, else Playwright.
-        fb_iter = iter(fallback_rows)
-        search_results_list = [http_rows.get(q) if q in http_rows else next(fb_iter) for q in queries]
+                async def _run_one(query: str):
+                    if serial:
+                        async with _bing_search_lock:
+                            return await search_with_bing_playwright(
+                                browser,
+                                query,
+                                max_results=max_results_per_query,
+                                shared_context=shared_context,
+                            )
+                    return await search_with_bing_playwright(
+                        browser,
+                        query,
+                        max_results=max_results_per_query,
+                        shared_context=shared_context,
+                    )
+
+                fallback_rows = await asyncio.gather(*[_run_one(q) for q in fallback_queries])
+
+            # Merge partial http rows + Playwright fallback rows.
+            fb_iter = iter(fallback_rows)
+            final_list: list[list] = []
+            for q in queries:
+                if q in partial_rows:
+                    final_list.append(partial_rows[q])
+                else:
+                    final_list.append(next(fb_iter))
+            search_results_list = final_list
 
     # Weather miss on polluted persistent profile → one ephemeral Chromium pass.
     if (

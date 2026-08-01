@@ -120,7 +120,11 @@ def _has_fresh_cookies() -> bool:
     with _cookie_lock:
         if not _cookies:
             return _load_cookies_from_disk()
-        return (time.time() - _cookie_loaded_at) < _cookie_ttl
+        if (time.time() - _cookie_loaded_at) < _cookie_ttl:
+            return True
+        # TTL expired — reload from disk (the exported file is fresher than
+        # the in-memory snapshot after long-running sessions).
+        return _load_cookies_from_disk()
 
 
 def _cookie_jar() -> httpx.Cookies:

@@ -281,3 +281,37 @@ def test_apply_rerank_strategy_strong_always_kept():
     scores = [0.998]
     out = apply_rerank_strategy(results, scores)
     assert len(out) == 1
+
+
+def test_query_variants_splits_joiners():
+    from websearch_api import _query_variants
+
+    vs = _query_variants("python asyncio 并发 教程")
+    assert vs[0] == "python asyncio 并发 教程"
+    assert any("python asyncio" in v for v in vs)
+    assert len(vs) <= 3
+
+
+def test_query_variants_drops_tail_word():
+    from websearch_api import _query_variants
+
+    vs = _query_variants("RAG 检索增强生成 应用")
+    assert any(v == "RAG 检索增强生成" for v in vs)
+    assert len(vs) <= 3
+
+
+def test_query_variants_zh_en():
+    from websearch_api import _query_variants
+
+    vs = _query_variants("2025年人工智能发展趋势 大模型")
+    # Tail word "大模型" is dropped and an English variant is added.
+    assert any("大模型" not in v and "人工智能" in v for v in vs)
+    assert any("LLM" in v or "large language model" in v for v in vs)
+    assert len(vs) <= 3
+
+
+def test_query_variants_short_unchanged():
+    from websearch_api import _query_variants
+
+    assert _query_variants("GDP") == ["GDP"]
+    assert _query_variants("天气") == ["天气"]
