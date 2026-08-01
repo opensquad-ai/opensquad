@@ -201,8 +201,9 @@ export interface FileEditInfo {
   fileName: string;
   oldStr: string | null;
   newStr: string;
-  addedLines: number;
-  removedLines: number;
+  /** Optional — a failed/partial edit may drop the diff counts. */
+  addedLines?: number;
+  removedLines?: number;
   lineRange?: string;
   /** 1-based line number of the first line in oldStr/newStr (for contextual snippets). */
   startLine?: number;

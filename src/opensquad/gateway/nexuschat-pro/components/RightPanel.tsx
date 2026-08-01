@@ -91,8 +91,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
             type: att.type as any
           })),
           isPinned: msg.is_pinned,
-          replyTo: msg.reply_to,
-          replyToContent: msg.reply_to_content,
+          replyToId: msg.reply_to_id,
           isEdited: msg.is_edited,
           mentions: msg.mentions
         }));
@@ -111,6 +110,17 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
     const timeoutId = setTimeout(performSearch, 300);
     return () => clearTimeout(timeoutId);
   }, [isOpen, searchQuery, group?.id]);
+
+  // Fetch available agents when the add-agent modal opens (was a render-time
+  // side-effect IIFE; moved into an effect so state is not mutated during render).
+  useEffect(() => {
+    if (!showAddAgentModal || !group) return;
+    if (loadingAgents || availableAgents.length > 0) return;
+    setLoadingAgents(true);
+    groupAPI.getAvailableAgents(group.id).then(res => {
+      setAvailableAgents(res.agents || []);
+    }).catch(() => {}).finally(() => setLoadingAgents(false));
+  }, [showAddAgentModal, group, loadingAgents, availableAgents.length]);
 
   // Guard: ALL hooks above, conditional return below — avoids React error #310
   if (!isOpen) return null;
@@ -613,15 +623,6 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
           </div>
         )}
 
-        {/* Fetch available agents when modal opens */}
-        {showAddAgentModal && group && !loadingAgents && availableAgents.length === 0 && (
-          (() => {
-            setLoadingAgents(true);
-            groupAPI.getAvailableAgents(group.id).then(res => {
-              setAvailableAgents(res.agents || []);
-            }).catch(() => {}).finally(() => setLoadingAgents(false));
-          })()
-        )}
       </div>
 
       {/* Agent offline toast */}

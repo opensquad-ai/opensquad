@@ -305,11 +305,14 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     if (isOpen) void loadSessions({ silent: false });
   }, [isOpen, loadSessions, workspaceRootPath, workspaceId]);
 
-  // Silent keep-alive refresh — no manual button; reconnect/list changes stay fresh
+  // Silent keep-alive refresh — no manual button; reconnect/list changes stay fresh.
+  // Real-time updates arrive via SESSION_LIST_REFRESH_EVENT (WS session_list /
+  // history_sync / current_session) — see the listener below — so this interval
+  // is only a slow fallback for missed events / reconnects (was 6s → 30s).
   useEffect(() => {
     if (!isOpen || !agentId) return;
     const tick = () => void loadSessions({ silent: true });
-    const id = window.setInterval(tick, 6000);
+    const id = window.setInterval(tick, 30000);
     const onFocus = () => tick();
     const onVis = () => {
       if (document.visibilityState === 'visible') tick();

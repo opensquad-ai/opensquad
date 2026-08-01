@@ -45,7 +45,7 @@ export const AccountRailFooter: React.FC<AccountRailFooterProps> = ({
         >
           {currentUser ? (
             <img
-              src={getAvatarUrl(currentUser.avatar, uid, name)}
+              src={getAvatarUrl(currentUser.avatar ?? undefined, uid, name)}
               alt=""
               className="h-7 w-7 shrink-0 rounded-full object-cover bg-border"
               loading="lazy"

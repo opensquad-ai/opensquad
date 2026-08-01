@@ -32,7 +32,7 @@ export function usePluginNavItems(): PluginNavItem[] {
         const { plugins } = await pluginAPI.getPlugins();
         const navItems = plugins
           .filter((p) => getPluginNavEnabled(p.name))
-          .flatMap((p) => {
+          .flatMap((p): PluginNavItem[] => {
             const nav = p.contributes?.navigation;
             if (nav) {
               if (!hasPluginViewAdapter(nav.view)) return [];

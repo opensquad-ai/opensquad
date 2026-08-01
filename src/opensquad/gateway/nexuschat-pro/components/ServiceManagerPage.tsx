@@ -3,7 +3,7 @@ import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
-  LayoutGrid, List,
+  LayoutGrid, List, AlertTriangle, Copy,
 } from 'lucide-react';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -54,6 +54,53 @@ function formatUptime(seconds: number): string {
 }
 
 const inputClass = 'w-full bg-bgLight border border-border rounded-lg px-2.5 py-1 text-[11px] text-textMain font-mono placeholder-textMuted focus:outline-none focus:border-primary/50 transition-colors';
+
+function SetupHintBanner({ svc }: { svc: ServiceStatus }) {
+  const { t: tr, i18n } = useTranslation();
+  const zh = (i18n.language || '').startsWith('zh');
+  const ps = svc.plugin_status || {};
+  if (svc.plugin_id !== 'websearch' || !ps.needs_bing_login) return null;
+  const cmd = typeof ps.setup_command === 'string' ? ps.setup_command : '';
+  const msg = zh
+    ? (ps.message_zh || '首次部署请完成 Bing 登录，以获得更接近手动浏览器的搜索质量。')
+    : (ps.message_en || 'Complete Bing login once after first deploy for better search quality.');
+
+  const onCopy = async () => {
+    if (!cmd) return;
+    try {
+      await navigator.clipboard.writeText(cmd);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-100/95 space-y-1.5">
+      <div className="flex items-start gap-1.5">
+        <AlertTriangle size={13} className="shrink-0 mt-0.5 text-amber-400" />
+        <div className="min-w-0 leading-relaxed">{msg}</div>
+      </div>
+      <div className="text-[10px] text-amber-200/80 pl-5">
+        {zh
+          ? '可在侧栏 / 插件中打开「Web Search」设置页一键登录，或复制命令手动运行。'
+          : 'Open the Web Search setup page for guided login, or copy the CLI command.'}
+      </div>
+      {cmd ? (
+        <div className="flex items-center gap-1.5 pl-5">
+          <code className="flex-1 min-w-0 truncate font-mono text-[10px] bg-black/25 rounded px-1.5 py-1">{cmd}</code>
+          <button
+            type="button"
+            onClick={() => void onCopy()}
+            className="shrink-0 inline-flex items-center gap-1 px-1.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100"
+            title={tr('common.copy') || 'Copy'}
+          >
+            <Copy size={11} />
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }) => {
   const { t: tr } = useTranslation();
@@ -700,6 +747,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
             </button>
           </div>
         </div>
+        <SetupHintBanner svc={svc} />
         {configPanel}
         {logsPanel}
       </div>
@@ -736,6 +784,8 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           {settingsBtn}
         </div>
       </div>
+
+      <SetupHintBanner svc={svc} />
 
       {configPanel}
 

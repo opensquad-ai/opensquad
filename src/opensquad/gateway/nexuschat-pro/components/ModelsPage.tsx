@@ -466,8 +466,8 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       is_think:   model.is_think,
       is_image:   model.is_image,
       is_video:   model.is_video,
-      is_audio_output: model.is_audio_output,
-      is_image_output: model.is_image_output,
+      is_audio_output: model.is_audio_output ?? false,
+      is_image_output: model.is_image_output ?? false,
       audio_output_voice: model.audio_output_voice ?? 'alloy',
       tool_call_mode: model.tool_call_mode as any,
     }));
@@ -666,7 +666,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const API_PROTOCOL_OPTIONS = ['openai', 'anthropic', 'google', 'openai_compat'];
 
   const allVendors = useMemo(() =>
-    [...new Set(cards.map(c => c.provider).filter(Boolean))].sort(),
+    [...new Set(cards.map(c => c.provider).filter((p): p is string => !!p))].sort(),
     [cards]
   );
 
@@ -780,7 +780,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
             }`}
           >
             {f === 'starred' && (
-              <Star size={11} md:size={13} className={filter === 'starred' ? 'fill-primary text-primary' : ''} />
+              <Star size={11} className={filter === 'starred' ? 'fill-primary text-primary' : ''} />
             )}
             {f === 'all' ? `${t('modelsPage.allProviders')} (${cards.length})` : `${t('modelsPage.starred')} (${cards.filter(c => favorites.has(c.name)).length})`}
           </button>
@@ -788,7 +788,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
         {/* Search */}
         <div className="ml-auto relative shrink-0">
-          <Search size={11} md:size={13} className="absolute left-2 md:left-2.5 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
+          <Search size={11} className="absolute left-2 md:left-2.5 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
           <input
             type="text"
             value={search}
@@ -1101,7 +1101,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                   <select
                     className={inputCls}
                     value={form.tool_call_mode ?? 'auto'}
-                    onChange={e => setField('tool_call_mode', e.target.value)}
+                    onChange={e => setField('tool_call_mode', e.target.value as 'auto' | 'native' | 'xml')}
                     title={t('modelsPage.toolCallModeTitle')}
                   >
                     <option value="auto">Auto</option>

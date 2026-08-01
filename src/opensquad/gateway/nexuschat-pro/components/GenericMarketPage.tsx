@@ -177,7 +177,7 @@ export default function GenericMarketPage({
         <div className="flex items-center gap-2 md:gap-4 h-9">
           <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
             <h1 className="text-base md:text-xl font-bold text-textMain whitespace-nowrap hidden sm:block">{title}</h1>
-            
+
             {/* Mobile Category Dropdown */}
             <div className="relative md:hidden shrink-0">
               <button
@@ -202,7 +202,7 @@ export default function GenericMarketPage({
           {/* Search box */}
           <div className="flex-1 flex items-center gap-1 md:gap-2 min-w-0 max-w-xl">
             <div className="relative flex-1 min-w-0">
-              <Search size={13} md:size={16} className="absolute left-2 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
+              <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
               <input
                 type="text"
                 value={searchInput}

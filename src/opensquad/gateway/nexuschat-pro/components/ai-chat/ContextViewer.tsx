@@ -41,7 +41,7 @@ export interface ContextEntry {
 interface TokenStatsShape {
   used: number;
   max: number;
-  breakdown?: { system?: number; user: number; thought: number; tool: number; tool_defs?: number; response: number };
+  breakdown?: { system?: number; user: number; thought: number; tool: number; tool_defs?: number; response: number; overhead?: number };
   model?: string;
 }
 

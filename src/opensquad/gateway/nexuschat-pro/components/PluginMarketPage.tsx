@@ -488,7 +488,7 @@ interface SecurityWarningModalProps {
 
 const SecurityWarningModal: React.FC<SecurityWarningModalProps> = ({ plugin, onConfirm, onCancel }) => {
   const { t } = useTranslation();
-  
+
   return (
     <div className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4 backdrop-blur-md" onClick={onCancel}>
       <div className="bg-panel w-full max-w-md rounded-2xl shadow-2xl overflow-hidden border border-red-100 animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
@@ -500,13 +500,13 @@ const SecurityWarningModal: React.FC<SecurityWarningModalProps> = ({ plugin, onC
           <p className="text-sm text-textMuted leading-relaxed">
             {t('pluginMarket.securityWarningDesc', { author: plugin.author })}
           </p>
-          
+
           <div className="mt-6 w-full p-4 bg-bgLight rounded-xl border border-border text-left">
             <div className="text-xs font-bold text-textMuted uppercase mb-1">{t('pluginMarket.sourceLabel')}</div>
             <div className="text-sm text-textMain font-mono break-all">{plugin.git_url || plugin.download_url}</div>
           </div>
         </div>
-        
+
         <div className="px-6 py-4 border-t border-border flex flex-col gap-2 bg-bgLight/30">
           <button
             onClick={onConfirm}
@@ -1412,9 +1412,9 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
       <div className="shrink-0 bg-panel border-b border-border px-4 md:px-6 py-2 md:py-3">
         <div className="flex items-center gap-2 md:gap-4 h-9">
           <div className="flex items-center gap-2 md:gap-3 shrink-0">
-            <Store size={20} md:size={24} className="text-primary shrink-0" />
+            <Store size={20} className="text-primary shrink-0" />
             <h1 className="text-base md:text-xl font-bold text-textMain whitespace-nowrap hidden sm:block">{t('pluginMarket.title')}</h1>
-            
+
             {/* Mobile Category Dropdown - moved to header row */}
             <div className="relative md:hidden shrink-0">
               <button
@@ -1440,7 +1440,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
                 {data ? `${data.total}` : ''}
               </span>
               <button onClick={fetchPlugins} disabled={loading} className="p-1 rounded-lg text-textMuted hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-50" title={t('common.refresh')}>
-                <RefreshCw size={13} md:size={15} className={loading ? 'animate-spin' : ''} />
+                <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
               </button>
             </div>
           </div>
@@ -1448,7 +1448,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
           {/* Search box - inline with title on mobile */}
           <form onSubmit={handleSearch} className="flex-1 flex items-center gap-1 md:gap-2 min-w-0 max-w-xl">
             <div className="relative flex-1 min-w-0">
-              <Search size={14} md:size={16} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
               <input type="text" value={searchInput} onChange={e => setSearchInput(e.target.value)}
                 placeholder={t('pluginMarket.searchPlaceholder')}
                 className="w-full pl-8 pr-2 py-1.5 bg-bgLight border border-border rounded-lg text-xs md:text-sm focus:outline-none focus:border-primary/50 text-textMain placeholder-textMuted truncate" />
@@ -1509,7 +1509,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
               ))}
             </div>
           </div>
-          
+
           <div className="flex-1" />
 
           {totalUpdateCount > 0 && (

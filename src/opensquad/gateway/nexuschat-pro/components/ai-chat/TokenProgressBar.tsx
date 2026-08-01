@@ -27,6 +27,7 @@ interface TokenProgressBarProps {
     tool: number;
     tool_defs?: number;
     response: number;
+    overhead?: number;
   };
   /** 本会话统计（后端新会话时 reset，直接显示无需 delta 计算） */
   session?: SessionStats | null;

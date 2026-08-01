@@ -263,7 +263,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
   // agentConfig 持有完整 config.json，agentTools 是 tools 数组的 Set（用于快速查找）
   const [agentConfig, setAgentConfig]       = useState<Record<string, any> | null>(null);
   const [agentTools, setAgentTools]         = useState<Set<string> | null>(null);
-  const [agentToolLevels, setAgentToolLevels] = useState<Record<string, 'core' | 'extended'>>({});
+  const [agentToolLevels, setAgentToolLevels] = useState<Record<string, 'core' | 'extended' | 'hidden'>>({});
   const [agentHiddenPlugins, setAgentHiddenPlugins] = useState<Set<string>>(new Set());
   const [agentToolsDirty, setAgentToolsDirty] = useState(false);
   const [savingTools, setSavingTools]       = useState(false);
@@ -304,7 +304,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
         const cfg = data.config || {};
         setAgentConfig(cfg);
         setAgentTools(new Set<string>((cfg.tools as string[]) || []));
-        setAgentToolLevels((cfg.tool_levels as Record<string, 'core' | 'extended'>) || {});
+        setAgentToolLevels((cfg.tool_levels as Record<string, 'core' | 'extended' | 'hidden'>) || {});
         setAgentHiddenPlugins(new Set<string>((cfg.prompt_preload?.hidden_plugins as string[]) || []));
       } catch {
         setAgentConfig(null);

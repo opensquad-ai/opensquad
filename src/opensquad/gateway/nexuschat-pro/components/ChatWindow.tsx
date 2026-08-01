@@ -8,6 +8,7 @@ import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../serv
 import { blobToWavFile } from '../utils/mediaDevices';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
+import { playGentleNotificationSound } from '../utils/sounds';
 import {
   CollabStepApprovalCard,
   parseCollabApproval,
@@ -318,42 +319,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     return groups.filter(g => g.id !== group.id && g.hasUnreadMention).length;
   }, [groups, group.id]);
 
-  // 统一的缓和提示音 - 适用于@提及和私信
-  const playGentleNotificationSound = useCallback(() => {
-    try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-
-      // 创建双音调缓和提示音
-      const oscillator1 = audioContext.createOscillator();
-      const oscillator2 = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-
-      oscillator1.connect(gainNode);
-      oscillator2.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-
-      // 缓和的双音调（类似风铃）
-      oscillator1.type = 'sine';
-      oscillator1.frequency.setValueAtTime(523.25, audioContext.currentTime); // C5 - 中音
-      oscillator1.frequency.exponentialRampToValueAtTime(659.25, audioContext.currentTime + 0.3); // E5
-
-      oscillator2.type = 'sine';
-      oscillator2.frequency.setValueAtTime(659.25, audioContext.currentTime); // E5
-      oscillator2.frequency.exponentialRampToValueAtTime(783.99, audioContext.currentTime + 0.3); // G5
-
-      // 极低的音量，缓和的淡入淡出
-      gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-      gainNode.gain.linearRampToValueAtTime(0.03, audioContext.currentTime + 0.1); // 仅3%音量
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.8);
-
-      oscillator1.start(audioContext.currentTime);
-      oscillator2.start(audioContext.currentTime);
-      oscillator1.stop(audioContext.currentTime + 0.8);
-      oscillator2.stop(audioContext.currentTime + 0.8);
-    } catch (e) {
-      // 静默失败
-    }
-  }, []);
+  // 统一的缓和提示音 - 适用于@提及和私信（共享实现见 utils/sounds.ts，模块级函数引用稳定）
 
   // 处理资源 URL
   const getResourceUrl = (url: string): string => {
@@ -636,7 +602,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   // Load messages centered around a target timestamp (bidirectional loading)
   const loadMessagesAround = async (targetId: string, targetTimestamp: number) => {
-    setIsRestoringPositionRef.current = true;
+    isRestoringPositionRef.current = true;
     setJumpTargetMessage(targetId);
 
     try {
@@ -679,7 +645,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       console.error('Failed to load messages around target:', error);
     } finally {
       setTimeout(() => {
-        setIsRestoringPositionRef.current = false;
+        isRestoringPositionRef.current = false;
       }, 300);
     }
   };
@@ -1059,9 +1025,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       }
     };
 
-    window.addEventListener('jumpToMessage', handleJumpToMessage as EventListener);
+    window.addEventListener('jumpToMessage', handleJumpToMessage as unknown as EventListener);
     return () => {
-      window.removeEventListener('jumpToMessage', handleJumpToMessage as EventListener);
+      window.removeEventListener('jumpToMessage', handleJumpToMessage as unknown as EventListener);
     };
   }, [messages, filter]); // 依赖 messages 和 filter
 
@@ -1217,9 +1183,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     let attempts = 0;
     let timer: any = null;
 
-    const tryJump = () => {
+    const tryJump = async () => {
         if (shouldJumpToMention && group.hasUnreadMention && messages.length > 0) {
-             const result = handleJumpToMention();
+             const result = await handleJumpToMention();
              if (result) {
                  // Success
              } else if (attempts < 10) {
@@ -1712,6 +1678,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
+        // Capture inside the closure below (narrowing is not preserved there).
+        const files = e.target.files;
         // 验证文件夹总大小
         const totalSize = Array.from(e.target.files).reduce((sum, file) => sum + file.size, 0);
         const MAX_FOLDER_SIZE = 200 * 1024 * 1024; // 200MB
@@ -1733,7 +1701,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
         // even if the first file happens to be an image.
         setStagedItems(prev => [...prev, {
           id: stagedId,
-          file: e.target.files[0], // representative file (unused for display when isFolder)
+          file: files[0], // representative file (unused for display when isFolder)
           localUrl: '',
           uploading: true,
           uploadProgress: 0,

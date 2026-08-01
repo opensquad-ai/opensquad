@@ -11,7 +11,7 @@ import { ElectronShell } from './components/ElectronShell';
 import { DesktopUpdateOverlay } from './components/DesktopUpdateOverlay';
 import { SoftOverlay } from './components/SoftOverlay';
 import { ChatState, Message, MessageType, Attachment, Group, User } from './types';
-import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI } from './services/api';
+import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI, adminAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
 import { AvatarImg } from './components/AvatarImg';
@@ -64,14 +64,31 @@ const App: React.FC = () => {
   });
 
   const openAgentChat = useCallback((agentId: string) => {
-    setOpenAgentChats(prev => {
-      const deduped = prev.filter(id => id !== agentId);
-      const updated = [...deduped, agentId];
-      // 超过 3 个时淘汰最旧的（LRU），被淘汰的组件卸载后会自动 releaseAiWsService
-      return updated.length > 3 ? updated.slice(-3) : updated;
+    const raw = (agentId || '').trim();
+    if (!raw) return;
+    // Prefer canonical config agent_id (agent305-001) over dir_name (agent305).
+    // localStorage may still hold a folder alias from older builds.
+    void adminAPI.getAgents().then((res) => {
+      const found = (res.agents || []).find(
+        (a) => a.agent_id === raw || a.dir_name === raw,
+      );
+      const canonical = (found?.agent_id || raw).trim();
+      setOpenAgentChats((prev) => {
+        const deduped = prev.filter((id) => id !== canonical && id !== raw);
+        const updated = [...deduped, canonical];
+        return updated.length > 3 ? updated.slice(-3) : updated;
+      });
+      setSelectedAgentId(canonical);
+      setCurrentView('ai-chat');
+    }).catch(() => {
+      setOpenAgentChats((prev) => {
+        const deduped = prev.filter((id) => id !== raw);
+        const updated = [...deduped, raw];
+        return updated.length > 3 ? updated.slice(-3) : updated;
+      });
+      setSelectedAgentId(raw);
+      setCurrentView('ai-chat');
     });
-    setSelectedAgentId(agentId);
-    setCurrentView('ai-chat');
   }, []);
 
   // 懒挂载缓存：首次访问某 view 后，永远保持其组件在 DOM 中（只隐藏不卸载）
@@ -261,7 +278,7 @@ const App: React.FC = () => {
         isPrivate: g.is_private,
         createdAt: new Date(g.created_at || Date.now()).getTime(),
         notificationSoundEnabled: g.notification_sound_enabled,
-        pinnedMessageId: g.pinned_message_id,
+        pinnedMessageId: g.pinned_message_id ?? undefined,
       }));
 
       // Extract last messages from group list

@@ -188,7 +188,10 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
   }
 
   if (evt.type === 'tool_call') {
-    const running = !evt.result && !blockCompleted;
+    // Open tools stay "running" even if the block was wrongly sealed (disk
+    // hydrate / mid-turn to_user). Otherwise long Agent Web turns flip to
+    // "Worked" and look frozen while websearch etc. are still in flight.
+    const running = !evt.result;
     const name = toolNameOf(evt);
     const content = typeof evt.content === 'object' && evt.content ? evt.content : {};
     const rawArgs = content.arguments ?? content.args ?? content.input;
@@ -386,18 +389,6 @@ function outerSummary(
   lines: ActivityLine[],
   turnStartedMs?: number,
 ): { primary: string; secondary: string } {
-  let elapsedMs: number | null = null;
-  if (typeof block.elapsed_ms === 'number') {
-    elapsedMs = Math.max(0, block.elapsed_ms);
-  } else if (block.completed) {
-    elapsedMs = frozenElapsedMs(block, turnStartedMs);
-  } else if (turnStartedMs != null) {
-    elapsedMs = Math.max(0, Date.now() - turnStartedMs);
-  } else if (typeof block.started_ms === 'number') {
-    elapsedMs = Math.max(0, Date.now() - block.started_ms);
-  }
-  const elapsedLabel =
-    elapsedMs != null ? formatElapsedAtLeastOneSecond(elapsedMs) : null;
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
   const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation' || l.kind === 'shell_job').length;
   const plans = lines.filter((l) => l.kind === 'plan');
@@ -406,6 +397,23 @@ function outerSummary(
   const liveTool = lines.some((l) => l.kind === 'tool' && l.running);
   const livePlan = plans.some((l) => l.running);
   const hasLiveLine = lines.some((l) => l.running);
+  const stillLive = !!(liveTool || livePlan || liveSummary || (hasLiveLine && !block.completed) || !block.completed);
+  let elapsedMs: number | null = null;
+  if (stillLive) {
+    if (turnStartedMs != null) {
+      elapsedMs = Math.max(0, Date.now() - turnStartedMs);
+    } else if (typeof block.started_ms === 'number') {
+      elapsedMs = Math.max(0, Date.now() - block.started_ms);
+    } else if (typeof block.elapsed_ms === 'number') {
+      elapsedMs = Math.max(0, block.elapsed_ms);
+    }
+  } else if (typeof block.elapsed_ms === 'number') {
+    elapsedMs = Math.max(0, block.elapsed_ms);
+  } else if (block.completed) {
+    elapsedMs = frozenElapsedMs(block, turnStartedMs);
+  }
+  const elapsedLabel =
+    elapsedMs != null ? formatElapsedAtLeastOneSecond(elapsedMs) : null;
 
   if (liveSummary) {
     if (elapsedLabel != null) return { primary: `Compressing for ${elapsedLabel}`, secondary: '' };
@@ -916,7 +924,7 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
   const expand = workflowExpandFlags(expandLevel);
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
-    (e) => e.type === 'tool_call' && !e.result && !block.completed,
+    (e) => e.type === 'tool_call' && !e.result,
   );
   // Async delegate_task_submit keeps the sub-agent window live after the parent
   // turn seals — treat it as still running so the outer fold / panel stay mounted.

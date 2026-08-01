@@ -193,6 +193,7 @@
     "statusStopped": "Stopped",
     "statusCrashed": "Crashed",
     "statusStarting": "Starting",
+    "statusReconnecting": "Reconnecting",
     "statusExternal": "External",
     "start": "Start",
     "stop": "Stop",

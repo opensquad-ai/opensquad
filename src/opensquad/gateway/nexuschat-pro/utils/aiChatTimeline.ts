@@ -472,6 +472,20 @@ export type TimelineEntry =
       collapsed: boolean;
     }; _uid: string };
 
+/** Prefer the timeline with more workflow activity (not just top-level entry count). */
+export function timelineRichness(entries: TimelineEntry[]): number {
+  let n = 0;
+  for (const e of entries) {
+    if (e.kind === 'workflow') n += 10 + (e.data.events?.length || 0) * 3 + (e.data.completed ? 0 : 1);
+    else if (e.kind === 'task_fold') {
+      n += 8 + timelineRichness(e.data.entries || []);
+    } else if (e.kind === 'archived_section') {
+      n += timelineRichness(e.data.entries || []);
+    } else n += 2;
+  }
+  return n;
+}
+
 /** Lifecycle-only info text that never paints in the workflow UI. */
 function isLifecycleInfoText(text: string): boolean {
   return /^New session started$/i.test(text) || /^Workflow started$/i.test(text);
@@ -1332,6 +1346,12 @@ export function buildTimelineFromSession(
   }
 
   const timeline: TimelineEntry[] = [];
+  // Strict identity dedup: a message_id / client_id must render only once.
+  // Optimistic user bubbles echo back from disk with the same client_id, and
+  // compression can leave the same turn in both archived + live arrays. The
+  // content+window dedup below misses those (different content, or >30s
+  // apart) → two entries share the same _uid → duplicate React keys.
+  const seenMessageIds = new Set<string>();
   const getTs = (value: any): number => {
     const ts = value?.timestamp ? new Date(value.timestamp).getTime() : NaN;
     return Number.isNaN(ts) ? Number.MAX_SAFE_INTEGER : ts;
@@ -1424,6 +1444,28 @@ export function buildTimelineFromSession(
     }
   };
 
+  // Soft events often persist *after* ChatAPI api_sync assistant text (thought
+  // after reply). Tools must NOT be late-absorbed — they belong after
+  // intermediate to_user progress and may still be in-flight on disk refresh.
+  const isSoftLateEvent = (raw: any): boolean => {
+    const t = raw?.type;
+    return t === 'thought' || t === 'plan' || t === 'info' || t === 'prompt_update';
+  };
+  const pullSoftEventsBefore = (beforeTs: number) => {
+    const head = sortedEvents.slice(0, eventCursor);
+    const rest = sortedEvents.slice(eventCursor);
+    const kept: typeof rest = [];
+    for (const ev of rest) {
+      if (ev.ts < beforeTs && isSoftLateEvent(ev.item)) {
+        pendingRaw.push(ev.item);
+      } else {
+        kept.push(ev);
+      }
+    }
+    sortedEvents.length = 0;
+    sortedEvents.push(...head, ...kept);
+  };
+
   for (let mi = 0; mi < messages.length; mi++) {
     const m = messages[mi];
     const mTs = getTs(m);
@@ -1472,17 +1514,24 @@ export function buildTimelineFromSession(
     // matching thought/plan events are written at end-of-turn. Live UI still
     // shows think→reply because WS streams thoughts first; on reload, pure
     // timestamp interleaving would put the reply above the thought.
-    // Absorb the rest of this turn's events (until the next user message)
-    // so workflow stays above the assistant bubble after refresh.
+    // Only late-absorb *soft* events (thought/plan/info) for the last assistant
+    // before the next user (or end of stream). Never pull tool_call/result —
+    // that sealed in-flight websearch as "Worked" and froze long Agent Web turns.
     if (m.role === 'assistant') {
       let turnEndTs = Number.POSITIVE_INFINITY;
+      let nextChatRole: string | null = null;
       for (let j = mi + 1; j < messages.length; j++) {
-        if (messages[j]?.role === 'user') {
+        const role = messages[j]?.role;
+        if (role === 'user' || role === 'assistant') {
           turnEndTs = getTs(messages[j]);
+          nextChatRole = role;
           break;
         }
       }
-      pullEventsBefore(turnEndTs);
+      const isLastAssistantInTurn = nextChatRole !== 'assistant';
+      if (isLastAssistantInTurn) {
+        pullSoftEventsBefore(turnEndTs);
+      }
     }
 
     // Flush workflow before assistant (and other non-user) messages only.
@@ -1501,9 +1550,13 @@ export function buildTimelineFromSession(
         flushPendingWorkflow({ completed: true });
       }
     } else {
+      const peek = pendingRaw.filter((r) => r.type !== 'prompt_update');
+      const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
+      const unsettled = peekWf.length > 0 && !isWorkflowSettled(peekWf);
       flushPendingWorkflow({
-        completed: true,
-        elapsedMs: typeof m.elapsed_ms === 'number' ? m.elapsed_ms : undefined,
+        completed: !unsettled,
+        elapsedMs:
+          !unsettled && typeof m.elapsed_ms === 'number' ? m.elapsed_ms : undefined,
       });
     }
 
@@ -1723,6 +1776,15 @@ export function buildTimelineFromSession(
         ((m as any).extra && ((m as any).extra.message_id || (m as any).extra.id)) ||
         '',
     ).trim();
+    // Skip the second copy of a message that shares this identity. Keeps the
+    // first occurrence so ordering matches the disk array; the content-based
+    // dup merge above already handles near-identical repeats.
+    if (stableMsgId && seenMessageIds.has(stableMsgId)) {
+      continue;
+    }
+    if (stableMsgId) {
+      seenMessageIds.add(stableMsgId);
+    }
     timeline.push({
       kind: 'message',
       data: {
@@ -1768,10 +1830,31 @@ export function buildTimelineFromSession(
         elapsedMs = Math.max(0, end - start);
       }
     }
-    flushPendingWorkflow({
-      completed: !inProgress,
-      elapsedMs,
-    });
+    // Trailing events after the last assistant:
+    // - In-flight tools (mid-turn websearch etc.) must APPEND after the bubble
+    //   so long Agent Web turns stay "Working" below the latest progress.
+    // - Settled / soft-only trails (api_sync saved reply before thought/tools)
+    //   still insert *before* the bubble so the final report is not above Worked.
+    const last = timeline[timeline.length - 1];
+    if (
+      peek.length > 0
+      && last
+      && last.kind === 'message'
+      && last.data.role === 'assistant'
+      && !inProgress
+    ) {
+      const parked = timeline.pop()!;
+      flushPendingWorkflow({
+        completed: true,
+        elapsedMs,
+      });
+      timeline.push(parked);
+    } else {
+      flushPendingWorkflow({
+        completed: !inProgress,
+        elapsedMs,
+      });
+    }
   }
 
   // CRITICAL: After building the timeline, orphaned tool_result events may be
@@ -1781,7 +1864,23 @@ export function buildTimelineFromSession(
   // tool_call card instead of a permanently "running" one.
   const mergedTimeline = mergeOrphanedToolResultsAcrossWorkflows(timeline);
 
-  return applyEndTaskFolds(mergedTimeline);
+  // Never leave open tools inside a sealed "Worked" fold — hydrate soft-refresh
+  // used to freeze long Agent Web turns that way.
+  const reopened = mergedTimeline.map((entry) => {
+    if (entry.kind !== 'workflow' || !entry.data.completed) return entry;
+    if (isWorkflowSettled(entry.data.events)) return entry;
+    return {
+      ...entry,
+      data: {
+        ...entry.data,
+        completed: false,
+        status: entry.data.status || 'working',
+        elapsed_ms: undefined,
+      },
+    } as TimelineEntry;
+  });
+
+  return applyEndTaskFolds(reopened);
 }
 
 /**

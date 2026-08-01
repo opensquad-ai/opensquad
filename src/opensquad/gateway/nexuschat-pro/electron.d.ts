@@ -1,5 +1,19 @@
 export {}
 
+import type { CSSProperties, InputHTMLAttributes } from 'react';
+
+declare module 'react' {
+  interface CSSProperties {
+    WebkitAppRegion?: 'drag' | 'no-drag';
+  }
+  interface InputHTMLAttributes<T> {
+    // Folder picker (Chrome/Edge). Not in React's official types.
+    webkitdirectory?: string;
+    directory?: string;
+  }
+}
+
+
 declare global {
   interface Window {
     electronEnv?: {

@@ -197,6 +197,8 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
 
   // 后台预取缓存：key → config（避免触发不必要重渲染，用 ref）
   const configCacheRef = useRef<Record<string, any>>({});
+  /** Per-agent fetch timestamp for the background config prefetch (60s TTL). */
+  const configFetchedAtRef = useRef<Record<string, number>>({});
 
   // ---- config 工具函数 ----
 
@@ -330,11 +332,17 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       const data = await adminAPI.getAgents();
       const agentList: AdminAgent[] = data.agents || [];
       setAgents(agentList);
-      // 后台静默预取所有 agent 的 config（不阻塞 UI）
+      // 后台静默预取 agent config（不阻塞 UI）。带 60s TTL 缓存：30s 轮询 +
+      // 2s 快轮询不再把每个周期放大成 N 个 getConfig 请求 —— 缓存命中直接跳过。
+      const now = Date.now();
       agentList.forEach(agent => {
         const key = getAgentKey(agent);
+        if ((configFetchedAtRef.current[key] || 0) > now - 60000) return;
         adminAPI.getConfig(key)
-          .then(cfgData => { configCacheRef.current[key] = cfgData.config || {}; })
+          .then(cfgData => {
+            configCacheRef.current[key] = cfgData.config || {};
+            configFetchedAtRef.current[key] = Date.now();
+          })
           .catch(() => {});
       });
     } catch (e: any) {
@@ -447,6 +455,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
         ]).then(([cfgData, pluginData, cardData]) => {
           const cfg = cfgData.config || {};
           configCacheRef.current[key] = cfg;
+          configFetchedAtRef.current[key] = Date.now();
           setConfigObj(cfg);
           setAvailablePlugins(pluginData.plugins || []);
           setModelCards(cardData.cards || []);
@@ -462,6 +471,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           ]);
           const cfg = cfgData.config || {};
           configCacheRef.current[key] = cfg;
+          configFetchedAtRef.current[key] = Date.now();
           setConfigObj(cfg);
           setAvailablePlugins(pluginData.plugins || []);
           setModelCards(cardData.cards || []);
@@ -1509,18 +1519,26 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
               const ready = isAgentReady(agent);
               const displayName = agent.agent_name || resolveChatName(agent.chat_profile) || key;
               const avatarUrl = resolveChatAvatar(agent.chat_profile);
-              const statusLabel = starting
-                ? t('agentManager.statusStarting')
-                : (STATUS_LABELS[agent.process_status] ? t(STATUS_LABELS[agent.process_status]) : agent.process_status);
+              const startedMs = agent.started_at ? new Date(agent.started_at).getTime() : 0;
+              const reconnecting =
+                starting
+                && Number.isFinite(startedMs)
+                && startedMs > 0
+                && Date.now() - startedMs > 45_000;
+              const statusLabel = reconnecting
+                ? t('agentManager.statusReconnecting')
+                : starting
+                  ? t('agentManager.statusStarting')
+                  : (STATUS_LABELS[agent.process_status] ? t(STATUS_LABELS[agent.process_status]) : agent.process_status);
 
               const actionButtons = (
                 <>
                   {isRunning ? (
                     <>
-                      <button onClick={() => doAction(agent, 'stop')} disabled={isLoading || starting} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
+                      <button onClick={() => doAction(agent, 'stop')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
                         {isLoading ? <Loader2 size={11} className="animate-spin" /> : <PowerOff size={11} />} Stop
                       </button>
-                      <button onClick={() => doAction(agent, 'restart')} disabled={isLoading || starting} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${starting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
+                      <button onClick={() => doAction(agent, 'restart')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
                         <RotateCcw size={11} /> Restart
                       </button>
                     </>
@@ -1639,7 +1657,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     <div className="flex items-center gap-3 text-[10px] text-textMuted mb-3">
                       {starting ? (
                         <span className="text-yellow-500 flex items-center gap-1">
-                          <Loader2 size={10} className="animate-spin" /> {t('agentManager.statusStarting')}...
+                          <Loader2 size={10} className="animate-spin" /> {statusLabel}...
                         </span>
                       ) : (
                         <>
@@ -1852,7 +1870,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                 {!emailLookupLoading && newEmail && newEmailUser && (
                   <p className="text-[10px] text-green-500 mt-1">
                     <Trans i18nKey="agentManager.accountFound" values={{ id: newEmailUser.id, name: newEmailUser.name }}>
-                      Account found: ID={{id}}, name=<strong>{{name}}</strong> (will be used as agent_id and agent_name)
+                      Account found: ID={newEmailUser.id}, name=<strong>{newEmailUser.name}</strong> (will be used as agent_id and agent_name)
                     </Trans>
                   </p>
                 )}

@@ -1294,6 +1294,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** Separate from sessionReloadSeqRef so connected/hydrate cannot invalidate New Session timers. */
   const newSessionFallbackSeqRef = useRef(0);
   const sessionReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Latest hydrateCurrentSession closure (the function is recreated per effect
+   * run; handleViewSession lives outside that scope and must go through the ref).
+   */
+  const hydrateCurrentSessionRef = useRef<((opts?: { showLoading?: boolean; wasNewSession?: boolean }) => void) | null>(null);
 
    // Auth expiry
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -1737,6 +1742,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [timeline, currentSessionId]);
 
   // ---- Fetch agent profile (avatar + name) + model name ----
+  const autoStartTriedRef = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!agentId) return;
     adminAPI.getAgents()
@@ -1744,6 +1750,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const found = res.agents.find(a => a.agent_id === agentId || a.dir_name === agentId);
         if (!found) return;
         setAgentProfile(found);
+        const dirName = (found.dir_name || '').trim();
+        const offline = !found.ready
+          && (found.process_status === 'stopped' || found.process_status === 'crashed');
+        if (dirName && offline) {
+          const now = Date.now();
+          const last = autoStartTriedRef.current[dirName] || 0;
+          if (now - last > 30000) {
+            autoStartTriedRef.current[dirName] = now;
+            adminAPI.startAgent(dirName)
+              .then(() => console.log('[AIChatPage] auto-started offline agent:', dirName))
+              .catch((e: any) => console.warn('[AIChatPage] auto-start failed:', dirName, e?.message || e));
+          }
+        }
         // Seed agent-level fallback only. Per-session % is filled by
         // requestTokenStats(sid) when focus / current_session is known —
         // do not attach agent-wide file stats to a history tab sid.
@@ -1762,8 +1781,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             setTokenStatsBySession((prev) => (prev[agentSid] ? prev : { ...prev, [agentSid]: stats }));
           }
         }
-        // 拉取 config 获取 model_name / api_protocol / provider / runtime cwd
-        return adminAPI.getConfig(found.dir_name).then(cfg => {
+        // 拉取 config 获取 model_name / api_protocol / provider / runtime cwd。
+        // 与 getWorkingDirectory 并行（原来 getConfig → getWorkingDirectory 串行两个 RTT）
+        const wdP: Promise<any> = dirName
+          ? adminAPI.getWorkingDirectory(dirName)
+          : Promise.resolve(null);
+        return Promise.all([adminAPI.getConfig(found.dir_name), wdP]).then(([cfg, wdRes]) => {
           const mn: string | undefined = cfg?.config?.model?.model_name;
           const ap: string | undefined = cfg?.config?.model?.api_protocol;
           const pv: string | undefined = cfg?.config?.model?.provider;
@@ -1801,34 +1824,27 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             realtime_card: String(voice.realtime_card || ''),
             realtime_voice: String(voice.realtime_voice || ''),
           });
+
+          // 会话工作目录（原独立 effect 合并至此，与 config 并行获取）。
+          // 覆盖永久 workspace root，使 ContextViewer 显示用户选择的 cwd。
+          if (wdRes) {
+            const active = wdRes.active_cwd || wdRes.session_cwd || wdRes.workspace_root || null;
+            if (wdRes.workspace_root) setDefaultCwd(wdRes.workspace_root);
+            else if (active) setDefaultCwd(active);
+            const sid = currentSessionIdRef.current;
+            const meta = sid ? getSessionMeta(agentId, sid) : null;
+            if (meta?.projectPath?.trim()) {
+              setAgentCwd(meta.projectPath.trim());
+            } else if (wdRes.session_cwd) {
+              setAgentCwd(wdRes.session_cwd);
+            } else if (active) {
+              setAgentCwd((prev) => prev || active);
+            }
+          }
         });
       })
       .catch(err => console.warn("[AIChatPage] Failed to load agent profile:", err.message));
   }, [agentId]);
-
-  // After agent profile loads, also fetch the session working directory
-  // (set via the folder-picker button). This overrides the permanent
-  // workspace root so ContextViewer shows the user-selected cwd.
-  // Prefer per-session locked projectPath when the current session has one.
-  useEffect(() => {
-    if (!agentProfile?.dir_name) return;
-    adminAPI.getWorkingDirectory(agentProfile.dir_name)
-      .then(res => {
-        const active = res.active_cwd || res.session_cwd || res.workspace_root || null;
-        if (res.workspace_root) setDefaultCwd(res.workspace_root);
-        else if (active) setDefaultCwd(active);
-        const sid = currentSessionIdRef.current;
-        const meta = sid ? getSessionMeta(agentId, sid) : null;
-        if (meta?.projectPath?.trim()) {
-          setAgentCwd(meta.projectPath.trim());
-        } else if (res.session_cwd) {
-          setAgentCwd(res.session_cwd);
-        } else if (active) {
-          setAgentCwd((prev) => prev || active);
-        }
-      })
-      .catch(() => {/* not critical, keep default */});
-  }, [agentProfile?.dir_name, agentId]);
 
   // When the active/viewed session changes, point the files panel at that
   // session's locked project folder (localStorage meta). Do not fall back to
@@ -2069,8 +2085,12 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         // Already have this exact message, skip duplicate
         // Still mark workflow as completed
         for (let j = updated.length - 1; j >= 0; j--) {
-          if (updated[j].kind === 'workflow' && !updated[j].data.completed) {
-            updated[j] = { ...updated[j], data: { ...updated[j].data, status: null, completed: true } } as TimelineEntry;
+          const wf = updated[j];
+          if (wf.kind === 'workflow' && !wf.data.completed) {
+            updated[j] = {
+              ...wf,
+              data: { ...wf.data, status: null, completed: true },
+            } as TimelineEntry;
             break;
           }
         }
@@ -2646,7 +2666,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const updated = [...prev];
         let targetWfIdx = -1;
         for (let i = updated.length - 1; i >= 0; i--) {
-          if (updated[i].kind === 'workflow' && !updated[i].data.completed) {
+          const entry = updated[i];
+          if (entry.kind === 'workflow' && !entry.data.completed) {
             targetWfIdx = i;
             break;
           }
@@ -2659,7 +2680,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           }, done ? 'Summary completed' : 'Summarizing...');
         }
 
-        const wf = updated[targetWfIdx].data;
+        const targetWf = updated[targetWfIdx];
+        if (targetWf.kind !== 'workflow') return prev;
+        const wf = targetWf.data;
         // Keep at most ONE summary_stream per workflow block:
         // - Streaming deltas (done=false) update in-place
         // - When done=true, the old streaming entry becomes the final green box
@@ -2712,7 +2735,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           // Find the last incomplete workflow block
           let targetWfIdx = -1;
           for (let i = updated.length - 1; i >= 0; i--) {
-            if (updated[i].kind === 'workflow' && !updated[i].data.completed) {
+            const entry = updated[i];
+            if (entry.kind === 'workflow' && !entry.data.completed) {
               targetWfIdx = i;
               break;
             }
@@ -2725,7 +2749,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }, text);
           }
 
-          const wf = updated[targetWfIdx].data;
+          const targetWf = updated[targetWfIdx];
+          if (targetWf.kind !== 'workflow') return prev;
+          const wf = targetWf.data;
           const events = [...wf.events];
           // Merge into existing compression_progress event or append new one
           let merged = false;
@@ -3279,7 +3305,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             updated[i] = {
               ...updated[i],
               data: { ...wfData, elapsed_ms: finalMs, completed: true, status: null },
-            };
+            } as TimelineEntry;
             break;
           }
         }
@@ -3298,7 +3324,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const changed: boolean = data?.changed ?? false;
       const diff: string[] | undefined = Array.isArray(data?.diff) ? data.diff : undefined;
       if (!systemPrompt) return;
-      const entry = {
+      const entry: TimelineEntry = {
         kind: 'prompt' as const,
         data: {
           system_prompt: systemPrompt,
@@ -3307,6 +3333,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           timestamp: new Date().toISOString(),
           diff,
         },
+        _uid: genUID(),
       };
       setTimeline(prev => {
         // 按时间顺序追加；首次也不再插到最前
@@ -3483,6 +3510,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       showLoading?: boolean;
       wasNewSession?: boolean;
     }) => {
+      hydrateCurrentSessionRef.current = hydrateCurrentSession;
       const seq = ++sessionReloadSeqRef.current;
       isHydratingSessionRef.current = true;
       sessionBootstrapDoneRef.current = false;
@@ -3625,7 +3653,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     mergedEntries[idx] = {
                       ...mergedEntries[idx],
                       data: _mergeChatMessage(mergedEntries[idx].data as ChatMessage, m),
-                    };
+                    } as TimelineEntry;
                     continue;
                   }
                 }
@@ -3663,7 +3691,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   mergedEntries[contentDupIdx] = {
                     ...mergedEntries[contentDupIdx],
                     data: _mergeChatMessage(mergedEntries[contentDupIdx].data as ChatMessage, m),
-                  };
+                  } as TimelineEntry;
                   continue;
                 }
 
@@ -3695,7 +3723,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     mergedEntries[richerIdx] = {
                       ...mergedEntries[richerIdx],
                       data: _mergeChatMessage(mergedEntries[richerIdx].data as ChatMessage, m),
-                    };
+                    } as TimelineEntry;
                     continue;
                   }
                 }
@@ -3719,7 +3747,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     mergedEntries[nearIdx] = {
                       ...mergedEntries[nearIdx],
                       data: _mergeChatMessage(mergedEntries[nearIdx].data as ChatMessage, m),
-                    };
+                    } as TimelineEntry;
                     continue;
                   }
 
@@ -4054,9 +4082,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       // Fields are at top level of the message object
       const raw = msg as any;
       const sid = raw.session_id || raw.sessionId || (raw.content && raw.content.session_id);
-      // Accept any non-null session_id (gateway_session_key on connect, canonical
-      // disk session ID arrives later via the `current_session` WS event).
-      if (sid) {
+      // Gateway fallback when the agent has not yet reported its disk session:
+      // session_id == gateway_session_key ("<user_id>:<agent_id>") is NOT a
+      // real history key — using it 404s every /agent-sessions/{sid} read and
+      // pollutes the timeline cache. Skip it; the disk hydrate / current_session
+      // event supplies the canonical id shortly after.
+      const isGatewaySessionKey =
+        !!sid &&
+        typeof sid === 'string' &&
+        sid.includes(':') &&
+        sid.endsWith(`:${agentId}`);
+      if (sid && !isGatewaySessionKey) {
         currentSessionIdRef.current = sid;
         wsServiceRef.current?.setActiveSession(sid);
         setCurrentSessionId(sid);
@@ -4335,7 +4371,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               next[idx] = {
                 ...next[idx],
                 data: _mergeChatMessage(next[idx].data as ChatMessage, histMsg),
-              };
+              } as TimelineEntry;
               return next;
             }
           }
@@ -4853,7 +4889,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         continue;
       }
       const merged = _mergeChatMessage(next[idx].data as ChatMessage, e.data as ChatMessage);
-      next[idx] = { ...next[idx], data: merged };
+      next[idx] = { ...next[idx], data: merged } as TimelineEntry;
     }
 
     return next;
@@ -6102,8 +6138,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     setAttachments([]);
     // Drop parked sends for the previous session; new session starts empty.
     try {
-      if (previousSid) localStorage.removeItem(pendingQueueStorageKey(previousSid));
-      localStorage.removeItem(pendingQueueStorageKey(null));
+      if (previousSid) localStorage.removeItem(pendingQueueStorageKey());
+      localStorage.removeItem(pendingQueueStorageKey());
     } catch { /* ignore */ }
     setPendingMessages([]);
     clearOutboundTurnPending();
@@ -6391,7 +6427,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (sessionId === currentSessionIdRef.current) {
       viewingHistorySessionRef.current = false;
       setViewingHistorySession(false);
-      await hydrateCurrentSession({ showLoading: false });
+      // hydrateCurrentSession lives inside the WS-subscription effect; expose
+      // it via ref so this top-level handler can reuse the same logic.
+      hydrateCurrentSessionRef.current?.({ showLoading: false });
       return;
     }
     // Silent switch: paint cache immediately, never show the global overlay.
@@ -6835,7 +6873,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
       (window as Window & { requestIdleCallback: (cb: () => void) => number }).requestIdleCallback(run);
     } else {
-      window.setTimeout(run, 400);
+      // `window` is narrowed to undefined in this branch — use the global timer.
+      setTimeout(run, 400);
     }
   }, [agentId]);
 
@@ -8488,7 +8527,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             <StreamingMessage
               content={displayStreamingText}
               isComplete={!isStreaming}
-              avatarSrc={resolveChatAvatar(agentProfile?.chat_profile)}
+              avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
               variant={isSolo ? 'solo' : 'classic'}
               senderName={agentProfile?.agent_name}
             />

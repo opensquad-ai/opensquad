@@ -385,12 +385,12 @@ export function rebuildShellStreamsFromEvents(
 
 /** Merge shell streams from every workflow block on a timeline. */
 export function rebuildShellStreamsFromTimeline(
-  timeline: Array<{ kind: string; data?: { events?: WorkflowEvent[] } }>,
+  timeline: ReadonlyArray<{ kind: string; data?: unknown }>,
 ): Record<string, ShellStreamState> {
   let streams: Record<string, ShellStreamState> = {};
   for (const entry of timeline) {
     if (entry.kind !== 'workflow') continue;
-    const events = entry.data?.events || [];
+    const events = (entry.data as { events?: WorkflowEvent[] } | undefined)?.events || [];
     const part = rebuildShellStreamsFromEvents(events);
     if (Object.keys(part).length === 0) continue;
     streams = { ...streams, ...part };

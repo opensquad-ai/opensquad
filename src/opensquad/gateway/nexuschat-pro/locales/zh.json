@@ -193,6 +193,7 @@
     "statusStopped": "已停止",
     "statusCrashed": "已崩溃",
     "statusStarting": "启动中",
+    "statusReconnecting": "重连中",
     "statusExternal": "外部",
     "start": "启动",
     "stop": "停止",

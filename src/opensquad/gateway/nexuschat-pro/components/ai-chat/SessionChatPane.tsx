@@ -9,6 +9,7 @@ import { agentSessionAPI } from '../../services/api';
 import {
   buildTimelineFromSession,
   rebaseTimelineUids,
+  timelineRichness,
   type TimelineEntry,
   type WorkflowBlock,
 } from '../../utils/aiChatTimeline';
@@ -88,7 +89,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   // Empty array still counts as Array.isArray — treat it as a miss so we
   // fetch disk history instead of painting a blank pane forever.
   const useLive = Array.isArray(liveTimeline) && liveTimeline.length > 0;
-  const liveOrFetched = useLive ? (liveTimeline as TimelineEntry[]) : fetched;
+  // When soft-polling (scheduled exec), keep merging disk into a live mirror
+  // so missed WS frames still surface without a full refresh.
+  const liveOrFetched = useMemo(() => {
+    if (!useLive) return fetched;
+    const live = liveTimeline as TimelineEntry[];
+    if (!pollIntervalMs || pollIntervalMs <= 0 || fetched.length === 0) return live;
+    return timelineRichness(fetched) > timelineRichness(live) ? fetched : live;
+  }, [useLive, liveTimeline, fetched, pollIntervalMs]);
   const {
     displayValue: timeline,
     isFrozen,
@@ -222,13 +230,16 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   }, [agentId, sessionId, useLive]);
 
   // Soft poll: refresh timeline in place (no loading spinner, no remount).
-  // Skipped when liveTimeline is provided or pollIntervalMs is unset/<=0.
-  // Also skipped while the user is selecting text (poll would clear selection).
+  // Runs even alongside liveTimeline when pollIntervalMs is set (scheduled
+  // exec catch-up). Skipped while the user is selecting text.
   useEffect(() => {
-    if (useLive || !pollIntervalMs || pollIntervalMs <= 0) return;
+    if (!pollIntervalMs || pollIntervalMs <= 0) return;
     let cancelled = false;
     const softRefresh = async () => {
       if (isFrozenRef.current) return;
+      // Skip while the tab is hidden — the poll is a catch-up fallback for
+      // missed WS frames, not the real-time path.
+      if (document.visibilityState !== 'visible') return;
       try {
         const resp = await agentSessionAPI.getSessionHistoryPaged(
           agentId,
@@ -280,6 +291,13 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   && (p.data.elapsed_ms || 0) === (n.data.elapsed_ms || 0)
                 );
               }
+              if (p.kind === 'task_fold' && n.kind === 'task_fold') {
+                return (
+                  (p.data.entries?.length || 0) === (n.data.entries?.length || 0)
+                  && (p.data.messageCount || 0) === (n.data.messageCount || 0)
+                  && (p.data.eventCount || 0) === (n.data.eventCount || 0)
+                );
+              }
               return true;
             })
           ) {
@@ -300,7 +318,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [agentId, sessionId, useLive, pollIntervalMs]);
+  }, [agentId, sessionId, pollIntervalMs]);
 
   const updateScrollButtons = useCallback(() => {
     const el = listRef.current;

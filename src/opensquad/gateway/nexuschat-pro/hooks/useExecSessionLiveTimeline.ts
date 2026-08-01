@@ -15,6 +15,7 @@ import {
   genTimelineUID,
   rebaseTimelineUids,
   sealIncompleteWorkflows,
+  timelineRichness,
   type TimelineEntry,
   type WorkflowEvent,
 } from '../utils/aiChatTimeline';
@@ -24,6 +25,8 @@ import {
 } from '../utils/sessionTimelineCache';
 import type { ChatMessage } from '../components/ai-chat/MessageBubble';
 import type { SoloTokenStats } from '../components/ai-chat/SoloContextFooter';
+
+export { timelineRichness };
 
 function extractContent(msg: AIWSMessage): string {
   const raw = msg.content ?? msg.data;
@@ -46,16 +49,6 @@ function msgSid(msg: AIWSMessage): string {
       || (typeof (d as any).data === 'object' && (d as any).data?.session_id)))
     || '',
   ).trim();
-}
-
-/** Prefer the timeline with more workflow activity (not just top-level entry count). */
-function timelineRichness(entries: TimelineEntry[]): number {
-  let n = 0;
-  for (const e of entries) {
-    if (e.kind === 'workflow') n += 10 + (e.data.events?.length || 0) * 3 + (e.data.completed ? 0 : 1);
-    else n += 2;
-  }
-  return n;
 }
 
 /** Normalize token_stats payloads (flat or still EventBus-wrapped). */
@@ -132,6 +125,11 @@ export function useExecSessionLiveTimeline(
      * nodes and break mouse selection.
      */
     diskPoll?: boolean;
+    /**
+     * Keep soft-polling even when busyRef is false (running scheduled exec
+     * that missed WS frames so busy never flipped).
+     */
+    forceDiskPoll?: boolean;
   },
 ): {
   timeline: TimelineEntry[];
@@ -142,11 +140,13 @@ export function useExecSessionLiveTimeline(
   busy: boolean;
 } {
   const diskPoll = opts?.diskPoll !== false;
+  const forceDiskPoll = !!opts?.forceDiskPoll;
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [tokenStats, setTokenStats] = useState<SoloTokenStats | null>(null);
   const [busy, setBusy] = useState(false);
   const sessionIdRef = useRef(sessionId || '');
   const busyRef = useRef(false);
+  const forceDiskPollRef = useRef(forceDiskPoll);
   const finalizingRef = useRef(false);
 
   useEffect(() => {
@@ -156,6 +156,10 @@ export function useExecSessionLiveTimeline(
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
+
+  useEffect(() => {
+    forceDiskPollRef.current = forceDiskPoll;
+  }, [forceDiskPoll]);
 
   // Reset + hydrate when session changes
   useEffect(() => {
@@ -461,6 +465,62 @@ export function useExecSessionLiveTimeline(
     unsubs.push(onWs('response', handleFinal));
 
     unsubs.push(
+      onWs('to_user_end_task', (msg) => {
+        if (finalizingRef.current) return;
+        finalizingRef.current = true;
+        const text = extractContent(msg);
+        if (typeof text === 'string' && text.trim().length > 0) {
+          const raw = msg as any;
+          const messageId = raw.message_id || raw.id || undefined;
+          const chatMsg: ChatMessage = {
+            role: 'assistant',
+            content: text,
+            timestamp: new Date().toISOString(),
+            end_task: true,
+          };
+          if (messageId) chatMsg.message_id = messageId;
+          setTimeline((prev) => {
+            for (let i = prev.length - 1; i >= 0; i -= 1) {
+              const entry = prev[i];
+              if (entry.kind === 'message' && (entry.data as ChatMessage).role === 'user') break;
+              if (entry.kind === 'message') {
+                const existing = entry.data as ChatMessage;
+                if (
+                  existing.role === 'assistant'
+                  && (messageId
+                    ? existing.message_id === messageId
+                    : existing.content === chatMsg.content)
+                ) {
+                  const patched = prev.map((e, idx) =>
+                    idx === i && e.kind === 'message'
+                      ? { ...e, data: { ...e.data, end_task: true } }
+                      : e,
+                  );
+                  return foldTaskProcessSinceLastUser(
+                    sealIncompleteWorkflows(patched, { nowMs: Date.now() }),
+                  );
+                }
+              }
+            }
+            return foldTaskProcessSinceLastUser(
+              finalizeWorkflowAndAddMessage(prev, chatMsg),
+            );
+          });
+        } else {
+          setTimeline((prev) =>
+            foldTaskProcessSinceLastUser(
+              sealIncompleteWorkflows(prev, { nowMs: Date.now() }),
+            ),
+          );
+        }
+        setBusy(false);
+        setTimeout(() => {
+          finalizingRef.current = false;
+        }, 300);
+      }),
+    );
+
+    unsubs.push(
       onWs('stream', () => {
         setBusy(true);
       }),
@@ -610,12 +670,14 @@ export function useExecSessionLiveTimeline(
       }
     };
     void pullDisk();
-    // Poll only while the turn is live. Continuous 1.2s rewrites after stop
-    // remount markdown and make text selection impossible.
+    // Poll while the turn is live OR the parent forced catch-up (running exec).
+    // WS stream/turn_* events are the real-time path; this disk pull is a
+    // catch-up fallback, so 3s (not 1.2s) is plenty.
     const pollId = window.setInterval(() => {
-      if (!busyRef.current) return;
+      if (!forceDiskPollRef.current && !busyRef.current) return;
+      if (document.visibilityState !== 'visible') return;
       void pullDisk();
-    }, 1200);
+    }, 3000);
 
     return () => {
       unsubs.forEach((u) => {

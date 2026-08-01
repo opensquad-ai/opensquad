@@ -54,11 +54,42 @@ const getBackendAuthority = () => {
         return pageAuthority;
       }
     }
-    // Vite DEV: HTTP page → use page host so WS hits the Vite proxy
-    // (`/ai-web` → gateway) instead of dialing :9555 directly.
+    // Vite DEV: HTTP page → use page host so HTTP hits the Vite proxy
+    // (`/api` → gateway) instead of dialing :9555 directly.
     if (Boolean((import.meta as any).env?.DEV)) {
       return pageAuthority;
     }
+  }
+  return `${getBackendHost()}:${BACKEND_PORT}`;
+};
+
+/**
+ * WebSocket authority. In local Vite DEV, dial the gateway port directly —
+ * Vite's `/ai-web` WS proxy frequently sticks in CONNECTING (readyState=0)
+ * after long uptime / reconnect storms, which queues chat with no delivery.
+ * LAN pages still use same-origin (page:5173) so only the frontend port is needed.
+ *
+ * Override: VITE_WS_DIRECT=1|0  (force on/off)
+ */
+const getWsAuthority = () => {
+  if (typeof window === 'undefined') {
+    return `${getBackendHost()}:${BACKEND_PORT}`;
+  }
+  const pageHost = window.location.hostname;
+  const pagePort = window.location.port;
+  const pageAuthority = pagePort ? `${pageHost}:${pagePort}` : pageHost;
+  if (isPageHttps()) {
+    return getBackendAuthority();
+  }
+  const envDirect = String((import.meta as any).env?.VITE_WS_DIRECT || '').toLowerCase();
+  const forceDirect = envDirect === '1' || envDirect === 'true' || envDirect === 'on';
+  const forceProxy = envDirect === '0' || envDirect === 'false' || envDirect === 'off';
+  const isLocalPage = pageHost === 'localhost' || pageHost === '127.0.0.1';
+  if (Boolean((import.meta as any).env?.DEV) && !forceProxy && (forceDirect || isLocalPage)) {
+    return `${getBackendHost()}:${BACKEND_PORT}`;
+  }
+  if (Boolean((import.meta as any).env?.DEV)) {
+    return pageAuthority;
   }
   return `${getBackendHost()}:${BACKEND_PORT}`;
 };
@@ -68,7 +99,7 @@ const wsScheme = () => (isPageHttps() ? 'wss' : 'ws');
 
 export const SERVER_BASE_URL = `${httpScheme()}://${getBackendAuthority()}`;
 const API_BASE_URL = '/api';
-export const WS_BASE_URL = `${wsScheme()}://${getBackendAuthority()}`;
+export const WS_BASE_URL = `${wsScheme()}://${getWsAuthority()}`;
 
 // 安全地访问 localStorage
 const safeGetStorage = (key: string): string | null => {
@@ -155,8 +186,37 @@ function _handle401() {
   }
 }
 
-// 通用请求函数
+// In-flight GET deduplication: concurrent callers of the same endpoint share a
+// single fetch instead of hammering the gateway N times (at boot getAgents is
+// fired by App.tsx, AIChatPage and AgentManagerPage; hydrateCurrentSession is
+// fired by mount + WS connected). Only GET requests are deduped and only while
+// the request is in flight — the entry is removed on settle, so later calls
+// always re-fetch fresh data (no stale caching).
+const _inflightGet = new Map<string, Promise<any>>();
+
 async function apiRequest<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const method = (options.method || 'GET').toUpperCase();
+  const isGet = method === 'GET' && !options.body;
+  if (isGet) {
+    const pending = _inflightGet.get(endpoint);
+    if (pending) return pending as Promise<T>;
+  }
+  const run = _doApiRequest<T>(endpoint, options);
+  if (isGet) {
+    _inflightGet.set(endpoint, run);
+    // Always clear on settle so a later call re-fetches fresh data. Compare
+    // identity so an older request can't evict a newer one for the same URL.
+    void run.finally(() => {
+      if (_inflightGet.get(endpoint) === run) _inflightGet.delete(endpoint);
+    });
+  }
+  return run;
+}
+
+async function _doApiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
@@ -779,7 +839,7 @@ export const directMessageAPI = {
 export interface TokenStats {
   used: number;
   max: number;
-  breakdown: { user: number; thought: number; tool: number; tool_defs?: number; response: number };
+  breakdown: { user: number; thought: number; tool: number; tool_defs?: number; response: number; overhead?: number; system?: number };
   cumulative: {
     total_input_tokens: number;
     total_output_tokens: number;
@@ -788,6 +848,8 @@ export interface TokenStats {
     cache_read_tokens?: number;
     cache_creation_tokens?: number;
   } | null;
+  /** Optional session-scoped stats (which session the numbers belong to). */
+  session?: { id: string; title?: string };
 }
 
 export interface ChatProfile {
@@ -2502,8 +2564,8 @@ export const pluginMarketAPI = {
   triggerBuild: (id: string): Promise<{ status: string; log_path: string }> =>
     apiRequest<{ status: string; log_path: string }>(`/ai-web/market/plugins/${id}/build`, { method: 'POST' }),
 
-  installPluginFromGit: (url: string, pluginId?: string, mode = 'smart'): Promise<{ ok: boolean; job_id: string; plugin_id: string; status: string; message: string }> =>
-    apiRequest<{ ok: boolean; job_id: string; plugin_id: string; status: string; message: string }>(
+  installPluginFromGit: (url: string, pluginId?: string, mode = 'smart'): Promise<{ ok: boolean; job_id: string; plugin_id: string; status: string; message: string; node_results?: Array<{ node_id: string; node_label: string; ok: boolean; action: string; message: string }> }> =>
+    apiRequest<{ ok: boolean; job_id: string; plugin_id: string; status: string; message: string; node_results?: Array<{ node_id: string; node_label: string; ok: boolean; action: string; message: string }> }>(
       '/ai-web/market/plugins/install-from-git',
       {
         method: 'POST',
@@ -2511,7 +2573,7 @@ export const pluginMarketAPI = {
       }
     ),
 
-  getGitInstallJob: (jobId: string): Promise<{ job_id: string; plugin_id: string; status: string; error?: string; has_ui?: boolean; dist_found?: boolean; build_log_path?: string; finished_at?: number }> =>
+  getGitInstallJob: (jobId: string): Promise<{ job_id: string; plugin_id: string; status: string; error?: string; has_ui?: boolean; dist_found?: boolean; build_log_path?: string; finished_at?: number; step?: string; message?: string; plugin_dir?: string; dist_path?: string }> =>
     apiRequest(`/ai-web/market/plugins/jobs/${jobId}`),
 
   getBuildLog: (id: string): Promise<{ status: string; log: string }> =>

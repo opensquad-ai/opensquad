@@ -6,8 +6,8 @@ import { Group, User } from '../types';
 import { uploadAPI, directMessageAPI } from '../services/api';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { formatTime } from '../utils/time';
-import { useWebSocket } from '../hooks/useWebSocket';
 import { parse } from 'marked';
+import { playGentleNotificationSound, playSendSuccessSound } from '../utils/sounds';
 import { openThemeSettings } from '../utils/themeStore';
 import { AccountRailFooter } from './AccountRailFooter';
 import { AgentNavShortcutAvatars } from './AgentNavShortcutAvatars';
@@ -71,6 +71,11 @@ export const ChatList: React.FC<ChatListProps> = ({
   const [sendSuccess, setSendSuccess] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [attachments, setAttachments] = useState<Array<{url: string, type: string, name: string, size: string}>>([]);
+
+  // Remove a staged attachment from the compose modal
+  const removeAttachment = (idx: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== idx));
+  };
 
   // Message Detail Modal State
   const [selectedMessage, setSelectedMessage] = useState<typeof notifications[0] | null>(null);
@@ -254,7 +259,7 @@ export const ChatList: React.FC<ChatListProps> = ({
               title: msg.title,
               content: msg.content,
               sender: msg.is_sender ? `To: ${msg.other_party}` : msg.sender,
-              senderAvatar: msg.sender_avatar,
+              senderAvatar: msg.sender_avatar ?? undefined,
               timestamp: new Date(msg.timestamp).getTime(),
               // 发送者发送的消息应该始终标记为已读，接收者的消息用后端状态
               read: msg.is_sender ? true : msg.is_read,
@@ -1322,7 +1327,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                                                     key={idx}
                                                     className="relative group aspect-square cursor-pointer"
                                                     onClick={() => {
-                                                        const imageList = selectedMessage.attachments.filter(a => a.type === 'image');
+                                                        const imageList = (selectedMessage.attachments ?? []).filter(a => a.type === 'image');
                                                         const index = imageList.findIndex(a => a.url === att.url);
                                                         console.log('[ChatList] Image container clicked, opening lightbox, index:', index, 'url:', att.url);
                                                         if (index >= 0) {
@@ -1429,12 +1434,12 @@ export const ChatList: React.FC<ChatListProps> = ({
                 </button>
 
                 {/* Navigation */}
-                {selectedMessage.attachments.filter((att: any) => att.type === 'image').length > 1 && lightboxScale === 1 && (
+                {(selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image').length > 1 && lightboxScale === 1 && (
                     <>
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
-                                const images = selectedMessage.attachments.filter((att: any) => att.type === 'image');
+                                const images = (selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image');
                                 setSelectedImageIndex((prev) =>
                                     prev === null ? 0 : (prev - 1 + images.length) % images.length
                                 );
@@ -1446,7 +1451,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
-                                const images = selectedMessage.attachments.filter((att: any) => att.type === 'image');
+                                const images = (selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image');
                                 setSelectedImageIndex((prev) =>
                                     prev === null ? 0 : (prev + 1) % images.length
                                 );
@@ -1459,9 +1464,9 @@ export const ChatList: React.FC<ChatListProps> = ({
                 )}
 
                 {/* Image Counter */}
-                {selectedMessage.attachments.filter((att: any) => att.type === 'image').length > 1 && lightboxScale === 1 && (
+                {(selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image').length > 1 && lightboxScale === 1 && (
                     <div className="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 bg-black/50 rounded-full text-white text-sm">
-                        {selectedImageIndex + 1} / {selectedMessage.attachments.filter((att: any) => att.type === 'image').length}
+                        {selectedImageIndex + 1} / {(selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image').length}
                     </div>
                 )}
 
@@ -1469,7 +1474,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                 <button
                     onClick={(e) => {
                         e.stopPropagation();
-                        const images = selectedMessage.attachments.filter((att: any) => att.type === 'image');
+                        const images = (selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image');
                         const img = images[selectedImageIndex];
                         if (img) {
                             console.log('[ChatList] Downloading from lightbox:', img.url);
@@ -1491,7 +1496,7 @@ export const ChatList: React.FC<ChatListProps> = ({
 
                 {/* Main Image */}
                 {(() => {
-                    const imageList = selectedMessage.attachments.filter((att: any) => att.type === 'image');
+                    const imageList = (selectedMessage.attachments ?? []).filter((att: any) => att.type === 'image');
                     const currentImage = imageList[selectedImageIndex];
                     const imageUrl = currentImage ? getResourceUrl(currentImage.url) : null;
                     return currentImage && imageUrl ? (

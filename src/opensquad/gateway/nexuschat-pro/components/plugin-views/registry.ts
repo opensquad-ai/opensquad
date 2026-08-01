@@ -89,6 +89,10 @@ const PLUGIN_VIEW_LOADERS: Record<string, () => Promise<PluginViewAdapter>> = {
     const { mount, unmount } = await import("./sensevoice/SenseVoicePanel");
     return { mount, unmount };
   },
+  "websearch:setup": async () => {
+    const { mount, unmount } = await import("./websearch/WebSearchSetupPanel");
+    return { mount, unmount };
+  },
 };
 
 // Adapter cache — avoids re-importing on every mount

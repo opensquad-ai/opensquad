@@ -22,7 +22,7 @@ import { SessionChatPane } from './SessionChatPane';
 import { AgentWebComposer, type ComposerSendPayload } from './AgentWebComposer';
 import { type AgentMode } from './ModePicker';
 import { type ReasoningEffort } from './EffortPicker';
-import { useExecSessionLiveTimeline } from '../../hooks/useExecSessionLiveTimeline';
+import { useExecSessionLiveTimeline, timelineRichness } from '../../hooks/useExecSessionLiveTimeline';
 import type { PaneSessionBridge } from './WorkspacePaneShell';
 
 interface Props {
@@ -99,14 +99,14 @@ export const ExecWorkflowView: React.FC<Props> = ({
     sealOnStop,
     busy: liveBusy,
   } = useExecSessionLiveTimeline(sessionAgentId, exec.session_id, {
-    // Bridge owns live WS; local hook only hydrates once. Competing 1.2s disk
-    // polls rewrite the timeline and wipe text selection while running.
-    diskPoll: !sessionBridge,
+    // Soft disk merge while running even when sessionBridge owns WS — scheduled
+    // turns often miss browser frames; richness guard avoids clobbering a live fold.
+    diskPoll: exec.status === 'running' || !sessionBridge,
+    forceDiskPoll: exec.status === 'running',
   });
 
   // Prefer Agent Web live bucket when bridge has one; else local hook (disk hydrate).
-  // If bridge is empty/stale but local still has the finished assistant reply
-  // (e.g. a follow-up briefly replaced the live bucket from disk), keep local.
+  // Pick the richer timeline so a stale bridge cannot freeze mid-run progress.
   const bridgeTimeline = sid && sessionBridge?.getSessionLiveTimeline
     ? sessionBridge.getSessionLiveTimeline(sid)
     : null;
@@ -114,16 +114,15 @@ export const ExecWorkflowView: React.FC<Props> = ({
     if (bridgeTimeline == null) return localTimeline;
     if (!bridgeTimeline.length) return localTimeline;
     if (localTimeline.length === 0) return bridgeTimeline;
-    const asstCount = (entries: typeof localTimeline) =>
-      entries.reduce((n, e) => {
-        if (e.kind === 'message' && e.data.role === 'assistant' && String(e.data.content || '').trim()) {
-          return n + 1;
-        }
-        return n;
-      }, 0);
-    if (asstCount(localTimeline) > asstCount(bridgeTimeline)) return localTimeline;
-    return bridgeTimeline;
-  }, [bridgeTimeline, localTimeline]);
+    const localR = timelineRichness(localTimeline);
+    const bridgeR = timelineRichness(bridgeTimeline);
+    // While running, disk catch-up wins ties — a frozen bridge can match
+    // richness but miss newer progress / correct order.
+    if (exec.status === 'running') {
+      return localR >= bridgeR ? localTimeline : bridgeTimeline;
+    }
+    return localR > bridgeR ? localTimeline : bridgeTimeline;
+  }, [bridgeTimeline, localTimeline, exec.status]);
 
   const bridgeTokenStats = sid && sessionBridge?.getSessionTokenStats
     ? sessionBridge.getSessionTokenStats(sid)
@@ -161,6 +160,7 @@ export const ExecWorkflowView: React.FC<Props> = ({
 
     let cancelled = false;
     const pullAgentStats = () => {
+      if (document.visibilityState !== 'visible') return;
       adminAPI.getAgents().then((res) => {
         if (cancelled) return;
         const found = res.agents.find((a) => a.agent_id === sessionAgentId || a.dir_name === sessionAgentId);
@@ -201,14 +201,14 @@ export const ExecWorkflowView: React.FC<Props> = ({
       }).catch(() => {});
     };
     pullAgentStats();
-    // Idle executions do not need an 8s admin poll — it re-renders the chat
+    // Idle executions do not need an admin poll — it re-renders the chat
     // tree and clears text selection for no benefit.
     if (exec.status !== 'running') {
       return () => {
         cancelled = true;
       };
     }
-    const id = window.setInterval(pullAgentStats, 8000);
+    const id = window.setInterval(pullAgentStats, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -375,13 +375,12 @@ export const ExecWorkflowView: React.FC<Props> = ({
   const hasSession = !!exec.session_id;
   /** null → SessionChatPane hydrates from disk; non-empty → live mirror. */
   const paneTimeline = timeline.length > 0 ? timeline : null;
-  // Only soft-poll when we have no live timeline yet AND no sessionBridge
-  // (bridge owns WS). Polling while live remounts nodes and kills text selection.
+  // Soft-poll while running so missed WS frames still catch up (richness merge
+  // in the hook / bridge pick prevents clobbering a fresher live fold). WS is
+  // the real-time path; 5s catch-up is plenty and keeps the 2s→5s load down.
   const panePollMs =
-    !sessionBridge
-    && exec.status === 'running'
-    && (!paneTimeline || paneTimeline.length === 0)
-      ? 4000
+    exec.status === 'running'
+      ? 5000
       : undefined;
   const pendingPanel =
     sid && sessionBridge?.renderSessionPendingPanel

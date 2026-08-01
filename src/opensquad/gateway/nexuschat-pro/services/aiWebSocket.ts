@@ -47,7 +47,7 @@ export interface AIWSMessage {
 export interface TokenStats {
   used: number;
   max: number;
-  breakdown?: { user: number; thought: number; tool: number; tool_defs?: number; response: number };
+  breakdown?: { user: number; thought: number; tool: number; tool_defs?: number; response: number; overhead?: number; system?: number };
   cumulative?: {
     total_input_tokens: number;
     total_output_tokens: number;
@@ -126,6 +126,16 @@ class AIWebSocketService {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatIntervalMs = 25000;
 
+  // Handshake watchdog — a socket stuck in CONNECTING never fires onclose,
+  // so reconnect would never run and chat/new_session would be silently dropped.
+  private connectWatchdog: ReturnType<typeof setTimeout> | null = null;
+  private static readonly CONNECT_TIMEOUT_MS = 8000;
+
+  // Queue outbound messages while the socket is not yet OPEN (e.g. user clicks
+  // New Session during reconnect). Flushed on open; dropped on intentional disconnect.
+  private pendingOutbound: any[] = [];
+  private static readonly PENDING_MAX = 32;
+
   // Event handlers
   private messageHandlers: Map<string, MessageHandler[]> = new Map();
   private statusHandlers: StatusHandler[] = [];
@@ -135,10 +145,22 @@ class AIWebSocketService {
 
   /** Connect to Gateway WS for a specific agent */
   connect(agentId: string) {
-    // If already connected/connecting to the same agent, skip duplicate connect.
-    if (this.agentId === agentId && this.ws && (
-      this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING
-    )) {
+    // If already OPEN to the same agent, skip. CONNECTING does not skip when
+    // the socket is stale — watchdog / force reconnect must be able to replace it.
+    if (
+      this.agentId === agentId
+      && this.ws
+      && this.ws.readyState === WebSocket.OPEN
+    ) {
+      return;
+    }
+    if (
+      this.agentId === agentId
+      && this.ws
+      && this.ws.readyState === WebSocket.CONNECTING
+      && this.connectWatchdog
+    ) {
+      // Fresh handshake already in flight with an active watchdog.
       return;
     }
 
@@ -156,7 +178,9 @@ class AIWebSocketService {
   disconnect() {
     this.intentionalDisconnect = true;
     this._clearReconnectTimer();
+    this._clearConnectWatchdog();
     this._stopHeartbeat();
+    this.pendingOutbound = [];
     if (this.ws) {
       this.ws.onclose = null;  // prevent auto-reconnect
       this.ws.onerror = null;  // prevent false auth-expired detection
@@ -492,6 +516,19 @@ class AIWebSocketService {
     this.wasEverOpen = false;
     this.intentionalDisconnect = false;
 
+    // Drop a previous half-open socket so CONNECTING cannot stick forever.
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onclose = null;
+        this.ws.onerror = null;
+        this.ws.close();
+      } catch { /* ignore */ }
+      this.ws = null;
+    }
+    this._clearConnectWatchdog();
+
     try {
       this.ws = new WebSocket(wsUrl);
     } catch (err) {
@@ -501,13 +538,38 @@ class AIWebSocketService {
       return;
     }
 
+    const sock = this.ws;
+    this.connectWatchdog = setTimeout(() => {
+      if (this.intentionalDisconnect) return;
+      if (this.ws !== sock) return;
+      if (sock.readyState === WebSocket.OPEN) return;
+      console.warn(
+        `[AIWebSocket] Connect timeout after ${AIWebSocketService.CONNECT_TIMEOUT_MS}ms ` +
+          `(readyState=${sock.readyState}); forcing reconnect`,
+      );
+      try {
+        sock.onopen = null;
+        sock.onmessage = null;
+        sock.onclose = null;
+        sock.onerror = null;
+        sock.close();
+      } catch { /* ignore */ }
+      if (this.ws === sock) this.ws = null;
+      this._updateStatus('connecting');
+      // Force a new timer — a prior onerror may have scheduled a slow retry
+      // while this socket was still half-open.
+      this._scheduleReconnect({ startupFast: true, force: true });
+    }, AIWebSocketService.CONNECT_TIMEOUT_MS);
+
     this.ws.onopen = () => {
       console.log(`[AIWebSocket] Connected to agent: ${this.agentId}`);
       this.reconnectAttempts = 0;
       this.wasEverOpen = true;
       this._clearReconnectTimer();
+      this._clearConnectWatchdog();
       this._updateStatus('connected');
       this._startHeartbeat();
+      this._flushPendingOutbound();
     };
 
     this.ws.onmessage = (event) => {
@@ -521,6 +583,7 @@ class AIWebSocketService {
 
     this.ws.onclose = (event) => {
       console.log(`[AIWebSocket] Disconnected, code=${event.code} reason=${event.reason}`);
+      this._clearConnectWatchdog();
       this._stopHeartbeat();
 
       // Detect auth-related closure:
@@ -528,6 +591,7 @@ class AIWebSocketService {
       // Only trigger auth expired for explicit server rejection (4001).
       if (event.code === 4001) {
         console.warn('[AIWebSocket] Auth token expired or invalid (server 4001), triggering re-login');
+        this.pendingOutbound = [];
         this._updateStatus('error');
         for (const h of this.authExpiredHandlers) {
           try { h(); } catch (e) { console.error('[AIWebSocket] Auth expired handler error:', e); }
@@ -557,12 +621,55 @@ class AIWebSocketService {
       // Only log if this wasn't an intentional disconnect (StrictMode cleanup)
       if (!this.intentionalDisconnect) {
         console.error('[AIWebSocket] Error:', err);
-        this._updateStatus('error');
+        // Keep status as connecting while handshake may still complete / retry.
+        // Setting `error` here used to drop outbound chat (canQueue excluded error).
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this._updateStatus('error');
+        } else {
+          this._updateStatus('connecting');
+        }
         // Schedule reconnect: onerror may not always be followed by onclose
         // in all browsers (especially for initial connection failures).
-        this._scheduleReconnect();
+        this._scheduleReconnect({ startupFast: true });
       }
     };
+  }
+
+  private _clearConnectWatchdog() {
+    if (this.connectWatchdog) {
+      clearTimeout(this.connectWatchdog);
+      this.connectWatchdog = null;
+    }
+  }
+
+  private _enqueuePending(data: any) {
+    const cmd = data?.type === 'command' ? data?.command : (data?.command || data?.type || '');
+    // Prefer the latest new_session / chat rather than flooding the queue.
+    if (cmd === 'new_session') {
+      this.pendingOutbound = this.pendingOutbound.filter(
+        (m) => !(m?.type === 'command' && m?.command === 'new_session'),
+      );
+    }
+    this.pendingOutbound.push(data);
+    while (this.pendingOutbound.length > AIWebSocketService.PENDING_MAX) {
+      this.pendingOutbound.shift();
+    }
+  }
+
+  private _flushPendingOutbound() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.pendingOutbound.length === 0) return;
+    const batch = this.pendingOutbound.splice(0, this.pendingOutbound.length);
+    console.info(`[AIWebSocket] Flushing ${batch.length} queued message(s) after connect`);
+    for (const data of batch) {
+      try {
+        this.ws.send(JSON.stringify(data));
+      } catch (e) {
+        console.warn('[AIWebSocket] Failed to flush queued message:', e);
+        this._enqueuePending(data);
+        break;
+      }
+    }
   }
 
   private _send(data: any) {
@@ -578,9 +685,39 @@ class AIWebSocketService {
         }
       } catch { /* ignore */ }
       this.ws.send(JSON.stringify(data));
-    } else {
-      console.warn('[AIWebSocket] Not connected, message not sent:', data);
+      return;
     }
+
+    // Queue while connecting / agent-starting / brief reconnect; drop only if
+    // we have no agent target (intentional disconnect) or auth expired.
+    const canQueue =
+      !!this.agentId &&
+      !this.intentionalDisconnect &&
+      this.status !== 'error' &&
+      (this.status === 'connecting' ||
+        this.status === 'agent-starting' ||
+        this.status === 'disconnected' ||
+        (this.ws != null &&
+          (this.ws.readyState === WebSocket.CONNECTING ||
+            this.ws.readyState === WebSocket.CLOSING)));
+
+    if (canQueue) {
+      this._enqueuePending(data);
+      console.warn('[AIWebSocket] Not connected yet — queued:', {
+        type: data?.type,
+        command: data?.command,
+        status: this.status,
+        queue: this.pendingOutbound.length,
+        wsUrl: WS_BASE_URL,
+      });
+      // Ensure a connect attempt is in flight.
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        this._scheduleReconnect({ startupFast: true, force: true });
+      }
+      return;
+    }
+
+    console.warn('[AIWebSocket] Not connected, message not sent:', data);
   }
 
   private _sendCommand(command: string, data?: any) {
@@ -696,12 +833,20 @@ class AIWebSocketService {
 
   // ---- Reconnection ----
 
-  private _scheduleReconnect(startupFast: boolean = false) {
+  private _scheduleReconnect(
+    opts: boolean | { startupFast?: boolean; force?: boolean } = false,
+  ) {
     if (!this.agentId) return;  // was intentionally disconnected
     if (this.intentionalDisconnect) return;
 
-    // Prevent duplicate reconnect timers
-    if (this.reconnectTimer) return;
+    const startupFast = typeof opts === 'boolean' ? opts : !!opts.startupFast;
+    const force = typeof opts === 'object' && !!opts.force;
+
+    // Prevent duplicate reconnect timers unless forced (connect watchdog).
+    if (this.reconnectTimer) {
+      if (!force) return;
+      this._clearReconnectTimer();
+    }
 
     this.reconnectAttempts++;
     const delay = this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 4));

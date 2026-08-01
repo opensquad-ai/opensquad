@@ -237,6 +237,24 @@ describe('buildTimelineFromSession', () => {
     expect(buildTimelineFromSession([], [])).toEqual([]);
   });
 
+  it('drops a second message with the same message_id (no duplicate React key)', () => {
+    // Same message_id arriving twice (optimistic echo + disk snapshot, or a
+    // compression overlap) must render once — _uid is derived from the id and
+    // duplicates would produce two children with the same React key.
+    const messages = [
+      { role: 'user', content: '创建项目', timestamp: '2026-01-01T00:00:00.000Z', client_id: 'dup-uuid', message_id: 'dup-uuid' },
+      { role: 'assistant', content: '好的', timestamp: '2026-01-01T00:00:02.000Z' },
+      { role: 'user', content: '创建项目', timestamp: '2026-01-01T00:00:04.000Z', client_id: 'dup-uuid', message_id: 'dup-uuid' },
+    ];
+    const tl = buildTimelineFromSession(messages, []);
+    const userEntries = tl.filter(
+      (e) => e.kind === 'message' && e.data.role === 'user',
+    );
+    expect(userEntries).toHaveLength(1);
+    const uids = tl.map((e) => e._uid);
+    expect(new Set(uids).size).toBe(uids.length);
+  });
+
   it('flattens archived messages into the normal timeline (no fold)', () => {
     const messages = [
       { role: 'user', content: 'hello', timestamp: '2026-01-01T00:00:00.000Z' },
@@ -309,6 +327,134 @@ describe('buildTimelineFromSession', () => {
     expect(tl[1].kind).toBe('workflow');
     expect(tl[1].kind === 'workflow' && tl[1].data.events.some((ev) => ev.type === 'thought')).toBe(true);
     expect(tl[2].kind === 'message' && tl[2].data.role).toBe('assistant');
+  });
+
+  it('keeps in-flight tools after last progress (long Agent Web turn mid-run)', () => {
+    // Disk refresh while websearch is still open must not seal as "Worked"
+    // above / inside the last to_user progress bubble.
+    const messages = [
+      { role: 'user', content: '报告今日行情', timestamp: '2026-07-31T04:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: '先看昨日复盘，再取今日早盘',
+        timestamp: '2026-07-31T04:05:00.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'thought',
+        data: { text: 'planning…' },
+        timestamp: '2026-07-31T04:00:10.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 'w1', name: 'websearch__search', args: '{}' },
+        timestamp: '2026-07-31T04:05:30.000Z',
+      },
+      {
+        type: 'thought',
+        data: { text: 'late thought after api_sync' },
+        timestamp: '2026-07-31T04:05:05.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const kinds = tl.map((e) => e.kind);
+    expect(kinds[0]).toBe('message');
+    expect(tl.some((e) => e.kind === 'workflow' && !e.data.completed)).toBe(true);
+    const progressIdx = tl.findIndex(
+      (e) => e.kind === 'message' && String(e.data.content).includes('昨日复盘'),
+    );
+    const openWfIdx = tl.findIndex(
+      (e) =>
+        e.kind === 'workflow'
+        && !e.data.completed
+        && e.data.events.some(
+          (ev) =>
+            ev.type === 'tool_call'
+            && !ev.result
+            && String((ev.content as any)?.name || '').includes('websearch'),
+        ),
+    );
+    expect(progressIdx).toBeGreaterThanOrEqual(0);
+    expect(openWfIdx).toBeGreaterThan(progressIdx);
+    // Late thought still sits above the progress reply (api_sync race).
+    const thoughtBefore = tl
+      .slice(0, progressIdx)
+      .some(
+        (e) =>
+          e.kind === 'workflow'
+          && e.data.events.some((ev) => String(ev.content || '').includes('late thought')),
+      );
+    expect(thoughtBefore).toBe(true);
+  });
+
+  it('interleaves tools between intermediate to_user progress lines (scheduled-task)', () => {
+    // Progress to_user messages must not pull later tools before themselves.
+    const messages = [
+      { role: 'user', content: '[Scheduled Task]', timestamp: '2026-07-31T03:54:33.000Z' },
+      {
+        role: 'assistant',
+        content: '已获取早盘信息',
+        timestamp: '2026-07-31T03:54:52.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '已获取午盘实时行情',
+        timestamp: '2026-07-31T03:55:17.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '最终报告正文',
+        end_task: true,
+        timestamp: '2026-07-31T03:55:30.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'tool_call',
+        data: { id: 'c1', name: 'websearch__search', args: '{}' },
+        timestamp: '2026-07-31T03:54:40.000Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'c1', content: 'ok' },
+        timestamp: '2026-07-31T03:54:50.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 'c2', name: 'task_watch__complete', args: '{}' },
+        timestamp: '2026-07-31T03:55:20.000Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'c2', content: 'done' },
+        timestamp: '2026-07-31T03:55:25.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    // end_task folds process into task_fold; inspect nested order.
+    expect(tl[0].kind).toBe('message');
+    expect(tl[0].kind === 'message' && tl[0].data.role).toBe('user');
+    expect(tl.some((e) => e.kind === 'task_fold')).toBe(true);
+    const fold = tl.find((e) => e.kind === 'task_fold');
+    const nested = fold && fold.kind === 'task_fold' ? fold.data.entries : [];
+    const nestedKinds = nested.map((e) =>
+      e.kind === 'message' ? `msg:${e.data.role}:${String(e.data.content).slice(0, 8)}` : e.kind,
+    );
+    const firstProgress = nestedKinds.findIndex((x) => x.includes('已获取早盘'));
+    const noonProgress = nestedKinds.findIndex((x) => x.includes('已获取午盘'));
+    expect(firstProgress).toBeGreaterThanOrEqual(0);
+    expect(noonProgress).toBeGreaterThan(firstProgress);
+    const firstWf = nestedKinds.indexOf('workflow');
+    expect(firstWf).toBeGreaterThanOrEqual(0);
+    expect(firstWf).toBeLessThan(firstProgress);
+    const wfIndexes = nestedKinds
+      .map((x, i) => (x === 'workflow' ? i : -1))
+      .filter((i) => i >= 0);
+    expect(wfIndexes.some((i) => i > noonProgress)).toBe(true);
+    expect(
+      tl.some((e) => e.kind === 'message' && String(e.data.content).includes('最终报告')),
+    ).toBe(true);
   });
 
   it('keeps same-turn tools AFTER the user even when event timestamps are earlier', () => {
@@ -611,12 +757,13 @@ describe('task_fold / to_user_end_task', () => {
       expect(tl[1].data.entries.some((e) => e.kind === 'message' && e.data.content === 'mid notice')).toBe(
         true,
       );
-      // Sub-agent thoughts are included in the same fold
-      const wf = tl[1].data.entries.find((e) => e.kind === 'workflow');
+      // Sub-agent thoughts after mid progress stay in the fold (later workflow).
       expect(
-        wf &&
-          wf.kind === 'workflow' &&
-          wf.data.events.some((ev) => ev.subAgent && String(ev.content).includes('sub thinking')),
+        tl[1].data.entries.some(
+          (e) =>
+            e.kind === 'workflow'
+            && e.data.events.some((ev) => ev.subAgent && String(ev.content).includes('sub thinking')),
+        ),
       ).toBe(true);
     }
   });

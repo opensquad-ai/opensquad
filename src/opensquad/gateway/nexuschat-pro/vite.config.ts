@@ -12,7 +12,7 @@ function loadSystemConfig(): { ports: Record<string, number>; hosts: Record<stri
     };
 
     // Helper: try a path, fallback to .example.json, return parsed config or null
-    function tryLoadConfig(basePath: string): Record<string, any> | null {
+    function tryLoadConfig(basePath: string): { ports: Record<string, number>; hosts: Record<string, string> } | null {
         for (const suffix of ['system_config.json', 'system_config.example.json']) {
             const fullPath = path.join(basePath, suffix);
             if (fs.existsSync(fullPath)) {
@@ -124,12 +124,15 @@ export default defineConfig(({ mode }) => {
             target: backendUrl,
             changeOrigin: true,
           },
-          // Agent WebSocket — same-origin via Vite so LAN clients only need :5173
-          // (browsers would otherwise hit :9555 directly and fail behind firewalls).
+          // Agent WebSocket — LAN still proxies via Vite; local DEV clients
+          // prefer direct :gateway (see api.ts getWsAuthority) to avoid
+          // Vite WS proxy CONNECTING hangs after long uptime.
           '/ai-web': {
             target: backendUrl,
             changeOrigin: true,
             ws: true,
+            timeout: 60_000,
+            proxyTimeout: 60_000,
           },
         }
       },

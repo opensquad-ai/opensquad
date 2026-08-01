@@ -1091,23 +1091,42 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     }
   }, [tab, loadChanged, loadTree]);
 
-  // Silent keep-alive — tree/changed stay fresh without a manual refresh control
+  // Silent keep-alive — tree/changed stay fresh without a manual refresh control.
+  // Separate intervals: the project tree payload can be up to 10k entries (heavy),
+  // while per-turn file changes are already pushed by AIChatPage's session-changes
+  // path — these are only slow fallbacks (was 5s for both → tree 30s / changed 10s).
+  // Ticks skip entirely while the document is hidden.
   useEffect(() => {
     if (!isOpen || !rootPath || !agentId) return;
-    const tick = () => refreshCurrent();
-    const id = window.setInterval(tick, 5000);
-    const onFocus = () => tick();
-    const onVis = () => {
-      if (document.visibilityState === 'visible') tick();
+    const treeTick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadTree({ silent: true });
     };
+    const changedTick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadChanged({ silent: true });
+    };
+    const onFocus = () => {
+      if (tab === 'changed') void loadChanged({ silent: true });
+      else {
+        void loadTree({ silent: true });
+        void loadChanged({ silent: true });
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'visible') onFocus();
+    };
+    const treeId = window.setInterval(treeTick, 30000);
+    const changedId = window.setInterval(changedTick, 10000);
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVis);
     return () => {
-      window.clearInterval(id);
+      window.clearInterval(treeId);
+      window.clearInterval(changedId);
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVis);
     };
-  }, [isOpen, rootPath, agentId, refreshCurrent]);
+  }, [isOpen, rootPath, agentId, tab, loadTree, loadChanged]);
 
   const openDiff = useCallback(
     async (relPath: string) => {
