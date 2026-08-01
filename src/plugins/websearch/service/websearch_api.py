@@ -135,8 +135,16 @@ def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float
         _rerank_cache_set(cache_key, scores)
         return scores
     except Exception as e:
-        print(f"[WebSearch] reranker unavailable ({e}); keeping Bing order")
-        _reranker_down_until = time.time() + 30.0
+        # Connection refused (WinError 10061) usually means the reranker is
+        # still loading — retry soon instead of tripping the long circuit
+        # breaker, which would make every search skip rerank for 30s.
+        e_text = str(e)
+        if "10061" in e_text or "Connection refused" in e_text or "拒绝" in e_text:
+            print(f"[WebSearch] reranker not ready yet ({e_text}); will retry shortly")
+            _reranker_down_until = time.time() + 3.0
+        else:
+            print(f"[WebSearch] reranker unavailable ({e_text}); keeping Bing order")
+            _reranker_down_until = time.time() + 30.0
         return None
 
 
