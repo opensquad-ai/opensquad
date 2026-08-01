@@ -64,6 +64,16 @@
     "health_endpoint": "/health",
     "auto_start": true,
     "health_check_interval": 30,
+    "env": {
+      "WEBSEARCH_RERANKER_ENABLED": "1",
+      "WEBSEARCH_RERANKER_URL": "http://127.0.0.1:8111",
+      "WEBSEARCH_RERANKER_PORT": "8111",
+      "WEBSEARCH_HEADLESS": "1",
+      "WEBSEARCH_SERIAL": "1",
+      "WEBSEARCH_NAV": "direct",
+      "WEBSEARCH_TYPE_DELAY_MS": "20",
+      "WEBSEARCH_PERSIST_PROFILE": "1"
+    },
     "restart_policy": {
       "max_retries": 5,
       "backoff": [

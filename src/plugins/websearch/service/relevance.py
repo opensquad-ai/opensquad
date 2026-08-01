@@ -558,3 +558,87 @@ def merge_and_rank_results(
     """Backward-compatible alias: preserves Bing SERP order (no scoring)."""
     del min_score  # scoring removed
     return merge_serp_results(queries, search_results_list, ad_str_list=ad_str_list)
+
+
+def _weak_relevance_noise(url: str, title: str, query: str = "") -> bool:
+    """Heuristic for borderline (0.3–0.5) hits that are probably SERP noise.
+
+    Baike / gov / zhihu portal pages score 0.1–0.4 when they merely mention the
+    query terms but do not answer the intent. Rejecting them sharpens precision
+    without emptying the result set on genuinely thin SERPs.
+
+    When ``query`` is provided, a portal page that only matches a place/entity
+    name but carries none of the query's intent keywords is also treated as
+    noise (e.g. "福州市人民政府" for a "福州市 GDP" query).
+    """
+    if not url:
+        return False
+    low = f"{url} {title or ''}".lower()
+    if any(
+        marker in low
+        for marker in (
+            "baike.baidu.com",
+            "gov.cn",
+            "zhihu.com",
+            "thepaper.cn",
+            "ctrip.com",
+            "163.com",
+            "weather.com.cn/sogou",
+            "zonghe.",
+        )
+    ):
+        return True
+    # Place/entity-only match on a broad fact query (no intent keyword present).
+    if query:
+        # Intent anchor: a year/number (e.g. 2026, GDP data) that a portal
+        # homepage for the place alone would not carry.
+        has_anchor = bool(re.search(r"\d{4}|\d+\.\d+", query))
+        if has_anchor and not re.search(r"\d{4}|\d+\.\d+", low):
+            return True
+    return False
+
+
+def apply_rerank_strategy(
+    results: list[dict[str, str]],
+    scores: list[float],
+    *,
+    noise_threshold: float = 0.3,
+    weak_floor: float = 0.5,
+    query: str = "",
+) -> list[dict[str, str]]:
+    """Rank merged SERP results by model relevance and drop clear noise.
+
+    Always stable-sorts by score descending (Bing order breaks ties).
+    - score >= ``weak_floor``: always kept (strong relevance).
+    - ``noise_threshold`` <= score < ``weak_floor``: kept unless the hit is a
+      known SERP-noise shape (baike/gov/zhihu portal) — see _weak_relevance_noise.
+    - score < ``noise_threshold``: dropped.
+
+    If *every* score is below the threshold (retrieval miss — e.g. Bing returned
+    only tourism/gov pages for a weather query), return an **empty** list instead
+    of falling back to the junk SERP. Callers should surface that as
+    ``applied_all_noise`` so the agent can retry or use another source.
+    """
+    if not results or len(scores) != len(results):
+        return results
+    order = sorted(range(len(results)), key=lambda i: scores[i], reverse=True)
+    ranked = [results[i] for i in order]
+    ranked_scores = [scores[i] for i in order]
+    kept: list[dict[str, str]] = []
+    rejected_weak = 0
+    for r, s in zip(ranked, ranked_scores, strict=True):
+        if s >= weak_floor:
+            kept.append(r)
+        elif s >= noise_threshold:
+            if _weak_relevance_noise(r.get("url", ""), r.get("title", ""), query):
+                rejected_weak += 1
+            else:
+                kept.append(r)
+    if kept:
+        return kept
+    # Nothing survived: either every score is below the threshold, or the only
+    # borderline hits were all rejected as SERP-noise shapes. Both mean the
+    # retrieval miss — return empty so the caller reports applied_all_noise.
+    if ranked_scores and (max(ranked_scores) < noise_threshold or rejected_weak > 0):
+        return []
+    return ranked

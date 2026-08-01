@@ -1,19 +1,83 @@
+from __future__ import annotations
+
 import asyncio
+import json
 import os
+import sys
 import time
+import urllib.request
 
 from playwright.async_api import Browser, BrowserContext, async_playwright
 
 try:
     from .fetch_content import fetch_page_content_async
-    from .relevance import merge_serp_results
+    from .relevance import apply_rerank_strategy, merge_serp_results, tokenize_query
     from .wash_content import wash_content
-    from .web_crawler import _CHROME_UA, _parse_geolocation, search_with_bing_playwright
+    from .web_crawler import (
+        _CHROME_UA,
+        _filter_weather_intent_results,
+        _parse_geolocation,
+        _query_looks_like_weather,
+        search_with_bing_playwright,
+    )
 except ImportError:
     from fetch_content import fetch_page_content_async
-    from relevance import merge_serp_results
+    from relevance import apply_rerank_strategy, merge_serp_results, tokenize_query
     from wash_content import wash_content
-    from web_crawler import _CHROME_UA, _parse_geolocation, search_with_bing_playwright
+    from web_crawler import (
+        _CHROME_UA,
+        _filter_weather_intent_results,
+        _parse_geolocation,
+        _query_looks_like_weather,
+        search_with_bing_playwright,
+    )
+
+
+# ── Model-based reranker (Qwen3-Reranker-0.6B) ───────────────────────
+# Optional second-stage relevance rerank over merged Bing SERP results.
+# The reranker runs as a separate HTTP service (default :8111) using the
+# official Qwen3 yes/no scoring method. websearch only calls it here; if the
+# service is down, results keep Bing's native order (graceful fallback).
+_RERANKER_URL = os.environ.get("WEBSEARCH_RERANKER_URL", "http://127.0.0.1:8111").rstrip("/")
+_RERANKER_ENABLED = os.environ.get("WEBSEARCH_RERANKER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+# Rerank cap: score at most this many results per search. On slow GPUs
+# (e.g. GTX 1060) 30 rows can take ~4.5s — capping keeps p95 well under the
+# HTTP timeout while still ranking the meaningful top of the SERP.
+_RERANK_MAX_ROWS = 20
+# Skip reranker calls for this long after a failure (avoid per-request timeouts).
+_reranker_down_until = 0.0
+
+
+def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float = 15.0) -> list[float] | None:
+    """POST {queries, documents} to the reranker service; return aligned scores.
+
+    Returns None on any failure (service down, error, mismatched length) so the
+    caller falls back to Bing order. ``queries`` is one query per document so
+    each result is scored against the query that actually found it.
+    """
+    global _reranker_down_until
+    if not _RERANKER_ENABLED or not documents:
+        return None
+    if time.time() < _reranker_down_until:
+        return None
+    payload = json.dumps({"queries": queries, "documents": documents}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{_RERANKER_URL}/rerank",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        scores = list(data.get("scores", []))
+        if len(scores) != len(documents):
+            return None
+        return scores
+    except Exception as e:
+        print(f"[WebSearch] reranker unavailable ({e}); keeping Bing order")
+        _reranker_down_until = time.time() + 30.0
+        return None
 
 
 # ── Env var sanitization ──────────────────────────────────────────────
@@ -35,6 +99,22 @@ _browser: Browser | None = None
 _context: BrowserContext | None = None
 _persistent_context: BrowserContext | None = None
 _browser_lock = asyncio.Lock()
+# Shared persistent profile cannot safely parallelize Bing scrapes.
+_bing_search_lock = asyncio.Lock()
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def resolve_headless() -> bool:
+    """WEBSEARCH_HEADLESS=0 → headed Chrome (closer to manual). Default: headless."""
+    return _env_flag("WEBSEARCH_HEADLESS", "1")
+
+
+def resolve_serial_search() -> bool:
+    """WEBSEARCH_SERIAL=0 allows parallel Bing scrapes (unsafe with persistent profile)."""
+    return _env_flag("WEBSEARCH_SERIAL", "1")
 
 
 def _persist_profile_enabled() -> bool:
@@ -89,10 +169,7 @@ async def _launch_chromium(playwright, launch_kwargs: dict):
         return await playwright.chromium.launch(**launch_kwargs)
     except Exception as chrome_exc:
         if "channel" in launch_kwargs:
-            print(
-                f"[WebSearch] Chrome channel unavailable ({chrome_exc}); "
-                "falling back to bundled Chromium"
-            )
+            print(f"[WebSearch] Chrome channel unavailable ({chrome_exc}); falling back to bundled Chromium")
             launch_kwargs = dict(launch_kwargs)
             launch_kwargs.pop("channel", None)
             return await playwright.chromium.launch(**launch_kwargs)
@@ -226,6 +303,62 @@ async def shutdown_browser():
     print("[WebSearch] Browser singleton shut down")
 
 
+async def run_login_setup() -> None:
+    """
+    Headed Chrome with the persistent websearch profile for manual Bing login.
+
+    Run:  python service/main.py --login-setup
+    After signing into Bing/Microsoft in the window, press Enter here so cookies
+    are flushed to disk for subsequent headless/headed service searches.
+    """
+    try:
+        from playwright_stealth import stealth_async as _stealth
+    except ImportError:
+
+        async def _stealth(page):  # type: ignore[misc]
+            return None
+
+    await shutdown_browser()
+    os.environ["WEBSEARCH_HEADLESS"] = "0"
+    os.environ.setdefault("WEBSEARCH_PERSIST_PROFILE", "1")
+    profile = resolve_browser_profile_dir()
+    print("[WebSearch] Login setup")
+    print(f"[WebSearch] Profile dir: {profile}")
+    print("[WebSearch] Opening headed Chrome → https://cn.bing.com/ …")
+    print("[WebSearch] Log into Bing / Microsoft Account in that window if needed.")
+    print("[WebSearch] Then return here and press Enter to save cookies and exit.")
+
+    ctx = await _get_persistent_context(headless=False)
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    try:
+        await _stealth(page)
+    except Exception:
+        pass
+    try:
+        await page.goto("https://cn.bing.com/", wait_until="domcontentloaded", timeout=60000)
+    except Exception as exc:
+        print(f"[WebSearch] goto cn.bing.com failed ({exc}); leaving blank tab open")
+    await asyncio.to_thread(input, "\n>>> Press Enter after login to save profile and exit… ")
+    # Touch storage so Chromium flushes cookies.
+    try:
+        await page.goto("https://cn.bing.com/", wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    await shutdown_browser()
+    print("[WebSearch] Login setup done. Restart the websearch service to use the profile.")
+    try:
+        # Prefer sibling package path when launched as service/main.py
+        _plugins = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        if _plugins not in sys.path:
+            sys.path.insert(0, _plugins)
+        from websearch.setup_status import mark_login_done, write_plugin_status
+
+        mark_login_done(source="login_setup")
+        write_plugin_status()
+    except Exception as exc:
+        print(f"[WebSearch] Could not write login marker / status.json: {exc}")
+
+
 # ── LRU Cache ─────────────────────────────────────────────────────────
 _CACHE_MAX = 200
 _search_cache: dict[str, tuple] = {}  # key -> (timestamp, results)
@@ -250,41 +383,286 @@ def _cache_set(cache: dict, key: str, val):
     cache[key] = (time.time(), val)
 
 
+def _rerank_payload(
+    results: list[dict],
+    *,
+    status: str,
+    applied: bool,
+    filtered: bool = False,
+    before_count: int | None = None,
+) -> dict:
+    """Build the search payload agents see (results + rerank transparency)."""
+    after = len(results)
+    before = after if before_count is None else before_count
+    if status == "applied":
+        note = (
+            "Relevance rerank applied (Qwen3-Reranker). Results are ordered by "
+            "relevance; low-relevance SERP noise may have been filtered out."
+            if filtered
+            else "Relevance rerank applied (Qwen3-Reranker). Results are ordered "
+            "by relevance; no items fell below the noise threshold."
+        )
+    elif status == "applied_all_noise":
+        note = (
+            "Relevance rerank applied, but ALL Bing hits scored as off-topic "
+            "(retrieval miss). Results are empty — do not cite the prior SERP; "
+            "retry with a more specific query (e.g. add 中国天气网 / weather.com.cn) "
+            "or fetch a known weather URL such as https://wttr.in/<city>?format=j1&lang=zh."
+        )
+    elif status == "disabled":
+        note = (
+            "Relevance rerank disabled (WEBSEARCH_RERANKER_ENABLED=0). "
+            "Results follow Bing SERP order and were not relevance-filtered."
+        )
+    elif status == "skipped_empty":
+        note = "No search hits; relevance rerank was not run."
+    elif status == "skipped_weather":
+        note = (
+            "Weather-intent query; results were hard-filtered by the weather "
+            "allow-list (site: retrieval + host rules). Model rerank skipped "
+            "since every surviving row is weather-relevant."
+        )
+    else:
+        # unavailable / unknown
+        note = (
+            "Relevance rerank NOT applied (reranker unavailable or timed out). "
+            "Results follow Bing SERP order and were not relevance-filtered."
+        )
+    return {
+        "results": results,
+        "relevance_rerank_applied": applied,
+        "relevance_rerank_status": status,
+        "filtered_by_relevance": filtered,
+        "result_count_before_filter": before,
+        "result_count": after,
+        "relevance_rerank_note": note,
+    }
+
+
+def _dynamic_rerank_window(
+    results: list[dict],
+    queries: list[str],
+    *,
+    cap: int = _RERANK_MAX_ROWS,
+) -> tuple[list[dict], list[dict]]:
+    """Pick which rows the model scores (window) vs which keep Bing order (tail).
+
+    When more rows than ``cap`` survive, we still want every row that carries
+    the query's own keywords to be model-scored (keyword hits are the strongest
+    cheap relevance signal). Rows below the cap are kept, then keyword-free rows
+    are pushed to the tail so the GPU only scores likely-relevant candidates.
+    """
+    if len(results) <= cap:
+        return results, []
+    tokens: set[str] = set()
+    for q in queries:
+        tokens.update(t.lower() for t in tokenize_query(q))
+    if not tokens:
+        return results[:cap], results[cap:]
+    scored: list[dict] = []
+    tail: list[dict] = []
+    for r in results:
+        blob = f"{r.get('title', '')} {r.get('snippet', '') or r.get('summary', '')} {r.get('url', '')}".lower()
+        hit = any(tok in blob for tok in tokens)
+        (scored if hit else tail).append(r)
+    if len(scored) > cap:
+        scored = scored[:cap]
+    return scored, tail
+
+
 # ── API 1: Search ─────────────────────────────────────────────────────
-async def search_links_async(
-    queries: list[str], max_results_per_query: int = 3, headless: bool = True
-) -> list[dict[str, str]]:
+async def search_links_async(queries: list[str], max_results_per_query: int = 30, headless: bool | None = None) -> dict:
+    """Search Bing and optionally rerank. Returns a dict for the agent tool.
+
+    Keys: ``results``, ``relevance_rerank_applied``, ``relevance_rerank_status``,
+    ``filtered_by_relevance``, ``result_count_before_filter``, ``result_count``,
+    ``relevance_rerank_note``.
+
+    ``headless`` defaults to ``resolve_headless()`` (``WEBSEARCH_HEADLESS``, default on).
+    """
+    if headless is None:
+        headless = resolve_headless()
     cache_key = str(sorted(queries)) + f":{max_results_per_query}"
     cached = _cache_get(_search_cache, cache_key)
     if cached is not None:
         print(f"[WebSearch] Search cache hit: {queries}")
+        # Older cache entries were bare lists; wrap for agent-facing shape.
+        if isinstance(cached, list):
+            return _rerank_payload(cached, status="unavailable", applied=False)
         return cached
 
     print(f"--- API 1: Starting Link Search for {len(queries)} queries ---")
+    print(f"[WebSearch] headless={headless} serial={resolve_serial_search()}")
     start_time = time.time()
     ad_str_list = ["选购"]
 
     browser, shared_context = await _get_search_handle(headless)
-    search_tasks = [
-        search_with_bing_playwright(
-            browser,
-            query,
-            max_results=max_results_per_query,
-            shared_context=shared_context,
-        )
-        for query in queries
-    ]
-    search_results_list = await asyncio.gather(*search_tasks)
+    serial = resolve_serial_search() or shared_context is not None
+
+    # Multi-query parallelism: when there is more than one query, spawn one
+    # ephemeral context per query on the shared browser so scrapes run
+    # concurrently instead of linearly (persistent-profile scrapes stay serial
+    # because a single on-disk profile cannot safely share parallel tabs).
+    if len(queries) > 1 and browser is not None and not serial:
+        print(f"[WebSearch] parallel scrape {len(queries)} queries on ephemeral contexts")
+
+        async def _run_parallel(query: str):
+            ctx = await browser.new_context(
+                ignore_https_errors=True,
+                user_agent=_CHROME_UA,
+                locale="zh-CN",
+            )
+            try:
+                return await search_with_bing_playwright(
+                    None,
+                    query,
+                    max_results=max_results_per_query,
+                    shared_context=ctx,
+                )
+            finally:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+
+        search_results_list = await asyncio.gather(*[_run_parallel(q) for q in queries])
+    else:
+
+        async def _run_one(query: str):
+            if serial:
+                async with _bing_search_lock:
+                    return await search_with_bing_playwright(
+                        browser,
+                        query,
+                        max_results=max_results_per_query,
+                        shared_context=shared_context,
+                    )
+            return await search_with_bing_playwright(
+                browser,
+                query,
+                max_results=max_results_per_query,
+                shared_context=shared_context,
+            )
+
+        search_results_list = await asyncio.gather(*[_run_one(q) for q in queries])
+
+    # Weather miss on polluted persistent profile → one ephemeral Chromium pass.
+    if (
+        shared_context is not None
+        and any(_query_looks_like_weather(q) for q in queries)
+        and not any(bool(rows) for rows in search_results_list)
+    ):
+        print("--- weather SERP empty on persistent profile; retrying ephemeral browser ---")
+        eph_browser = await _get_browser(headless)
+        eph_rows: list = []
+        for q in queries:
+            async with _bing_search_lock:
+                eph_rows.append(
+                    await search_with_bing_playwright(
+                        eph_browser,
+                        q,
+                        max_results=max_results_per_query,
+                        shared_context=None,
+                    )
+                )
+        search_results_list = eph_rows
 
     results = merge_serp_results(
         queries,
         search_results_list,
         ad_str_list=ad_str_list,
     )
+    serp_count = len(results)
+    # Weather intent: drop gov/baike/tourism even if Bing ranked them high.
+    # Reranker alone false-positives (~0.2–0.6) on city-name portal pages.
+    results = _filter_weather_intent_results(queries, results)
+
+    # Optional Qwen3-Reranker pass: score each result against the query that
+    # found it, then reorder / drop clear noise. Expose status so agents know
+    # whether the list was relevance-filtered.
+    if not results:
+        if serp_count > 0:
+            payload = _rerank_payload(
+                results,
+                status="applied_all_noise",
+                applied=True,
+                filtered=True,
+                before_count=serp_count,
+            )
+        else:
+            payload = _rerank_payload(results, status="skipped_empty", applied=False)
+    # Weather queries are already hard-filtered by _filter_weather_intent_results
+    # (allow-listed hosts + intent regex) — the model rerank adds ~1.5-2s with no
+    # measurable gain since every surviving row is weather-relevant.
+    elif all(_query_looks_like_weather(q) for q in queries):
+        payload = _rerank_payload(
+            results,
+            status="skipped_weather",
+            applied=False,
+            filtered=False,
+            before_count=serp_count,
+        )
+    elif not _RERANKER_ENABLED:
+        payload = _rerank_payload(
+            results,
+            status="disabled",
+            applied=False,
+            filtered=len(results) < serp_count,
+            before_count=serp_count,
+        )
+    else:
+        # Dynamic model window: keyword-carrying rows get scored; keyword-free
+        # rows beyond the cap keep Bing order. Keeps the GPU load bounded on
+        # slow hardware (GTX 1060: 30-row scoring ~4.5s can blow the timeout).
+        window, tail = _dynamic_rerank_window(results, queries)
+        docs = [f"{r.get('title', '')}. {r.get('snippet', '') or r.get('summary', '')}" for r in window]
+        rqs = [(r.get("matched_queries") or queries[:1] or [""])[0] for r in window]
+        scores = await asyncio.to_thread(_rerank_scores_sync, rqs, docs)
+        if scores is None:
+            payload = _rerank_payload(
+                results,
+                status="unavailable",
+                applied=False,
+                filtered=len(results) < serp_count,
+                before_count=serp_count,
+            )
+        else:
+            before = serp_count
+            # Pass the query that found these rows so weak-relevance review can
+            # drop place-only portals (e.g. gov homepage for a "city GDP" query).
+            ranked = apply_rerank_strategy(window, scores, query=queries[0] if queries else "")
+            # Append unranked tail rows in Bing order (dedupe by url).
+            seen = {r.get("url") for r in ranked}
+            ranked = ranked + [r for r in tail if r.get("url") not in seen]
+            results = ranked
+            # Second weather hard-filter after model ranking (false-positive belt).
+            results = _filter_weather_intent_results(queries, results)
+            if not results and before > 0:
+                payload = _rerank_payload(
+                    results,
+                    status="applied_all_noise",
+                    applied=True,
+                    filtered=True,
+                    before_count=before,
+                )
+            else:
+                payload = _rerank_payload(
+                    results,
+                    status="applied",
+                    applied=True,
+                    filtered=len(results) < before,
+                    before_count=before,
+                )
+
     elapsed = time.time() - start_time
-    print(f"--- API 1: Finished. Found {len(results)} unique links in {elapsed:.2f}s ---")
-    _cache_set(_search_cache, cache_key, results)
-    return results
+    print(
+        f"--- API 1: Finished. Found {payload['result_count']} links "
+        f"(rerank={payload['relevance_rerank_status']}) in {elapsed:.2f}s ---"
+    )
+    # Do not cache retrieval misses — weather SERPs flip between junk and good.
+    if payload.get("relevance_rerank_status") != "applied_all_noise":
+        _cache_set(_search_cache, cache_key, payload)
+    return payload
 
 
 _BLOCK_MARKERS = (
@@ -312,7 +690,9 @@ def _blocked_page_message(url: str) -> str:
 
 
 # ── API 2: Fetch + wash ───────────────────────────────────────────────
-async def fetch_and_wash_urls_async(url_infos: list[str], headless: bool = True) -> dict[str, str]:
+async def fetch_and_wash_urls_async(url_infos: list[str], headless: bool | None = None) -> dict[str, str]:
+    if headless is None:
+        headless = resolve_headless()
     if not url_infos:
         return {}
 
@@ -365,7 +745,9 @@ async def fetch_and_wash_urls_async(url_infos: list[str], headless: bool = True)
 
 
 # ── API 3: Fetch raw HTML ────────────────────────────────────────
-async def fetch_html_content_async(url: str | None = None, headless: bool = True) -> str:
+async def fetch_html_content_async(url: str | None = None, headless: bool | None = None) -> str:
+    if headless is None:
+        headless = resolve_headless()
     if not url:
         return ""
     cached = _cache_get(_fetch_cache, url)
@@ -392,9 +774,16 @@ async def main():
         "2025 artificial intelligence development trends",
         "large language models in healthcare",
     ]
-    link_results = await search_links_async(queries=my_queries, max_results_per_query=3)
+    search_payload = await search_links_async(queries=my_queries, max_results_per_query=3)
+    link_results = search_payload.get("results") or []
 
     print("\n\n==================== API 1: Link Search Results ====================")
+    print(
+        f"Rerank: applied={search_payload.get('relevance_rerank_applied')} "
+        f"status={search_payload.get('relevance_rerank_status')} "
+        f"filtered={search_payload.get('filtered_by_relevance')}"
+    )
+    print(f"Note: {search_payload.get('relevance_rerank_note')}")
     if not link_results:
         print("API 1 did not return any links.")
         return

@@ -7,7 +7,13 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "plugins", "websearch", "service"))
 )
 
-from relevance import merge_serp_results, parse_query_terms, score_single_result, tokenize_query
+from relevance import (
+    apply_rerank_strategy,
+    merge_serp_results,
+    parse_query_terms,
+    score_single_result,
+    tokenize_query,
+)
 
 
 def test_tokenize_query_mixed_language():
@@ -144,7 +150,13 @@ def test_merge_serp_filters_ad_marker():
 
 
 def test_weather_degraded_serp_detection():
-    from web_crawler import _query_looks_like_weather, _results_look_like_weather
+    from web_crawler import (
+        _filter_weather_intent_results,
+        _query_looks_like_weather,
+        _result_is_weather_relevant,
+        _results_look_like_weather,
+        _weather_rescue_query,
+    )
 
     assert _query_looks_like_weather("福州 天气预报 今天")
     assert not _query_looks_like_weather("福州旅游攻略")
@@ -171,3 +183,101 @@ def test_weather_degraded_serp_detection():
             }
         ]
     )
+    rescue = _weather_rescue_query("福州今天天气")
+    assert "site:weather.com.cn" in rescue
+    # Bare weather.com.cn must still be rewritten to site:
+    assert "site:weather.com.cn" in _weather_rescue_query("福州 天气 weather.com.cn")
+    assert "site:weather.com" in _weather_rescue_query(
+        "Fuzhou weather forecast"
+    ) or "site:weather.com.cn" in _weather_rescue_query("Fuzhou weather forecast")
+    assert "福州" in _weather_rescue_query("Fuzhou weather forecast")
+    # Already site-scoped — leave unchanged.
+    assert _weather_rescue_query("福州天气 site:weather.com.cn") == "福州天气 site:weather.com.cn"
+    assert not _result_is_weather_relevant(
+        {"title": "福州市人民政府", "url": "https://www.fuzhou.gov.cn/", "summary": "政务"}
+    )
+    assert _result_is_weather_relevant(
+        {
+            "title": "福州天气预报",
+            "url": "https://www.weather.com.cn/weather/101230101.shtml",
+            "summary": "今日气温",
+        }
+    )
+    filtered = _filter_weather_intent_results(
+        ["福州天气预报 今天"],
+        [
+            {"title": "福州市人民政府", "url": "https://www.fuzhou.gov.cn/", "summary": "政务"},
+            {
+                "title": "福州天气预报",
+                "url": "https://www.weather.com.cn/weather/101230101.shtml",
+                "summary": "今日气温",
+            },
+        ],
+    )
+    assert len(filtered) == 1
+    assert "weather.com.cn" in filtered[0]["url"]
+
+
+def test_apply_rerank_strategy_all_noise_returns_empty():
+    """Do not fall back to junk tourism/gov pages when every score is below threshold."""
+    results = [
+        {"title": "福州市人民政府", "url": "https://www.fuzhou.gov.cn/"},
+        {"title": "福州旅游攻略", "url": "https://zhuanlan.zhihu.com/p/1"},
+    ]
+    scores = [0.001, 0.002]
+    out = apply_rerank_strategy(results, scores, noise_threshold=0.1)
+    assert out == []
+
+
+def test_apply_rerank_strategy_keeps_high_scores():
+    results = [
+        {"title": "福州天气预报", "url": "https://www.weather.com.cn/weather/101230101.shtml"},
+        {"title": "福州市人民政府", "url": "https://www.fuzhou.gov.cn/"},
+    ]
+    scores = [0.99, 0.001]
+    out = apply_rerank_strategy(results, scores, noise_threshold=0.1)
+    assert len(out) == 1
+    assert "weather.com.cn" in out[0]["url"]
+
+
+def test_apply_rerank_strategy_weak_noise_shape_rejected():
+    """Borderline (0.3-0.5) baike/gov/zhihu portal hits are dropped."""
+    results = [
+        {"title": "福州市_百度百科", "url": "https://baike.baidu.com/item/福州市/1"},
+        {"title": "2026最新福州旅游攻略", "url": "https://zhuanlan.zhihu.com/p/2"},
+    ]
+    scores = [0.41, 0.39]
+    out = apply_rerank_strategy(results, scores)  # default threshold 0.3, weak_floor 0.5
+    assert out == []
+
+
+def test_apply_rerank_strategy_weak_kept_for_real_site():
+    """Borderline score on a non-noise host is kept."""
+    results = [
+        {"title": "2026年一季度福州市经济运行情况 GDP数据发布", "url": "https://www.kantianqi.com/gdp/1"},
+    ]
+    scores = [0.409]
+    out = apply_rerank_strategy(results, scores)  # 0.409 < 0.5 but not a noise shape
+    assert len(out) == 1
+
+
+def test_apply_rerank_strategy_place_only_portal_rejected_for_year_query():
+    """A gov/baike page matching only the place is dropped for a 'city 2026 GDP' query."""
+    results = [
+        {"title": "福州市人民政府", "url": "https://www.fuzhou.gov.cn/?page_index=1"},
+        {"title": "2026年一季度福州市经济运行情况", "url": "https://www.kantianqi.com/gdp/fuzhou"},
+    ]
+    scores = [0.41, 0.62]
+    out = apply_rerank_strategy(results, scores, query="福州市 2026 年 GDP")
+    assert len(out) == 1
+    assert "kantianqi.com" in out[0]["url"]
+
+
+def test_apply_rerank_strategy_strong_always_kept():
+    """Score >= weak_floor (0.5) survives regardless of host."""
+    results = [
+        {"title": "福州市人民政府 政务公开", "url": "https://www.fuzhou.gov.cn/"},
+    ]
+    scores = [0.998]
+    out = apply_rerank_strategy(results, scores)
+    assert len(out) == 1

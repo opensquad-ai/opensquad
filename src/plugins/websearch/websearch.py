@@ -116,19 +116,30 @@ def _make_request(endpoint: str, params: dict) -> dict:
 
 def search(
     queries: list[str] | str | None = None,
-    max_results: int = 30,
+    max_results: int = 20,
     query: str | list[str] | None = None,
-) -> list[dict[str, str]]:
+) -> dict:
     """
     Call the WebSearch service's /search endpoint to retrieve search results for multiple queries.
 
-    Each result typically includes: title, url, summary/snippet, matched_queries,
-    match_count, and optionally result_type/card_kind
-    (``answer_card`` for Bing weather/knowledge/AI widgets; ``organic`` for blue links).
+    Returns a dict (not a bare list):
+    - ``results``: list of hits. Each typically includes title, url, summary/snippet,
+      matched_queries, match_count, and optionally result_type/card_kind
+      (``answer_card`` for Bing weather/knowledge/AI widgets; ``organic`` for blue links).
+    - ``relevance_rerank_applied`` (bool): whether Qwen3-Reranker re-ordered / filtered hits.
+    - ``relevance_rerank_status``: ``applied`` | ``unavailable`` | ``disabled`` | ``skipped_empty``.
+    - ``filtered_by_relevance`` (bool): True if low-relevance items were dropped.
+    - ``result_count_before_filter`` / ``result_count``: sizes before/after filter.
+    - ``relevance_rerank_note``: short human-readable explanation — read this to know
+      whether the list was relevance-filtered or is still raw Bing order.
 
-    Results keep Bing SERP order (no custom relevance re-ranking).
+    When ``relevance_rerank_applied`` is True, trust top ``results`` more and treat
+    the list as already noise-filtered. When False, results follow Bing SERP order
+    and may include off-topic links — judge relevance yourself before fetch/cite.
 
     Usage tips:
+    - **Check rerank status first:** Use ``relevance_rerank_applied`` /
+      ``relevance_rerank_note`` before deciding how aggressive to be about filtering.
     - **Prefer snippets / answer cards before fetch:** For many questions (weather, facts,
       short news, definitions), the returned ``summary``/``snippet`` or an ``answer_card``
       already contains enough information to answer. Do **not** automatically call
@@ -145,17 +156,17 @@ def search(
     - **Language-aware search:** Chinese queries automatically use cn.bing.com; English
       queries use www.bing.com. Mixed queries pick the region based on the dominant script.
     - **Multi-keyword / quoted phrases:** Prefer the same phrasing a human would type in
-      Bing (quotes help for memes/slang). Results follow Bing's own ranking.
+      Bing (quotes help for memes/slang). Prefer returned order after optional rerank.
     - **When to fetch:** After reading summaries, fetch at most 1–3 high-value URLs that
       still need full text (long reports, docs, paywalled-looking snippets that are thin).
       Prefer alternative open sources if a site is known to block scrapers.
-    - **High result volume:** If coverage is thin, increase max_results (e.g. 30 → 100)
-      and read more snippets — still avoid mass-fetching.
+    - **High result volume:** Default is 20 (rerank filters noise). For broader
+      coverage pass 50–100; pagination is capped so it will not walk endless Bing pages.
 
     Demo: research "the latest advances in artificial intelligence"
-    1. Multi-angle search: ``search(queries=["Latest AI breakthroughs 2024", ...], max_results=30)``
-    2. Read ``title`` / ``summary`` / ``result_type`` in returned order; answer from
-       snippets/answer cards when sufficient.
+    1. Multi-angle search: ``search(queries=["Latest AI breakthroughs 2024", ...], max_results=20)``
+    2. Read ``relevance_rerank_note``, then ``results`` ``title`` / ``summary`` /
+       ``result_type`` in order; answer from snippets/answer cards when sufficient.
     3. Only then ``fetch`` the 1–3 URLs that still need full-page detail.
     """
     if not queries:

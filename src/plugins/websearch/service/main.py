@@ -113,7 +113,20 @@ app = FastAPI(
 
 @app.get("/health", summary="Health check")
 async def health():
-    return {"status": "ok", "service": "websearch"}
+    payload = {"status": "ok", "service": "websearch"}
+    try:
+        _plugins = _os.path.abspath(_os.path.join(_here, "..", ".."))
+        if _plugins not in sys.path:
+            sys.path.insert(0, _plugins)
+        from websearch.setup_status import get_setup_status, write_plugin_status
+
+        setup = get_setup_status()
+        write_plugin_status(setup)
+        payload["bing_login_ready"] = bool(setup.get("bing_login_ready"))
+        payload["needs_bing_login"] = bool(setup.get("needs_bing_login"))
+    except Exception as exc:
+        payload["setup_status_error"] = str(exc)
+    return payload
 
 
 @app.get("/search", summary="Execute web search")
@@ -187,7 +200,7 @@ async def fetch_html(url: str = Query(..., description="URL to fetch content fro
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup browser singleton on service shutdown."""
+    """Cleanup browser singleton and reranker sidecar on service shutdown."""
     try:
         # Try relative import first (when run as package), fallback to
         # absolute (when run as script: `python service/main.py`).
@@ -199,14 +212,41 @@ async def shutdown_event():
         await shutdown_browser()
     except Exception as e:
         print(f"[WebSearch] Shutdown cleanup error: {e}")
+    try:
+        try:
+            from .reranker_sidecar import stop_reranker_sidecar
+        except ImportError:
+            from reranker_sidecar import stop_reranker_sidecar
+
+        stop_reranker_sidecar()
+    except Exception as e:
+        print(f"[WebSearch] Reranker shutdown error: {e}")
 
 
 # --- 3. Run server ---
 if __name__ == "__main__":
+    import argparse
+    import asyncio
     import logging as _logging
     import signal
 
     import uvicorn
+
+    _parser = argparse.ArgumentParser(description="OpenSquad websearch service")
+    _parser.add_argument(
+        "--login-setup",
+        action="store_true",
+        help="Open headed Chrome with the persistent Bing profile for manual login, then exit",
+    )
+    _args, _unknown = _parser.parse_known_args()
+    if _args.login_setup:
+        try:
+            from websearch_api import run_login_setup
+        except ImportError:
+            from .websearch_api import run_login_setup  # type: ignore
+
+        asyncio.run(run_login_setup())
+        raise SystemExit(0)
 
     # Suppress uvicorn access logs for /health endpoint
     class _HealthCheckFilter(_logging.Filter):
@@ -241,6 +281,12 @@ if __name__ == "__main__":
     if sys.platform == "win32":
 
         def _force_exit(signum, frame):
+            try:
+                from reranker_sidecar import stop_reranker_sidecar
+
+                stop_reranker_sidecar()
+            except Exception:
+                pass
             import os
 
             os._exit(0)
@@ -248,8 +294,40 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, _force_exit)
         signal.signal(signal.SIGTERM, _force_exit)
 
+    # Co-start Qwen3-Reranker (:8111) before accepting search traffic.
+    try:
+        from reranker_sidecar import start_reranker_sidecar
+
+        start_reranker_sidecar()
+    except Exception as e:
+        print(f"[WebSearch] Reranker sidecar start skipped: {e}")
+
+    # First-deploy Bing login status → status.json for Service Manager.
+    try:
+        _plugins = _os.path.abspath(_os.path.join(_here, "..", ".."))
+        if _plugins not in sys.path:
+            sys.path.insert(0, _plugins)
+        from websearch.setup_status import get_setup_status, write_plugin_status
+
+        _setup = get_setup_status()
+        write_plugin_status(_setup)
+        if _setup.get("needs_bing_login"):
+            print("[WebSearch] Bing login recommended (first deploy).")
+            print(f"[WebSearch] Run: {_setup.get('setup_command')}")
+        else:
+            print("[WebSearch] Bing browser profile looks ready.")
+    except Exception as e:
+        print(f"[WebSearch] Setup status write skipped: {e}")
+
     port = _resolve_service_port()
-    print(f"[WebSearch Service] Starting on port {port}")
+    _headless = _os.environ.get("WEBSEARCH_HEADLESS", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    print(f"[WebSearch Service] Starting on port {port} (headless={_headless})")
+    print("[WebSearch] Tip: python service/main.py --login-setup  (headed Bing login into persistent profile)")
     uvicorn.run(
         app,
         host="0.0.0.0",

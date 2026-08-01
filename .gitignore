@@ -247,6 +247,11 @@ scripts/manual_tests/
 # ── Local pip cache (downloaded wheels, not source) ──
 pip/
 
+# ── Websearch Qwen3-Reranker weights (~1.2GB; download at deploy time) ──
+# The whole snapshot dir (weights + tokenizer) is fetched via
+# WEBSEARCH_RERANKER_MODEL_PATH at deployment; only deploy.py / README are tracked.
+src/plugins/websearch/service/reranker/models/models--Qwen/
+
 # ── Local scratch notes / one-off helper scripts ──
 IDEA.md
 scripts/_fix_pth.py
