@@ -83,6 +83,21 @@ class SessionManager:
         # a newer session_data with stale data.  Initialized from disk on load.
         self._save_seq: int = 0
 
+        # ---- Incremental log + throttled snapshot (write-amplification fix) ----
+        # Mutations append O(1) seq-tagged records to history/{sid}.json.log;
+        # a full snapshot (current_session.json + history/{sid}.json) is only
+        # written every _snapshot_interval_sec or _snapshot_max_records records
+        # (~60x fewer full rewrites on large sessions). Crash recovery =
+        # snapshot + replay of records with seq > snapshot seq. Both live in
+        # this process only; the Gateway has its own mirrored reader.
+        self._snapshot_interval_sec = 30.0
+        self._snapshot_max_records = 200
+        self._last_snapshot_mono = 0.0
+        self._log_records_since_snapshot = 0
+        # Each start_async_writer() era starts with one fresh snapshot so
+        # cross-process readers see recent state immediately, then throttles.
+        self._writer_era_snapshotted = True
+
         # Ensure directories exist
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.history_dir, exist_ok=True)
@@ -285,6 +300,12 @@ class SessionManager:
         sid = data.get("id")
         is_focused = as_focused if as_focused is not None else (sid == self.session_data.get("id"))
         try:
+            # A full snapshot supersedes every incremental log record — never
+            # regress below a seq already recorded in data (e.g. data replayed
+            # from a log written by an earlier process run).
+            data_seq = data.get("_save_seq") or 0
+            if isinstance(data_seq, (int, float)):
+                self._save_seq = max(self._save_seq, int(data_seq))
             self._save_seq += 1
             data["_save_seq"] = self._save_seq
             if is_focused:
@@ -304,9 +325,183 @@ class SessionManager:
                 os.replace(tmp_h, hist_path)
                 self._cache_put(sid, data)
                 self._live_sessions[sid] = data
+                # Snapshot supersedes the log — reset it so replay starts clean.
+                self._truncate_log(sid)
             self._last_save_time = time.monotonic()
+            self._last_snapshot_mono = time.monotonic()
         except Exception as e:
             logger.error("[SessionManager] Failed to save session data: %s", e)
+
+    # ---- Incremental log (append-only) + replay ----
+
+    def _log_path_for(self, sid: str) -> str:
+        return os.path.join(self.history_dir, f"{sid}.json.log")
+
+    def _append_log_record(self, sid: str, record: dict) -> None:
+        """Append one incremental record to ``history/{sid}.json.log`` (O(1)).
+
+        Called from inside mutation closures, which always run under
+        ``self._lock`` (async writer batch / sync fallback / drain), so the
+        seq counter stays in sync with snapshot writes. Each record takes the
+        next ``_save_seq``; a later snapshot (seq S) supersedes every record
+        with seq <= S, so a crash between snapshot write and log truncate
+        replays nothing twice. A corrupted tail line (partial append) is
+        skipped on replay.
+        """
+        if not sid:
+            return
+        self._save_seq += 1
+        self._log_records_since_snapshot += 1
+        # The cached copy is stale the moment a log record lands (log mtime is
+        # not part of the cache staleness check) — pop it so the next read
+        # merges from disk.
+        try:
+            self._cache_remove(sid)
+        except Exception:
+            pass
+        record = {"seq": self._save_seq, "sid": sid, **record}
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        try:
+            os.makedirs(self.history_dir, exist_ok=True)
+            with open(self._log_path_for(sid), "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as e:
+            logger.warning("[SessionManager] Log append failed (sid=%s): %s", sid, e)
+
+    def _truncate_log(self, sid: str) -> None:
+        """Reset ``{sid}.json.log`` — the just-written snapshot supersedes it."""
+        if not sid:
+            return
+        self._log_records_since_snapshot = 0
+        try:
+            path = self._log_path_for(sid)
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            logger.debug("[SessionManager] Log truncate failed (sid=%s): %s", sid, e)
+
+    def _replay_log_into(self, data: dict, sid: str, base_seq: int) -> tuple[int, int]:
+        """Replay incremental log records with ``seq > base_seq`` into ``data``.
+
+        Mutates ``data`` in place (must be a working copy, not a shared
+        reference) and applies the same semantics as the live mutation
+        closures (append + cap trimming + draft promotion + provisional
+        title). Returns (max replayed seq, applied count). Corrupt lines
+        (partial appends from a crash) are dropped with a warning; the
+        remaining records still apply.
+        """
+        if not sid:
+            return 0, 0
+        path = self._log_path_for(sid)
+        if not os.path.exists(path):
+            return 0, 0
+        max_seq = 0
+        count = 0
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        logger.warning("[SessionManager] Dropping corrupt log line (sid=%s): %s", sid, line[:120])
+                        continue
+                    seq = rec.get("seq")
+                    if not isinstance(seq, int) or seq <= base_seq:
+                        continue
+                    if seq > max_seq:
+                        max_seq = seq
+                    op = rec.get("op")
+                    if op == "msg_append":
+                        msg = rec.get("msg")
+                        if isinstance(msg, dict):
+                            data.setdefault("messages", []).append(msg)
+                            if len(data["messages"]) > 1000:
+                                data["messages"] = data["messages"][-1000:]
+                            if rec.get("draft") is not None:
+                                data["draft"] = rec["draft"]
+                            if rec.get("title") and not data.get("title_locked"):
+                                data["title"] = rec["title"]
+                            data["last_updated"] = rec.get("ts") or utc_now_iso()
+                            count += 1
+                    elif op == "evt_append":
+                        evt = rec.get("evt")
+                        if isinstance(evt, dict):
+                            data.setdefault("events", []).append(evt)
+                            if len(data["events"]) > 2000:
+                                data["events"] = data["events"][-2000:]
+                            data["last_updated"] = rec.get("ts") or utc_now_iso()
+                            count += 1
+                    elif op == "tail_patch":
+                        patches = rec.get("patches")
+                        if isinstance(patches, dict):
+                            messages = data.get("messages") or []
+                            for i in range(len(messages) - 1, -1, -1):
+                                if messages[i].get("role") == "assistant":
+                                    messages[i].update(patches)
+                                    count += 1
+                                    break
+                    elif op == "meta":
+                        fields = rec.get("fields")
+                        if isinstance(fields, dict):
+                            if "title" in fields and not data.get("title_locked"):
+                                data["title"] = fields["title"]
+                            if "last_updated" in fields:
+                                data["last_updated"] = fields["last_updated"]
+                            count += 1
+                    else:
+                        logger.debug("[SessionManager] Unknown log op skipped (sid=%s): %s", sid, op)
+            # Reconstructed state supersedes the replayed records — a later
+            # snapshot (via max-insurance in _save_session_data) cannot
+            # regress below them.
+            data["_save_seq"] = max(int(data.get("_save_seq") or 0), max_seq)
+        except Exception as e:
+            logger.warning("[SessionManager] Log replay failed (sid=%s): %s", sid, e)
+        return max_seq, count
+
+    def _maybe_snapshot(self) -> None:
+        """Throttled full-snapshot decision; must be called under ``self._lock``.
+
+        A snapshot runs when the current writer era has not yet written one,
+        or when the interval / record-count budget is exhausted. Between
+        snapshots the incremental log carries the durable state.
+        """
+        now = time.monotonic()
+        if (
+            not self._writer_era_snapshotted
+            or self._log_records_since_snapshot >= self._snapshot_max_records
+            or (now - self._last_snapshot_mono) >= self._snapshot_interval_sec
+        ):
+            self._writer_era_snapshotted = True
+            self._save_session()
+
+    def _archive_snapshot(self, data: dict) -> None:
+        """Write a full history snapshot of ``data`` (archive paths).
+
+        Archive writes are rare user-driven events — they always supersede
+        the incremental log so the archived file is a complete, standalone
+        snapshot (must be called under ``self._lock``).
+        """
+        sid = data.get("id")
+        if not sid:
+            return
+        data_seq = data.get("_save_seq") or 0
+        if isinstance(data_seq, (int, float)):
+            self._save_seq = max(self._save_seq, int(data_seq))
+        self._save_seq += 1
+        data["_save_seq"] = self._save_seq
+        try:
+            os.makedirs(self.history_dir, exist_ok=True)
+            file_path = os.path.join(self.history_dir, f"{sid}.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self._cache_put(sid, data)
+            self._truncate_log(sid)
+            logger.info(f"[SessionManager] Archived session: {sid}")
+        except Exception as e:
+            logger.error(f"[SessionManager] Failed to archive session: {e}")
 
     def _enqueue_mutation_for(self, mutation: callable, sid: str | None = None):
         """Enqueue mutation targeting focused or a specific live session."""
@@ -343,11 +538,20 @@ class SessionManager:
                 mutation()
 
         if self._writer_running and self._write_queue is not None:
-            try:
-                self._write_queue.put_nowait(_guarded)
-                return
-            except queue.Full:
-                pass
+            _wt = self._writer_task
+            if _wt is not None and _wt.done():
+                # Writer task died before the self-heal could restart it
+                # (e.g. cancelled mid-storm) — degrade to synchronous writes
+                # so mutations still land on disk instead of queueing forever.
+                logger.warning("[SessionManager] Async writer task dead — falling back to sync writes")
+                self._writer_running = False
+                self._writer_task = None
+            else:
+                try:
+                    self._write_queue.put_nowait(_guarded)
+                    return
+                except queue.Full:
+                    pass
         with self._lock:
             _guarded()
             data = self._resolve_session_data(sid)
@@ -370,6 +574,9 @@ class SessionManager:
         self._writer_shutdown_event = asyncio.Event()
         self._writer_idle_event = asyncio.Event()
         self._writer_idle_event.set()
+        # Fresh writer era: force one snapshot on the first flush so readers
+        # see recent state, then throttle to _maybe_snapshot()'s budget.
+        self._writer_era_snapshotted = False
         self._writer_task = loop.create_task(self._async_save_loop())
         self._writer_running = True
         logger.info("[SessionManager] Async writer started")
@@ -397,7 +604,36 @@ class SessionManager:
         logger.info("[SessionManager] Async writer stopped")
 
     async def _async_save_loop(self):
-        """Background consumer: batches queued writes and flushes to disk."""
+        """Background consumer: batches queued writes and flushes to disk.
+
+        Resilience: boot-time anyio/MCP cancel storms (Python 3.12) leak
+        CancelledError into sibling tasks. A dead writer would silently queue
+        mutations forever (no disk writes, no errors, and no sync fallback
+        while ``_writer_running`` stays True), so the loop task re-creates
+        itself on a stray cancellation instead of dying. This mirrors the
+        SDK/runner "die + restart" pattern: the OLD task ends (so a caller
+        that cancels-and-awaits it — e.g. pytest-asyncio loop teardown —
+        completes), while the fresh task continues draining the queue.
+        """
+        while True:
+            try:
+                await self._async_save_loop_inner()
+                return  # inner loop exited on shutdown (final drain done)
+            except asyncio.CancelledError:
+                if not self._writer_running:
+                    raise
+                logger.warning("[SessionManager] Async writer cancelled (boot storm) — restarting")
+                self._writer_task = asyncio.get_running_loop().create_task(self._async_save_loop())
+                return
+            except Exception as e:
+                if not self._writer_running:
+                    raise
+                logger.error("[SessionManager] Async writer crashed (%s) — restarting", e)
+                self._writer_task = asyncio.get_running_loop().create_task(self._async_save_loop())
+                return
+
+    async def _async_save_loop_inner(self):
+        """The actual flush loop (wrapped by _async_save_loop for resilience)."""
         while self._writer_running:
             try:
                 # Wait for the flush interval or shutdown signal
@@ -423,33 +659,34 @@ class SessionManager:
                 # Clear idle before processing (writer is busy)
                 if self._writer_idle_event:
                     self._writer_idle_event.clear()
-                # Apply + save under the same lock as truncate/new_session so a
-                # withdraw cannot cut the session while this batch still holds
-                # dequeued (but unapplied) appends that would resurrect messages.
-                with self._lock:
-                    seq_before = self._save_seq
-                    for mutation in batch:
-                        try:
-                            mutation()
-                        except Exception as e:
-                            logger.warning("[SessionManager] Async mutation failed: %s", e)
-                    # Always persist current in-memory state after the batch.
-                    # If truncate already saved (seq advanced) and invalidated
-                    # guarded mutations, this re-saves the truncated snapshot.
-                    if self._save_seq > seq_before:
-                        logger.debug(
-                            "[SessionManager] Async writer raced sync save (seq %d > %d); "
-                            "re-saving in-memory state so thought/info are not lost",
-                            self._save_seq,
-                            seq_before,
-                        )
-                    self._save_session()
+
+                def _flush_batch_to_disk():
+                    # Apply + save under the same lock as truncate/new_session so a
+                    # withdraw cannot cut the session while this batch still holds
+                    # dequeued (but unapplied) appends that would resurrect messages.
+                    with self._lock:
+                        for mutation in batch:
+                            try:
+                                mutation()
+                            except Exception as e:
+                                logger.warning("[SessionManager] Async mutation failed: %s", e)
+                        # Throttled snapshot: mutations already appended O(1)
+                        # incremental records, so a full rewrite only runs every
+                        # _snapshot_interval_sec / _snapshot_max_records records.
+                        self._maybe_snapshot()
+
+                # JSON serialization + disk writes are synchronous and can take
+                # seconds on huge sessions. Run them on a worker thread so the
+                # event loop (and thus the gateway WS keepalive / heartbeats)
+                # never stalls — otherwise agent shows "重连中" mid-turn.
+                await asyncio.to_thread(_flush_batch_to_disk)
+
                 # Mark idle after flush is complete
                 if self._writer_idle_event:
                     self._writer_idle_event.set()
                 logger.debug(
                     f"[SessionManager] Async flush: {len(batch)} mutation(s), "
-                    f"seq_before={seq_before}, seq_after={self._save_seq}"
+                    f"log_records_since_snapshot={self._log_records_since_snapshot}"
                 )
 
         # Final drain on shutdown
@@ -459,14 +696,21 @@ class SessionManager:
                 final_batch.append(self._write_queue.get_nowait())
             except queue.Empty:
                 break
-        if final_batch:
-            with self._lock:
-                for mutation in final_batch:
-                    try:
-                        mutation()
-                    except Exception as e:
-                        logger.warning("[SessionManager] Final mutation failed: %s", e)
-                self._save_session()
+        if final_batch or self._log_records_since_snapshot > 0:
+
+            def _final_drain_to_disk():
+                with self._lock:
+                    for mutation in final_batch:
+                        try:
+                            mutation()
+                        except Exception as e:
+                            logger.warning("[SessionManager] Final mutation failed: %s", e)
+                    # Guarantee the last state lands as a snapshot on shutdown
+                    # (only needed when the log has records beyond the last one).
+                    if self._log_records_since_snapshot > 0:
+                        self._save_session()
+
+            await asyncio.to_thread(_final_drain_to_disk)
             if self._writer_idle_event:
                 self._writer_idle_event.set()
             logger.info(f"[SessionManager] Final drain: {len(final_batch)} mutation(s)")
@@ -492,11 +736,20 @@ class SessionManager:
             mutation()
 
         if self._writer_running and self._write_queue is not None:
-            try:
-                self._write_queue.put_nowait(_guarded)
-                return
-            except queue.Full:
-                pass  # Fallback to sync
+            _wt = self._writer_task
+            if _wt is not None and _wt.done():
+                # Writer task died before the self-heal could restart it
+                # (e.g. cancelled mid-storm) — degrade to synchronous writes
+                # so mutations still land on disk instead of queueing forever.
+                logger.warning("[SessionManager] Async writer task dead — falling back to sync writes")
+                self._writer_running = False
+                self._writer_task = None
+            else:
+                try:
+                    self._write_queue.put_nowait(_guarded)
+                    return
+                except queue.Full:
+                    pass  # Fallback to sync
         # Synchronous fallback (boot phase or queue overflow)
         with self._lock:
             _guarded()
@@ -534,15 +787,19 @@ class SessionManager:
             target["last_updated"] = utc_now_iso()
             if len(target["events"]) > 2000:
                 target["events"] = target["events"][-2000:]
+            self._append_log_record(
+                target.get("id") or sid or self.session_data.get("id"),
+                {"op": "evt_append", "evt": event, "ts": event["timestamp"]},
+            )
 
-        if event_type in ("tool_call", "tool_result"):
-            with self._lock:
-                self._drain_pending_mutations_sync()
-                _mutate()
-                self._save_session_data(target)
-            self._last_save_time = time.monotonic()
-        else:
-            self._enqueue_mutation_for(_mutate, sid=sid or target.get("id"))
+        # tool_call / tool_result previously flushed synchronously to guarantee
+        # crash-recoverable state before tool execution. But that JSON+disk
+        # write blocks the event loop for seconds on huge sessions → agent WS
+        # keepalive times out → gateway flips offline → UI 重连中. The async
+        # writer flushes every 0.5s (crash window is tiny), so route everything
+        # through it; the sync fallback below only triggers pre-writer boot.
+        self._enqueue_mutation_for(_mutate, sid=sid or target.get("id"))
+        self._last_save_time = time.monotonic()
 
     def _flush_if_dirty(self):
         """DEPRECATED: kept for backward-compat callers.
@@ -581,6 +838,15 @@ class SessionManager:
                     self.session_data["archived_events"] = []
                 # Restore save_seq from disk to prevent stale async-writer overwrites
                 self._save_seq = self.session_data.get("_save_seq", 0)
+                # Replay incremental log records written after the last snapshot
+                # so a crash loses at most the in-flight writer batch.
+                _max_seq, _replayed = self._replay_log_into(
+                    self.session_data,
+                    self.session_data.get("id"),
+                    self._save_seq,
+                )
+                self._save_seq = max(self._save_seq, _max_seq)
+                self._log_records_since_snapshot = _replayed
 
                 if self._is_reusable_draft(self.session_data):
                     # Keep the empty draft as the New Session cache — do not
@@ -697,6 +963,13 @@ class SessionManager:
                 if "latest_summary" not in data:
                     data["latest_summary"] = ""
 
+            # Merge incremental log records newer than the snapshot. The log
+            # (not the json mtime) invalidates the LRU entry via cache-pop in
+            # _append_log_record, so a read-only disk hit stays correct.
+            _max_seq, _replayed = self._replay_log_into(data, session_id, int(data.get("_save_seq") or 0))
+            if _replayed and _max_seq > self._save_seq:
+                self._save_seq = max(self._save_seq, _max_seq)
+
             # Put into cache
             self._cache_put(session_id, data)
             return data
@@ -764,6 +1037,14 @@ class SessionManager:
                 if "latest_summary" not in self.session_data:
                     self.session_data["latest_summary"] = ""
 
+            # Merge incremental log records newer than the snapshot; the
+            # subsequent _save_session() supersedes them with a fresh snapshot.
+            _max_seq, _replayed = self._replay_log_into(
+                self.session_data, session_id, int(self.session_data.get("_save_seq") or 0)
+            )
+            if _replayed and _max_seq > self._save_seq:
+                self._save_seq = max(self._save_seq, _max_seq)
+
             # Put into cache
             self._cache_put(session_id, self.session_data)
             self._register_live(self.session_data)
@@ -781,24 +1062,15 @@ class SessionManager:
         if not self.session_data.get("messages"):
             return
 
-        history_dir = self.history_dir
-        os.makedirs(history_dir, exist_ok=True)
-
         sid = self.session_data.get("id")
         if not sid:
             sid = self._generate_id()
             self.session_data["id"] = sid
 
-        # Cache the session before switching away so a switch-back doesn't need to read disk
-        self._cache_put(sid, self.session_data)
-
-        file_path = os.path.join(history_dir, f"{sid}.json")
-        try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(self.session_data, f, indent=2, ensure_ascii=False)
-            logger.info(f"[SessionManager] Archived session: {sid}")
-        except Exception as e:
-            logger.error(f"[SessionManager] Failed to archive session: {e}")
+        # Archive = rare user-driven event: full snapshot that supersedes the
+        # incremental log (seq bump + truncate inside _archive_snapshot).
+        with self._lock:
+            self._archive_snapshot(self.session_data)
 
     def start_new_session(self) -> bool:
         """Start a new session (automatically archives the old one).
@@ -853,23 +1125,17 @@ class SessionManager:
                     except Exception:
                         pass
                     history_path = os.path.join(self.history_dir, f"{sid}.json")
+                    log_path = self._log_path_for(sid)
                     try:
                         if os.path.isfile(history_path):
                             os.remove(history_path)
+                        if os.path.isfile(log_path):
+                            os.remove(log_path)
                     except Exception as e:
                         logger.debug("[SessionManager] Failed to drop empty draft %s: %s", sid, e)
                 elif sid:
                     self._live_sessions[sid] = old_data
-                    self._cache_put(sid, old_data)
-                    history_dir = self.history_dir
-                    os.makedirs(history_dir, exist_ok=True)
-                    file_path = os.path.join(history_dir, f"{sid}.json")
-                    try:
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            json.dump(old_data, f, indent=2, ensure_ascii=False)
-                        logger.info(f"[SessionManager] Archived session: {sid}")
-                    except Exception as e:
-                        logger.error(f"[SessionManager] Failed to archive session: {e}")
+                    self._archive_snapshot(old_data)
             return True
 
     def create_parallel_session(self, title: str | None = None, origin: str | None = None) -> str:
@@ -1192,16 +1458,33 @@ class SessionManager:
 
             target.setdefault("messages", []).append(message)
             target["last_updated"] = utc_now_iso()
+            draft_promoted = False
+            provisional_title = None
             if role == "user":
                 # First real user input promotes the draft into the normal session list.
                 if target.get("draft"):
                     target["draft"] = False
+                    draft_promoted = True
                 if not target.get("title") and not target.get("title_locked"):
                     provisional = self._title_from_user_content(content)
                     if provisional:
                         target["title"] = provisional
+                        provisional_title = provisional
             if len(target["messages"]) > 1000:
                 target["messages"] = target["messages"][-1000:]
+            record: dict = {
+                "op": "msg_append",
+                "msg": message,
+                "ts": message["timestamp"],
+            }
+            if draft_promoted:
+                record["draft"] = False
+            if provisional_title:
+                record["title"] = provisional_title
+            self._append_log_record(
+                target.get("id") or sid or self.session_data.get("id"),
+                record,
+            )
 
         self._enqueue_mutation_for(_mutate, sid=sid or target.get("id"))
 
@@ -1250,6 +1533,10 @@ class SessionManager:
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "assistant":
                     messages[i]["elapsed_ms"] = elapsed_ms
+                    self._append_log_record(
+                        self.session_data.get("id"),
+                        {"op": "tail_patch", "patches": {"elapsed_ms": elapsed_ms}},
+                    )
                     return
 
         self._enqueue_mutation(_mutate)
@@ -1262,6 +1549,10 @@ class SessionManager:
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "assistant":
                     messages[i]["end_task"] = True
+                    self._append_log_record(
+                        self.session_data.get("id"),
+                        {"op": "tail_patch", "patches": {"end_task": True}},
+                    )
                     return
 
         self._enqueue_mutation(_mutate)
@@ -1328,6 +1619,13 @@ class SessionManager:
                 return
             self.session_data["title"] = title
             self.session_data["last_updated"] = utc_now_iso()
+            self._append_log_record(
+                self.session_data.get("id"),
+                {
+                    "op": "meta",
+                    "fields": {"title": title, "last_updated": self.session_data["last_updated"]},
+                },
+            )
 
         self._enqueue_mutation(_mutate)
 
@@ -1611,10 +1909,16 @@ class SessionManager:
                                 content = jf.read()
                                 try:
                                     parsed = json.loads(content)
-                                    if isinstance(parsed, dict) and self._session_hidden_from_list(parsed):
-                                        seen_ids.add(sid)
-                                        continue
-                                    messages = parsed.get("messages", []) or []
+                                    if isinstance(parsed, dict):
+                                        # Merge log records newer than the snapshot
+                                        # (title/preview/hidden flags stay fresh).
+                                        self._replay_log_into(parsed, sid, int(parsed.get("_save_seq") or 0))
+                                        if self._session_hidden_from_list(parsed):
+                                            seen_ids.add(sid)
+                                            continue
+                                        messages = parsed.get("messages", []) or []
+                                    else:
+                                        messages = parsed.get("messages", []) or []
                                     title = self.resolve_session_title(messages, parsed.get("title"), sid)
                                     preview = _extract_preview(messages)
                                     if isinstance(parsed, dict):
@@ -1674,11 +1978,13 @@ class SessionManager:
                 self._init_new_session()
                 self._register_live(self.session_data)
                 history_path = os.path.join(self.history_dir, f"{session_id}.json")
-                if os.path.exists(history_path):
-                    try:
-                        os.remove(history_path)
-                    except Exception:
-                        pass
+                log_path = self._log_path_for(session_id)
+                for p in (history_path, log_path):
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
                 logger.info(
                     "[SessionManager] Abandoned empty current session %s → %s",
                     session_id,
@@ -1688,13 +1994,15 @@ class SessionManager:
 
             history_dir = self.history_dir
             file_path = os.path.join(history_dir, f"{session_id}.json")
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    return True
-                except Exception:
-                    return False
-            return False
+            removed = False
+            for p in (file_path, self._log_path_for(session_id)):
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        removed = True
+                    except Exception:
+                        pass
+            return bool(removed)
 
 
 # Global singleton

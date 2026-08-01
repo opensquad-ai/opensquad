@@ -3,7 +3,7 @@
 Validates:
 1. add_event() / add_message() return immediately (non-blocking)
 2. Events are eventually persisted to disk
-3. tool_call / tool_result still flush synchronously
+3. tool_call / tool_result land in the incremental log (crash-recoverable)
 4. Graceful shutdown drains pending writes
 """
 
@@ -89,18 +89,35 @@ async def test_add_event_non_critical_is_async(temp_session_manager):
 
 
 @pytest.mark.asyncio
-async def test_tool_call_flushes_sync(temp_session_manager):
-    """tool_call events must be on disk immediately (crash-recoverable)."""
+async def test_tool_call_writes_incremental_log_immediately(temp_session_manager):
+    """tool_call events must be crash-recoverable without a full snapshot.
+
+    The writer applies mutations in 0.5s batches; each mutation appends an
+    O(1) seq-tagged record to history/{sid}.json.log, so a crash between
+    flushes loses nothing — a fresh manager replays snapshot + log.
+    """
     sm = temp_session_manager
     sm.start_async_writer()
 
-    sm.add_event("tool_call", {"tool": "filesystem", "args": {"path": "/tmp"}})
+    # Era-first flush takes a fresh snapshot (and truncates the log); the
+    # tool_call must land in the incremental log after that, while full
+    # snapshots are throttled.
+    sm.add_event("thought", {"text": "seed era"})
+    await asyncio.sleep(sm._writer_flush_interval + 0.1)
 
-    # Should be on disk immediately, no need to wait for flush interval
-    with open(sm.current_session_file, encoding="utf-8") as f:
-        data = json.load(f)
-    assert len(data["events"]) == 1
-    assert data["events"][0]["type"] == "tool_call"
+    sm.add_event("tool_call", {"tool": "filesystem", "args": {"path": "/tmp"}})
+    await asyncio.sleep(sm._writer_flush_interval + 0.1)
+
+    sid = sm.get_current_session_id()
+    log_path = os.path.join(sm.history_dir, f"{sid}.json.log")
+    assert os.path.exists(log_path)
+    with open(log_path, encoding="utf-8") as f:
+        recs = [json.loads(line) for line in f.read().splitlines() if line.strip()]
+    assert any(rec.get("op") == "evt_append" and rec.get("evt", {}).get("type") == "tool_call" for rec in recs)
+
+    # Crash recovery: snapshot + log reconstruct the event.
+    sm2 = SessionManager(save_dir=sm.save_dir, history_dir=sm.history_dir)
+    assert [e["type"] for e in sm2.get_events()] == ["thought", "tool_call"]
 
     await sm.stop_async_writer()
 

@@ -27,6 +27,12 @@ from opensquad.system_config import syscfg
 # Active workspace directory
 ROOT_DIR = syscfg.get_workspace()
 
+# Cap on events returned on the latest page (offset=0). Long sessions can hold
+# thousands of events; returning all of them makes the first history request
+# multi-MB and stalls the frontend hydrate (10s client abort). The newest
+# events pair with the newest messages shown on the first page.
+_MAX_FIRST_PAGE_EVENTS = 400
+
 
 def _build_agent_id_map() -> dict:
     """
@@ -118,6 +124,12 @@ class AgentSessionReader:
                 self.session_data["archived_messages"] = []
             if "archived_events" not in self.session_data:
                 self.session_data["archived_events"] = []
+            # Merge incremental log records newer than the last snapshot (the
+            # agent throttles full snapshots; between them it appends O(1)
+            # records to history/{sid}.json.log).
+            _sid = self.session_data.get("id")
+            if _sid and _sid != "unknown":
+                self._replay_log_into(self.session_data, _sid, int(self.session_data.get("_save_seq") or 0))
             self._current_session_mtime = mtime
         except Exception as e:
             logger.warning(f"Failed to reload session: {e}")
@@ -132,11 +144,19 @@ class AgentSessionReader:
     # ---- LRU cache ----
 
     def _get_history_file_mtime(self, sid: str) -> float | None:
-        fp = os.path.join(self.history_dir, f"{sid}.json")
-        try:
-            return os.path.getmtime(fp) if os.path.exists(fp) else None
-        except OSError:
-            return None
+        # Include the incremental log file so cache entries are invalidated
+        # when the agent appends records without a full snapshot.
+        mtimes = []
+        for fp in (
+            os.path.join(self.history_dir, f"{sid}.json"),
+            os.path.join(self.history_dir, f"{sid}.json.log"),
+        ):
+            try:
+                if os.path.exists(fp):
+                    mtimes.append(os.path.getmtime(fp))
+            except OSError:
+                pass
+        return max(mtimes) if mtimes else None
 
     def _cache_put(self, sid: str, data: dict):
         if not sid:
@@ -181,9 +201,85 @@ class AgentSessionReader:
         system__event_pipeline is an internal mechanism injected by
         chat_api.add_pipeline_events() — it is NOT an actual LLM tool call
         and must never be exposed to the frontend or stored in session history.
+
+        tool_call_delta is the streaming partial-input event used only by the
+        live WS feed (each frame can carry ~25KB of accumulated arguments).
+        History replay renders the final ``tool_call`` (full args) instead, so
+        dropping deltas keeps session payloads small — a long turn otherwise
+        returns 1.5MB+ of deltas and stalls the frontend hydrate.
         """
         skip_names = ("system__event_pipeline", "system.event_pipeline")
-        return [e for e in events if e.get("name") not in skip_names]
+        skip_types = ("tool_call_delta",)
+        return [e for e in events if e.get("name") not in skip_names and e.get("type") not in skip_types]
+
+    def _replay_log_into(self, data: dict, sid: str, base_seq: int) -> int:
+        """Merge the agent's incremental log (history/{sid}.json.log) into ``data``.
+
+        Mirror of SessionManager._replay_log_into (the gateway reads these
+        files cross-process). Applies records with seq > base_seq (the
+        snapshot's _save_seq) using the same append/patch semantics, so a
+        session served here matches the agent's in-memory state even while
+        full snapshots are throttled. Returns the max replayed seq (0 if no
+        log / nothing applied). Corrupt tail lines are dropped.
+        """
+        log_path = os.path.join(self.history_dir, f"{sid}.json.log")
+        if not os.path.exists(log_path):
+            return 0
+        max_seq = 0
+        try:
+            with open(log_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        logger.warning(f"Dropping corrupt log line (sid={sid}): {line[:120]}")
+                        continue
+                    seq = rec.get("seq")
+                    if not isinstance(seq, int) or seq <= base_seq:
+                        continue
+                    if seq > max_seq:
+                        max_seq = seq
+                    op = rec.get("op")
+                    if op == "msg_append":
+                        msg = rec.get("msg")
+                        if isinstance(msg, dict):
+                            data.setdefault("messages", []).append(msg)
+                            if len(data["messages"]) > 1000:
+                                data["messages"] = data["messages"][-1000:]
+                            if rec.get("draft") is not None:
+                                data["draft"] = rec["draft"]
+                            if rec.get("title") and not data.get("title_locked"):
+                                data["title"] = rec["title"]
+                            data["last_updated"] = rec.get("ts")
+                    elif op == "evt_append":
+                        evt = rec.get("evt")
+                        if isinstance(evt, dict):
+                            data.setdefault("events", []).append(evt)
+                            if len(data["events"]) > 2000:
+                                data["events"] = data["events"][-2000:]
+                            data["last_updated"] = rec.get("ts")
+                    elif op == "tail_patch":
+                        patches = rec.get("patches")
+                        if isinstance(patches, dict):
+                            messages = data.get("messages") or []
+                            for i in range(len(messages) - 1, -1, -1):
+                                if messages[i].get("role") == "assistant":
+                                    messages[i].update(patches)
+                                    break
+                    elif op == "meta":
+                        fields = rec.get("fields")
+                        if isinstance(fields, dict):
+                            if "title" in fields and not data.get("title_locked"):
+                                data["title"] = fields["title"]
+                            if "last_updated" in fields:
+                                data["last_updated"] = fields["last_updated"]
+            data["_save_seq"] = max(int(data.get("_save_seq") or 0), max_seq)
+        except Exception as e:
+            logger.warning(f"Log replay failed (sid={sid}): {e}")
+        return max_seq
 
     # ---- public API ----
 
@@ -321,6 +417,9 @@ class AgentSessionReader:
                         raw = json.load(jf)
                     if isinstance(raw, dict):
                         data_for_meta = raw
+                        # Merge incremental log records so title/preview stay
+                        # fresh between throttled snapshots.
+                        self._replay_log_into(data_for_meta, sid, int(data_for_meta.get("_save_seq") or 0))
                     elif isinstance(raw, list):
                         data_for_meta = {"id": sid, "messages": raw, "title": None}
                 except Exception:
@@ -524,6 +623,10 @@ class AgentSessionReader:
                 if "archived_events" not in data:
                     data["archived_events"] = []
 
+            # Merge incremental log records newer than the snapshot (the agent
+            # throttles full snapshots; the log carries the durable tail).
+            self._replay_log_into(data, session_id, int(data.get("_save_seq") or 0))
+
             # Filter out synthetic internal events before caching
             data["events"] = self._filter_events(data.get("events", []))
 
@@ -548,15 +651,18 @@ class AgentSessionReader:
         self._cache.pop(session_id, None)
         self._list_meta_cache.pop(session_id, None)
         file_path = os.path.join(self.history_dir, f"{session_id}.json")
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Deleted session file: {file_path}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to delete session {session_id}: {e}")
-                return False
-        return False
+        log_path = os.path.join(self.history_dir, f"{session_id}.json.log")
+        removed = False
+        for p in (file_path, log_path):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    removed = True
+                    logger.info(f"Deleted session file: {p}")
+                except Exception as e:
+                    logger.error(f"Failed to delete session {session_id}: {e}")
+                    return False
+        return bool(removed)
 
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 
@@ -707,6 +813,14 @@ class AgentSessionReader:
         elif offset == 0 and total_events > 0 and len(paged_messages) >= total_messages:
             # Full message set on first page — return all events.
             paged_events = list(all_events)
+
+        # Cap the first-page event payload. Long sessions accumulate thousands
+        # of events (tool_call_delta / thought / tool_result …) — returning all
+        # of them on offset=0 balloons the response to 1.5MB+ and stalls the
+        # frontend hydrate (client aborts after 10s → "加载中…" forever). Keep
+        # the newest events, which pair with the newest messages on this page.
+        if offset == 0 and len(paged_events) > _MAX_FIRST_PAGE_EVENTS:
+            paged_events = paged_events[-_MAX_FIRST_PAGE_EVENTS:]
 
         has_more = (total_messages - offset - limit) > 0
 

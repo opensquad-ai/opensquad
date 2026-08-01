@@ -97,6 +97,12 @@ def persist(sid: str, card_name: str) -> bool:
                 card,
             )
             return False
+        # Already persisted with this card — skip the full synchronous
+        # serialize + double-file write (current_session.json + history/{sid}.json).
+        # The chat WS payload carries model_card on *every* message, so without
+        # this guard each turn re-writes the whole session before the LLM call.
+        if (data.get("model_card") or "").strip() == card:
+            return True
         data["model_card"] = card
         sm._save_session_data(data)
         logger.warning("[session_model] persisted sid=%s card=%s", sid, card)
@@ -136,7 +142,9 @@ async def bind_for_turn(
     # equalled the agent default so a stale UI closure would not clobber a pane
     # override — but Agent Web now persists the last UI pick as the agent
     # default, so that guard would keep old session cards after refresh.)
-    if preferred:
+    # Short-circuit when memory/disk already carry this card so the per-message
+    # persist() (full session serialize + double-file write) is skipped entirely.
+    if preferred and get(runner, sid) != preferred:
         set_session_card(runner, sid, preferred)
 
     apis = session_api_map(runner)

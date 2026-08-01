@@ -42,8 +42,13 @@ def test_is_external_ingress_sources():
     assert not is_external_ingress("", "web")
 
 
-def test_start_new_session_archives_empty(tmp_path: Path):
-    """Empty previous session must still land in history/ so it appears in the list."""
+def test_start_new_session_archives_previous(tmp_path: Path):
+    """A session with content must land in history/ so it appears in the list.
+
+    Empty drafts are deliberately reused on New Session (see
+    test_new_session_reuses_empty_draft), so the previous session needs at
+    least one message to be archived.
+    """
     save = tmp_path / "sessions"
     hist = tmp_path / "history"
     save.mkdir()
@@ -51,12 +56,15 @@ def test_start_new_session_archives_empty(tmp_path: Path):
     sm = SessionManager(save_dir=str(save), history_dir=str(hist))
     first = sm.get_current_session_id()
     assert first and first != "unknown"
-    assert not (sm.session_data.get("messages") or [])
+    sm.add_message("user", "seed the session")
+    assert sm.session_data.get("messages")
 
     sm.start_new_session()
     second = sm.get_current_session_id()
     assert second != first
     assert (hist / f"{first}.json").is_file()
+    # Promote the new draft so it appears in the sidebar listing.
+    sm.add_message("user", "second seed")
     listing = sm.get_session_list()
     ids = {s["id"] for s in listing}
     assert first in ids
@@ -86,6 +94,7 @@ def test_primary_session_default_and_rebind(tmp_path: Path):
     assert sm.get_primary_session_id() == first
     assert (save / "primary_session.json").is_file()
 
+    sm.add_message("user", "seed")
     sm.start_new_session()
     second = sm.get_current_session_id()
     assert second != first
@@ -97,6 +106,8 @@ def test_primary_session_default_and_rebind(tmp_path: Path):
     with open(save / "primary_session.json", encoding="utf-8") as f:
         assert json.load(f)["primary_session_id"] == second
 
+    # Promote the new draft so it appears in the sidebar listing.
+    sm.add_message("user", "second seed")
     listing = sm.get_session_list()
     primaries = [s for s in listing if s.get("primary")]
     assert len(primaries) == 1
@@ -110,6 +121,7 @@ def test_concurrent_add_message_two_sessions(tmp_path: Path):
     hist.mkdir()
     sm = SessionManager(save_dir=str(save), history_dir=str(hist))
     sid_a = sm.get_current_session_id()
+    sm.add_message("user", "seed A", sid=sid_a)
     sm.start_new_session()
     sid_b = sm.get_current_session_id()
     # Keep A live
@@ -199,8 +211,10 @@ def test_resolve_primary_session_id(tmp_path: Path):
     hist.mkdir()
     sm = SessionManager(save_dir=str(save), history_dir=str(hist))
     first = sm.get_current_session_id()
+    sm.add_message("user", "seed")
     sm.start_new_session()
     second = sm.get_current_session_id()
+    assert second != first
     assert resolve_primary_session_id(sm) == first
     sm.set_primary_session_id(second)
     assert resolve_primary_session_id(sm) == second
@@ -218,10 +232,12 @@ async def test_message_router_idle_pushes_process_queue_to_primary(tmp_path: Pat
     hist.mkdir()
     sm = SessionManager(save_dir=str(save), history_dir=str(hist))
     first = sm.get_current_session_id()
+    sm.add_message("user", "seed")
     sm.start_new_session()
     second = sm.get_current_session_id()
     assert sm.get_primary_session_id() == first
     assert sm.get_focused_session_id() == second
+    assert second != first
 
     hub = InputHub()
 
@@ -283,6 +299,7 @@ async def test_dispatcher_process_queue_starts_primary_turn(tmp_path: Path, monk
     hist.mkdir()
     sm = SessionManager(save_dir=str(save), history_dir=str(hist))
     primary = sm.get_current_session_id()
+    sm.add_message("user", "seed")
     sm.start_new_session()  # focused ≠ primary
 
     q = get_message_queue()
