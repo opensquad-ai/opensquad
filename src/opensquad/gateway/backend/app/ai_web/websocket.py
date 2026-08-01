@@ -21,6 +21,38 @@ from .sessions import gateway_session_cache
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
 
+# Canonical agent disk session id last reported via the `current_session`
+# WS event (agent_id -> session_id). The Gateway forwards this to the user
+# `connected` event so the frontend history read uses a real disk session id
+# instead of the gateway_session_key (user_id:agent_id) fallback, which is
+# not a valid session file name and always 404s the history API.
+_agent_current_session_id: dict[str, str] = {}
+
+
+def _resolve_registered_agent_id(agent_id: str) -> str:
+    """Map UI/dir aliases (e.g. ``agent305``) to the registered WS agent_id.
+
+    The registry is keyed by config ``agent_id`` (often ``agent305-001``), but the
+    web UI / localStorage may reopen chat with the on-disk folder name. Without
+    this alias, user WS gets 1013 ``agent_not_ready`` forever while the agent is
+    actually online under the longer id.
+    """
+    if not agent_id:
+        return agent_id
+    if registry.get_agent(agent_id):
+        return agent_id
+    try:
+        agents = registry.list_agents()
+    except Exception:
+        return agent_id
+    for a in agents:
+        aid = (a.agent_id or "").strip()
+        if not aid:
+            continue
+        if aid.startswith(agent_id + "-") or aid.rsplit("-", 1)[0] == agent_id:
+            return aid
+    return agent_id
+
 
 def _check_node_secret(received: str) -> bool:
     """
@@ -317,6 +349,17 @@ class AgentWebSocketHandler:
                             invalidate_reader(agent_id)
                         except Exception:
                             pass
+                        # Track the agent's canonical disk session id so the next
+                        # user `connected` event exposes a real session instead of
+                        # the gateway_session_key fallback (which is not a disk
+                        # session file and breaks HTTP history reads).
+                        _cs = message.get("content")
+                        if isinstance(_cs, dict):
+                            _csid = str(_cs.get("id") or _cs.get("session_id") or "").strip()
+                        else:
+                            _csid = str(_cs or "").strip()
+                        if _csid:
+                            _agent_current_session_id[agent_id] = _csid
                         # Also invalidate Gateway in-memory cache so stale
                         # user messages from previous session aren't served
                         # on reconnect.
@@ -428,23 +471,26 @@ class UserWebSocketHandler:
         """Handle conversation between user and Agent"""
         await websocket.accept()
 
+        # UI may pass dir_name (agent305) while registry keys agent_id (agent305-001).
+        requested_id = agent_id
+        agent_id = _resolve_registered_agent_id(agent_id)
+        if agent_id != requested_id:
+            logger.info("[WS] Resolved user-chat agent alias %r -> %r", requested_id, agent_id)
+
         # Wait briefly for agent startup. If still offline, fail fast with 1013
         # so frontend can retry quickly instead of hanging for a long handshake wait.
+        # Event-driven: registry sets the per-agent event on register()/unregister(),
+        # so this wakes the moment the agent appears (or disappears) instead of
+        # polling every 0.3s.
         agent = registry.get_agent(agent_id)
         if not agent or agent.status == "offline":
             max_wait = 3  # seconds
-            interval = 0.3
-            waited = 0.0
             logger.info(f"Agent {agent_id} not ready, waiting up to {max_wait}s for it to register...")
-            while waited < max_wait:
-                await asyncio.sleep(interval)
-                waited += interval
-                agent = registry.get_agent(agent_id)
-                if agent and agent.status != "offline":
-                    break
-            else:
-                # Still not available after waiting
-                agent = registry.get_agent(agent_id)
+            try:
+                await asyncio.wait_for(registry.registration_event(agent_id).wait(), timeout=max_wait)
+            except asyncio.TimeoutError:
+                pass
+            agent = registry.get_agent(agent_id)
 
         if not agent or agent.status == "offline":
             status_msg = f"Agent {agent_id} is offline" if agent else f"Agent {agent_id} not found"
@@ -482,20 +528,21 @@ class UserWebSocketHandler:
             history = await gateway_session_cache.async_get_history(user_id, agent_id, limit=20)
 
             # Send session info.
-            # Use gateway_session_key as session_id — it's always available (no disk dependency).
-            # The canonical agent disk session ID arrives later via the `current_session` WS event.
-            # This eliminates:
-            #   1. Startup delay waiting for agent disk read (may fail on remote deploys)
-            #   2. Fragile agent_id→path mapping in agent_sessions.py
-            #   3. Session ID mismatch between connected event and current_session event
+            # Prefer the agent's canonical disk session id (reported via the
+            # `current_session` WS event) — it is a real history key the
+            # frontend can read via /agent-sessions/{agent}/{sid}/paged.
+            # Fall back to gateway_session_key only when the agent has not
+            # reported a disk session yet (it always resolves for new chats).
+            session_key = session["session_key"]
+            canonical_sid = _agent_current_session_id.get(agent_id, "")
             await websocket.send_json(
                 {
                     "type": "connected",
                     "agent_id": agent_id,
                     "agent_name": agent.agent_name,
                     "agent_status": agent.status,
-                    "session_id": session["session_key"],
-                    "gateway_session_key": session["session_key"],
+                    "session_id": canonical_sid or session_key,
+                    "gateway_session_key": session_key,
                     "history_count": len(history),
                 }
             )
@@ -656,12 +703,15 @@ class UserWebSocketHandler:
                     )
 
                     # Forward to Agent
-                    history = await gateway_session_cache.async_get_history(user_id, agent_id, limit=10)
+                    # NOTE: no `history` field here — the agent maintains its own
+                    # authoritative disk session and never reads gateway history
+                    # (gateway_adapter._handle_chat ignores it). Previously we
+                    # serialized + sent the last 10 messages on EVERY chat turn,
+                    # a pure overhead (thread-pool hop + lock + JSON bytes).
                     message_to_agent = {
                         "type": "chat",
                         "user_id": user_id,
                         "content": content,
-                        "history": history,
                         "channel": message.get("channel", "web"),
                     }
                     # Pass through session_id for parallel multi-session routing

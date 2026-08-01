@@ -342,6 +342,11 @@ if __name__ == "__main__":
             reload_dirs=[BACKEND_DIR],
             log_level=backend_config.get("log_level", "warning"),
             access_log=False,
+            # Agent turns can block briefly on session JSON/disk writes; the
+            # default 20s ws ping window would then kill the agent WS every
+            # turn (UI flips to "重连中"). Generous server-side ping window.
+            ws_ping_interval=30,
+            ws_ping_timeout=90,
         )
     else:
         from app.main import app as _fastapi_app
@@ -353,4 +358,6 @@ if __name__ == "__main__":
             reload=False,
             log_level=backend_config.get("log_level", "warning"),
             access_log=False,
+            ws_ping_interval=30,
+            ws_ping_timeout=90,
         )

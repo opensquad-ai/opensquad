@@ -189,11 +189,25 @@ async def admin_list_agents(current_user: User = Depends(get_current_user_dep)):
     registry_agents = registry.list_agents()
     registry_map = {a.agent_id: a for a in registry_agents}
 
+    def _match_registry(agent_id: str, dir_name: str):
+        """Match launcher id/dir to registry key (agent305 ↔ agent305-001)."""
+        for key in (agent_id, dir_name):
+            if key and key in registry_map:
+                return registry_map.pop(key)
+        for key in (agent_id, dir_name):
+            if not key:
+                continue
+            for rid, reg in list(registry_map.items()):
+                if rid.startswith(key + "-") or rid.rsplit("-", 1)[0] == key:
+                    return registry_map.pop(rid)
+        return None
+
     # Merge info
     merged = []
     for agent in launcher_agents:
-        agent_id = agent.get("agent_id", agent.get("dir_name", ""))
-        reg = registry_map.pop(agent_id, None)
+        dir_name = agent.get("dir_name", "")
+        agent_id = agent.get("agent_id", dir_name)
+        reg = _match_registry(agent_id, dir_name)
 
         # launcher returns alive: bool, convert to status string expected by frontend
         is_alive = agent.get("alive", False)

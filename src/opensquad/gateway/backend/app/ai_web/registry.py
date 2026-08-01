@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STALE_S = 75.0
 _PROBE_TIMEOUT_S = 8.0
 _LIVENESS_SWEEP_INTERVAL_S = 30.0
+# While an agent is mid-turn (busy), the recv loop may be blocked on tools/LLM
+# and miss a single 8s probe. Do not unregister on one miss if heartbeats are
+# still fresh — that falsely flips the Agent Manager card to 「启动中」.
+_BUSY_PROBE_GRACE_S = 180.0
+_PROBE_FAIL_STREAK_DROP = 3
 
 
 @dataclass
@@ -59,7 +64,21 @@ class AgentRegistry:
         self._last_heartbeat_mono: dict[str, float] = {}
         self._last_pong_mono: dict[str, float] = {}
         self._pong_waiters: dict[str, list[asyncio.Future]] = {}
+        self._probe_fail_streak: dict[str, int] = {}
         self._liveness_task: asyncio.Task | None = None
+        # Per-agent registration events: set on register(), cleared on
+        # unregister(). Lets user-chat WS waits be event-driven instead of
+        # polling. Events are REUSED per agent_id (not recreated) so a waiter
+        # that grabbed the event before a reconnect still gets woken by it.
+        self._registered_events: dict[str, asyncio.Event] = {}
+
+    def registration_event(self, agent_id: str) -> asyncio.Event:
+        """Return the (lazily created, reused) registration event for an agent."""
+        ev = self._registered_events.get(agent_id)
+        if ev is None:
+            ev = asyncio.Event()
+            self._registered_events[agent_id] = ev
+        return ev
 
     def register(self, agent_info: AgentInfo, websocket) -> object | None:
         """Register Agent.
@@ -89,6 +108,8 @@ class AgentRegistry:
         self._busy_sessions.setdefault(agent_id, set())
         self._last_heartbeat_mono[agent_id] = now_mono
         self._last_pong_mono[agent_id] = now_mono
+        self._probe_fail_streak.pop(agent_id, None)
+        self.registration_event(agent_id).set()
 
         logger.info(f"Agent {agent_id} ({agent_info.agent_name}) registered")
         return old_ws
@@ -102,6 +123,11 @@ class AgentRegistry:
         self._busy_sessions.pop(agent_id, None)
         self._last_heartbeat_mono.pop(agent_id, None)
         self._last_pong_mono.pop(agent_id, None)
+        self._probe_fail_streak.pop(agent_id, None)
+        # Wake any waiting user-chat handlers immediately; they re-check the
+        # registry and fail fast with 1013 instead of polling to timeout.
+        # (Event staying set is fine — waiters always re-check the registry.)
+        self.registration_event(agent_id).set()
         waiters = self._pong_waiters.pop(agent_id, [])
         for fut in waiters:
             if not fut.done():
@@ -128,10 +154,26 @@ class AgentRegistry:
         if agent_id not in self.agents:
             return
         self._last_pong_mono[agent_id] = time.monotonic()
+        self._probe_fail_streak.pop(agent_id, None)
         waiters = self._pong_waiters.pop(agent_id, [])
         for fut in waiters:
             if not fut.done():
                 fut.set_result(True)
+
+    def _agent_is_busy(self, agent_id: str) -> bool:
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return False
+        if agent.status == "busy":
+            return True
+        sessions = self._busy_sessions.get(agent_id) or set()
+        return bool(sessions)
+
+    def _heartbeat_age_s(self, agent_id: str) -> float:
+        last = self._last_heartbeat_mono.get(agent_id, 0.0)
+        if last <= 0:
+            return 0.0
+        return max(0.0, time.monotonic() - last)
 
     def is_agent_live(self, agent_id: str, max_stale_s: float = _DEFAULT_STALE_S) -> bool:
         """True if agent has a WS and recent heartbeat or pong."""
@@ -290,7 +332,8 @@ class AgentRegistry:
         self.unregister(agent_id)
         if ws is not None:
             try:
-                await ws.close(code=4001, reason=reason[:120])
+                # 1012 = Service Restart — not 4001 (reserved for user auth expiry).
+                await ws.close(code=1012, reason=reason[:120])
             except Exception:
                 pass
 
@@ -302,6 +345,37 @@ class AgentRegistry:
             running = loop or asyncio.get_running_loop()
         except RuntimeError:
             return
+
+        async def _maybe_drop_after_probe(aid: str, reason: str) -> None:
+            ok = await self.probe_agent(aid)
+            if ok:
+                self._probe_fail_streak[aid] = 0
+                return
+            streak = self._probe_fail_streak.get(aid, 0) + 1
+            self._probe_fail_streak[aid] = streak
+            busy = self._agent_is_busy(aid)
+            hb_age = self._heartbeat_age_s(aid)
+            # Mid-turn agents often cannot answer ping within 8s (websearch /
+            # LLM blocking). Keep them registered while heartbeats continue.
+            if busy and hb_age <= _BUSY_PROBE_GRACE_S:
+                logger.info(
+                    "[Registry] probe miss agent=%s streak=%s reason=%s (busy, hb_age=%.0fs — keeping registered)",
+                    aid,
+                    streak,
+                    reason,
+                    hb_age,
+                )
+                return
+            if streak < _PROBE_FAIL_STREAK_DROP:
+                logger.info(
+                    "[Registry] probe miss agent=%s streak=%s/%s reason=%s (defer drop)",
+                    aid,
+                    streak,
+                    _PROBE_FAIL_STREAK_DROP,
+                    reason,
+                )
+                return
+            await self.drop_stale_agent(aid, reason=reason)
 
         async def _sweep() -> None:
             while True:
@@ -315,14 +389,10 @@ class AgentRegistry:
                             # that still emit heartbeats.
                             last_pong = self._last_pong_mono.get(aid, 0.0)
                             if time.monotonic() - last_pong > _DEFAULT_STALE_S * 0.6:
-                                ok = await self.probe_agent(aid)
-                                if not ok:
-                                    await self.drop_stale_agent(aid, reason="probe_failed")
+                                await _maybe_drop_after_probe(aid, "probe_failed")
                             continue
-                        # Stale heartbeat — one probe chance, then drop
-                        ok = await self.probe_agent(aid)
-                        if not ok:
-                            await self.drop_stale_agent(aid, reason="stale_heartbeat")
+                        # Stale heartbeat — probe with the same busy/streak guards.
+                        await _maybe_drop_after_probe(aid, "stale_heartbeat")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

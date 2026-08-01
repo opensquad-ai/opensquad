@@ -455,9 +455,22 @@ async def ai_launcher_tunnel(websocket: WebSocket):
 async def ai_user_chat(websocket: WebSocket, agent_id: str):
     """User-to-agent chat endpoint"""
     token = websocket.query_params.get("token")
+
+    async def _reject(code: int, reason: str) -> None:
+        # Must accept before close — otherwise browsers can stick in CONNECTING
+        # (readyState=0) forever and chat appears dead after service restart.
+        try:
+            await websocket.accept()
+        except Exception:
+            return
+        try:
+            await websocket.close(code=code, reason=reason)
+        except Exception:
+            pass
+
     if not token:
         _ws_log.warning("[AI Web WS] Missing token for agent %s", agent_id)
-        await websocket.close(code=4001, reason="Missing token")
+        await _reject(4001, "Missing token")
         return
 
     # Check against configured gateway_token (for adapter connections)
@@ -477,13 +490,13 @@ async def ai_user_chat(websocket: WebSocket, agent_id: str):
         payload = decode_token(token)
         if not payload:
             _ws_log.error("[AI Web WS] REJECTED: invalid token for agent %s", agent_id)
-            await websocket.close(code=4001, reason="Invalid token")
+            await _reject(4001, "Invalid token")
             return
 
         user_id = payload.get("sub")
         if not user_id:
             _ws_log.error("[AI Web WS] REJECTED: no 'sub' in token payload for agent %s", agent_id)
-            await websocket.close(code=4001, reason="Invalid user")
+            await _reject(4001, "Invalid user")
             return
 
         _ws_log.debug("[AI Web WS] ACCEPTED: user=%s -> agent=%s", user_id, agent_id)
@@ -789,4 +802,9 @@ if __name__ == "__main__":
         reload=backend_config.get("reload", True),
         log_level=backend_config.get("log_level", "warning"),
         access_log=False,
+        # Generous server-side WS ping window so long agent turns (blocked
+        # briefly by session JSON/disk writes) do not get disconnected as
+        # "keepalive ping timeout" → agent flips offline → UI 重连中.
+        ws_ping_interval=30,
+        ws_ping_timeout=90,
     )
