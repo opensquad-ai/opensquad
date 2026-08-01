@@ -145,8 +145,9 @@ async def _suppress_proactor_noise():
 
     try:
         loop.set_exception_handler(_handler)
-    except Exception:
-        pass
+        print("[WebSearch] Proactor noise handler installed")
+    except Exception as e:
+        print(f"[WebSearch] Proactor noise handler install failed: {e}")
 
 
 # --- 2. Define API endpoints ---
