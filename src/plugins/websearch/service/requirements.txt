@@ -14,3 +14,7 @@ beautifulsoup4
 
 # PDF Processing
 PyPDF2
+
+# Reranker (Qwen3-Reranker-0.6B sidecar)
+torch
+transformers

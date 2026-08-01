@@ -35,6 +35,8 @@ logger = logging.getLogger("plugins.websearch")
             "playwright-stealth",
             "trafilatura",
             "PyMuPDF",
+            "torch",
+            "transformers",
         ]
     },
     tags=["search"],
