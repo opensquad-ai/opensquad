@@ -118,13 +118,23 @@ class AgentBootPhases:
 
         await self._setup_web_server(config, logger)
         await self._setup_gateway_adapter(config, logger, boot_t0)
-        self._setup_group_chat_bridge(config, logger, data_dir)
+        # NOTE: group-chat bridge is deliberately NOT started here. Boot-time
+        # MCP/plugin init (anyio TaskGroups with deadlines) fires a cancel
+        # storm across concurrently-running tasks on Python 3.12+; starting the
+        # bridge after those phases (see start_group_chat_bridge) keeps its
+        # login/join out of that window.
         perf_event(
             "boot",
             "connections_scheduled",
             agent_id=config.get("agent_id", ""),
             elapsed_ms=int((__import__("time").perf_counter() - boot_t0) * 1000),
         )
+
+    def start_group_chat_bridge(self, config: dict[str, Any], logger: Any, data_dir: str) -> None:
+        """Start the ChatPro group-chat bridge late in boot, after MCP/plugin
+        init finished — the anyio cancel storm is over by then, so the bridge
+        does not need its retry path to survive repeated CancelledError."""
+        self._setup_group_chat_bridge(config, logger, data_dir)
 
     async def initialize_agent_runtime(
         self, config: dict[str, Any], agent_dir: str, input_hub: Any, agent_logger: Any
@@ -754,10 +764,23 @@ class AgentBootPhases:
                 except asyncio.CancelledError:
                     # During boot, an anyio CancelScope cancellation can fire across
                     # all tasks (SDK, Runner, Bridge). The SDK/Runner recover via
-                    # uncancel(); the Bridge must too — re-login and reconnect.
-                    logger.warning(
-                        f"[Boot] ChatPro Bridge cancelled during setup (retry {retry + 1}/{max_retries}), recovering..."
-                    )
+                    # uncancel(); the Bridge must too — drain leaked cancel
+                    # counters (Python 3.12+) so the retry sleeps/awaits below
+                    # are not instantly re-cancelled, then re-login and reconnect.
+                    try:
+                        from opensquad.sdk import _drain_task_cancellation
+
+                        _drain_task_cancellation()
+                    except Exception:
+                        pass
+                    if retry == 0:
+                        logger.warning(
+                            f"[Boot] ChatPro Bridge cancelled during setup (retry {retry + 1}/{max_retries}), recovering..."
+                        )
+                    else:
+                        logger.debug(
+                            f"[Boot] ChatPro Bridge cancelled during setup (retry {retry + 1}/{max_retries}), recovering..."
+                        )
                     if retry < max_retries - 1:
                         await asyncio.sleep(1)
                         continue
@@ -881,11 +904,11 @@ class AgentBootPhases:
                 time_decay_lambda=float(plugin_cfg.get("time_decay_lambda", 0.1)),
                 max_dim=int(plugin_cfg.get("max_dim", 100000)),
             )
-            try:
-                agent_memory.load(memory_data_dir)
-                agent_logger.info(f"[Boot] Long memory loaded from {memory_data_dir}")
-            except Exception:
-                agent_logger.info(f"[Boot] Long memory initialized fresh at {memory_data_dir}")
+            # Deferred (lazy) load: restoring the co-occurrence/PPMI matrices
+            # (Python-level DOK fill loop) can take seconds on a large
+            # vocabulary. AgentMemory.ensure_loaded() triggers the load on the
+            # first query/write instead of blocking agent boot.
+            agent_logger.info(f"[Boot] Long memory ready (lazy load on first use: {memory_data_dir})")
 
             memory_manager = MemoryManager(
                 agent_memory=agent_memory,

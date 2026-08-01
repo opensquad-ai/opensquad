@@ -318,6 +318,7 @@ _HEAVY_PACKAGES = frozenset(
         "torch",
         "torchvision",
         "torchaudio",
+        "transformers",
         "playwright",
     }
 )
@@ -568,7 +569,11 @@ class AgentProcess:
     HEALTH_CHECK_TIMEOUT = 5  # seconds before probe is considered failed
     HEALTH_CHECK_FAIL_THRESHOLD = 6  # consecutive failures before restart (was 3 → 6 for multi-agent concurrent boot)
     HEALTH_CHECK_INITIAL_DELAY = (
-        60  # let health server register before first probe (was 20 → 60 for cold start + MCP init)
+        5  # short grace before first probe — the agent's health server is up
+        # within ~1s of boot (stdlib thread in agents_boot). Was 60s, which
+        # left every agent "health unknown" for a full minute and hid hangs;
+        # port discovery in _health_monitor_loop retries quickly until the
+        # server appears, so a long MCP/plugin init is not misread as failure.
     )
 
     def __init__(self, agent_dir: str, config: dict):
@@ -857,13 +862,25 @@ class AgentProcess:
 
     def _health_monitor_loop(self):
         """Periodically probe Agent health; restart on consecutive failures."""
-        # Initial delay: let Agent boot and start its health server
+        # Initial delay: let Agent boot and start its health server.
+        # The agent health server is up within ~1s of boot; the only reason
+        # discovery can be slow is a long MCP/plugin init, which we tolerate
+        # below by retrying the port discovery WITHOUT counting failures.
         self._stop_health.wait(self.HEALTH_CHECK_INITIAL_DELAY)
         while not self._stop_health.is_set():
             alive = self.is_alive()
             if not alive:
                 # Process already dead — the existing restart logic in launcher.py will handle it
                 break
+
+            if self._health_port is None:
+                self._health_port = self._discover_health_port()
+            if self._health_port is None:
+                # Health server not up yet (agent still booting) — retry shortly,
+                # but do NOT count as a failure: a cold boot with MCP/plugin
+                # init can legitimately take longer than the fail threshold.
+                self._stop_health.wait(2)
+                continue
 
             healthy = self._check_agent_health()
             self._last_health_ok = healthy

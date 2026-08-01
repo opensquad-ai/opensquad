@@ -16,14 +16,18 @@ logger = logging.getLogger(__name__)
 
 # Protocol-level keepalive (websockets library). Detects dead TCP / NAT drops
 # after long idle; without these, send() can succeed into a half-open socket.
+# Timeout is generous: during long agent turns the loop can be briefly blocked
+# by big session JSON serialization / disk writes — a 20s protocol timeout
+# then kills the WS every turn → gateway flips the agent offline → UI "重连中".
 _WS_PING_INTERVAL_S = 20
-_WS_PING_TIMEOUT_S = 20
+_WS_PING_TIMEOUT_S = 60
 # Application heartbeat interval. Gateway uses last_heartbeat for liveness.
 _HEARTBEAT_INTERVAL_S = 20
 # If the message recv loop has not ticked for this long, stop heartbeating and
 # force reconnect. Catches "writer alive / reader dead" half-zombies where
 # CancelledError killed _message_loop but heartbeat still ran.
-_MESSAGE_LOOP_STALE_S = 45
+# Raised so a long unattended turn (no inbound messages) is not misread as dead.
+_MESSAGE_LOOP_STALE_S = 120
 
 
 def _drain_task_cancellation() -> int:
@@ -176,8 +180,11 @@ class BaseAgent:
 
         await self.ws.send(json.dumps(register_msg))
 
-        # Wait for confirmation
-        response = await self.ws.recv()
+        # Wait for confirmation — with a hard timeout so a silent Gateway
+        # (accepts the WS but never replies to register) cannot leave the
+        # agent stuck "not online" forever. The TimeoutError bubbles up to
+        # start()'s reconnect loop and is retried with backoff.
+        response = await asyncio.wait_for(self.ws.recv(), timeout=15)
         data = json.loads(response)
 
         if data.get("status") == "registered":

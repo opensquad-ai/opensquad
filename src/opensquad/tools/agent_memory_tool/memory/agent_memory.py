@@ -51,6 +51,7 @@ Usage:
 
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -137,6 +138,10 @@ class AgentMemory:
         self._matrices_dirty = True  # flag whether matrices need rebuilding
         self._last_rebuild_docs = 0
 
+        # Lazy disk-loading state (see ensure_loaded): boot defers the
+        # (potentially slow) matrix restore; the first query/write loads it.
+        self._loaded = False
+        self._load_lock = threading.Lock()
         # Episodic Layer (log memory) indexes
         self._date_index = {}  # {"2026-02-09": ["mem_001", ...]} in chronological order
         self._category_index = {}  # {"work": {"mem_001", ...}}
@@ -154,6 +159,7 @@ class AgentMemory:
             text: str - raw document text
             min_word_len: int - minimum word length (filter single characters)
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         if not text or not isinstance(text, str):
             return
 
@@ -247,6 +253,7 @@ class AgentMemory:
         Returns:
             str - entry_id
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         ts = timestamp if timestamp is not None else time.time()
         date_str = self._ts_to_date_str(ts)
 
@@ -399,6 +406,7 @@ class AgentMemory:
             }
         """
         # ---- Automatic time expression parsing ----
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         parsed_time_info = None
         if auto_parse_time and user_input and time_range is None and time_recent is None:
             parsed = parse_time_expression(user_input)
@@ -467,6 +475,7 @@ class AgentMemory:
                 "evidence": [...] (only when with_evidence=True),
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         self._ensure_matrices()
 
         if self._ppmi_matrix is None:
@@ -576,6 +585,7 @@ class AgentMemory:
         Returns:
             str - entry_id
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         if not content or not isinstance(content, str):
             raise ValueError("content cannot be empty")
 
@@ -624,6 +634,7 @@ class AgentMemory:
                 "categories": {str: int},  # category counts for the day
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         entry_ids = self._date_index.get(date_str, [])
 
         entries = []
@@ -677,6 +688,7 @@ class AgentMemory:
                 "categories": {str: int},  # category counts for the entire range
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         import datetime
 
         dt_start = datetime.datetime.strptime(start_date, "%Y-%m-%d")
@@ -770,6 +782,7 @@ class AgentMemory:
                 "entries": [entry_dicts...],  # all entries (for AI summary generation)
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         import datetime
 
         dt_end = datetime.datetime.strptime(end_date, "%Y-%m-%d") if end_date else datetime.datetime.now()
@@ -819,6 +832,7 @@ class AgentMemory:
         Returns:
             bool - whether it succeeded (whether the entry exists)
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         return self._store.set_importance(entry_id, level)
 
     # ================================================================
@@ -843,6 +857,7 @@ class AgentMemory:
                 "time_ms": float,
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         t0 = time.time()
 
         thresh = min_cooccurrence if min_cooccurrence is not None else self._config["min_cooccurrence"]
@@ -921,6 +936,7 @@ class AgentMemory:
                 "rebuild_stats": dict,  # return value of rebuild_matrices()
             }
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         vocab_before = self._cooccurrence.vocab_count
 
         # Step 1: if rebuild_from_recent is set, fetch recent entries from SQLite and rebuild
@@ -980,6 +996,7 @@ class AgentMemory:
         Returns:
             int - number of words removed
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         if not hasattr(self._cooccurrence, "remove_words"):
             return 0
 
@@ -1088,6 +1105,7 @@ class AgentMemory:
         Args:
             directory: str - directory path to save to
         """
+        self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         os.makedirs(directory, exist_ok=True)
 
         # 1. Co-occurrence matrix -> CSR -> npz
@@ -1151,6 +1169,8 @@ class AgentMemory:
         Returns:
             bool - whether loading succeeded
         """
+        if self._loaded:
+            return True
         meta_path = os.path.join(directory, "config.json")
         if not os.path.exists(meta_path):
             return False
@@ -1238,7 +1258,26 @@ class AgentMemory:
             self._category_index = {k: set(v) for k, v in ep_meta.get("category_index", {}).items()}
             self._episodic_ids = set(ep_meta.get("episodic_ids", []))
 
+        self._loaded = True
         return True
+
+    def ensure_loaded(self):
+        """Load persisted state from disk on first use (idempotent, thread-safe).
+
+        Agent boot defers the (potentially slow) co-occurrence/PPMI matrix
+        restore to keep startup fast; the first query/write triggers it here.
+        No-op when nothing was persisted yet or loading already succeeded.
+        """
+        if self._loaded or not self._data_dir:
+            return
+        with self._load_lock:
+            if self._loaded:
+                return
+            try:
+                self.load(self._data_dir)
+            except Exception:
+                # Keep _loaded=False so a later call retries the load.
+                pass
 
     # ================================================================
     # Convenience methods

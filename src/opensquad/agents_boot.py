@@ -619,16 +619,14 @@ async def _initialize_mcp_background(
         agent_logger.info("[Boot] MCP runtime ready (background)")
         if runner is not None and getattr(runner, "_plugin_manager", None):
             pm = runner._plugin_manager
+            # reload_plugins() re-registers tools for any newly loaded plugin
+            # itself, so a second register_tools_to_agent() here would be a
+            # full redundant re-registration of every plugin tool (main boot
+            # already registered them in initialize_plugin_runtime).
             pm.reload_plugins(
                 registry=runner.tool_registry,
                 agent_id=runner._agent_id,
                 agent_tool_names=runner._agent_tool_names,
-            )
-            pm.register_tools_to_agent(
-                registry=runner.tool_registry,
-                agent_id=runner._agent_id,
-                agent_tool_names=runner._agent_tool_names,
-                agent_tool_levels=runner._agent_tool_levels,
             )
         # Log final tool inventory after MCP + plugin hot-reload completes.
         # This is the definitive list — if a namespace is missing here, the
@@ -997,6 +995,11 @@ async def main(agent_dir: str, override_port: int | None = None):
         _model_switch_init(_early_runner, os.path.join(agent_dir, "config.json"))
     except Exception as _e:
         agent_logger.warning(f"[Boot] model_switch coordinator re-init failed: {_e}")
+
+    # Start group-chat bridge AFTER MCP/plugin init — the anyio cancel storm
+    # (which used to hit the concurrently-running bridge/SDK every boot) has
+    # passed by now, so login/join proceeds without retry churn.
+    BOOT_PHASES.start_group_chat_bridge(config, agent_logger, data_dir)
 
     await BOOT_PHASES.await_runner_shutdown(
         early_runner=_early_runner,

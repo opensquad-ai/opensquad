@@ -1680,9 +1680,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             Stored on the agent host so LAN / different browser origins
             (localhost vs 192.168.x.x) share the same chrome.
             """
-            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
-            if not os.path.isdir(agent_dir):
+            dir_name = self._resolve_agent_dir_name(name)
+            if not dir_name:
                 return self._send_json({"error": "Agent directory not found"}, 404)
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), dir_name)
             fp = self._web_ui_state_path(agent_dir)
             if not os.path.isfile(fp):
                 return self._send_json(
@@ -1713,9 +1714,10 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
         def _handle_put_web_ui_state(self, name: str, body: dict):
             """PUT /api/agents/{name}/web-ui-state — persist Agent Web UI chrome."""
-            agent_dir = os.path.join(syscfg.workspace_agents_dir(), name)
-            if not os.path.isdir(agent_dir):
+            dir_name = self._resolve_agent_dir_name(name)
+            if not dir_name:
                 return self._send_json({"error": "Agent directory not found"}, 404)
+            agent_dir = os.path.join(syscfg.workspace_agents_dir(), dir_name)
             if not isinstance(body, dict):
                 return self._send_json({"error": "Invalid body"}, 400)
 
