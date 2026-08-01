@@ -92,27 +92,25 @@ def _contains_chinese(text: str) -> bool:
 def _weather_city_token(query: str) -> str:
     """Best-effort city token for weather retrieval rewrites."""
     q = (query or "").strip()
-    m = re.search(
-        r"([\u4e00-\u9fff]{2,8}?)(?:今天|今日|实时|现在|明天|一周|七日|未来|预报)?(?:的)?天气",
-        q,
-    )
+    # Strip weather/time modifiers first, then take the first remaining CJK run
+    # as the city. "上海 一周天气预报" -> 上海; "福州天气预报 今天 明天" -> 福州.
+    s = re.sub(r"(今天|今日|实时|现在|明天|后天|一周|七天|七日|未来|本周|下周|天气预报|天气|预报|气温|温度)", " ", q)
+    s = re.sub(r"\s+", " ", s).strip()
+    if s:
+        first = s.split()[0]
+        m = re.match(r"[\u4e00-\u9fff]{2,8}", first)
+        if m:
+            return m.group(0)
+        # Latin city like "Fuzhou weather"
+        m = re.match(r"[A-Za-z]{3,24}", first)
+        if m:
+            return m.group(0)
+    # Fallback: single CJK run before "天气".
+    m = re.search(r"([\u4e00-\u9fff]{2,8}?)(?:的)?(?:天气|预报)", q)
     if m:
         return m.group(1)
-    m = re.search(r"([\u4e00-\u9fff]{2,8}?)天气预报", q)
-    if m:
-        return m.group(1)
-    m = re.search(r"\b([A-Za-z][A-Za-z.-]{2,24})\s+(?:weather|forecast|temperature)\b", q, re.I)
-    if m:
-        return m.group(1)
-    if "福州" in q:
-        return "福州"
-    if re.search(r"\bfuzhou\b", q, re.I):
-        return "Fuzhou"
     cjk = re.findall(r"[\u4e00-\u9fff]{2,8}", q)
-    if cjk:
-        return cjk[0]
-    latin = re.findall(r"[A-Za-z]{3,24}", q)
-    return latin[0] if latin else q[:12] or "China"
+    return cjk[0] if cjk else (re.findall(r"[A-Za-z]{3,24}", q) or [""])[0]
 
 
 # English city → Chinese for cn.bing site: retrieval (global Bing is weak for weather).

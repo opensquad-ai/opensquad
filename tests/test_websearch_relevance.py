@@ -218,6 +218,18 @@ def test_weather_degraded_serp_detection():
     assert "weather.com.cn" in filtered[0]["url"]
 
 
+def test_weather_city_token_extraction():
+    """City extraction must not grab time words like 一周/今天."""
+    from web_crawler import _weather_city_token
+
+    assert _weather_city_token("上海 一周天气预报") == "上海"
+    assert _weather_city_token("福州天气预报 今天 明天") == "福州"
+    assert _weather_city_token("广州今日天气") == "广州"
+    assert _weather_city_token("杭州 未来七天天气预报") == "杭州"
+    assert _weather_city_token("成都 天气") == "成都"
+    assert _weather_city_token("北京天气 中国天气网 weather.com.cn 101010100") == "北京"
+
+
 def test_apply_rerank_strategy_all_noise_returns_empty():
     """Do not fall back to junk tourism/gov pages when every score is below threshold."""
     results = [
