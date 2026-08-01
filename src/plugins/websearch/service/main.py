@@ -1,5 +1,6 @@
 import os as _os
 import sys
+import threading
 import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -106,6 +107,46 @@ app = FastAPI(
     description="An API service providing web search and web content extraction via GET methods.",
     version="1.1.0",
 )
+
+
+@app.on_event("startup")
+async def _suppress_proactor_noise():
+    """Windows asyncio Proactor prints Tracebacks for benign keep-alive resets.
+
+    When a remote (Bing) closes a keep-alive connection, the transport's
+    ``_call_connection_lost`` calls ``socket.shutdown`` on an already-closed
+    socket → ``ConnectionResetError [WinError 10054]``. This is harmless (the
+    HTTP response was already delivered) but asyncio's default exception
+    handler prints it to stderr. The ``logging`` filter can't catch it, so we
+    wrap ``loop.set_exception_handler`` here (loop exists during startup).
+    """
+    import asyncio as _aio
+
+    loop = _aio.get_running_loop()
+    default_handler = loop.get_exception_handler()
+
+    def _handler(loop_, context):
+        exc = context.get("exception")
+        msg = str(context.get("message", ""))
+        if exc is not None:
+            exc_text = str(exc)
+        else:
+            exc_text = ""
+        noisy = any(
+            sig in exc_text or sig in msg
+            for sig in ("_call_connection_lost", "ConnectionResetError", "[WinError 10054]", "ConnectionAbortedError")
+        )
+        if noisy:
+            return
+        if default_handler is not None:
+            default_handler(loop_, context)
+        else:
+            loop_.default_exception_handler(context)
+
+    try:
+        loop.set_exception_handler(_handler)
+    except Exception:
+        pass
 
 
 # --- 2. Define API endpoints ---
@@ -294,11 +335,18 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, _force_exit)
         signal.signal(signal.SIGTERM, _force_exit)
 
-    # Co-start Qwen3-Reranker (:8111) before accepting search traffic.
+    # Start Qwen3-Reranker (:8111) in the background so websearch HTTP can
+    # accept traffic immediately. The guardian handles readiness and restarts.
     try:
         from reranker_sidecar import start_reranker_sidecar
 
-        start_reranker_sidecar()
+        def _start_reranker_background() -> None:
+            try:
+                start_reranker_sidecar()
+            except Exception as e:
+                print(f"[WebSearch] Reranker sidecar background start failed: {e}")
+
+        threading.Thread(target=_start_reranker_background, daemon=True, name="reranker-start").start()
     except Exception as e:
         print(f"[WebSearch] Reranker sidecar start skipped: {e}")
 
