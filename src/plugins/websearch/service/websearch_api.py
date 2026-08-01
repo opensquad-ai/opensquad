@@ -21,6 +21,7 @@ try:
         _filter_weather_intent_results,
         _parse_geolocation,
         _query_looks_like_weather,
+        _weather_rescue_query,
         search_with_bing_playwright,
     )
 except ImportError:
@@ -33,6 +34,7 @@ except ImportError:
         _filter_weather_intent_results,
         _parse_geolocation,
         _query_looks_like_weather,
+        _weather_rescue_query,
         search_with_bing_playwright,
     )
 
@@ -596,6 +598,13 @@ def _query_variants(query: str) -> list[str]:
     q = (query or "").strip()
     if not q or len(q) < 6:
         return [q]
+    # Weather queries already get a dedicated site: rescue rewrite
+    # (_weather_rescue_query in web_crawler) and skip the model rerank
+    # (skipped_weather). Decomposition is harmful here: e.g. stripping CJK
+    # from "北京天气 中国天气网 weather.com.cn 101010100" yields
+    # "weather.com.cn 101010100", which Bing misreads as a random city code.
+    if _query_looks_like_weather(q):
+        return [q]
 
     variants: list[str] = [q]
     seen = {q}
@@ -624,7 +633,12 @@ def _query_variants(query: str) -> list[str]:
     if has_cjk and has_latin:
         latin_only = re.sub(r"[\u4e00-\u9fff]+", " ", q).strip()
         latin_only = re.sub(r"\s+", " ", latin_only)
-        if len(latin_only) >= 4 and latin_only not in seen:
+        # Drop fragments that are mostly a URL/code (e.g. "weather.com.cn
+        # 101010100"), which mislead Bing into city-code guesses. Only keep a
+        # pure-Latin variant if it still reads like a real phrase.
+        looks_like_url = bool(re.search(r"\.(com|cn|net|org|io)\b|www\.", latin_only, re.I))
+        has_real_word = bool(re.search(r"[a-zA-Z]{5,}", latin_only)) and not looks_like_url
+        if has_real_word and len(latin_only) >= 4 and latin_only not in seen:
             seen.add(latin_only)
             variants.append(latin_only)
 
@@ -688,11 +702,16 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     if total_variants > 0:
 
         async def _fetch_variant(q: str, v: str):
-            region = _detect_region_for_query(v)
+            # Weather queries need the site: rescue rewrite even on the http
+            # path (the Playwright path does this inside search_with_bing_playwright;
+            # http-direct must mirror it or raw weather SERPs degrade to
+            # baike/gov/travel → all filtered as noise).
+            active = _weather_rescue_query(v) if _query_looks_like_weather(v) else v
+            region = _detect_region_for_query(active)
             try:
                 rows = await asyncio.to_thread(
                     fetch_serp_http,
-                    v,
+                    active,
                     base_url=region["base_url"],
                     market=region["market"],
                     setlang=region["setlang"],

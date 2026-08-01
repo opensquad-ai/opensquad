@@ -315,3 +315,23 @@ def test_query_variants_short_unchanged():
 
     assert _query_variants("GDP") == ["GDP"]
     assert _query_variants("天气") == ["天气"]
+
+
+def test_query_variants_weather_not_decomposed():
+    """Weather queries must not be split — the dedicated site: rewrite handles them."""
+    from websearch_api import _query_variants
+
+    q = "北京天气 中国天气网 weather.com.cn 101010100"
+    vs = _query_variants(q)
+    assert vs == [q]
+    # No harmful fragment like "weather.com.cn 101010100" should appear.
+    assert not any("weather.com.cn" in v and "北京" not in v for v in vs)
+
+
+def test_query_variants_url_fragment_dropped():
+    """A pure-Latin variant that is mostly a URL/code must be dropped."""
+    from websearch_api import _query_variants
+
+    # CJK + URL + code, no real English phrase → no Latin-only variant.
+    vs = _query_variants("惠城天气 weather.com.cn 101280306")
+    assert not any(".com" in v and "天气" not in v for v in vs)
