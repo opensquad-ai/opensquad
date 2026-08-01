@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 
 from playwright.async_api import Browser, BrowserContext, async_playwright
 
 try:
+    from .bing_http import export_cookies_from_storage_state, fetch_serp_http
     from .fetch_content import fetch_page_content_async
     from .relevance import apply_rerank_strategy, merge_serp_results, tokenize_query
     from .wash_content import wash_content
@@ -21,6 +23,7 @@ try:
         search_with_bing_playwright,
     )
 except ImportError:
+    from bing_http import export_cookies_from_storage_state, fetch_serp_http
     from fetch_content import fetch_page_content_async
     from relevance import apply_rerank_strategy, merge_serp_results, tokenize_query
     from wash_content import wash_content
@@ -47,6 +50,49 @@ _RERANK_MAX_ROWS = 20
 # Skip reranker calls for this long after a failure (avoid per-request timeouts).
 _reranker_down_until = 0.0
 
+# ── Reranker stability: LRU cache + concurrency mutex ──────────────────
+# GTX 1060 scores ~150ms/row; identical (query, document) pairs recur across
+# calls (same query, same SERP), so caching skips redundant GPU work. The
+# mutex serializes in-flight rerank calls so a slow batch never stacks.
+_RERANK_CACHE_MAX = 512
+_rerank_cache: dict[str, tuple[float, list[float]]] = {}
+_rerank_cache_lock = threading.Lock()
+_rerank_call_lock = threading.Lock()
+
+
+def _rerank_cache_key(queries: list[str], documents: list[str]) -> str:
+    import hashlib
+
+    h = hashlib.sha1()
+    for q, d in zip(queries, documents, strict=True):
+        h.update(q.encode("utf-8", "replace"))
+        h.update(b"\x00")
+        h.update(d.encode("utf-8", "replace"))
+        h.update(b"\x01")
+    return h.hexdigest()
+
+
+def _rerank_cache_get(key: str) -> list[float] | None:
+    with _rerank_cache_lock:
+        hit = _rerank_cache.get(key)
+        if hit is None:
+            return None
+        ts, scores = hit
+        # 10 min TTL; results drift as SERPs change but not within a session.
+        if time.time() - ts > 600:
+            _rerank_cache.pop(key, None)
+            return None
+        return scores
+
+
+def _rerank_cache_set(key: str, scores: list[float]) -> None:
+    with _rerank_cache_lock:
+        if len(_rerank_cache) >= _RERANK_CACHE_MAX:
+            # Drop oldest 20%.
+            for old_key in list(_rerank_cache.keys())[: _RERANK_CACHE_MAX // 5]:
+                _rerank_cache.pop(old_key, None)
+        _rerank_cache[key] = (time.time(), scores)
+
 
 def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float = 15.0) -> list[float] | None:
     """POST {queries, documents} to the reranker service; return aligned scores.
@@ -60,6 +106,12 @@ def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float
         return None
     if time.time() < _reranker_down_until:
         return None
+
+    cache_key = _rerank_cache_key(queries, documents)
+    cached = _rerank_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     payload = json.dumps({"queries": queries, "documents": documents}).encode("utf-8")
     req = urllib.request.Request(
         f"{_RERANKER_URL}/rerank",
@@ -68,11 +120,14 @@ def _rerank_scores_sync(queries: list[str], documents: list[str], timeout: float
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        # Serialize in-flight rerank calls: slow GPU batches must not stack.
+        with _rerank_call_lock:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
         scores = list(data.get("scores", []))
         if len(scores) != len(documents):
             return None
+        _rerank_cache_set(cache_key, scores)
         return scores
     except Exception as e:
         print(f"[WebSearch] reranker unavailable ({e}); keeping Bing order")
@@ -246,6 +301,15 @@ async def _get_persistent_context(headless: bool = True) -> BrowserContext:
         if _playwright is None:
             _playwright = await async_playwright().start()
         _persistent_context = await _launch_persistent_context(_playwright, headless)
+        # Export Bing cookies once so the http-direct path (bing_http) can skip
+        # Chrome entirely for subsequent searches (1-2s instead of 5-10s).
+        try:
+            state = await _persistent_context.storage_state()
+            n = export_cookies_from_storage_state(state)
+            if not n:
+                print("[WebSearch] no Bing cookies exported; http-direct search disabled")
+        except Exception as e:
+            print(f"[WebSearch] cookie export failed (non-fatal): {e}")
         return _persistent_context
 
 
@@ -470,6 +534,21 @@ def _dynamic_rerank_window(
     return scored, tail
 
 
+def _detect_region_for_query(query: str) -> dict[str, str]:
+    """Resolve Bing endpoint params for a query (mirrors web_crawler's region)."""
+    try:
+        from .bing_region import detect_bing_region
+    except ImportError:
+        from bing_region import detect_bing_region  # type: ignore[no-redef]
+    region = detect_bing_region(query)
+    return {
+        "base_url": region.base_url,
+        "market": region.market,
+        "setlang": region.setlang,
+        "country_code": region.country_code,
+    }
+
+
 # ── API 1: Search ─────────────────────────────────────────────────────
 async def search_links_async(queries: list[str], max_results_per_query: int = 30, headless: bool | None = None) -> dict:
     """Search Bing and optionally rerank. Returns a dict for the agent tool.
@@ -496,55 +575,93 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     start_time = time.time()
     ad_str_list = ["选购"]
 
-    browser, shared_context = await _get_search_handle(headless)
-    serial = resolve_serial_search() or shared_context is not None
-
-    # Multi-query parallelism: when there is more than one query, spawn one
-    # ephemeral context per query on the shared browser so scrapes run
-    # concurrently instead of linearly (persistent-profile scrapes stay serial
-    # because a single on-disk profile cannot safely share parallel tabs).
-    if len(queries) > 1 and browser is not None and not serial:
-        print(f"[WebSearch] parallel scrape {len(queries)} queries on ephemeral contexts")
-
-        async def _run_parallel(query: str):
-            ctx = await browser.new_context(
-                ignore_https_errors=True,
-                user_agent=_CHROME_UA,
-                locale="zh-CN",
+    # ── Fast path: http-direct Bing (reuses exported persistent cookies) ──
+    # Try to serve the whole request with httpx first; only fall back to
+    # Playwright for queries where the http path failed. This skips Chrome
+    # launch/render entirely on the hot path (~1-2s vs 5-10s).
+    http_rows: dict[str, list] = {}
+    http_ok = 0
+    for q in queries:
+        region = _detect_region_for_query(q)
+        try:
+            rows = await asyncio.to_thread(
+                fetch_serp_http,
+                q,
+                base_url=region["base_url"],
+                market=region["market"],
+                setlang=region["setlang"],
+                country_code=region["country_code"],
+                max_results=max_results_per_query,
             )
-            try:
-                return await search_with_bing_playwright(
-                    None,
-                    query,
-                    max_results=max_results_per_query,
-                    shared_context=ctx,
-                )
-            finally:
-                try:
-                    await ctx.close()
-                except Exception:
-                    pass
+        except Exception as e:
+            print(f"[WebSearch] http-direct error for {q!r}: {e}")
+            rows = None
+        if rows:
+            http_rows[q] = rows
+            http_ok += 1
 
-        search_results_list = await asyncio.gather(*[_run_parallel(q) for q in queries])
+    if http_ok == len(queries):
+        search_results_list = [http_rows[q] for q in queries]
+        print(f"[WebSearch] http-direct search: all {len(queries)} queries served (fast path)")
+        shared_context = None
     else:
+        # Fallback queries need Playwright.
+        fallback_queries = [q for q in queries if q not in http_rows]
+        print(f"[WebSearch] http-direct partial ({http_ok}/{len(queries)}); Playwright for {len(fallback_queries)}")
 
-        async def _run_one(query: str):
-            if serial:
-                async with _bing_search_lock:
+        browser, shared_context = await _get_search_handle(headless)
+        serial = resolve_serial_search() or shared_context is not None
+
+        # Multi-query parallelism: when there is more than one query, spawn one
+        # ephemeral context per query on the shared browser so scrapes run
+        # concurrently instead of linearly (persistent-profile scrapes stay
+        # serial because a single on-disk profile cannot safely share tabs).
+        if len(fallback_queries) > 1 and browser is not None and not serial:
+            print(f"[WebSearch] parallel scrape {len(fallback_queries)} queries on ephemeral contexts")
+
+            async def _run_parallel(query: str):
+                ctx = await browser.new_context(
+                    ignore_https_errors=True,
+                    user_agent=_CHROME_UA,
+                    locale="zh-CN",
+                )
+                try:
                     return await search_with_bing_playwright(
-                        browser,
+                        None,
                         query,
                         max_results=max_results_per_query,
-                        shared_context=shared_context,
+                        shared_context=ctx,
                     )
-            return await search_with_bing_playwright(
-                browser,
-                query,
-                max_results=max_results_per_query,
-                shared_context=shared_context,
-            )
+                finally:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
 
-        search_results_list = await asyncio.gather(*[_run_one(q) for q in queries])
+            fallback_rows = await asyncio.gather(*[_run_parallel(q) for q in fallback_queries])
+        else:
+
+            async def _run_one(query: str):
+                if serial:
+                    async with _bing_search_lock:
+                        return await search_with_bing_playwright(
+                            browser,
+                            query,
+                            max_results=max_results_per_query,
+                            shared_context=shared_context,
+                        )
+                return await search_with_bing_playwright(
+                    browser,
+                    query,
+                    max_results=max_results_per_query,
+                    shared_context=shared_context,
+                )
+
+            fallback_rows = await asyncio.gather(*[_run_one(q) for q in fallback_queries])
+
+        # Assemble in original query order: http rows where available, else Playwright.
+        fb_iter = iter(fallback_rows)
+        search_results_list = [http_rows.get(q) if q in http_rows else next(fb_iter) for q in queries]
 
     # Weather miss on polluted persistent profile → one ephemeral Chromium pass.
     if (

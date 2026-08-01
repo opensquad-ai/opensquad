@@ -302,6 +302,27 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[WebSearch] Reranker sidecar start skipped: {e}")
 
+    # Pre-export Bing cookies so the http-direct fast path works on the very
+    # first search (avoids a Playwright cold start per request).
+    try:
+        import asyncio as _asyncio
+
+        async def _warm_http_path():
+            try:
+                from websearch_api import _get_persistent_context
+
+                ctx = await _get_persistent_context(headless=True)
+                if ctx is not None:
+                    print("[WebSearch] http-direct path warmed (cookies exported)")
+            except Exception as e:
+                print(f"[WebSearch] cookie warm-up skipped (non-fatal): {e}")
+
+        # This runs before uvicorn starts its own loop, so drive it directly
+        # instead of scheduling on a loop that does not exist yet.
+        _asyncio.run(_warm_http_path())
+    except Exception as e:
+        print(f"[WebSearch] cookie warm-up setup failed (non-fatal): {e}")
+
     # First-deploy Bing login status → status.json for Service Manager.
     try:
         _plugins = _os.path.abspath(_os.path.join(_here, "..", ".."))

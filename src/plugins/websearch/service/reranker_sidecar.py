@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -85,6 +86,7 @@ def start_reranker_sidecar() -> None:
 
     if _health_ok():
         print(f"[WebSearch] Reranker already healthy at {_reranker_base_url()}")
+        _start_guardian()
         return
 
     if _port_open(port):
@@ -92,6 +94,7 @@ def start_reranker_sidecar() -> None:
             f"[WebSearch] Port {port} in use but /health failed; "
             "not spawning another reranker (websearch will fall back to Bing order)"
         )
+        _start_guardian()
         return
 
     model = _model_path()
@@ -150,15 +153,60 @@ def start_reranker_sidecar() -> None:
                 "search will keep Bing order"
             )
             _reranker_proc = None
-            return
+            break
         if _health_ok(timeout=2.0):
             print(f"[WebSearch] Reranker ready at {_reranker_base_url()}")
+            _start_guardian()
             return
         time.sleep(1.0)
     print(
         "[WebSearch] Reranker still loading after wait; websearch continues "
         "(rerank will activate once /health succeeds)"
     )
+    _start_guardian()
+
+
+# ── Guardian: auto-restart the reranker if it dies mid-session ─────────
+_guardian_started = False
+_guardian_lock = threading.Lock()
+_guardian_interval = float(os.environ.get("WEBSEARCH_RERANKER_GUARD_S", "30") or "30")
+_guardian_debounce = float(os.environ.get("WEBSEARCH_RERANKER_GUARD_DEBOUNCE_S", "120") or "120")
+_last_guard_restart = 0.0
+
+
+def _guardian_loop() -> None:
+    global _last_guard_restart
+    while True:
+        time.sleep(_guardian_interval)
+        if not _env_truthy("WEBSEARCH_RERANKER_ENABLED", "1"):
+            return
+        # If the port is serving and healthy, nothing to do.
+        if _health_ok(timeout=1.5):
+            continue
+        # Port open but /health failed (loading / wedged) — wait it out.
+        if _port_open(_reranker_port()):
+            continue
+        # Port closed: our sidecar died. Restart unless we just did (debounce).
+        now = time.time()
+        if now - _last_guard_restart < _guardian_debounce:
+            continue
+        print("[WebSearch] Reranker guardian: process gone, respawning…")
+        _last_guard_restart = now
+        start_reranker_sidecar()
+
+
+def _start_guardian() -> None:
+    global _guardian_started
+    with _guardian_lock:
+        if _guardian_started:
+            return
+        try:
+            t = threading.Thread(target=_guardian_loop, name="reranker-guardian", daemon=True)
+            t.start()
+            _guardian_started = True
+            print("[WebSearch] Reranker guardian started")
+        except Exception as e:
+            print(f"[WebSearch] Reranker guardian start failed: {e}")
 
 
 def stop_reranker_sidecar() -> None:
