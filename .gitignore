@@ -264,3 +264,8 @@ src/plugins/*/ui/package-lock.json
 #    @rollup/rollup-{win32,linux}-x64 make it non-portable across OSes;
 #    use `npm install --no-package-lock` in CI instead) ──
 src/opensquad/gateway/nexuschat-pro/package-lock.json
+
+# ── local tooling / workspace scratch ──
+.zcode/
+_ws_run.log.err
+src/plugins/websearch/service/reranker/models/
