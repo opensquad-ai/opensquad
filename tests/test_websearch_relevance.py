@@ -335,3 +335,23 @@ def test_query_variants_url_fragment_dropped():
     # CJK + URL + code, no real English phrase → no Latin-only variant.
     vs = _query_variants("惠城天气 weather.com.cn 101280306")
     assert not any(".com" in v and "天气" not in v for v in vs)
+
+
+def test_clean_query_strips_url_and_code():
+    from bing_http import _clean_query
+
+    assert _clean_query("北京天气 中国天气网 weather.com.cn 101010100") == "北京天气"
+    assert "catl.com" not in _clean_query("宁德时代 2025 年报 营收 www.catl.com")
+    # Clean queries pass through unchanged.
+    assert _clean_query("广州今日天气") == "广州今日天气"
+
+
+def test_clean_query_preserves_site_clause():
+    from bing_http import _clean_query
+
+    q = "北京 天气 (site:weather.com.cn OR site:tianqi.com OR site:nmc.cn OR site:msn.com/weather)"
+    out = _clean_query(q)
+    assert "site:weather.com.cn" in out
+    assert "site:tianqi.com" in out
+    assert "site:nmc.cn" in out
+    assert "北京" in out

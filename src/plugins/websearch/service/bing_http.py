@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 
@@ -144,6 +145,51 @@ def _cookie_jar() -> httpx.Cookies:
     return jar
 
 
+# ── Query impurity cleaning ────────────────────────────────────────────
+# Bing's relevance collapses when a query carries URL/code noise: "北京天气
+# 中国天气网 weather.com.cn 101010100" returns baike/gov/travel instead of
+# forecasts, and the same happens for ANY topic (stats URLs, city codes, …).
+# The site: rescue rewrite only fixes weather; the real fix is to scrub these
+# tokens before the HTTP request so Bing searches clean keywords.
+_URL_TOKEN_RE = re.compile(
+    r"\b(?:www\.)?[a-z0-9-]+\.(?:com|cn|net|org|io|gov|edu|co)(?:\.[a-z]{2})?(?:/[^\s]*)?\b", re.I
+)
+# Long digit runs are almost always entity/city codes (weather id 101010100),
+# not meaningful numbers. Keep short ones (years like 2025).
+_LONG_DIGIT_RE = re.compile(r"(?<![a-z0-9])\d{6,}(?![a-z0-9])")
+# Site-name hints users append to anchor results ("中国天气网"); after the URL
+# is gone these just confuse Bing.
+_SITE_HINT_RE = re.compile(r"(中国天气网|天气网|天气预报网|天气在线|天气预报网站|官方网站|官网|\.com|\.cn|\.net)", re.I)
+
+
+def _clean_query(query: str) -> str:
+    """Strip URL/code/site-hint noise from a query for Bing. Returns the query
+    unchanged if cleaning produces nothing meaningful.
+
+    ``site:`` constraints (used by the weather rescue rewrite) are preserved —
+    their domains are intentional filters, not noise.
+    """
+    q = (query or "").strip()
+    if not q:
+        return q
+    # Protect site: clauses so their domains survive cleaning.
+    site_parts: list[str] = []
+
+    def _hold(m: re.Match[str]) -> str:
+        site_parts.append(m.group(0))
+        return f" __SITE{len(site_parts) - 1}__ "
+
+    s = re.sub(r"site:[a-z0-9./:\-_]+", _hold, q, flags=re.I)
+    s = _URL_TOKEN_RE.sub(" ", s)
+    s = _LONG_DIGIT_RE.sub(" ", s)
+    s = _SITE_HINT_RE.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for i, part in enumerate(site_parts):
+        s = s.replace(f"__SITE{i}__", part)
+    # Never let cleaning empty the query (e.g. pure-URL query).
+    return s if len(s) >= 4 else q
+
+
 # ── HTML parsing (mirrors web_crawler._extract_organics_from_page in Python) ──
 from bs4 import BeautifulSoup  # noqa: E402
 
@@ -219,7 +265,13 @@ def fetch_serp_http(
     if time.time() < _blocked_until:
         return None
 
-    url = _build_search_url(base_url, query, market=market, setlang=setlang, country_code=country_code)
+    # Scrub URL/code/site-hint noise so Bing searches clean keywords (raw
+    # queries with e.g. "weather.com.cn 101010100" collapse to baike/gov/travel).
+    cleaned = _clean_query(query)
+    if cleaned != query:
+        print(f"[WebSearch] query cleaned: {query!r} -> {cleaned!r}")
+
+    url = _build_search_url(base_url, cleaned, market=market, setlang=setlang, country_code=country_code)
     headers = {
         "User-Agent": _UA,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
