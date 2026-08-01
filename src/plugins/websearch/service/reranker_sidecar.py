@@ -94,6 +94,15 @@ def _model_is_complete(model_dir: str) -> bool:
     return any(f.endswith(".safetensors") for f in os.listdir(model_dir))
 
 
+def _reranker_deps_available() -> bool:
+    for mod in ("torch", "transformers"):
+        try:
+            __import__(mod)
+        except ImportError:
+            return False
+    return True
+
+
 def _auto_download_model(model_dir: str) -> bool:
     """Return True if a download was (or already is) running / completed.
 
@@ -146,7 +155,11 @@ def _auto_download_model(model_dir: str) -> bool:
 
 
 def start_reranker_sidecar() -> None:
-    """Best-effort start of the local :8111 reranker. Never blocks websearch boot."""
+    """Spawn the local reranker and return without waiting for model load.
+
+    Websearch HTTP must become ready independently of the reranker. The
+    guardian polls /health and owns late readiness / restart handling.
+    """
     global _reranker_proc
 
     if not _env_truthy("WEBSEARCH_RERANKER_ENABLED", "1"):
@@ -183,15 +196,9 @@ def start_reranker_sidecar() -> None:
             )
         return
 
-    for mod in ("torch", "transformers"):
-        try:
-            __import__(mod)
-        except ImportError:
-            print(
-                f"[WebSearch] Reranker deps missing ({mod}); "
-                "skipping sidecar until plugin pip deps install (torch, transformers)"
-            )
-            return
+    if not _reranker_deps_available():
+        print("[WebSearch] Reranker deps missing (torch/transformers); skipping sidecar until plugin pip deps install")
+        return
 
     deploy_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reranker", "deploy.py")
     if not os.path.isfile(deploy_py):
@@ -222,26 +229,13 @@ def start_reranker_sidecar() -> None:
     atexit.register(stop_reranker_sidecar)
     print(f"[WebSearch] Reranker sidecar started (pid={_reranker_proc.pid}, port={port})")
 
-    # Model load can take tens of seconds; wait briefly then continue either way.
-    deadline = time.time() + float(os.environ.get("WEBSEARCH_RERANKER_WAIT_S", "90") or "90")
-    while time.time() < deadline:
-        if _reranker_proc.poll() is not None:
-            print(
-                f"[WebSearch] Reranker sidecar exited early (code={_reranker_proc.returncode}); "
-                "search will keep Bing order"
-            )
-            _reranker_proc = None
-            break
-        if _health_ok(timeout=2.0):
-            print(f"[WebSearch] Reranker ready at {_reranker_base_url()}")
-            _start_guardian()
-            return
-        time.sleep(1.0)
-    print(
-        "[WebSearch] Reranker still loading after wait; websearch continues "
-        "(rerank will activate once /health succeeds)"
-    )
+    if _reranker_proc.poll() is not None:
+        print(
+            f"[WebSearch] Reranker sidecar exited early (code={_reranker_proc.returncode}); search will keep Bing order"
+        )
+        _reranker_proc = None
     _start_guardian()
+    print("[WebSearch] Reranker loading in background; websearch stays available immediately")
 
 
 # ── Guardian: auto-restart the reranker if it dies mid-session ─────────
@@ -265,6 +259,10 @@ def _guardian_loop() -> None:
         if _port_open(_reranker_port()):
             continue
         # Port closed: our sidecar died. Restart unless we just did (debounce).
+        # Also avoid respawn if the process we spawned is still alive (it may be
+        # mid-load and the port check raced/failed).
+        if _reranker_proc is not None and _reranker_proc.poll() is None:
+            continue
         now = time.time()
         if now - _last_guard_restart < _guardian_debounce:
             continue
