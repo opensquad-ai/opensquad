@@ -636,6 +636,77 @@ async def _initialize_mcp_background(
         agent_logger.warning(f"[Boot] MCP background init failed: {exc}")
 
 
+async def _prewarm_chat_api(chat_api: Any, agent_logger: logging.Logger) -> None:
+    """Build the LLM client/tokenizer in the background so the first chat is fast."""
+    try:
+        warmup = getattr(chat_api, "warmup", None)
+        if callable(warmup):
+            await asyncio.to_thread(warmup)
+            agent_logger.info("[Boot] ChatAPI warmup complete")
+    except Exception as exc:
+        agent_logger.warning(f"[Boot] ChatAPI warmup skipped: {exc}")
+
+
+async def _initialize_extension_runtime_background(
+    config: dict,
+    agent_dir: str,
+    data_dir: str,
+    tool_registry: ToolRegistry,
+    early_runner: Any,
+    agent_name: str,
+    agent_logger: logging.Logger,
+    boot_main_t0: float,
+    agent_id: str,
+    agent_context: Any,
+) -> None:
+    """Load plugins/skills/memory/context after the chat entrypoint is live."""
+    try:
+        plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
+            config=config,
+            agent_dir=agent_dir,
+            project_root=syscfg.get_workspace(),
+            data_dir=data_dir,
+            tool_registry=tool_registry,
+            early_runner=early_runner,
+            agent_name=agent_name,
+            agent_logger=agent_logger,
+            boot_main_t0=boot_main_t0,
+        )
+        if agent_context is not None:
+            agent_context.plugin_manager = plugin_runtime.plugin_manager
+            agent_context.memory_manager = plugin_runtime.memory_manager
+        context_runtime = await BOOT_PHASES.initialize_context_runtime(
+            config=config,
+            agent_dir=agent_dir,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            chat_api=early_runner.chat_api,
+            tool_registry=tool_registry,
+            input_hub=input_hub,
+            project_root=syscfg.get_workspace(),
+            memory_manager=plugin_runtime.memory_manager,
+            load_context_module=load_context_module,
+            agent_logger=agent_logger,
+        )
+        BOOT_PHASES.finalize_runner_runtime(
+            early_runner=early_runner,
+            hooks=context_runtime.hooks,
+            memory_manager=plugin_runtime.memory_manager,
+            boot_main_t0=boot_main_t0,
+            agent_id=agent_id,
+            agent_logger=agent_logger,
+        )
+        try:
+            from opensquad.model_switch import init as _model_switch_init
+
+            _model_switch_init(early_runner, os.path.join(agent_dir, "config.json"))
+        except Exception as _e:
+            agent_logger.warning(f"[Boot] model_switch coordinator re-init failed: {_e}")
+        agent_logger.info("[Boot] Extension runtime ready (background)")
+    except Exception as exc:
+        agent_logger.exception("[Boot] Extension runtime init failed: %s", exc)
+
+
 # ===================================================================
 # Connections and routing
 # ===================================================================
@@ -860,13 +931,15 @@ async def main(agent_dir: str, override_port: int | None = None):
     await register_tools(config, tool_registry, agent_dir)
 
     # 3.05 Inject runtime config for the built-in `delegate_task` tool.
-    BOOT_PHASES.initialize_delegate_tool(
-        provider=provider,
-        model_cfg=model_cfg,
-        system_prompt=system_prompt,
-        tool_registry=tool_registry,
-        agent_logger=agent_logger,
-    )
+    disabled_tools = {str(name) for name in config.get("disabled_tools", []) if name}
+    if "delegate_task" not in disabled_tools:
+        BOOT_PHASES.initialize_delegate_tool(
+            provider=provider,
+            model_cfg=model_cfg,
+            system_prompt=system_prompt,
+            tool_registry=tool_registry,
+            agent_logger=agent_logger,
+        )
 
     # 3.05 ═══ Start Runner EARLY (before slow plugins) so urgent commands are never lost ═══
     # The GatewayAdapter has already connected by now and messages are arriving via
@@ -904,7 +977,8 @@ async def main(agent_dir: str, override_port: int | None = None):
     except Exception as _e:
         agent_logger.warning(f"[Boot] model_switch early init failed: {_e}")
 
-    asyncio.create_task(
+    asyncio.create_task(_prewarm_chat_api(chat_api, agent_logger))
+    mcp_task = asyncio.create_task(
         _initialize_mcp_background(
             config,
             tool_registry,
@@ -913,36 +987,20 @@ async def main(agent_dir: str, override_port: int | None = None):
             runner=_early_runner,
         )
     )
-
-    plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
-        config=config,
-        agent_dir=agent_dir,
-        project_root=syscfg.get_workspace(),
-        data_dir=data_dir,
-        tool_registry=tool_registry,
-        early_runner=_early_runner,
-        agent_name=agent_name,
-        agent_logger=agent_logger,
-        boot_main_t0=boot_main_t0,
+    extension_task = asyncio.create_task(
+        _initialize_extension_runtime_background(
+            config=config,
+            agent_dir=agent_dir,
+            data_dir=data_dir,
+            tool_registry=tool_registry,
+            early_runner=_early_runner,
+            agent_name=agent_name,
+            agent_logger=agent_logger,
+            boot_main_t0=boot_main_t0,
+            agent_id=agent_id,
+            agent_context=agent_ctx,
+        )
     )
-    skills = plugin_runtime.skills
-    memory_manager_instance = plugin_runtime.memory_manager
-
-    context_runtime = await BOOT_PHASES.initialize_context_runtime(
-        config=config,
-        agent_dir=agent_dir,
-        agent_id=agent_id,
-        agent_name=agent_name,
-        chat_api=chat_api,
-        tool_registry=tool_registry,
-        input_hub=input_hub,
-        project_root=syscfg.get_workspace(),
-        memory_manager=memory_manager_instance,
-        load_context_module=load_context_module,
-        agent_logger=agent_logger,
-    )
-    context_module = context_runtime.context_module
-    hooks = context_runtime.hooks
 
     # 5. Start response router
     await setup_response_router(agent_logger)
@@ -971,30 +1029,13 @@ async def main(agent_dir: str, override_port: int | None = None):
         print(f"  Gateway ID: {agent_id}")
     if config.get("group_chat", {}).get("enabled"):
         print("  Group Chat: Enabled")
-    if context_module:
-        print(f"  Hooks: {', '.join(hooks.keys()) or 'init only'}")
-    if skills:
-        print(f"  Skills: {', '.join(s.display_name for s in skills)}")
+    print("  Extensions (plugins/skills/memory) loading in background")
     print("=" * 50 + "\n")
 
-    # 9. Agent is now fully initialized — update the early Runner with remaining fields
-    BOOT_PHASES.finalize_runner_runtime(
-        early_runner=_early_runner,
-        hooks=hooks,
-        memory_manager=memory_manager_instance,
-        boot_main_t0=boot_main_t0,
-        agent_id=agent_id,
-        agent_logger=agent_logger,
-    )
-
-    # model_switch.init already ran right after start_early_runner; refresh the
-    # runner/config handle here in case boot mutated paths (idempotent).
-    try:
-        from opensquad.model_switch import init as _model_switch_init
-
-        _model_switch_init(_early_runner, os.path.join(agent_dir, "config.json"))
-    except Exception as _e:
-        agent_logger.warning(f"[Boot] model_switch coordinator re-init failed: {_e}")
+    # 9. Let extensions finish before starting the group-chat bridge; the early
+    # runner is already live and can process chat while this background task runs.
+    await extension_task
+    await mcp_task
 
     # Start group-chat bridge AFTER MCP/plugin init — the anyio cancel storm
     # (which used to hit the concurrently-running bridge/SDK every boot) has

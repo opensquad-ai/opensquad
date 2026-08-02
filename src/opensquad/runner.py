@@ -322,36 +322,8 @@ class AgentRunner:
         # The task is tracked in _state_change_tasks to prevent GC and to log
         # exceptions via done-callback (asyncio otherwise swallows them).
         self._state_change_tasks: set[asyncio.Task] = set()
-
-        if self._plugin_manager:
-            _pm = self._plugin_manager
-            _aid = self._agent_id
-            _tasks_ref = self._state_change_tasks
-
-            def _log_task_exception(t: asyncio.Task) -> None:
-                if t.cancelled():
-                    return
-                exc = t.exception()
-                if exc:
-                    logger.warning("[Runner] on_state_change hook task raised: %r", exc, exc_info=exc)
-                # Drop from the tracking set once done.
-                _tasks_ref.discard(t)
-
-            async def _on_state_change_hook(old_state: str, new_state: str):
-                task = asyncio.create_task(
-                    _pm.run_hook(
-                        "on_state_change",
-                        {
-                            "old_state": old_state,
-                            "new_state": new_state,
-                            "agent_id": _aid,
-                        },
-                    )
-                )
-                _tasks_ref.add(task)
-                task.add_done_callback(_log_task_exception)
-
-            _get_state_manager().add_listener(_on_state_change_hook)
+        self._plugin_state_listener = None
+        self._register_plugin_state_listener()
         self._agent_tool_names = agent_tool_names or []  # Tool names from agent config (for plugin hot-reload)
         self._agent_tool_levels: dict[str, str] = {}  # Per-tool level overrides from agent config
         self._config_path = config_path  # Path to config.json (for hot-reload watching)
@@ -475,6 +447,64 @@ class AgentRunner:
         self._pending_buffer: list[dict] = []
         # Subscribe to agent_ready from boot (fires before run() starts)
         bus.subscribe("agent_ready", lambda _: self._replay_pending())
+
+    def _register_plugin_state_listener(self) -> None:
+        """Wire on_state_change plugin hooks after the plugin manager is attached."""
+        if self._plugin_manager is None or getattr(self, "_plugin_state_listener", None) is not None:
+            return
+        _pm = self._plugin_manager
+        _aid = self._agent_id
+        _tasks_ref = self._state_change_tasks
+
+        def _log_task_exception(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.warning("[Runner] on_state_change hook task raised: %r", exc, exc_info=exc)
+            _tasks_ref.discard(t)
+
+        async def _on_state_change_hook(old_state: str, new_state: str):
+            task = asyncio.create_task(
+                _pm.run_hook(
+                    "on_state_change",
+                    {
+                        "old_state": old_state,
+                        "new_state": new_state,
+                        "agent_id": _aid,
+                    },
+                )
+            )
+            _tasks_ref.add(task)
+            task.add_done_callback(_log_task_exception)
+
+        self._plugin_state_listener = _on_state_change_hook
+        _get_state_manager().add_listener(_on_state_change_hook)
+
+    def attach_runtime_components(
+        self,
+        *,
+        plugin_manager=None,
+        hooks: dict | None = None,
+        memory_manager=None,
+    ) -> None:
+        """Attach late-initialized plugin/skill/memory runtime to an early runner."""
+        if plugin_manager is not None and plugin_manager is not self._plugin_manager:
+            self._plugin_manager = plugin_manager
+            if self._plugin_state_listener is not None:
+                try:
+                    _get_state_manager().remove_listener(self._plugin_state_listener)
+                except Exception:
+                    pass
+                self._plugin_state_listener = None
+            self._register_plugin_state_listener()
+        if hooks is not None:
+            self._hooks = hooks
+        if memory_manager is not None:
+            self._memory_manager = memory_manager
+        self._context_builder.plugin_manager = self._plugin_manager
+        self._context_builder.hooks = self._hooks
+        self._context_builder.memory_manager = self._memory_manager
 
     def _active_tl(self) -> TurnLocal:
         tl = get_turn_local()

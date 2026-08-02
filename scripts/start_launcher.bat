@@ -4,5 +4,5 @@ title OpenSquad Launcher
 cd /d "%~dp0\.."
 
 echo [*] Starting Launcher (port 9600)...
-python -m opensquad.launcher
+python -m opensquad.launcher_main
 pause

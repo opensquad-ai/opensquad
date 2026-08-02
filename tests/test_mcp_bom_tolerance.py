@@ -27,11 +27,14 @@ These tests pin the contract so future regressions are caught at
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from opensquad.json_cache import load_json_cached
+from opensquad.registry import ToolRegistry
 
 # ── json_cache.load_json_cached ──────────────────────────────────────────
 
@@ -65,6 +68,71 @@ def test_load_json_cached_caches_after_first_read(tmp_path):
     first = load_json_cached(str(path))
     second = load_json_cached(str(path))
     assert first is second  # same object — confirms caching path is exercised
+
+
+def test_register_mcp_adapter_binds_registry():
+    registry = ToolRegistry()
+    adapter = SimpleNamespace(_registry=None)
+    registry.register_mcp_adapter(adapter)
+    assert adapter._registry is registry
+
+
+def test_registry_routes_mcp_tools_without_namespace_registration():
+    registry = ToolRegistry()
+    adapter = SimpleNamespace(_registry=None, called=[])
+
+    async def call_tool_async(tool_name, arguments):
+        adapter.called.append((tool_name, arguments))
+        return "ok"
+
+    adapter.call_tool_async = call_tool_async
+    registry.register_mcp_adapter(adapter)
+
+    result = asyncio.run(registry.call("mcp__playwright__browser_navigate", {"url": "http://www.weather.com.cn"}))
+
+    assert result == "ok"
+    assert adapter.called == [("mcp__playwright__browser_navigate", {"url": "http://www.weather.com.cn"})]
+
+
+def test_invalidate_mcp_tools_clears_prompt_caches():
+    registry = ToolRegistry()
+    registry.generate_openai_tools("all")
+    registry.generate_tool_descriptions()
+    assert registry._openai_tools_cache
+    assert registry._desc_cache is not None
+
+    registry.invalidate_mcp_tools()
+
+    assert not registry._openai_tools_cache
+    assert registry._desc_cache is None
+
+
+def test_init_mcp_adapter_registers_registry_before_connect(monkeypatch):
+    import opensquad.tools.mcp_adapter as mcp_module
+
+    registry = ToolRegistry()
+
+    class FakeAdapter:
+        def __init__(self, config_path=None, agent_dir=None, global_disabled_servers=None):
+            self.config_path = config_path
+            self.agent_dir = agent_dir
+            self._connected = False
+            self._registry = None
+
+        async def connect(self):
+            self._connected = True
+
+    monkeypatch.setattr(mcp_module, "MCPAdapter", FakeAdapter)
+    monkeypatch.setattr(mcp_module, "_mcp_adapter", None)
+
+    async def run():
+        return await mcp_module.init_mcp_adapter(agent_dir="agent-x", registry=registry)
+
+    adapter = asyncio.run(run())
+
+    assert registry._mcp_adapter is adapter
+    assert adapter._registry is registry
+    assert adapter._connected is True
 
 
 # ── filesystem.write_file / replace_in_file ──────────────────────────────

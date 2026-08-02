@@ -68,7 +68,11 @@ class AgentBootPhases:
 
     def build_tool_name_list(self, config: dict[str, Any]) -> list[str]:
         configured_tools = config.get("tools", [])
-        return list(self.mandatory_tools) + [name for name in configured_tools if name not in self.mandatory_tools]
+        disabled_tools = {str(name) for name in config.get("disabled_tools", []) if name}
+        mandatory = [name for name in self.mandatory_tools if name not in disabled_tools]
+        return mandatory + [
+            name for name in configured_tools if name not in self.mandatory_tools and name not in disabled_tools
+        ]
 
     def register_builtin_tools(self, config: dict[str, Any], registry: Any, agent_dir: str) -> None:
         t0 = __import__("time").perf_counter()
@@ -573,8 +577,15 @@ class AgentBootPhases:
     ) -> None:
         from opensquad.structured_log import perf_event
 
-        early_runner._hooks = hooks
-        early_runner._memory_manager = memory_manager
+        if hasattr(early_runner, "attach_runtime_components"):
+            early_runner.attach_runtime_components(
+                plugin_manager=getattr(early_runner, "_plugin_manager", None),
+                hooks=hooks,
+                memory_manager=memory_manager,
+            )
+        else:
+            early_runner._hooks = hooks
+            early_runner._memory_manager = memory_manager
         # Phase 1d: sync memory_manager back to AgentContext
         if getattr(early_runner, "_ctx", None) is not None:
             early_runner._ctx.memory_manager = memory_manager
@@ -639,11 +650,11 @@ class AgentBootPhases:
         try:
             from opensquad.tools.mcp_adapter import init_mcp_adapter
 
-            mcp_adapter = await init_mcp_adapter(
+            await init_mcp_adapter(
                 agent_dir=agent_dir,
                 global_disabled_servers=global_disabled,
+                registry=registry,
             )
-            registry.register_mcp_adapter(mcp_adapter, level="extended")
         except ImportError as exc:
             # ImportError here means the MCP SDK itself is missing from the
             # runtime (e.g. frozen bundle didn't bundle `mcp` package). This

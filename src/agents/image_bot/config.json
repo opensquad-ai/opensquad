@@ -31,6 +31,15 @@
     "_card": "step-image-edit-2"
   },
   "tools": [],
+  "disabled_tools": [
+    "im",
+    "collaboration",
+    "delegate_task",
+    "workspace",
+    "task_watch",
+    "choice_tools",
+    "goal"
+  ],
   "group_chat": {
     "enabled": false
   },

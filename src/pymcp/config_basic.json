@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "playwright": {
-      "enabled": true,
+      "enabled": false,
       "command": "npx",
       "args": [
         "-y",

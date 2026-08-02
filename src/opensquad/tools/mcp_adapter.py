@@ -145,6 +145,7 @@ class MCPAdapter:
         self._tools_cache: dict[str, list] = {}  # server_name -> List[Tool objects]
         self._timeouts: dict[str, int] = {}  # server_name -> timeout seconds
         self._connected = False
+        self._registry: Any | None = None
 
         # P2-2: Health check / auto-reconnect state
         self._health_task: asyncio.Task | None = None
@@ -172,13 +173,14 @@ class MCPAdapter:
             self._connected = True
             return
 
-        for server_name, cfg in self._server_configs.items():
-            try:
-                await self._connect_server(server_name, cfg)
-            except (Exception, asyncio.CancelledError) as e:
+        server_names = list(self._server_configs.keys())
+        tasks = [asyncio.create_task(self._connect_server(name, self._server_configs[name])) for name in server_names]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for server_name, result in zip(server_names, results, strict=True):
+            if isinstance(result, Exception | asyncio.CancelledError):
                 # Catch all regular exceptions and CancelledError to prevent one failing server
                 # from taking down the entire Agent
-                logger.error(f"[MCP] Failed to connect to '{server_name}': {e} ({type(e).__name__})")
+                logger.error(f"[MCP] Failed to connect to '{server_name}': {result} ({type(result).__name__})")
 
                 # Clean up resources for this failed server
                 if server_name in self._exit_stacks:
@@ -194,6 +196,7 @@ class MCPAdapter:
         logger.info(
             f"[MCP] Adapter ready: {len(self._sessions)}/{len(self._server_configs)} servers, {total_tools} tools"
         )
+        self._invalidate_registry_tools()
 
         # P2-2: Start background health-check + auto-reconnect loop
         self._stop_health.clear()
@@ -202,6 +205,12 @@ class MCPAdapter:
                 self._health_monitor_loop(),
                 name="mcp-health-monitor",
             )
+
+    def _invalidate_registry_tools(self) -> None:
+        """Notify ToolRegistry so newly connected MCP tools enter prompt/tool caches."""
+        registry = getattr(self, "_registry", None)
+        if registry is not None and hasattr(registry, "invalidate_mcp_tools"):
+            registry.invalidate_mcp_tools()
 
     async def _filter_log(self, server_name: str, stream):
         """Consume and filter stderr from MCP server"""
@@ -573,6 +582,7 @@ class MCPAdapter:
 
         tool_names = [t.name for t in self._tools_cache.get(server_name, [])]
         logger.info(f"[MCP] add_server: '{server_name}' connected with {len(tool_names)} tools: {tool_names}")
+        self._invalidate_registry_tools()
 
         return {
             "success": True,
@@ -607,6 +617,7 @@ class MCPAdapter:
         self._tools_cache.pop(server_name, None)
         self._server_configs.pop(server_name, None)
         self._timeouts.pop(server_name, None)
+        self._invalidate_registry_tools()
 
         # Persist removal
         if persist:
@@ -772,12 +783,21 @@ class MCPAdapter:
 
         cfg = self._server_configs.get(server_name)
         if cfg is None:
-            logger.error(f"[MCP] Cannot reconnect unknown server: {server_name}")
-            return False
+            # Allow runtime enable without restart: pick up an enabled server
+            # from the same central/agent config even if it was added later.
+            try:
+                cfg = _load_mcp_config(self.config_path, self.agent_dir).get(server_name)
+            except Exception:
+                cfg = None
+            if cfg is None:
+                logger.error(f"[MCP] Cannot reconnect unknown server: {server_name}")
+                return False
+            self._server_configs[server_name] = cfg
 
         try:
             await self._connect_server(server_name, cfg)
             logger.info(f"[MCP] Successfully reconnected to '{server_name}'")
+            self._invalidate_registry_tools()
             return True
         except Exception as e:
             logger.error(f"[MCP] Reconnect failed for '{server_name}': {e}")
@@ -826,7 +846,10 @@ _mcp_adapter: MCPAdapter | None = None
 
 
 async def init_mcp_adapter(
-    config_path: str | None = None, agent_dir: str | None = None, global_disabled_servers: set | None = None
+    config_path: str | None = None,
+    agent_dir: str | None = None,
+    global_disabled_servers: set | None = None,
+    registry: Any | None = None,
 ) -> MCPAdapter:
     """
     Async initialization of the MCP adapter (global singleton).
@@ -841,10 +864,14 @@ async def init_mcp_adapter(
         config_path: Optional global config file path (backward compat)
         agent_dir: Agent directory; agent_dir/mcp_config.json takes priority
         global_disabled_servers: Set of server names disabled globally (not started for any agent)
+        registry: Optional ToolRegistry to bind before slow server connections finish
     """
     global _mcp_adapter
     if _mcp_adapter is None:
         _mcp_adapter = MCPAdapter(config_path, agent_dir, global_disabled_servers=global_disabled_servers)
+    if registry is not None:
+        registry.register_mcp_adapter(_mcp_adapter, level="extended")
+    if not _mcp_adapter._connected:
         await _mcp_adapter.connect()
     return _mcp_adapter
 

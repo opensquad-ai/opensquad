@@ -89,6 +89,7 @@ class AgentSessionReader:
         self._list_meta_cache: dict[str, dict[str, Any]] = {}
         # mtime cache for current_session.json — avoid re-parsing unchanged large files
         self._current_session_mtime: float | None = None
+        self._current_log_mtime: float | None = None
         # Load current session from disk
         self._reload()
 
@@ -101,15 +102,24 @@ class AgentSessionReader:
 
         Args:
             force: If True, read from disk unconditionally (skips mtime cache).
-                   Public API methods (get_session_history*) always pass force=True
-                   to prevent stale reads on Windows where mtime granularity is low.
+                   Public API methods use mtime + incremental-log tracking so
+                   repeated reads do not re-parse a large current session.
         """
         if not os.path.exists(self.current_session_file):
             return
         try:
             mtime = os.path.getmtime(self.current_session_file)
-            if not force and mtime == self._current_session_mtime:
-                return  # file unchanged, skip disk read
+            _sid = self.session_data.get("id") if isinstance(self.session_data, dict) else None
+            _log_path = os.path.join(self.history_dir, f"{_sid}.json.log") if _sid else None
+            _log_mtime = os.path.getmtime(_log_path) if _log_path and os.path.exists(_log_path) else None
+            if not force and mtime == self._current_session_mtime and _log_mtime == self._current_log_mtime:
+                return  # snapshot and incremental log unchanged, skip disk read
+            if not force and mtime == self._current_session_mtime and self._current_session_mtime is not None:
+                # Snapshot unchanged: only merge new incremental log records.
+                if _sid and _sid != "unknown":
+                    self._replay_log_into(self.session_data, _sid, int(self.session_data.get("_save_seq") or 0))
+                self._current_log_mtime = _log_mtime
+                return
             with open(self.current_session_file, encoding="utf-8") as f:
                 self.session_data = json.load(f)
             if "events" not in self.session_data:
@@ -131,6 +141,7 @@ class AgentSessionReader:
             if _sid and _sid != "unknown":
                 self._replay_log_into(self.session_data, _sid, int(self.session_data.get("_save_seq") or 0))
             self._current_session_mtime = mtime
+            self._current_log_mtime = _log_mtime
         except Exception as e:
             logger.warning(f"Failed to reload session: {e}")
 
@@ -299,17 +310,18 @@ class AgentSessionReader:
             pass
         return self.session_data.get("id")
 
-    def get_session_list(self) -> list[dict[str, Any]]:
+    def get_session_list(self, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         """Return list of all sessions (current + history), newest first.
 
         Uses a per-file mtime metadata cache so repeated list refreshes (sidebar
-        polling) do not re-parse large history JSON files.
+        polling) do not re-parse large history JSON files. ``limit``/``offset``
+        let the sidebar render the newest page first and load older pages on
+        demand instead of scanning every history file at startup.
         """
-        # Always force-reload: after new_session the mtime cache can lag (esp. Windows)
-        # and the sidebar would keep showing the previous current session.
-        self._reload(force=True)
+        self._reload()
         sessions: list[dict[str, Any]] = []
         seen_ids: set = set()
+        visible_index = 0
 
         def _file_ts(path: str) -> tuple[str | None, str | None]:
             """Return (created_at, last_updated) ISO strings from filesystem."""
@@ -458,17 +470,19 @@ class AgentSessionReader:
                 title = self.session_data.get("title") or _extract_title(messages, curr_id)
                 preview = _extract_preview(messages)
                 created_at, last_updated = _pick_ts_light(self.session_data, self.current_session_file)
-                sessions.append(
-                    {
-                        "id": curr_id,
-                        "title": title,
-                        "preview": preview,
-                        "current": True,
-                        "primary": curr_id == primary_id,
-                        "created_at": created_at,
-                        "last_updated": last_updated,
-                    }
-                )
+                if visible_index >= offset:
+                    sessions.append(
+                        {
+                            "id": curr_id,
+                            "title": title,
+                            "preview": preview,
+                            "current": True,
+                            "primary": curr_id == primary_id,
+                            "created_at": created_at,
+                            "last_updated": last_updated,
+                        }
+                    )
+                visible_index += 1
                 seen_ids.add(curr_id)
 
         # 2. History files
@@ -490,23 +504,29 @@ class AgentSessionReader:
                     if _hidden(sid, origin=str(meta.get("origin") or "")):
                         seen_ids.add(sid)
                         continue
-                    entry = {
-                        "id": sid,
-                        "title": meta.get("title") or sid,
-                        "preview": meta.get("preview") or "",
-                        "current": False,
-                        "primary": sid == primary_id,
-                        "created_at": meta.get("created_at"),
-                        "last_updated": meta.get("last_updated"),
-                    }
-                    if meta.get("origin"):
-                        entry["origin"] = meta.get("origin")
-                    sessions.append(entry)
+                    if visible_index >= offset:
+                        entry = {
+                            "id": sid,
+                            "title": meta.get("title") or sid,
+                            "preview": meta.get("preview") or "",
+                            "current": False,
+                            "primary": sid == primary_id,
+                            "created_at": meta.get("created_at"),
+                            "last_updated": meta.get("last_updated"),
+                        }
+                        if meta.get("origin"):
+                            entry["origin"] = meta.get("origin")
+                        sessions.append(entry)
+                    visible_index += 1
                     seen_ids.add(sid)
-                # Drop stale list-meta entries for deleted history files
-                stale = [k for k in self._list_meta_cache if k not in live_sids and k != curr_id]
-                for k in stale:
-                    self._list_meta_cache.pop(k, None)
+                    if limit is not None and len(sessions) >= limit:
+                        break
+                # Drop stale list-meta entries only after a full scan; a paged
+                # scan must not evict metadata for pages not visited yet.
+                if limit is None:
+                    stale = [k for k in self._list_meta_cache if k not in live_sids and k != curr_id]
+                    for k in stale:
+                        self._list_meta_cache.pop(k, None)
             except Exception as e:
                 logger.error(f"Error scanning history: {e}")
 
@@ -666,8 +686,8 @@ class AgentSessionReader:
 
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 
-    async def async_get_session_list(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.get_session_list)
+    async def async_get_session_list(self, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.get_session_list, limit, offset)
 
     async def async_get_current_session_id(self) -> str:
         return await asyncio.to_thread(self.get_current_session_id)
@@ -982,8 +1002,12 @@ class _RemoteSessionReader:
             r.raise_for_status()
             return r.json()
 
-    def get_session_list(self):
-        return self._get("/list").get("sessions", [])
+    def get_session_list(self, limit: int | None = None, offset: int = 0):
+        params: dict[str, int] = {}
+        if limit is not None:
+            params["limit"] = limit
+            params["offset"] = offset
+        return self._get("/list", params).get("sessions", [])
 
     def get_current_session_id(self) -> str | None:
         return self._get("/list").get("current_session_id")
@@ -1028,8 +1052,8 @@ class _RemoteSessionReader:
 
     # ---- async interface (wraps sync HTTP calls via to_thread) ----
 
-    async def async_get_session_list(self):
-        return await asyncio.to_thread(self.get_session_list)
+    async def async_get_session_list(self, limit: int | None = None, offset: int = 0):
+        return await asyncio.to_thread(self.get_session_list, limit, offset)
 
     async def async_get_current_session_id(self) -> str | None:
         return await asyncio.to_thread(self.get_current_session_id)
@@ -1071,8 +1095,13 @@ class _WsSessionReader:
     async def _call(self, method: str, path: str, body=None) -> dict:
         return await self._rpc(self._node_id, method, path, body)
 
-    async def async_get_session_list(self) -> list[dict[str, Any]]:
-        result = await self._call("GET", f"{self._base}/list")
+    async def async_get_session_list(self, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        path = f"{self._base}/list"
+        if limit is not None:
+            from urllib.parse import urlencode
+
+            path += f"?{urlencode({'limit': limit, 'offset': offset})}"
+        result = await self._call("GET", path)
         return result.get("sessions", [])
 
     async def async_get_current_session_id(self) -> str | None:

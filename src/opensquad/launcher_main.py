@@ -764,7 +764,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             # ── Agent session endpoints (for remote Gateway access) ──
             elif path.startswith("/api/sessions/") and path.endswith("/list"):
                 agent_id = path.split("/")[3]
-                return self._handle_session_list(agent_id)
+                limit = int(qs.get("limit", ["0"])[0])
+                offset = int(qs.get("offset", ["0"])[0])
+                return self._handle_session_list(agent_id, limit or None, offset)
             elif path.startswith("/api/sessions/") and path.endswith("/current"):
                 agent_id = path.split("/")[3]
                 offset = int(qs.get("offset", ["0"])[0])
@@ -2976,23 +2978,35 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 _log.error(f"[Launcher] Failed to get session reader for {agent_id}: {e}")
                 return None
 
-        def _handle_session_list(self, agent_id: str):
+        def _handle_session_list(self, agent_id: str, limit: int | None = None, offset: int = 0):
             """GET /api/sessions/{agent_id}/list"""
             reader = self._get_session_reader(agent_id)
             if reader is None:
                 return self._send_json({"error": f"Agent not found: {agent_id}"}, 404)
             try:
-                sessions = reader.get_session_list()
+                sessions = reader.get_session_list(limit=limit, offset=offset)
                 current_id = reader.get_current_session_id()
             except Exception as e:
                 import httpx
 
                 if isinstance(e, httpx.TimeoutException):
                     return self._send_json(
-                        {"error": "Agent session request timed out", "sessions": [], "current_session_id": None}, 504
+                        {
+                            "error": "Agent session request timed out",
+                            "sessions": [],
+                            "current_session_id": None,
+                            "has_more": False,
+                        },
+                        504,
                     )
                 return self._send_json({"error": f"Failed to get sessions: {e!s}"}, 500)
-            return self._send_json({"sessions": sessions, "current_session_id": current_id})
+            return self._send_json(
+                {
+                    "sessions": sessions,
+                    "current_session_id": current_id,
+                    "has_more": bool(limit and len(sessions) >= limit),
+                }
+            )
 
         def _handle_session_current(self, agent_id: str, offset: int, limit: int):
             """GET /api/sessions/{agent_id}/current?offset=0&limit=50"""
@@ -3060,7 +3074,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             try:
                 import json as _json
 
-                raw = body if isinstance(body, (bytes, bytearray, str)) else b""
+                raw = body if isinstance(body, bytes | bytearray | str) else b""
                 data = _json.loads(raw or b"{}") if raw else {}
                 title = (data.get("title") or "").strip()
             except Exception:

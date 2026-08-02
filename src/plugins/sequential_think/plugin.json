@@ -10,7 +10,15 @@
   "tags": [
     "reasoning"
   ],
-  "tools": [],
+  "tools": [
+    {
+      "name": "sequential_think",
+      "module": "proxy",
+      "level": "extended",
+      "auto_register": false,
+      "requires_agent_id": false
+    }
+  ],
   "hooks": [],
   "config": {
     "schema": {}
@@ -18,6 +26,8 @@
   "config_schema": {},
   "contributes": {},
   "dependencies": {
-    "pip": []
+    "pip": [
+      "portalocker"
+    ]
   }
 }

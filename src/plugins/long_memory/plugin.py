@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
     plugin_type="hook",
     display_name="Long Memory",
     description="Long-term memory management with semantic recall, keyword extraction, and co-occurrence knowledge graph. View and manage stored memory entries.",
+    dependencies={"pip": ["numpy>=1.21", "scipy>=1.7", "jieba>=0.42", "networkx>=2.6"]},
     contributes={
         "views": [
             {

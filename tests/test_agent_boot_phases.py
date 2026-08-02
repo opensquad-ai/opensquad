@@ -50,6 +50,9 @@ class DummyInputHub:
     def set_agent_context(self, agent_dir):
         self.contexts.append(agent_dir)
 
+    def _check_session_cwd(self):
+        return None
+
 
 class DummyLogger:
     def __init__(self):
@@ -134,6 +137,19 @@ def test_register_builtin_tools_wires_levels_and_filesystem(monkeypatch, tmp_pat
     assert str((tmp_path / "ws" / "relative-dir").resolve()) in fs_module.allowed_dirs[0]
 
 
+def test_build_tool_name_list_respects_disabled_tools():
+    phases = AgentBootPhases(
+        tool_modules={},
+        mandatory_tools={"system", "filesystem", "im", "workspace"},
+        core_tools=set(),
+    )
+    config = {
+        "tools": ["im", "websearch", "workspace"],
+        "disabled_tools": ["im", "workspace"],
+    }
+    assert sorted(phases.build_tool_name_list(config)) == ["filesystem", "system", "websearch"]
+
+
 def test_initialize_runtime_infrastructure_registers_mcp_adapter(monkeypatch, tmp_path):
     registry = DummyRegistry()
     phases = AgentBootPhases(tool_modules={}, mandatory_tools=set(), core_tools=set())
@@ -141,8 +157,11 @@ def test_initialize_runtime_infrastructure_registers_mcp_adapter(monkeypatch, tm
     monkeypatch.setattr(agent_boot_phases_module.syscfg, "workspace_data_dir", lambda name: str(tmp_path / name))
     monkeypatch.setattr(agent_boot_phases_module.os.path, "isfile", lambda _: False)
 
-    async def fake_init_mcp_adapter(agent_dir, global_disabled_servers):
-        return {"agent_dir": agent_dir, "disabled": global_disabled_servers}
+    async def fake_init_mcp_adapter(agent_dir, global_disabled_servers, registry=None):
+        adapter = {"agent_dir": agent_dir, "disabled": global_disabled_servers}
+        if registry is not None:
+            registry.register_mcp_adapter(adapter, level="extended")
+        return adapter
 
     fake_module = types.ModuleType("opensquad.tools.mcp_adapter")
     fake_module.init_mcp_adapter = fake_init_mcp_adapter
@@ -231,7 +250,7 @@ def test_initialize_agent_runtime_sets_state_and_default_wake(monkeypatch, tmp_p
     assert input_hub.contexts == [str(tmp_path / "agent")]
     assert session_manager.async_writer_started is True
     assert state_manager.states == ["idle"]
-    assert state_manager.wake_modes == ["normal"]
+    assert state_manager.wake_modes == ["strict"]
     assert result.data_dir == str(tmp_path / "agent" / "data")
     assert result.history_dir == str(tmp_path / "agent" / "data" / "ai_his_talk")
 
@@ -245,6 +264,8 @@ def test_initialize_chat_runtime_builds_chat_api(monkeypatch, tmp_path):
             self.model = model
             self.token_max = token_max
             self.timeout = timeout
+            self.reasoning_effort = "high"
+            self.is_think = False
 
     class DummyChatApi:
         def __init__(self, config, stream_parser):
@@ -257,7 +278,7 @@ def test_initialize_chat_runtime_builds_chat_api(monkeypatch, tmp_path):
         "opensquad.model_config.ModelConfig.from_dict",
         lambda model_cfg, prompt, provider: DummyModelConfig(model=model_cfg.get("model_name", "")),
     )
-    monkeypatch.setattr(agent_boot_phases_module, "ChatAPI", DummyChatApi)
+    monkeypatch.setattr("opensquad.chat_api.ChatAPI", DummyChatApi)
     monkeypatch.setattr(agent_boot_phases_module.syscfg, "workspace_uploads_dir", lambda: str(tmp_path / "uploads"))
 
     result = phases.initialize_chat_runtime(

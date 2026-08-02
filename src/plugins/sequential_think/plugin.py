@@ -22,6 +22,7 @@ logger = logging.getLogger("plugins.sequential_think")
     plugin_type="tool",
     display_name="Sequential Thinking",
     tags=["reasoning"],
+    dependencies={"pip": ["portalocker"]},
 )
 class SequentialThinkPlugin(Plugin):
     """Sequential thinking tool plugin (proxy to opensquad.tools.sequential_think)."""

@@ -15,5 +15,7 @@ copy /Y system_config.gateway.json system_config.json >nul
 echo [*] Using system_config.gateway.json
 
 :: 使用 start_team.py 统一启动三个服务
+set OPENSQUAD_RELOAD=0
+set OPENSQUAD_DISABLE_VITE_PROXY=1
 python scripts/start_team.py
 pause

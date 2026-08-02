@@ -79,7 +79,7 @@ interface SessionSidebarProps {
   pendingPrimarySessionId?: string | null;
   onSetPrimarySession?: (sessionId: string) => void;
   /** Notify parent when the session list (titles) changes — used for L2 tab labels. */
-  onSessionsChange?: (sessions: AgentSession[]) => void;
+  onSessionsChange?: (sessions: AgentSession[], complete?: boolean) => void;
   /** Chat layout mode: classic (Work) | solo (Code). */
   uiMode?: 'classic' | 'solo';
   onUiModeChange?: (mode: 'classic' | 'solo') => void;
@@ -92,6 +92,7 @@ const SIDEBAR_WIDTH_KEY = 'opensquad.sessionSidebar.width';
 const SIDEBAR_WIDTH_DEFAULT = 256;
 const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 480;
+const SESSION_LIST_PAGE_SIZE = 100;
 
 function loadSidebarWidth(): number {
   try {
@@ -196,6 +197,9 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const { t, i18n } = useTranslation();
   const ageLocale: 'zh' | 'en' = i18n.language?.startsWith('zh') ? 'zh' : 'en';
   const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [metaMap, setMetaMap] = useState<Record<string, SessionProjectMeta>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -206,6 +210,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   const [sectionOpen, setSectionOpen] = useState({ pinned: true, recent: true, archive: true });
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const editInputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -285,10 +290,13 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
       setError(null);
     }
     try {
-      const resp = await agentSessionAPI.getSessionList(agentId);
+      const resp = await agentSessionAPI.getSessionList(agentId, 0, SESSION_LIST_PAGE_SIZE);
       const list = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
       // Avoid no-op setState — parent/chat ticks + 6s poll would remount hover UI.
       setSessions((prev) => (sessionsListEqual(prev, list) ? prev : list));
+      setOffset(list.length);
+      setHasMore(!!resp.has_more);
+      setLoadingMore(false);
       reloadMeta();
       return list;
     } catch (err: any) {
@@ -300,6 +308,39 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
       if (!opts?.silent) setLoading(false);
     }
   }, [agentId, reloadMeta, t]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (!agentId || loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    try {
+      const resp = await agentSessionAPI.getSessionList(agentId, offset, SESSION_LIST_PAGE_SIZE);
+      const more = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
+      setSessions((prev) => {
+        const seen = new Set(prev.map((s) => s.id));
+        const merged = [...prev];
+        for (const s of more) {
+          if (seen.has(s.id)) continue;
+          merged.push(s);
+          seen.add(s.id);
+        }
+        return merged;
+      });
+      setOffset((prev) => prev + more.length);
+      setHasMore(!!resp.has_more);
+    } catch {
+      setHasMore(false);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [agentId, offset, hasMore, loadingMore]);
+
+  const handleListScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el || loadingMore || !hasMore) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
+      void loadMoreSessions();
+    }
+  }, [loadMoreSessions, loadingMore, hasMore]);
 
   useEffect(() => {
     if (isOpen) void loadSessions({ silent: false });
@@ -429,8 +470,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   }, [sessionTitleUpdate]);
 
   useEffect(() => {
-    onSessionsChange?.(sessions);
-  }, [sessions, onSessionsChange]);
+    onSessionsChange?.(sessions, !hasMore);
+  }, [sessions, hasMore, onSessionsChange]);
 
   useEffect(() => {
     const onMeta = (e: Event) => {
@@ -799,7 +840,11 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush">
+      <div
+        ref={listRef}
+        onScroll={handleListScroll}
+        className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush"
+      >
         {!workspaceRootPath ? (
           <div className="px-3 py-4 text-[11px] text-textMuted/70">请先打开或创建一个工作区</div>
         ) : error ? (
@@ -842,6 +887,18 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                 sections.archive.map((s) => renderRow(s, `archive:${s.id}`))
               )}
             </SidebarSection>
+            {hasMore ? (
+              <div className="px-3 py-2">
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void loadMoreSessions()}
+                  className="w-full rounded-lg px-2 py-1.5 text-[11px] text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
+                >
+                  {loadingMore ? '加载中...' : '加载更多会话'}
+                </button>
+              </div>
+            ) : null}
           </>
         )}
       </div>

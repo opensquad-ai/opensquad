@@ -2203,12 +2203,13 @@ export interface AgentSessionData {
 
 export const agentSessionAPI = {
   /** Get session list for an agent */
-  getSessionList: async (agentId: string) => {
+  getSessionList: async (agentId: string, offset: number = 0, limit: number = 100) => {
     return apiRequest<{
       agent_id: string;
       current_session_id: string;
       sessions: AgentSession[];
-    }>(`/ai-web/agent-sessions/${agentId}/list`);
+      has_more: boolean;
+    }>(`/ai-web/agent-sessions/${agentId}/list?offset=${offset}&limit=${limit}`);
   },
 
   /**

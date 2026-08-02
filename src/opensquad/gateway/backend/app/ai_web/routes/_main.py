@@ -646,6 +646,8 @@ async def download_file(
 @router.get("/agent-sessions/{agent_id}/list")
 async def agent_session_list(
     agent_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user_dep),
 ):
     """
@@ -656,13 +658,14 @@ async def agent_session_list(
     if not reader:
         raise HTTPException(404, f"Agent not found: {agent_id}")
 
-    sessions = await reader.async_get_session_list()
+    sessions = await reader.async_get_session_list(limit=limit, offset=offset)
     current_id = await reader.async_get_current_session_id()
 
     return {
         "agent_id": agent_id,
         "current_session_id": current_id,
         "sessions": sessions,
+        "has_more": len(sessions) >= limit,
     }
 
 

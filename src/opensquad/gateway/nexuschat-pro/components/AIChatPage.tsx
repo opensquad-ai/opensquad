@@ -6803,7 +6803,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   }, [sessionTitleUpdate]);
 
   /** Keep L2 tab labels in sync with sidebar session titles (not truncated session ids). */
-  const handleSessionsChange = useCallback((sessions: Array<{ id: string; title?: string }>) => {
+  const handleSessionsChange = useCallback((
+    sessions: Array<{ id: string; title?: string }>,
+    complete: boolean = true,
+  ) => {
     setTabSessionTitles((prev) => {
       let changed = false;
       const next = { ...prev };
@@ -6822,7 +6825,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     // before the HTTP list includes them; pruning flipped the active tab away
     // and docked the empty composer while the user was still typing.
     const ids = sessions.map((s) => s.id).filter(Boolean);
-    if (agentId && ids.length > 0) {
+    if (complete !== false && agentId && ids.length > 0) {
       const protect = new Set(ids);
       const cur = currentSessionIdRef.current;
       const agentCur = agentCurrentSessionIdRef.current;
@@ -6886,7 +6889,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       try {
         const resp = await agentSessionAPI.getSessionList(agentId);
         if (cancelled) return;
-        handleSessionsChange(resp.sessions || []);
+        handleSessionsChange(resp.sessions || [], !resp.has_more);
       } catch {
         /* ignore */
       }

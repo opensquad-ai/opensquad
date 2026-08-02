@@ -182,7 +182,7 @@ cd /d "%ROOTDIR%"
 timeout /t 2 /nobreak >nul
 
 echo [4/4] Starting Launcher (port 9600)...
-start /b "" python -m opensquad.launcher >nul 2>&1
+start /b "" python -m opensquad.launcher_main >nul 2>&1
 
 echo.
 echo ==================================================

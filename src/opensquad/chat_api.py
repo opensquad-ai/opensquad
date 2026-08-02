@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import re
+import threading
 import uuid
 from collections import OrderedDict
 
@@ -191,12 +192,11 @@ class ChatAPI:
         self.history_file = None
         self._initialize_history(config.load_his)
 
-        self.client = _get_async_openai()(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout,
-            http_client=_make_llm_http_client(self.timeout),
-        )
+        # Defer OpenAI SDK, httpx SSL setup and tiktoken loading to first use.
+        # Building the client here costs several seconds per agent boot.
+        self.client = None
+        self._client_lock = threading.Lock()
+        self._encoding = None
         self.token_max = config.token_max
         self.reduction_strategy = config.reduction_strategy
         self.reduction_batch_size = config.reduction_batch_size
@@ -229,15 +229,54 @@ class ChatAPI:
         self.total_requests = 0
         self.total_cache_read_tokens = 0
 
-        try:
-            self.encoding = _get_tiktoken().encoding_for_model(self.model)
-        except KeyError:
-            self.encoding = _get_tiktoken().get_encoding("cl100k_base")
-
         # ── Safety cap for message history (P2 defense) ──
         self._MAX_HISTORY_MESSAGES = 5000  # Prevent unbounded memory growth
 
         logger.info(f"ChatAPI Initialized. Model: {self.model}")
+
+    def _build_client(self):
+        return _get_async_openai()(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            http_client=_make_llm_http_client(self.timeout),
+        )
+
+    def _ensure_client(self):
+        if self.client is None:
+            lock = getattr(self, "_client_lock", None)
+            if lock is None:
+                self.client = self._build_client()
+            else:
+                with lock:
+                    if self.client is None:
+                        self.client = self._build_client()
+        return self.client
+
+    @property
+    def encoding(self):
+        if getattr(self, "_encoding", None) is None:
+            self._encoding = self._build_encoding()
+        return self._encoding
+
+    @encoding.setter
+    def encoding(self, value):
+        self._encoding = value
+
+    def _build_encoding(self):
+        try:
+            return _get_tiktoken().encoding_for_model(self.model)
+        except KeyError:
+            return _get_tiktoken().get_encoding("cl100k_base")
+
+    def warmup(self) -> None:
+        """Pre-build client, tokenizer and token caches without a network call."""
+        self._ensure_client()
+        _ = self.encoding
+        try:
+            self.get_current_token_count(self._last_tools)
+        except Exception as exc:
+            logger.debug("[ChatAPI] warmup token count skipped: %s", exc)
 
     def _trim_history_if_needed(self):
         """Safety cap: prevent unbounded memory growth in extreme long-running sessions.
@@ -319,12 +358,7 @@ class ChatAPI:
         # await close() can stall for seconds on half-open sockets; the UI then
         # sits on "Switching…" even though credentials are already updated.
         old_client = self.client
-        self.client = _get_async_openai()(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=self.timeout,
-            http_client=_make_llm_http_client(self.timeout),
-        )
+        self.client = self._build_client()
 
         async def _close_old() -> None:
             with contextlib.suppress(Exception):
@@ -335,12 +369,9 @@ class ChatAPI:
 
         # File IDs are provider/account specific -- clear cache
         self._file_id_cache.clear()
-        # Re-initialise tiktoken only when the model id changed (can be slow).
-        if old_model != self.model or getattr(self, "encoding", None) is None:
-            try:
-                self.encoding = _get_tiktoken().encoding_for_model(self.model)
-            except KeyError:
-                self.encoding = _get_tiktoken().get_encoding("cl100k_base")
+        # Reset the lazily loaded encoding so the next token count rebuilds it.
+        if old_model != self.model or getattr(self, "_encoding", None) is None:
+            self._encoding = None
         logger.info(f"[ChatAPI] Model hot-reloaded: {old_model} -> {self.model}")
 
     def update_system_prompt(self, new_prompt: str):
@@ -384,8 +415,9 @@ class ChatAPI:
         if path in self._file_id_cache:
             return self._file_id_cache[path]
         try:
+            client = self._ensure_client()
             with open(path, "rb") as f:
-                response = self.client.files.create(file=f, purpose=purpose)
+                response = client.files.create(file=f, purpose=purpose)
             file_id = response.id
             self._file_id_cache[path] = file_id
             # LRU eviction: discard oldest entry when over limit
@@ -400,7 +432,7 @@ class ChatAPI:
     def _delete_file_openai(self, file_id: str):
         """Delete an uploaded file from the Files API (can be called for cleanup after session ends)"""
         try:
-            self.client.files.delete(file_id)
+            self._ensure_client().files.delete(file_id)
             # Clear cache
             self._file_id_cache = OrderedDict((k, v) for k, v in self._file_id_cache.items() if v != file_id)
             logger.info(f"[ChatAPI] Deleted from Files API: {file_id}")
@@ -1621,11 +1653,12 @@ class ChatAPI:
                 "cfg_scale": float(self.image_cfg_scale),
                 "steps": int(self.image_steps),
             }
+            client = self._ensure_client()
             edit_paths = [p for p in (image_path or []) if p and os.path.isfile(p)]
             if edit_paths and self.is_img_model:
                 # Image editing path (StepFun / OpenAI images.edits)
                 with open(edit_paths[0], "rb") as img_f:
-                    result = await self.client.images.edit(
+                    result = await client.images.edit(
                         model=self.model,
                         image=img_f,
                         prompt=prompt,
@@ -1633,7 +1666,7 @@ class ChatAPI:
                         extra_body=extra_body,
                     )
             else:
-                result = await self.client.images.generate(
+                result = await client.images.generate(
                     model=self.model,
                     prompt=prompt,
                     size=self.image_size or "1024x1024",
@@ -1938,10 +1971,11 @@ class ChatAPI:
 
             tool_call_strategy.set_delta_callback(_on_tool_call_delta)
 
+        client = self._ensure_client()
         for attempt in range(max_stream_retries + 1):
             got_any_chunk = False
             try:
-                stream = await self.client.chat.completions.create(**request_params)
+                stream = await client.chat.completions.create(**request_params)
 
                 async for chunk in stream:
                     got_any_chunk = True

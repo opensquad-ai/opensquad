@@ -221,6 +221,67 @@ class TestAgentSessionReader:
         assert by_id["hist-1"]["current"] is False
         assert by_id["hist-2"]["current"] is False
 
+    def test_get_session_list_pagination(self, tmp_path):
+        """Paged list returns the newest page without scanning all files."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        (save_dir / "current_session.json").write_text(
+            json.dumps({"id": "cur-1", "title": "Current", "messages": []}),
+            encoding="utf-8",
+        )
+        for idx in range(3):
+            path = history_dir / f"hist-{idx}.json"
+            path.write_text(
+                json.dumps({"id": f"hist-{idx}", "title": f"Hist {idx}", "messages": []}),
+                encoding="utf-8",
+            )
+            ts = 1_700_000_000 + idx
+            os.utime(path, (ts, ts))
+
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+
+        first = reader.get_session_list(limit=2, offset=0)
+        second = reader.get_session_list(limit=2, offset=2)
+
+        assert [s["id"] for s in first] == ["cur-1", "hist-2"]
+        assert [s["id"] for s in second] == ["hist-1", "hist-0"]
+
+    def test_current_session_log_reload_avoids_snapshot_reread(self, tmp_path, monkeypatch):
+        """New incremental log lines replay without re-opening current_session.json."""
+        save_dir = tmp_path / "sessions"
+        history_dir = tmp_path / "history"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(history_dir, exist_ok=True)
+        current_path = save_dir / "current_session.json"
+        current_path.write_text(
+            json.dumps({"id": "cur-1", "_save_seq": 0, "messages": [], "events": []}),
+            encoding="utf-8",
+        )
+
+        reader = AgentSessionReader(str(save_dir), str(history_dir))
+        log_path = history_dir / "cur-1.json.log"
+        log_path.write_text(
+            json.dumps({"seq": 1, "op": "msg_append", "msg": {"role": "user", "content": "hi"}}) + "\n",
+            encoding="utf-8",
+        )
+
+        real_open = open
+        open_calls = {"current": 0}
+
+        def counting_open(*args, **kwargs):
+            path = args[0] if args else kwargs.get("file")
+            if str(path) == str(current_path):
+                open_calls["current"] += 1
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counting_open)
+        reader._reload()
+
+        assert open_calls["current"] == 0
+        assert [m["content"] for m in reader.session_data["messages"]] == ["hi"]
+
     def test_get_session_list_meta_cache_skips_reread(self, tmp_path, monkeypatch):
         """Second list call with unchanged mtime must not re-parse history JSON."""
         save_dir = tmp_path / "sessions"

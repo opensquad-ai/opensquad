@@ -245,6 +245,7 @@ class TestDefaults:
         assert result["agent_type"] == "assistant"
         assert result["capabilities"] == []
         assert result["tools"] == []
+        assert result["disabled_tools"] == []
         assert result["plugins"] == []
         assert result["gateway"]["enabled"] is True
         assert result["web_server"]["enabled"] is False

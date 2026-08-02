@@ -799,7 +799,7 @@ if __name__ == "__main__":
         "app.main:app",
         host=backend_config.get("host", "0.0.0.0"),
         port=backend_config.get("port", syscfg.port("gateway")),
-        reload=backend_config.get("reload", True),
+        reload=backend_config.get("reload", False),
         log_level=backend_config.get("log_level", "warning"),
         access_log=False,
         # Generous server-side WS ping window so long agent turns (blocked

@@ -139,6 +139,7 @@ class AgentConfigSchema(BaseModel):
     model: ModelConfigSchema = Field(default_factory=ModelConfigSchema)
     prompt: PromptConfigSchema = Field(default_factory=PromptConfigSchema)
     tools: list[str] = Field(default_factory=list)
+    disabled_tools: list[str] = Field(default_factory=list)
     plugins: list[str] = Field(default_factory=list)
     tool_levels: dict[str, Any] = Field(default_factory=dict)
     collaboration: CollaborationConfigSchema = Field(default_factory=CollaborationConfigSchema)

@@ -83,7 +83,15 @@ class ToolRegistry:
             self._mcp_adapter = adapter
         self._desc_cache = None  # invalidate cache
         self._openai_tools_cache.clear()
+        if hasattr(adapter, "_registry"):
+            adapter._registry = self
         logger.info(f"MCP adapter registered as [{level}].")
+
+    def invalidate_mcp_tools(self):
+        """Drop MCP-influenced prompt/tool caches after runtime connect changes."""
+        with self._lock:
+            self._desc_cache = None
+            self._openai_tools_cache.clear()
 
     def log_inventory(self, boot_logger=None) -> list[str]:
         """Log the full set of registered tool namespaces.

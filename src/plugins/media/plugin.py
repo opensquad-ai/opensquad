@@ -21,6 +21,7 @@ logger = logging.getLogger("plugins.media")
     plugin_type="tool",
     display_name="Media Tools",
     tags=["audio"],
+    dependencies={"pip": ["pydub", "imageio-ffmpeg"]},
 )
 class MediaPlugin(Plugin):
     """Media tool plugin (proxy to opensquad.tools.media)."""

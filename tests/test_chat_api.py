@@ -21,6 +21,91 @@ def chat():
     )
 
 
+class TestLazyInitialization:
+    """ChatAPI should defer OpenAI SDK / tiktoken work until first use."""
+
+    def test_init_does_not_build_client_or_encoding(self):
+        from opensquad.chat_api import ChatAPI
+
+        api = ChatAPI(
+            api_key="test-key",
+            model="gpt-4",
+            base_url="https://api.openai.com/v1",
+            prompt="You are a helpful assistant.",
+        )
+        assert api.client is None
+        assert api._encoding is None
+
+    def test_ensure_client_builds_only_on_demand(self, monkeypatch):
+        import opensquad.chat_api as chat_api_module
+        from opensquad.chat_api import ChatAPI
+
+        built = []
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                built.append(kwargs)
+
+        monkeypatch.setattr(chat_api_module, "_get_async_openai", lambda: FakeAsyncOpenAI)
+        monkeypatch.setattr(chat_api_module, "_make_llm_http_client", lambda timeout: object())
+
+        api = ChatAPI.__new__(ChatAPI)
+        api.client = None
+        api.api_key = "k"
+        api.base_url = "https://example.com"
+        api.timeout = 30.0
+
+        first = api._ensure_client()
+        second = api._ensure_client()
+
+        assert first is second
+        assert api.client is first
+        assert len(built) == 1
+
+    def test_encoding_is_lazy(self, monkeypatch):
+        import opensquad.chat_api as chat_api_module
+        from opensquad.chat_api import ChatAPI
+
+        loaded = []
+        fake_encoding = object()
+
+        class FakeTiktoken:
+            def encoding_for_model(self, model):
+                loaded.append(model)
+                return fake_encoding
+
+        monkeypatch.setattr(chat_api_module, "_get_tiktoken", lambda: FakeTiktoken())
+
+        api = ChatAPI.__new__(ChatAPI)
+        api._encoding = None
+        api.model = "gpt-4"
+
+        assert api.encoding is fake_encoding
+        assert api.encoding is fake_encoding
+        assert loaded == ["gpt-4"]
+
+    def test_warmup_builds_client_encoding_and_token_cache(self):
+        from opensquad.chat_api import ChatAPI
+
+        api = ChatAPI.__new__(ChatAPI)
+        api.client = None
+        api._client_lock = None
+        api._encoding = None
+        api.model = "gpt-4"
+        api._last_tools = None
+        token_calls = []
+
+        api._build_client = lambda: object()
+        api._build_encoding = lambda: object()
+        api.get_current_token_count = lambda tools: token_calls.append(tools) or 42
+
+        api.warmup()
+
+        assert api.client is not None
+        assert api._encoding is not None
+        assert token_calls == [None]
+
+
 class TestAddUserMessage:
     """Test add_user_message — adding user messages to conversation history."""
 
