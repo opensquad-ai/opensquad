@@ -102,6 +102,32 @@ def _resolve_service_port() -> int:
 
 
 # --- 1. Initialize FastAPI application ---
+
+if sys.platform == "win32":
+    # Windows asyncio Proactor: when a peer closes a keep-alive connection, the
+    # transport's _call_connection_lost calls socket.shutdown() on an
+    # already-closed socket, raising ConnectionResetError [WinError 10054].
+    # Harmless (the response was delivered) but asyncio prints a Traceback that
+    # even loop.set_exception_handler doesn't always catch. Patch the transport
+    # to treat that specific shutdown error as benign.
+    try:
+        import asyncio.proactor_events as _proactor_events
+
+        _orig_call_connection_lost = _proactor_events._ProactorBasePipeTransport._call_connection_lost
+
+        def _patched_call_connection_lost(self, exc):
+            try:
+                return _orig_call_connection_lost(self, exc)
+            except (ConnectionResetError, ConnectionAbortedError) as _benign:
+                # Swallow the benign keep-alive reset; log at debug if wanted.
+                self._called_connection_lost = True
+                return None
+
+        _proactor_events._ProactorBasePipeTransport._call_connection_lost = _patched_call_connection_lost
+        print("[WebSearch] Proactor transport keep-alive noise patched")
+    except Exception as _patch_exc:  # pragma: no cover
+        print(f"[WebSearch] Proactor transport patch skipped (non-fatal): {_patch_exc}")
+
 app = FastAPI(
     title="Web Search Service API (GET Version)",
     description="An API service providing web search and web content extraction via GET methods.",
