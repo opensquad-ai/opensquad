@@ -349,6 +349,29 @@ def test_query_variants_url_fragment_dropped():
     assert not any(".com" in v and "天气" not in v for v in vs)
 
 
+def test_dynamic_rerank_window_preserves_overflow_keyword_hits_as_tail():
+    """Rows beyond the model window must be kept as tail, not discarded."""
+    from websearch_api import _dynamic_rerank_window
+
+    results = [
+        {"title": f"python result {i}", "url": f"https://example.com/{i}", "snippet": "python tutorial"}
+        for i in range(15)
+    ]
+    window, tail = _dynamic_rerank_window(results, ["python"], cap=10)
+    assert len(window) == 10
+    assert len(tail) == 5
+    assert [r["url"] for r in tail] == [f"https://example.com/{i}" for i in range(10, 15)]
+
+
+def test_finance_news_query_prefers_browser_serp():
+    from websearch_api import _query_needs_browser_serp
+
+    assert _query_needs_browser_serp("A股 收评 上证指数 深证成指 创业板指")
+    assert _query_needs_browser_serp("A股 今日行情 上证指数 深证成指 创业板指 涨跌")
+    assert _query_needs_browser_serp("OpenAI GPT-5 发布")
+    assert not _query_needs_browser_serp("福州今天天气")
+
+
 def test_clean_query_strips_url_and_code():
     from bing_http import _clean_query
 

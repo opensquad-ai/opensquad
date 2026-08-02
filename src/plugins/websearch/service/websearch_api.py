@@ -543,7 +543,8 @@ def _dynamic_rerank_window(
         hit = any(tok in blob for tok in tokens)
         (scored if hit else tail).append(r)
     if len(scored) > cap:
-        scored = scored[:cap]
+        scored, overflow = scored[:cap], scored[cap:]
+        tail = overflow + tail
     return scored, tail
 
 
@@ -665,6 +666,18 @@ def _query_variants(query: str) -> list[str]:
 
 
 # ── API 1: Search ─────────────────────────────────────────────────────
+_QUERY_NEEDS_BROWSER_SERP_RE = re.compile(
+    r"(收评|收盘|复盘|行情|大盘|股市|A股|上证指数|深证成指|创业板指|"
+    r"涨停|跌停|涨跌|新闻|资讯|头条|快讯|要闻|消息|发布|公布)",
+    re.I,
+)
+
+
+def _query_needs_browser_serp(query: str) -> bool:
+    """News/finance queries get richer Bing browser SERPs than httpx organics."""
+    return bool(_QUERY_NEEDS_BROWSER_SERP_RE.search(query or ""))
+
+
 async def search_links_async(queries: list[str], max_results_per_query: int = 30, headless: bool | None = None) -> dict:
     """Search Bing and optionally rerank. Returns a dict for the agent tool.
 
@@ -689,6 +702,9 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     print(f"[WebSearch] headless={headless} serial={resolve_serial_search()}")
     start_time = time.time()
     ad_str_list = ["选购"]
+    prefer_browser = any(_query_needs_browser_serp(q) for q in queries)
+    if prefer_browser:
+        print("[WebSearch] Browser SERP preferred (news/finance query); skipping http-direct fast path")
 
     # ── Fast path: http-direct Bing (reuses exported persistent cookies) ──
     # Try to serve the whole request with httpx first; only fall back to
@@ -702,10 +718,14 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
     variant_map: dict[str, list[str]] = {q: _query_variants(q) for q in queries}
     http_rows: dict[str, list] = {}
     http_ok = 0
-    total_variants = sum(len(vs) for vs in variant_map.values())
-    variant_index: list[tuple[str, str]] = []  # (original_query, variant)
-    for q, vs in variant_map.items():
-        variant_index.extend((q, v) for v in vs)
+    if prefer_browser:
+        total_variants = 0
+        variant_index: list[tuple[str, str]] = []
+    else:
+        total_variants = sum(len(vs) for vs in variant_map.values())
+        variant_index = []  # (original_query, variant)
+        for q, vs in variant_map.items():
+            variant_index.extend((q, v) for v in vs)
 
     if total_variants > 0:
 
@@ -753,17 +773,24 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
 
         # Only treat as full-fast-path if every original query got >=1 row.
         search_results_list = [_merge_variants(q) for q in queries]
-        if all(bool(rows) for rows in search_results_list):
+        if not prefer_browser and all(bool(rows) for rows in search_results_list):
             print("[WebSearch] http-direct search: all queries served (fast path)")
             shared_context = None
         else:
             # Some originals empty — fall through to Playwright for those.
-            fallback_queries = [q for q, rows in zip(queries, search_results_list, strict=True) if not rows]
-            partial_rows: dict[str, list] = {
-                q: rows for q, rows in zip(queries, search_results_list, strict=True) if rows
-            }
+            fallback_queries = (
+                list(queries)
+                if prefer_browser
+                else [q for q, rows in zip(queries, search_results_list, strict=True) if not rows]
+            )
+            partial_rows = (
+                {}
+                if prefer_browser
+                else {q: rows for q, rows in zip(queries, search_results_list, strict=True) if rows}
+            )
             print(
-                f"[WebSearch] http-direct partial ({len(partial_rows)}/{len(queries)}); Playwright for {len(fallback_queries)}"
+                f"[WebSearch] http-direct partial ({len(partial_rows)}/{len(queries)}); "
+                f"Playwright for {len(fallback_queries)}"
             )
 
             browser, shared_context = await _get_search_handle(headless)
@@ -820,6 +847,59 @@ async def search_links_async(queries: list[str], max_results_per_query: int = 30
                 else:
                     final_list.append(next(fb_iter))
             search_results_list = final_list
+    else:
+        # News/finance queries: httpx returns only sparse quote/portal organics,
+        # while the rendered Bing SERP includes news cards and answer boxes.
+        print("[WebSearch] Browser SERP preferred; running Playwright for all queries")
+        search_results_list = [[] for _ in queries]
+        fallback_queries = list(queries)
+        partial_rows = {}
+        browser, shared_context = await _get_search_handle(headless)
+        serial = resolve_serial_search() or shared_context is not None
+
+        if len(fallback_queries) > 1 and browser is not None and not serial:
+
+            async def _run_parallel(query: str):
+                ctx = await browser.new_context(
+                    ignore_https_errors=True,
+                    user_agent=_CHROME_UA,
+                    locale="zh-CN",
+                )
+                try:
+                    return await search_with_bing_playwright(
+                        None,
+                        query,
+                        max_results=max_results_per_query,
+                        shared_context=ctx,
+                    )
+                finally:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+
+            fallback_rows = await asyncio.gather(*[_run_parallel(q) for q in fallback_queries])
+        else:
+
+            async def _run_one(query: str):
+                if serial:
+                    async with _bing_search_lock:
+                        return await search_with_bing_playwright(
+                            browser,
+                            query,
+                            max_results=max_results_per_query,
+                            shared_context=shared_context,
+                        )
+                return await search_with_bing_playwright(
+                    browser,
+                    query,
+                    max_results=max_results_per_query,
+                    shared_context=shared_context,
+                )
+
+            fallback_rows = await asyncio.gather(*[_run_one(q) for q in fallback_queries])
+
+        search_results_list = list(fallback_rows)
 
     # Weather miss on polluted persistent profile → one ephemeral Chromium pass.
     if (
