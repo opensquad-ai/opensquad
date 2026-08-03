@@ -237,6 +237,22 @@ describe('buildTimelineFromSession', () => {
     expect(buildTimelineFromSession([], [])).toEqual([]);
   });
 
+  it('skips role=tool messages (tool IO is LLM context, rendered via workflow events)', () => {
+    const messages = [
+      { role: 'user', content: 'hi', timestamp: '2026-01-01T00:00:00.000Z' },
+      { role: 'assistant', content: 'working...', timestamp: '2026-01-01T00:00:01.000Z' },
+      { role: 'tool', content: "{'status': 'success', 'content': '1: file line'}", timestamp: '2026-01-01T00:00:02.000Z' },
+      { role: 'assistant', content: 'done', timestamp: '2026-01-01T00:00:03.000Z' },
+    ];
+    const tl = buildTimelineFromSession(messages, []);
+    const messageEntries = tl.filter((e: any) => e.kind === 'message');
+    expect(messageEntries.length).toBe(3); // user + 2 assistant, no tool bubble
+    const leaked = messageEntries.some(
+      (e: any) => e.data && String(e.data.content || '').includes('file line'),
+    );
+    expect(leaked).toBe(false);
+  });
+
   it('drops a second message with the same message_id (no duplicate React key)', () => {
     // Same message_id arriving twice (optimistic echo + disk snapshot, or a
     // compression overlap) must render once — _uid is derived from the id and

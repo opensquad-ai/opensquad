@@ -26,7 +26,9 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system';
+  // 'tool' is never user-facing dialogue; the type allows it so defensive
+  // rendering can skip it (see MessageBubble render guard).
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   type?: string;
   /** Stable backend id when available (preferred for merge/reconcile). */
@@ -445,6 +447,13 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
       </button>
     );
   };
+
+  // Defensive: tool-role messages are LLM context, never user-facing dialogue.
+  // buildTimelineFromSession now skips them; this guard covers legacy cached
+  // timelines and any other path that might still surface them.
+  if (message.role === 'tool') {
+    return null;
+  }
 
   if (message.role === 'system') {
     const isContextSummary = message.type === 'context_summary'

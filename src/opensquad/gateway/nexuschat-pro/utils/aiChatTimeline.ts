@@ -1470,6 +1470,14 @@ export function buildTimelineFromSession(
     const m = messages[mi];
     const mTs = getTs(m);
 
+    // role='tool' messages are LLM context (tool IO persisted for the model),
+    // NOT user-facing dialogue. Their content is already rendered from the
+    // events array as workflow blocks; skipping them here prevents read_file
+    // etc. results from appearing as chat bubbles on history replay.
+    if (m.role === 'tool') {
+      continue;
+    }
+
     // Do NOT pull/flush workflow events before a user bubble.
     // After compression (and with sub-agent / clock skew), same-turn
     // thought/tool events can have timestamps <= the user message. Pulling

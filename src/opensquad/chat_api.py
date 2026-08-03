@@ -1838,17 +1838,13 @@ class ChatAPI:
         self._last_tools = tools
         messages = self._prepare_messages()
 
-        # Add reasoning_content to EVERY assistant message if prev_reasoning exists
-        # This ensures DeepSeek V4 receives reasoning_content in ALL turns after thinking mode activation
-        if self._prev_reasoning_content:
-            for m in messages:
-                if m.get("role") == "assistant" and "reasoning_content" not in m:
-                    m["reasoning_content"] = self._prev_reasoning_content
-
-        # CRITICAL FIX for DeepSeek V4 thinking mode:
-        # If previous turn had reasoning_content, we must pass it back when tools are involved.
-        # According to DeepSeek V4 docs: "If tool calls were made between user requests,
-        # reasoning_content must be passed back in ALL subsequent turns."
+        # DeepSeek V4 thinking mode: reasoning_content must be passed back on
+        # the turn FOLLOWING a tool-call turn — i.e. the most recent assistant
+        # message, not every historical assistant message. The previous
+        # "inject into ALL" logic copied the latest reasoning into every
+        # tool_calls message (121 on session 151735_a7s7), multiplying the
+        # request ~2.75x (362K -> 998K tokens) and pushing real requests past
+        # the 1M context limit (400).
         has_tool_involvement = any(m.get("tool_calls") or m.get("role") == "tool" for m in messages)
 
         # Debug logging
@@ -1859,33 +1855,22 @@ class ChatAPI:
 
         if self._prev_reasoning_content and messages:
             injected = False
-            if has_tool_involvement:
-                # Tool call detected - inject reasoning_content into ALL assistant messages with tool_calls
-                # (don't break after first injection - multiple assistant messages may need it)
-                for m in reversed(messages):
-                    if m.get("role") == "assistant" and m.get("tool_calls"):
-                        m["reasoning_content"] = self._prev_reasoning_content
-                        logger.debug(
-                            f"[ChatAPI] Injected _prev_reasoning_content into tool_calls assistant, len={len(self._prev_reasoning_content)}"
-                        )
-                        injected = True
-                        # Don't break - need to inject into ALL assistant messages with tool_calls
-            else:
-                # Still inject if prev_reasoning exists for safety
-                # CRITICAL: Inject into ALL assistant messages, not just the first one
-                # DeepSeek V4 requires reasoning_content in ALL turns after thinking mode activation
-                injected_count = 0
-                for m in reversed(messages):
-                    if m.get("role") == "assistant" and (m.get("content") or m.get("tool_calls")):
-                        # Only inject if not already present
-                        if "reasoning_content" not in m:
-                            m["reasoning_content"] = self._prev_reasoning_content
-                            injected_count += 1
-                injected = injected_count > 0
-                if injected:
+            for m in reversed(messages):
+                if m.get("role") != "assistant":
+                    continue
+                # With tool involvement, the following assistant turn must carry
+                # reasoning; without it, any assistant message qualifies. Either
+                # way only the MOST RECENT one needs it.
+                needs = (m.get("tool_calls") or m.get("content")) if not has_tool_involvement else m.get("tool_calls")
+                if not needs:
+                    continue
+                if "reasoning_content" not in m:
+                    m["reasoning_content"] = self._prev_reasoning_content
+                    injected = True
                     logger.debug(
-                        f"[ChatAPI] Injected _prev_reasoning_content into {injected_count} assistant message(s) (always inject when present), len={len(self._prev_reasoning_content)}"
+                        f"[ChatAPI] Injected _prev_reasoning_content into latest assistant message, len={len(self._prev_reasoning_content)}"
                     )
+                break
             if not injected:
                 # P1-6: failing to inject is EXPECTED when the conversation has
                 # no assistant message yet (e.g. a fresh session whose first
