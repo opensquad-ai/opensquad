@@ -1,4 +1,5 @@
 """Verify session cwd is visible from executor threads (run_in_executor simulation)."""
+
 import concurrent.futures
 import os
 import sys

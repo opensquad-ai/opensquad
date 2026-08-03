@@ -7,6 +7,7 @@ Example:
     python update_workspace_config.py 127.0.0.1
     python update_workspace_config.py your-gateway-host
 """
+
 import json
 import os
 import sys
@@ -24,7 +25,7 @@ def main():
         print("[--] no last_workspace.json, workspace config skipped")
         return
 
-    with open(ws_file, "r", encoding="utf-8") as f:
+    with open(ws_file, encoding="utf-8") as f:
         ws_path = json.load(f).get("last_workspace", "")
 
     if not ws_path:
@@ -36,7 +37,7 @@ def main():
         print("[--] workspace config not found: " + cfg_path)
         return
 
-    with open(cfg_path, "r", encoding="utf-8-sig") as f:
+    with open(cfg_path, encoding="utf-8-sig") as f:
         cfg = json.load(f)
 
     cfg.setdefault("hosts", {})["gateway"] = gateway_ip

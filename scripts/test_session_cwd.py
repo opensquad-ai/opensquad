@@ -1,4 +1,5 @@
 """Quick test: verify _check_session_cwd reads .session_cwd and applies cwd."""
+
 import os
 import sys
 

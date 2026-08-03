@@ -1,7 +1,8 @@
-"""Unit tests for runner.py pure utility functions.
+"""Unit tests for runner pure utility functions.
 
-Tests cover: _build_context_prefix, _filter_native_tokens, _remove_all_tags,
-_extract_text_before_tool, _is_repeated_content, _truncate_result_text.
+Tests cover: build_context_prefix (moved to context_builder.py in P1-1),
+_filter_native_tokens, _remove_all_tags, _extract_text_before_tool,
+_is_repeated_content, _truncate_result_text.
 """
 
 
@@ -22,13 +23,13 @@ def _make_runner():
 
 
 class TestBuildContextPrefix:
-    """Test _build_context_prefix — assembling dynamic context blocks."""
+    """Test build_context_prefix — assembling dynamic context blocks."""
 
     @staticmethod
     def _target(dynamic_parts: dict) -> str:
-        from opensquad.runner import _build_context_prefix
+        from opensquad.context_builder import build_context_prefix
 
-        return _build_context_prefix(dynamic_parts)
+        return build_context_prefix(dynamic_parts)
 
     def test_empty_parts(self):
         result = self._target({})

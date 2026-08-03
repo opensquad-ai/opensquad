@@ -8,7 +8,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if sys.platform == "win32":
+# Only needed when running this file standalone on a GBK Windows console.
+# Under pytest, stdout is a capture wrapper — replacing it here breaks pytest's
+# capture at shutdown ("I/O operation on closed file") because the wrapper is
+# garbage-collected and closes its buffer mid-run.
+if sys.platform == "win32" and "pytest" not in sys.modules:
     import io
 
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")

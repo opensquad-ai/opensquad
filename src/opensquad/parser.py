@@ -631,27 +631,31 @@ class ResponseParser:
 
         # ---- Pass 4: <func>name</func> + cross-style <param>... (legacy XML
         # wrapper content embedded inside a DSML or <tool_call> container) ----
+        # Parse EACH container block separately: parsing the combined text would
+        # merge parallel <tool_call> blocks into one call (args from the last
+        # block win, e.g. parallel read+write collapsing into a single call).
         if not results:
-            # Match <func>name</func>  OR  <function=name>
-            func_match = re.search(
-                r'<func\s*>([^<]+)</func\s*>|<function\s*=\s*"?([a-zA-Z_][\w.]*)"?\s*/?>',
-                combined,
-                re.IGNORECASE,
-            )
-            if func_match:
+            for block in inner_blocks or [text]:
+                func_match = re.search(
+                    r'<func\s*>([^<]+)</func\s*>|<function\s*=\s*"?([a-zA-Z_][\w.]*)"?\s*/?>',
+                    block,
+                    re.IGNORECASE,
+                )
+                if not func_match:
+                    continue
                 name = (func_match.group(1) or func_match.group(2) or "").strip()
-                if name:
-                    # Reuse the same param extraction used by XML parser
-                    args = ResponseParser.parse_xml_arguments(combined)
-                    if args:
-                        norm_name = _normalize_tool_name(name)
-                        tc_log.info(
-                            "[_parse_dsml] legacy-func name=%r -> %r, args=%r",
-                            name,
-                            norm_name,
-                            args,
-                        )
-                        results.append((norm_name, args))
+                if not name:
+                    continue
+                args = ResponseParser.parse_xml_arguments(block)
+                if args:
+                    norm_name = _normalize_tool_name(name)
+                    tc_log.info(
+                        "[_parse_dsml] legacy-func name=%r -> %r, args=%r",
+                        name,
+                        norm_name,
+                        args,
+                    )
+                    results.append((norm_name, args))
 
         return results
 

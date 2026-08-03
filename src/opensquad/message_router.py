@@ -6,8 +6,8 @@ import logging
 import time
 from typing import Any
 
-from opensquad.message_queue import QueueMessage, get_message_queue
 from opensquad.ingress_policy import trigger_process_queue
+from opensquad.message_queue import QueueMessage, get_message_queue
 from opensquad.sleep_controller import get_sleep_controller
 from opensquad.state_manager import get_state_manager
 
@@ -170,9 +170,7 @@ class MessageRouter:
                         "reason": "received @mention while working, pushed trigger to ensure delivery",
                     }
                 )
-                logger.info(
-                    f"[Router] @mention during working → primary={primary_sid or '-'}: {content}"
-                )
+                logger.info(f"[Router] @mention during working → primary={primary_sid or '-'}: {content}")
             else:
                 # normal mode non-@: message already queued; Runner turn loop will consume it
                 result.update(
@@ -211,9 +209,7 @@ class MessageRouter:
                         "reason": "idle, triggering Runner to consume message queue",
                     }
                 )
-                logger.info(
-                    f"[Router] Trigger idle AI → primary={primary_sid or '-'}: {content}"
-                )
+                logger.info(f"[Router] Trigger idle AI → primary={primary_sid or '-'}: {content}")
 
         return result
 

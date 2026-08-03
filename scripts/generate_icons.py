@@ -10,27 +10,26 @@
 也可作为模块导入调用 generate_all()。
 """
 
-import os
 import io
+import os
 import struct
 import sys
+
 from PIL import Image, ImageDraw
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-ASSETS_DIR = os.path.join(
-    PROJECT_ROOT, "src", "opensquad", "gateway", "nexuschat-pro", "assets"
-)
+ASSETS_DIR = os.path.join(PROJECT_ROOT, "src", "opensquad", "gateway", "nexuschat-pro", "assets")
 
 # ── 调色板 ───────────────────────────────────────────────────────────────────
-BG_TOP    = (30, 27, 75)      # #1e1b4b  深紫蓝（顶）
-BG_BOTTOM = (15, 23, 42)      # #0f172a  深蓝黑（底）
-ACCENT_1  = (129, 140, 248)   # #818cf8  淡紫
-ACCENT_2  = (52, 211, 153)    # #34d399  翠绿
-ACCENT_3  = (56, 189, 248)    # #38bdf8  天蓝
-WHITE     = (255, 255, 255)
-DIM       = (148, 163, 184)   # #94a3b8  灰
+BG_TOP = (30, 27, 75)  # #1e1b4b  深紫蓝（顶）
+BG_BOTTOM = (15, 23, 42)  # #0f172a  深蓝黑（底）
+ACCENT_1 = (129, 140, 248)  # #818cf8  淡紫
+ACCENT_2 = (52, 211, 153)  # #34d399  翠绿
+ACCENT_3 = (56, 189, 248)  # #38bdf8  天蓝
+WHITE = (255, 255, 255)
+DIM = (148, 163, 184)  # #94a3b8  灰
 
 
 def draw_icon(size: int) -> Image.Image:
@@ -55,14 +54,14 @@ def draw_icon(size: int) -> Image.Image:
     cx, cy = BASE // 2, BASE // 2 - 20  # 整体居中偏上
 
     # 三个 Agent 节点的位置（等边三角形布局）
-    r1 = 64   # 节点圆半径
-    r2 = 52   # 节点内部高亮圆半径
-    dist = 92 # 节点间距
+    r1 = 64  # 节点圆半径
+    r2 = 52  # 节点内部高亮圆半径
+    dist = 92  # 节点间距
 
     nodes = [
-        (cx, cy - dist),                          # 上
-        (cx - dist * 0.866, cy + dist * 0.5),     # 左下
-        (cx + dist * 0.866, cy + dist * 0.5),     # 右下
+        (cx, cy - dist),  # 上
+        (cx - dist * 0.866, cy + dist * 0.5),  # 左下
+        (cx + dist * 0.866, cy + dist * 0.5),  # 右下
     ]
     node_colors = [ACCENT_1, ACCENT_2, ACCENT_3]
 
@@ -72,7 +71,7 @@ def draw_icon(size: int) -> Image.Image:
             _line_gradient(draw, nodes[i], nodes[j], node_colors[i], node_colors[j], width=5)
 
     # 画节点圆
-    for (nx, ny), color in zip(nodes, node_colors):
+    for (nx, ny), color in zip(nodes, node_colors, strict=False):
         # 外圈光晕
         glow_r = r1 + 8
         for g in range(6, 0, -1):
@@ -218,13 +217,14 @@ def generate_ico(output=None):
         h = 0 if s == 256 else s
         entries += struct.pack(
             "<BBBBHHII",
-            w, h,          # 宽度、高度（0=256）
-            0,             # 调色板大小
-            0,             # 保留
-            1,             # 颜色平面数
-            32,            # 每像素位数
-            len(data),     # 图像数据大小
-            data_offset,   # 数据偏移
+            w,
+            h,  # 宽度、高度（0=256）
+            0,  # 调色板大小
+            0,  # 保留
+            1,  # 颜色平面数
+            32,  # 每像素位数
+            len(data),  # 图像数据大小
+            data_offset,  # 数据偏移
         )
         data_offset += len(data)
 
@@ -262,9 +262,9 @@ def generate_icns(output=None):
         print(f"[OK] ICNS 1024x1024 → {output}")
     except Exception as e:
         print(f"[..] ICNS 无法直接生成 ({e})")
-        print(f"     请在有 macOS + Pillow icns 支持的环境下运行：")
-        print(f"       python scripts/generate_icons.py --icns-only")
-        print(f"     临时方案：使用 icon.png（512x512）作为备选")
+        print("     请在有 macOS + Pillow icns 支持的环境下运行：")
+        print("       python scripts/generate_icons.py --icns-only")
+        print("     临时方案：使用 icon.png（512x512）作为备选")
     finally:
         if os.path.exists(png_path):
             os.remove(png_path)
@@ -294,7 +294,7 @@ def generate_tray(size=22, output=None):
             draw.line([pts[i], pts[j]], fill=DIM + (180,), width=BASE // 16)
 
     dot_r = BASE // 10
-    for (px, py), color in zip(pts, colors):
+    for (px, py), color in zip(pts, colors, strict=False):
         _circle(draw, (px, py), dot_r, (*color, 220))
         _circle(draw, (px, py), dot_r // 2, (255, 255, 255, 100))
 

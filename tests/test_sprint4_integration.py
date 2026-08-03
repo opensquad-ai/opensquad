@@ -184,18 +184,26 @@ class TestBackwardCompatibility:
         Test that Runner falls back to XML parsing when:
         1. No strategy provided (tool_data_from_api = None)
         2. Or Native FC didn't detect tool call
+
+        The turn-result logic lives in _runner/_turn_loop.py::TurnLoop since the
+        runner.py extraction; the AgentRunner._handle_turn_result wrapper delegates.
         """
-        # This is verified by code inspection
-        # runner.py line ~1145-1152 has fallback logic
         import inspect
 
+        from opensquad._runner._turn_loop import TurnLoop
+
+        source = inspect.getsource(TurnLoop.handle_turn_result)
+
+        # Verify fallback logic exists: the canonical boundary in messages.py
+        # (native-FC data wins, else the parser) is what the turn loop calls.
+        assert "parse_tool_calls(" in source
+        assert "ResponseParser" in source or "parser" in source
+
+        # The wrapper in runner.py must still exist and delegate
         import opensquad.runner as runner_module
 
-        source = inspect.getsource(runner_module.AgentRunner._handle_turn_result)
-
-        # Verify fallback logic exists
-        assert "ResponseParser.parse_tool_call" in source
-        assert "Fallback" in source or "XML" in source or "parse_tool_call" in source
+        wrapper = inspect.getsource(runner_module.AgentRunner._handle_turn_result)
+        assert "TurnLoop" in wrapper and "handle_turn_result" in wrapper
 
 
 if __name__ == "__main__":

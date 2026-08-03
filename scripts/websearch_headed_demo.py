@@ -171,10 +171,7 @@ async def _run_search(args: argparse.Namespace) -> int:
                 print("(no results)")
             else:
                 for i, item in enumerate(results, 1):
-                    print(
-                        f"\n[{i}] type={item.get('result_type', '?')} "
-                        f"region={item.get('bing_region', '?')}"
-                    )
+                    print(f"\n[{i}] type={item.get('result_type', '?')} region={item.get('bing_region', '?')}")
                     print(f"    title:   {item.get('title', '')}")
                     print(f"    url:     {item.get('url', '')}")
                     summary = (item.get("summary") or "").replace("\n", " ").strip()

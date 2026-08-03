@@ -1,7 +1,7 @@
 """Verify filesystem relative paths resolve against session_cwd."""
+
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.environ["OPENSQUAD_WORKSPACE"] = r"C:\ai_work\pro0\opensquad_runtime_deploy"

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Generate OpenSquad desktop-app icons from ``assets/logo-source.svg``.
 
@@ -22,6 +21,7 @@ Dependencies: Playwright (with chromium installed), Pillow.
 The first run requires ``playwright install chromium`` so headless chromium
 can rasterize the SVG.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,28 +34,19 @@ from PIL import Image
 try:
     from playwright.async_api import async_playwright
 except ImportError:  # pragma: no cover - import-time guidance
-    sys.exit(
-        "Playwright is required: pip install playwright && playwright install chromium"
-    )
+    sys.exit("Playwright is required: pip install playwright && playwright install chromium")
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ASSETS_DIR = (
-    REPO_ROOT
-    / "src"
-    / "opensquad"
-    / "gateway"
-    / "nexuschat-pro"
-    / "assets"
-)
+ASSETS_DIR = REPO_ROOT / "src" / "opensquad" / "gateway" / "nexuschat-pro" / "assets"
 SOURCE_SVG = ASSETS_DIR / "logo-source.svg"
 
 # Icon sizes.
-MASTER_SIZE = 1024            # icon.png (Linux master + source for ICO/ICNS)
-HIDPI_SIZE = 512              # icon@2x.png
-TRAY_SIZE = 32                # tray.png
+MASTER_SIZE = 1024  # icon.png (Linux master + source for ICO/ICNS)
+HIDPI_SIZE = 512  # icon@2x.png
+TRAY_SIZE = 32  # tray.png
 
 # Windows ICO multi-size list (Favicon-friendly set).
 ICO_SIZES: tuple[int, ...] = (16, 24, 32, 48, 64, 128, 256)
@@ -77,7 +68,7 @@ async def _render_master_png(svg_path: Path, out_path: Path, size: int) -> None:
   svg {{ display: block; width: {size}px; height: {size}px; }}
 </style></head>
 <body>
-  {svg_path.read_text(encoding='utf-8')}
+  {svg_path.read_text(encoding="utf-8")}
 </body></html>
 """
     async with async_playwright() as p:

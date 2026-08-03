@@ -7,7 +7,6 @@ import os as _os
 import re
 import sys
 import time
-from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -15,12 +14,22 @@ from opensquad.system_config import syscfg
 
 from . import session_manager as _session_module
 from . import state_manager as _state_module
+
+# Compression logic lives in the _runner sub-package (extracted from this file).
+from ._runner._compression import (
+    build_summary_payload as _build_summary_payload,
+)
+from ._runner._compression import (
+    extract_file_operations as _build_extract_file_operations,
+)
+from ._runner._compression import (
+    run_external_summarizer as _run_external_summarizer,
+)
 from .chat_api import ChatAPI
 from .claude_api import ClaudeAPI
 from .context_builder import ContextBuilder
 from .events import bus
 from .input_hub import input_hub
-from .log_setup import get_tool_call_debug_logger
 from .message_queue import message_queue
 from .parser import ResponseParser
 from .registry import ToolRegistry
@@ -32,8 +41,6 @@ from .session_parallel import (
 )
 from .sleep_controller import sleep_controller
 from .task import TaskManager
-from .task_logger import task_logger
-from .task_supervisor import task_supervisor
 from .tool import logger
 from .tool_call_strategy import ToolCallStrategySelector
 from .utils import extract_and_remove_first_tag
@@ -60,144 +67,6 @@ def _get_state_manager():
     except Exception:
         pass
     return _state_module.state_manager
-
-
-def _build_summary_payload(
-    previous_summary: str,
-    messages: list[dict[str, Any]],
-    events: list[dict[str, Any]],
-    keep_last: int | None = None,
-) -> str:
-    lines: list[str] = []
-    if previous_summary and previous_summary.strip():
-        lines.append("[Previous Context Summary]")
-        lines.append(previous_summary.strip())
-    else:
-        lines.append("[Previous Context Summary]\n(none)")
-
-    lines.append("\n[Conversation Messages to Compress]")
-    msgs_to_compress = messages[:-keep_last] if keep_last is not None and len(messages) > keep_last else messages
-    for msg in msgs_to_compress:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if not content:
-            continue
-        short = str(content).strip()
-        if len(short) > 800:
-            short = short[:800] + "..."
-        lines.append(f"- {role}: {short}")
-
-    lines.append("\n[Workflow Events to Compress]")
-    for evt in events:
-        etype = evt.get("type", "")
-        data = evt.get("data", evt.get("content", ""))
-        text = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data or "")
-        text = text.strip()
-        if not text:
-            continue
-        if len(text) > 800:
-            text = text[:800] + "..."
-        lines.append(f"- {etype}: {text}")
-
-    lines.append("\n[Compression Rules]")
-    lines.append(
-        "Use the exact summary template with these sections: Current Task, Original Goal, Completed, Current State, Key Parameters, Unresolved Issues."
-    )
-    lines.append(
-        "Current Task MUST describe what the agent is working on RIGHT NOW — the most recent user request in detail."
-    )
-    lines.append("Original Goal is the very first user request in this session, in one sentence.")
-    lines.append(
-        "Current State is the most important section — include open files, current directory, last tool executed."
-    )
-    lines.append("Preserve all file paths, IDs, ports, version numbers, config values, and error messages verbatim.")
-    lines.append(
-        "You MUST consider full workflow context: thought, plan, tool_call, tool_result, and info/status events."
-    )
-    lines.append("Completed must include Done/In progress/Todo sub-bullets with specific file paths.")
-    if keep_last is not None:
-        lines.append(
-            f"Keep only the last {keep_last} messages in live chat history; everything above must be summarized into CONTEXT_SUMMARY."
-        )
-    else:
-        lines.append(
-            "Compress ALL messages and events into CONTEXT_SUMMARY. Keep only the newest 10% of content as live context."
-        )
-    return "\n".join(lines)
-
-
-async def _run_external_summarizer(
-    summary_payload: str,
-    base_url: str,
-    api_key: str,
-    model: str,
-    on_chunk: Callable[[str], Awaitable[None]] | None = None,
-) -> str:
-    # Delegated summarizer uses the same runtime model endpoint as current agent,
-    # unless model override is explicitly provided.
-    model = syscfg.get("summarizer", "model") or model or "gpt-4o-mini"
-
-    system_prompt = (
-        "You are a summarizer agent. Return ONLY the summary in the specified template. "
-        "Do not add commentary or extra sections."
-    )
-
-    try:
-        # Use async OpenAI client to avoid blocking the event loop
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=60)
-        logger.info(
-            "[Runner] Calling external summarizer LLM (async): model=%s, payload_len=%d", model, len(summary_payload)
-        )
-        if on_chunk is None:
-            response = await client.chat.completions.create(
-                model=model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": summary_payload},
-                ],
-            )
-            content = response.choices[0].message.content or ""
-            return content.strip()
-
-        stream = await client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            stream=True,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": summary_payload},
-            ],
-        )
-
-        parts: list[str] = []
-        async for chunk in stream:
-            try:
-                delta = chunk.choices[0].delta.content or ""
-            except Exception:
-                delta = ""
-            if not delta:
-                continue
-            parts.append(delta)
-            try:
-                await on_chunk(delta)
-            except Exception:
-                # Streaming callback failure must not break compression.
-                pass
-
-        result = "".join(parts).strip()
-        if not result:
-            logger.warning(
-                "[Runner] External summarizer returned empty result, model=%s, payload_len=%d",
-                model,
-                len(summary_payload),
-            )
-        return result
-    except Exception as e:
-        logger.error(f"[Runner] External summarizer failed: {e}")
-        return ""
 
 
 # Module-level runner reference for tool hot-reload (each agent is an independent process, singleton-safe)
@@ -419,6 +288,10 @@ class AgentRunner:
         # Store current tools and tool_choice (updated by _setup_prompt)
         self._current_tools = None
         self._current_tool_choice = "auto"
+
+        # Repeated-action guard state: sid -> {"count", "last", "guarded"}
+        # Breaks runaway identical tool loops (see turn-loop guard below).
+        self._tool_repeat_state: dict[str, dict] = {}
 
         # Inject sid_provider into ChatAPI so it can include the correct session_id when emitting events
         self.chat_api._sid_provider = lambda: self._turn_sid
@@ -1124,7 +997,21 @@ class AgentRunner:
                 input_hub.clear_stop_request()
             _get_session_manager().ensure_session_loaded(sid)
             self._turn_sid = sid
-            self._load_history(sid)
+            # ── Tool-loop fix: keep in-memory tool history across turns ──
+            # _load_history() rebuilds req from the session file; with tool
+            # persistence (sync_tool_call_message + tool messages) recovery is
+            # lossless, but when this session already has a bound ChatAPI with
+            # history in memory (same process, same sid) rebuilding is pure
+            # overhead and previously dropped live state mid-loop.
+            try:
+                from opensquad.session_model import session_api_map
+
+                _existing_api = session_api_map(self).get(sid)
+                _has_mem_history = bool(_existing_api is not None and getattr(_existing_api, "req", None))
+            except Exception:
+                _has_mem_history = False
+            if not _has_mem_history:
+                self._load_history(sid)
 
             if not content or content.startswith("__"):
                 # Session-scoped system cmds
@@ -1826,6 +1713,32 @@ class AgentRunner:
                         all_events_for_summary,
                         keep_last=None,  # Token-based, no message count threshold
                     )
+                    # File-op tracking: tell the summarizer which files were read / modified.
+                    # The session changeset (when present) is the authoritative source for
+                    # modified files; tool events backfill reads and paths from other tools.
+                    _file_ops: dict[str, list[str]] | None = None
+                    try:
+                        from opensquad.utils.session_changeset import summary as _changeset_summary
+
+                        _root = getattr(self, "_workspace_dir", None) or getattr(
+                            _get_session_manager(), "save_dir", None
+                        )
+                        if _root and os.path.isdir(_root):
+                            _cs = _changeset_summary(_root)
+                            _file_ops = _build_extract_file_operations(
+                                msgs_for_summary, all_events_for_summary, changeset_files=_cs.get("files")
+                            )
+                    except Exception:
+                        _file_ops = None
+                    if _file_ops is None:
+                        _file_ops = _build_extract_file_operations(msgs_for_summary, all_events_for_summary)
+                    summary_payload = _build_summary_payload(
+                        prev_summary,
+                        msgs_for_summary,
+                        all_events_for_summary,
+                        keep_last=None,  # Token-based, no message count threshold
+                        file_ops=_file_ops,
+                    )
 
                     summary_stream_id = f"compress_{_trace_id}"
                     summary_text_chunks: list[str] = []
@@ -1914,7 +1827,7 @@ class AgentRunner:
                     # Force prompt refresh so CONTEXT_SUMMARY replacement takes effect immediately.
                     # Also force one prompt_update snapshot after compression even if textual diff
                     # is not detected by equality checks.
-                    self._has_prompt_snapshot = False
+                    self._context_builder.reset_prompt_snapshot()
                     await self._setup_prompt()
                     _end_ms = int(datetime.now().timestamp() * 1000)
                     await self._emit("turn_elapsed", {"started_ms": _start_ms, "ended_ms": _end_ms})
@@ -2730,7 +2643,7 @@ class AgentRunner:
                         )
 
                     # Force prompt refresh so CONTEXT_SUMMARY replacement takes effect immediately
-                    self._has_prompt_snapshot = False
+                    self._context_builder.reset_prompt_snapshot()
                     await self._setup_prompt()
 
                     # History sync
@@ -3351,862 +3264,16 @@ class AgentRunner:
         finish_reason: str | None = None,
         stream_error: bool = False,
     ) -> tuple[bool, str, bool]:
-        """
-        Handle one turn's result.
+        """Turn result handling -- implemented in _runner/_turn_loop.py::TurnLoop."""
+        from ._runner._turn_loop import TurnLoop
 
-        Args:
-            full_response: LLM response text
-            tool_data_from_api: Tool call data parsed by strategy (tool_name, tool_args) or None
-            output_media: Media list generated by the model [{"type": "audio"/"image", "url": ..., "mime": ...}]
-
-        Returns: (should_stop, next_input, went_to_sleep)
-        """
-        # --- 1. Extract all interaction tags and persist them (ensure no loss on restart) ---
-
-        # Thinking process (supports both 'thought' and 'think')
-        # Note: during streaming, stream_parser already pushed thought events to the frontend in real time.
-        # Here we only persist (write to session history); do not re-emit to avoid the frontend displaying duplicates.
-        thought_text = ResponseParser.extract_tag(full_response, "thought") or ResponseParser.extract_tag(
-            full_response, "think"
+        return await TurnLoop(self).handle_turn_result(
+            full_response,
+            tool_data_from_api,
+            output_media,
+            finish_reason,
+            stream_error,
         )
-        if thought_text:
-            _get_session_manager().add_event(
-                "thought", {"text": thought_text}, turn_id=self._current_turn, round_id=self._current_round
-            )
-
-        # Task plan
-        plan_text = ResponseParser.extract_tag(full_response, "plan")
-        if plan_text:
-            plan_id = f"plan_{datetime.now().strftime('%M%S')}"
-            await self._emit("plan", {"id": plan_id, "text": plan_text})
-            _get_session_manager().add_event(
-                "plan", {"id": plan_id, "text": plan_text}, turn_id=self._current_turn, round_id=self._current_round
-            )
-            # Write back to TaskManager so the next turn's {{TASK_STATE}} includes the AI's own plan
-            self.task_manager.update(plan_text)
-
-        # Option buttons
-        import re
-
-        option_matches = re.findall(r"<option>(.*?)</option>", full_response, re.DOTALL)
-        for option_text in option_matches:
-            await self._emit("option", option_text.strip())
-            _get_session_manager().add_event(
-                "option", {"text": option_text.strip()}, turn_id=self._current_turn, round_id=self._current_round
-            )
-
-        # --- 2. State and sleep tags ---
-        new_state = self._extract_tag(full_response, "state")
-        new_wake = self._extract_tag(full_response, "wake")
-        sleep_seconds = self._extract_tag(full_response, "sleep")
-        sys_cmd = self._extract_tag(full_response, "to_system")
-
-        # --- 2.1 Task supervision tags ---
-        task_start = self._extract_tag(full_response, "task_start")
-        if task_start:
-            self._in_task = True
-            self._auto_continue_retries = 0
-            task_name = task_start.strip()
-            if task_name:
-                _get_session_manager().set_title(task_name)
-                await self._emit(
-                    "current_session", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
-                )
-                await bus.emit_async("session_list", _get_session_manager().get_session_list())
-                await self._emit(
-                    "session_title", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
-                )
-
-        # Agent-chosen session subject via <title>...</title>
-        title_tag = self._extract_tag(full_response, "title")
-        if title_tag and title_tag.strip():
-            title_name = title_tag.strip()
-            _get_session_manager().set_title(title_name)
-            sid = _get_session_manager().get_current_session_id()
-            await self._emit("current_session", {"id": sid, "title": title_name})
-            await bus.emit_async("session_list", _get_session_manager().get_session_list())
-            await self._emit("session_title", {"id": sid, "title": title_name})
-
-        if sys_cmd in ["task_complete", "task_failed"]:
-            self._in_task = False
-            self._awaiting_user_reply = False
-            self._last_user_msg_from_to_user = False
-            self._auto_continue_retries = 0
-
-        # --- 3. Execute state update logic ---
-        if new_state:
-            logger.info(f"[Runner] Applying AI state change: {new_state}")
-            await _get_state_manager().set_state(new_state)
-            await self._emit("state", new_state)  # Explicitly emit state change event
-
-            if new_state == "working" and not task_logger.has_active_task():
-                task_req = self._last_user_input[:200]
-                task_id = task_logger.start_task(task_req, "working")
-                logger.info(f"[Runner] Task recording started: {task_id}")
-                # --- Plugin Hook: on_task_start ---
-                if self._plugin_manager:
-                    await self._plugin_manager.run_hook(
-                        "on_task_start",
-                        {
-                            "task_id": task_id,
-                            "requirement": task_req,
-                            "source": self._current_input_source,
-                            "agent_id": self._agent_id,
-                        },
-                    )
-
-        if new_wake:
-            logger.info(f"[Runner] Applying wake mode change: {new_wake}")
-            await _get_state_manager().set_wake_mode(new_wake)
-            await self._emit("wake", new_wake)
-
-        # --- 3. Handle sleep command ---
-        if sleep_seconds and sleep_seconds.isdigit():
-            seconds = int(sleep_seconds)
-            logger.info(f"[Runner] AI entering sleep for {seconds}s")
-            await self._emit("sleep", seconds)
-            await _get_state_manager().set_state("sleeping")
-            await self._emit("state", "sleeping")
-            wake_info = await sleep_controller.sleep(seconds)
-            await _get_state_manager().set_state("idle")
-            await self._emit("state", "idle")
-            logger.info(f"[Runner] Sleep ended: {wake_info.get('wake_type')}, reason: {wake_info.get('wake_reason')}")
-            return False, "", True
-
-        # --- 5. Text content persistence (regardless of whether tools are called) ---
-        # Prefer streamed text accumulated by stream_parser during streaming.
-        # stream_parser correctly identifies to_user content in real-time,
-        # so its output is the authoritative source. This avoids the bug where
-        # _remove_all_tags() would incorrectly strip tag names appearing as
-        # explanatory text (e.g. AI explains "<to_user>" in a markdown table).
-        # When the model leaves the real body *outside* <to_user> and only a
-        # coda inside, upgrade to compose_user_visible_message (preamble+coda).
-        from opensquad._runner._tag_utils import compose_user_visible_message
-
-        streamed = "".join(getattr(self, "_streamed_user_text", []))
-        user_msg_from_tag = None
-        self._last_user_msg_from_to_user = False
-        composed, composed_tag = compose_user_visible_message(full_response)
-        if streamed.strip():
-            user_msg = streamed.strip()
-            user_msg_from_tag = getattr(self, "_streamed_user_tag", None) or "to_user"
-            # Prefer explicit end_task tag in the raw response over stream-tag race.
-            end_only = self._extract_tag(full_response, "to_user_end_task")
-            if end_only is not None:
-                user_msg_from_tag = "to_user_end_task"
-                cleaned_end = self._remove_all_tags(end_only).strip()
-                if cleaned_end:
-                    user_msg = cleaned_end
-            if composed and len(composed) > len(user_msg) + 80:
-                user_msg = composed
-                if composed_tag:
-                    user_msg_from_tag = composed_tag
-            self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
-        else:
-            user_msg = composed
-            user_msg_from_tag = composed_tag
-            self._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
-
-        if user_msg_from_tag == "to_user_reply":
-            self._awaiting_user_reply = True
-
-        # Guard: detect leaked tool call arguments (JSON or XML leaking as user-visible text).
-        # This happens when the model outputs malformed or unclosed <tool_call> tags.
-        # Report the error back to the model the same way a failed tool execution is reported,
-        # so it appears in the WorkflowContainer and the model can self-correct.
-        if self._is_leaked_tool_params(user_msg):
-            preview = user_msg.strip()[:120]
-            logger.warning(
-                "[Runner] Detected leaked tool parameters in user_msg "
-                "(len=%d, preview=%r) -- sending format error back to model",
-                len(user_msg.strip()),
-                preview,
-            )
-            now_str = datetime.now().strftime("%M%S")
-            fe_call_id = f"call_{now_str}_format_error"
-            fe_name = "format_error"
-            fe_detail = (
-                "Detected tool call parameters appearing directly in the response body; "
-                "this indicates a <tool_call> tag was not properly closed or is malformed.\n"
-                "Please strictly follow the XML format and re-output the tool call:\n"
-                "<tool_call>\n"
-                "    <func>tool_name</func>\n"
-                "    <param1>value1</param1>\n"
-                "    <param2>value2</param2>\n"
-                "</tool_call>\n"
-                "Strict rule: all XML tags must come in pairs; never omit the </tool_call> closing tag."
-            )
-            # Notify frontend (WorkflowContainer)
-            await self._emit("tool_call", {"id": fe_call_id, "name": fe_name, "args": preview})
-            await self._emit(
-                "tool_result", {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"}
-            )
-            # Persist to session
-            _get_session_manager().add_event(
-                "tool_call",
-                {"id": fe_call_id, "name": fe_name, "args": preview},
-                turn_id=self._current_turn,
-                round_id=self._current_round,
-            )
-            _get_session_manager().add_event(
-                "tool_result",
-                {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"},
-                turn_id=self._current_turn,
-                round_id=self._current_round,
-            )
-            # Feed back to model in same format as a tool execution result
-            return False, self._summarize_result(fe_name, f"Error: {fe_detail}"), False
-
-        # Guard: detect repetitive output (stuttering) from lower-quality models.
-        # Only run if enable_repetition_check is True in model config
-        is_repetitive = False
-        if getattr(self.chat_api, "enable_repetition_check", False):
-            # Check both user-visible message and internal thought process
-            is_repetitive = self._is_repeated_content(user_msg) or self._is_repeated_content(thought_text)
-
-        if is_repetitive:
-            if self._repetition_rewind_count >= 1:
-                logger.warning(
-                    "[Runner] Repetition rewind already used once this turn, allowing it through to avoid infinite loop"
-                )
-            else:
-                self._repetition_rewind_count += 1
-                logger.warning(
-                    "[Runner] Detected repetitive output (stuttering) -- performing context rewind and requesting re-output"
-                )
-
-                # CRITICAL: Break the loop by removing the repetitive message from model history
-                # This 'Context Rewind' prevents the model from being biased by its own recent mistake.
-                if hasattr(self.chat_api, "pop_last_assistant_message"):
-                    self.chat_api.pop_last_assistant_message()
-
-                re_name = "repetition_error"
-                re_detail = (
-                    "Detected repetitive output (stuttering / loop). "
-                    "CRITICAL: System has removed your last repetitive message from history. "
-                    "Do NOT repeat your previous phrases. Do NOT explain why you looped. "
-                    "Immediately take a DIFFERENT approach or skip directly to the tool call."
-                )
-                # Notify frontend
-                hint = "检测到模型输出内容重复（复读机行为），系统已自动回退上下文并要求模型修正。"
-                await self._emit("info", hint)
-                await self._emit("status", "Repetition loop detected, rewinding and retrying...")
-
-                _get_session_manager().add_event(
-                    "info", {"text": hint}, turn_id=self._current_turn, round_id=self._current_round
-                )
-
-                return False, self._summarize_result(re_name, f"Error: {re_detail}"), False
-
-        # Auto-filter out raw conversational text when entering/exiting a task without a to_user wrapper
-        if (
-            (task_start or sys_cmd in ["task_complete", "task_failed"])
-            and "<to_user>" not in full_response
-            and "<to_user_reply>" not in full_response
-            and "<to_user_end_task>" not in full_response
-        ):
-            logger.info("[Runner] Auto-filtering bare conversational text during task start/complete")
-            user_msg = ""
-
-        _saved_msg = None
-        _saved_output_media = None
-        if user_msg.strip():
-            # --- Plugin Hook: on_before_send ---
-            _send_msg = user_msg
-            if self._plugin_manager:
-                _hook_ctx = await self._plugin_manager.run_hook(
-                    "on_before_send",
-                    {
-                        "message": _send_msg,
-                        "agent_id": self._agent_id,
-                    },
-                )
-                _send_msg = _hook_ctx.get("message", _send_msg)
-                if _hook_ctx.get("__stop__"):
-                    logger.info("[Runner] on_before_send: send cancelled by plugin hook")
-                    _send_msg = None
-            if _send_msg and _send_msg.strip():
-                # Emit to frontend immediately for real-time display,
-                # but defer session persistence until after tool execution
-                # so events (thought, tool_call, tool_result) appear before
-                # the assistant message in current_session.json
-                if user_msg_from_tag == "to_user_end_task":
-                    event_type = "to_user_end_task"
-                elif user_msg_from_tag == "to_user_reply":
-                    event_type = "to_user_reply"
-                else:
-                    event_type = "to_user_final"
-                await self._emit(event_type, _send_msg)
-                if output_media:
-                    await self._emit("output_media", output_media)
-                _saved_msg = _send_msg
-                _saved_output_media = output_media
-                if user_msg_from_tag == "to_user_end_task":
-                    _get_session_manager().mark_last_assistant_end_task()
-                # --- Plugin Hook: on_after_send ---
-                if self._plugin_manager:
-                    await self._plugin_manager.run_hook(
-                        "on_after_send",
-                        {
-                            "message": _send_msg,
-                            "agent_id": self._agent_id,
-                        },
-                    )
-
-        # --- 6. Tool call logic (placed after text is saved) ---
-        tc_log = get_tool_call_debug_logger()
-        tc_log.debug("[runner] full_response len=%d, first 500 chars: %s", len(full_response), full_response[:500])
-
-        # tool_data_from_api is now List[Tuple] for parallel tool call support
-        if tool_data_from_api:
-            tool_calls = tool_data_from_api  # List[(name, args_dict)]
-            tc_log.info("[runner] [OK] Using tool_data from Native FC strategy: %d tool(s)", len(tool_calls))
-        else:
-            # Fallback to XML parsing — supports parallel tool calls
-            tool_calls = ResponseParser.parse_tool_calls(full_response)
-            if tool_calls:
-                tc_log.info("[runner] [OK] Using tool_data from XML parser: %d tool(s)", len(tool_calls))
-            else:
-                tool_calls = []
-
-        if tool_calls:
-            tc_log.info("[runner] [tool] Executing %d parallel tool call(s)", len(tool_calls))
-
-            # Phase 1: Execute ALL tools and collect results (no add_tool_result yet)
-            _tool_results = []  # List of dicts with tool metadata for batch commit
-            _control_flow_return = None  # If a control tool requests immediate return
-            _stopped_by_user = False
-
-            def _turn_stop_requested() -> bool:
-                try:
-                    sid = getattr(self, "_turn_sid", "") or ""
-                    if sid and input_hub.is_session_stop_requested(sid):
-                        return True
-                    return bool(input_hub.is_stop_requested())
-                except Exception:
-                    return False
-
-            for call_index, (t_name, t_args_dict) in enumerate(tool_calls):
-                if _turn_stop_requested():
-                    _stopped_by_user = True
-                    for rest_index in range(call_index, len(tool_calls)):
-                        rest_name, _ = tool_calls[rest_index]
-                        rid = f"call_stop_{rest_index}"
-                        await self._emit("tool_call", {"id": rid, "name": rest_name, "args": "{}"})
-                        await self._emit(
-                            "tool_result",
-                            {"id": rid, "name": rest_name, "result": "Cancelled: stopped by user"},
-                        )
-                    break
-
-                tc_log.info("[runner] [tool] #%d: name=%r, args=%r", call_index, t_name, t_args_dict)
-                call_id = f"call_{datetime.now().strftime('%M%S')}_{t_name}_{call_index}"
-                _sanitized = {k: ("..." if v is ... else v) for k, v in t_args_dict.items()} if t_args_dict else {}
-                t_args_json = json.dumps(_sanitized, ensure_ascii=False, indent=2) if _sanitized else "{}"
-
-                tc_log.info("[runner] [emit] Emitting tool_call event: id=%s, name=%s", call_id, t_name)
-                # Skip internal synthetic event_pipeline — hidden from frontend & session
-                if t_name in ("system__event_pipeline", "system.event_pipeline"):
-                    tc_log.debug("[runner] [emit] Skipping system__event_pipeline from frontend & session")
-                else:
-                    await self._emit("tool_call", {"id": call_id, "name": t_name, "args": t_args_json})
-                    _get_session_manager().add_event(
-                        "tool_call",
-                        {"id": call_id, "name": t_name, "args": t_args_json},
-                        turn_id=self._current_turn,
-                        round_id=self._current_round,
-                    )
-
-                # --- Plugin Hook: on_before_tool ---
-                _skip_tool = False
-                if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook(
-                        "on_before_tool",
-                        {
-                            "tool_name": t_name,
-                            "arguments": t_args_dict,
-                            "agent_id": self._agent_id,
-                        },
-                    )
-                    t_name = _hook_ctx.get("tool_name", t_name)
-                    t_args_dict = _hook_ctx.get("arguments", t_args_dict)
-                    _skip_tool = _hook_ctx.get("skip", False)
-
-                # Extract limit_token meta-parameter (stripped from args, not passed to tool)
-                _limit_token = None
-                if isinstance(t_args_dict, dict) and "limit_token" in t_args_dict:
-                    _raw = t_args_dict.pop("limit_token")
-                    try:
-                        _v = int(_raw)
-                        _limit_token = _v if _v > 0 else 0
-                    except (ValueError, TypeError):
-                        pass
-
-                if _skip_tool:
-                    result = _hook_ctx.get("result", "Tool call skipped by plugin hook.")
-                    tc_log.info("[runner] [skip] Tool execution skipped by plugin hook")
-                else:
-                    tc_log.info("[runner] [run] Executing tool: %s", t_name)
-                    # Bind call_id/sid so background Jobs can stream stdout to the CMD panel
-                    from opensquad.tools.system import reset_tool_call_context, set_tool_call_context
-
-                    _ctx_token = set_tool_call_context(
-                        sid=getattr(self, "_turn_sid", "") or "",
-                        call_id=call_id,
-                        tool_name=t_name,
-                    )
-                    try:
-                        result = await self.tool_registry.call(t_name, t_args_dict)
-                    finally:
-                        reset_tool_call_context(_ctx_token)
-                    task_supervisor.report_activity()
-
-                    if _turn_stop_requested():
-                        _stopped_by_user = True
-
-                    # Mid-tool drain: voice/web supplements arriving during a long tool
-                    # should enter event_pipeline ASAP (not wait for the whole batch).
-                    try:
-                        _mid_sup = input_hub.get_all_pending()
-                    except Exception:
-                        _mid_sup = []
-                    if _mid_sup:
-                        from opensquad.event_pipeline import event_pipeline as _ep_mid
-
-                        for _item in _mid_sup:
-                            _c = (_item.get("content") or "").strip()
-                            if not _c or _c == "[wakeup-urgent-command]":
-                                continue
-                            logger.info(
-                                "[Runner] Mid-tool supplement from input_hub: %s",
-                                _c[:80],
-                            )
-                            _imgs = _item.get("images") or []
-                            if _imgs:
-                                self._current_images.extend(_imgs)
-                            _atts = _item.get("attachments") or []
-                            if _atts:
-                                self._current_attachments = list(self._current_attachments or []) + list(_atts)
-                            _ep_mid.push_nowait(
-                                source=_item.get("source", "web"),
-                                content=_c,
-                                metadata={
-                                    "sender_name": _item.get("sender_name", ""),
-                                    "channel": _item.get("channel", ""),
-                                    "source": "input_hub",
-                                    "images": _imgs,
-                                    "attachments": _atts,
-                                },
-                            )
-
-                # Collaboration board auto-sync
-                try:
-                    import os as _os
-
-                    from opensquad.collab_board import update_latest_tool as _cb_update_latest_tool
-
-                    _agent_dir = getattr(self, "_agent_dir", "") or ""
-                    _agent_id = _os.path.basename(_agent_dir) if _agent_dir else "unknown_agent"
-                    from opensquad.collab_board import list_tasks as _cb_list_tasks
-
-                    _tasks = _cb_list_tasks()
-                    _active_task_id = ""
-                    for _t in _tasks:
-                        if _t.get("status") == "active":
-                            _active_task_id = str(_t.get("task_id") or "")
-                            break
-                    if _active_task_id:
-                        _sensitive_tools = {
-                            "read_related_files",
-                            "glob",
-                            "grep",
-                            "rg",
-                            "filesystem__read",
-                            "filesystem__write",
-                            "filesystem__edit",
-                            "bash",
-                            "subprocess",
-                            "delegate_task",
-                            "system__send_file_to_web",
-                            "execute_command",
-                            "view_source_code",
-                            "find_files",
-                        }
-                        if t_name.startswith("collaboration.") or t_name.startswith("agent_setup."):
-                            _sensitive_tools.add(t_name)
-                        _should_sync = t_name not in _sensitive_tools
-                        if _should_sync:
-                            _cb_update_latest_tool(
-                                collab_id=_active_task_id,
-                                task_name="",
-                                agent_id=_agent_id,
-                                tool_name=t_name,
-                                tool_result=result,
-                            )
-                except Exception:
-                    pass
-
-                result_preview = str(result)[:300] if result else ""
-                if isinstance(result, str) and result.startswith("Error:"):
-                    tc_log.warning("[runner] [FAIL] Tool %r returned ERROR: %s", t_name, result_preview)
-                else:
-                    tc_log.info("[runner] [OK] Tool %r returned OK (result length=%d chars)", t_name, len(str(result)))
-
-                # --- Plugin Hook: on_after_tool ---
-                if self._plugin_manager:
-                    _hook_ctx = await self._plugin_manager.run_hook(
-                        "on_after_tool",
-                        {
-                            "tool_name": t_name,
-                            "arguments": t_args_dict,
-                            "result": result,
-                            "agent_id": self._agent_id,
-                            "model": getattr(self.chat_api, "model", ""),
-                        },
-                    )
-                    result = _hook_ctx.get("result", result)
-
-                # TTS / media tools may return __output_media__ for chat bubble playback
-                if isinstance(result, dict) and result.get("__output_media__"):
-                    try:
-                        await self._emit("output_media", result["__output_media__"])
-                        tc_log.info(
-                            "[runner] Emitted output_media from tool %r: %d item(s)",
-                            t_name,
-                            len(result["__output_media__"]),
-                        )
-                    except Exception as _om_err:
-                        tc_log.warning("[runner] Failed to emit tool output_media: %s", _om_err)
-
-                # --- Plugin Hook: on_tool_error ---
-                if self._plugin_manager and isinstance(result, str) and result.startswith("Error:"):
-                    _hook_ctx = await self._plugin_manager.run_hook(
-                        "on_tool_error",
-                        {
-                            "tool_name": t_name,
-                            "arguments": t_args_dict,
-                            "error": result,
-                            "agent_id": self._agent_id,
-                        },
-                    )
-                    result = _hook_ctx.get("error", result)
-
-                # Drain event pipeline (per-tool, may contain events that arrived during execution)
-                from opensquad.event_pipeline import event_pipeline
-
-                _raw_events = event_pipeline.drain_sync()
-
-                for evt in _raw_events:
-                    if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
-                        _get_session_manager().add_message("user", evt.content)
-                        await self._emit("user_msg", evt.content)
-                    if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
-                        img_paths = evt.metadata.get("image_paths", [])
-                        if img_paths:
-                            self._current_images.extend(img_paths)
-                            already = set(self._current_images)
-                            new_img_paths = [p for p in img_paths if p not in already]
-                            if new_img_paths:
-                                self._current_images.extend(new_img_paths)
-                            try:
-                                _ipf = (
-                                    os.path.join(self._agent_dir, "img_path.txt") if self._agent_dir else "img_path.txt"
-                                )
-                                with open(_ipf, "w", encoding="utf-8") as _f:
-                                    _f.write(str(img_paths))
-                            except Exception:
-                                pass
-
-                if _raw_events:
-                    lines = ["", "--- External Events (arrived during processing) ---"]
-                    for evt in _raw_events:
-                        lines.append(evt.format_for_llm())
-                    lines.append("--- End External Events ---")
-                    _pipeline_events = "\n".join(lines)
-                else:
-                    _pipeline_events = ""
-
-                # Prefer human message for LLM history; keep diff_* for UI emit
-                _ui_extras: dict = {}
-                if isinstance(result, dict):
-                    for _k in ("diff_old", "diff_new", "diff_start_line"):
-                        if _k in result and result[_k] is not None:
-                            _ui_extras[_k] = result[_k]
-                    _display = result.get("message")
-                    if isinstance(_display, str) and _display.strip():
-                        _tool_result_text = _display
-                    else:
-                        _tool_result_text = str(result) if result else "(empty result)"
-                else:
-                    _tool_result_text = str(result) if result else "(empty result)"
-
-                # Apply limit_token override or config-based truncation
-                if _limit_token is not None:
-                    _max_len = _limit_token if _limit_token > 0 else None
-                else:
-                    _max_len = self._get_tool_output_max_chars()
-                    _max_len = _max_len if _max_len > 0 else None
-                _tool_result_text = self._truncate_result_text(_tool_result_text, _max_len)
-
-                # --- system.wait: special control flow (immediate return) ---
-                if t_name in ("system.wait", "wait", "system__wait"):
-                    if isinstance(result, dict) and result.get("status") == "success":
-                        _ckpt_dir = getattr(self, "_agent_dir", "") or ""
-                        if _ckpt_dir:
-                            try:
-                                from opensquad import checkpoint as _ckpt2
-
-                                _ckpt2.clear_checkpoint(_ckpt_dir)
-                            except Exception:
-                                pass
-                        wake_type = result.get("wake_type", "natural")
-                        wake_reason = result.get("wake_reason", "")
-                        actual_seconds = result.get("actual_seconds", 0)
-                        wake_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        wake_msg = f"[Wake-{wake_time}-Slept {actual_seconds}s ({wake_type})"
-                        if wake_reason and wake_reason != "Sleep duration ended":
-                            wake_msg += f", reason: {wake_reason}"
-                        wake_msg += "]"
-
-                        # Merge any user messages that arrived during sleep so the
-                        # next LLM turn sees real user content (text + image notice),
-                        # not only the wake marker.
-                        try:
-                            _sleep_pending = input_hub.get_all_pending()
-                        except Exception:
-                            _sleep_pending = []
-                        _user_parts: list[str] = []
-                        for _item in _sleep_pending or []:
-                            _c = (_item.get("content") or "").strip()
-                            if not _c or _c == "[wakeup-urgent-command]":
-                                continue
-                            _user_parts.append(_c)
-                            _imgs = _item.get("images") or []
-                            if _imgs:
-                                self._current_images.extend(_imgs)
-                            _atts = _item.get("attachments") or []
-                            if _atts:
-                                self._current_attachments = list(self._current_attachments or []) + list(_atts)
-                        if _user_parts:
-                            wake_msg = (
-                                wake_msg
-                                + "\n\n[Messages received while sleeping — treat these as the user's real input; "
-                                "do not dismiss them as wake notifications]\n" + "\n---\n".join(_user_parts)
-                            )
-                            logger.info(
-                                f"[Runner] system.wait merged {len(_user_parts)} pending user msg(s) "
-                                f"and {len(self._current_images)} image(s) into wake context"
-                            )
-
-                        _wait_result_text = wake_msg
-
-                        self.chat_api.add_tool_result(
-                            tool_name=t_name,
-                            tool_args=t_args_dict,
-                            result=_wait_result_text,
-                            tool_call_id=call_id,
-                        )
-                        if _pipeline_events and hasattr(self.chat_api, "add_pipeline_events"):
-                            self.chat_api.add_pipeline_events(_pipeline_events)
-
-                        _get_session_manager().add_event(
-                            "tool_result",
-                            {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text},
-                            turn_id=self._current_turn,
-                            round_id=self._current_round,
-                        )
-                        await self._emit(
-                            "tool_result",
-                            {"id": call_id, "name": t_name, "args": t_args_json, "result": _wait_result_text},
-                        )
-                        logger.info(f"[Runner] system.wait finished: {wake_msg[:120]}")
-
-                        _control_flow_return = (False, wake_msg, False)
-                    continue
-
-                # --- system.set_state: also special, emit state change immediately ---
-                if t_name in ("system.set_state", "set_state", "system__set_state"):
-                    if isinstance(result, dict) and result.get("status") == "success":
-                        msg = result.get("message", "")
-                        import re as _re
-
-                        _m = _re.search(r"'(\w+)'", msg)
-                        if _m:
-                            actual_state = _m.group(1)
-                            await self._emit("state", actual_state)
-                            if actual_state == "working" and not task_logger.has_active_task():
-                                task_req = self._last_user_input[:200]
-                                tid = task_logger.start_task(task_req, "working")
-                                logger.info(f"[Runner] Task recording started via set_state: {tid}")
-
-                # --- Collect result for batch commit ---
-                _tool_results.append(
-                    {
-                        "name": t_name,
-                        "args": t_args_dict,
-                        "args_json": t_args_json,
-                        "result_text": _tool_result_text,
-                        "call_id": call_id,
-                        "pipeline_events": _pipeline_events,
-                        "ui_extras": _ui_extras,
-                    }
-                )
-                if _stopped_by_user or _turn_stop_requested():
-                    _stopped_by_user = True
-                    break
-
-            if _control_flow_return:
-                logger.info(f"[Runner] [DIAG] _control_flow_return set: {_control_flow_return}")
-                return _control_flow_return
-
-            # Phase 2: Batch-commit ALL tool results to chat_api history (one batch)
-            tc_log.info("[runner] [tool] Batch-committing %d tool result(s) to chat_api history", len(_tool_results))
-            for entry in _tool_results:
-                self.chat_api.add_tool_result(
-                    tool_name=entry["name"],
-                    tool_args=entry["args"],
-                    result=entry["result_text"],
-                    tool_call_id=entry["call_id"],
-                )
-                if entry["pipeline_events"] and hasattr(self.chat_api, "add_pipeline_events"):
-                    self.chat_api.add_pipeline_events(entry["pipeline_events"])
-
-                _get_session_manager().add_event(
-                    "tool_result",
-                    {
-                        "id": entry["call_id"],
-                        "name": entry["name"],
-                        "args": entry["args_json"],
-                        "result": entry["result_text"],
-                        **(entry.get("ui_extras") or {}),
-                    },
-                    turn_id=self._current_turn,
-                    round_id=self._current_round,
-                )
-                await self._emit(
-                    "tool_result",
-                    {
-                        "id": entry["call_id"],
-                        "name": entry["name"],
-                        "args": entry["args_json"],
-                        "result": entry["result_text"],
-                        **(entry.get("ui_extras") or {}),
-                    },
-                )
-
-                if task_logger.has_active_task():
-                    task_logger.increment_turn(entry["name"])
-
-            if _stopped_by_user or _turn_stop_requested():
-                tc_log.info(
-                    "[runner] [tool] Stopped by user after %d result(s) — ending turn",
-                    len(_tool_results),
-                )
-                if _saved_msg:
-                    _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self._workflow_started_ms)
-                    _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
-                return True, "", False
-
-            tc_log.info(
-                "[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results)
-            )
-            if _saved_msg:
-                # Update elapsed_ms on the assistant message that ChatAPI already saved
-                _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self._workflow_started_ms)
-                _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
-                logger.info(
-                    "[Runner] Tool turn complete: saved_msg_len=%d, elapsed_ms=%d",
-                    len(_saved_msg),
-                    _elapsed_ms,
-                )
-            return False, "", False
-
-        # Check for auto-continue (trailing colon indicating tool intent)
-        # We check the original full_response (after tag removal) to see if it ends with a colon,
-        # even if user_msg was filtered out.
-        clean_full = self._remove_all_tags(full_response).strip()
-        needs_tool = clean_full.endswith(":") or clean_full.endswith("：")
-
-        if needs_tool and not tool_data_from_api:
-            if finish_reason == "stop" and not stream_error:
-                if (
-                    self._max_auto_continue_retries is None
-                    or self._auto_continue_retries < self._max_auto_continue_retries
-                ):
-                    self._auto_continue_retries += 1
-                    auto_continue_prompt = (
-                        "[System Prompt] You ended with a trailing colon, which usually means you intended to call a tool next. "
-                        "Continue immediately by calling the appropriate tool."
-                    )
-                    logger.info(
-                        "[Runner] Auto-continuing due to trailing colon (limit: %s/%s)",
-                        self._auto_continue_retries,
-                        self._max_auto_continue_retries,
-                    )
-                    return False, auto_continue_prompt, False
-                logger.warning("[Runner] Max auto-continue retries reached")
-            elif stream_error:
-                logger.warning("[Runner] Stream interrupted; skip auto-continue for tool-intent")
-
-        # The assistant message itself is now persisted by ChatAPI.add_assistant_message()
-        # (chat_api.py:1717) during streaming — always, not only for reasoning_content.
-        # Here we only need to update elapsed_ms on that message.
-        if _saved_msg:
-            _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self._workflow_started_ms)
-            _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
-            sess = _get_session_manager().session_data
-            msgs = sess.get("messages", [])
-            evts = sess.get("events", [])
-            logger.info(
-                "[Runner] Session after turn: %d messages (roles=%s), %d events (types=%s)",
-                len(msgs),
-                [m.get("role") for m in msgs[-5:]],
-                len(evts),
-                [e.get("type") for e in evts[-5:]],
-            )
-
-        if user_msg.strip():
-            # to_user_reply expects a user response: keep waiting
-            if self._awaiting_user_reply:
-                self._awaiting_user_reply = False
-
-            # KEY CHANGE: Don't mark workflow as ended.
-            # The LLM has produced output and is now waiting for more events.
-            # In the 'never stop' architecture, the LLM calls system.wait after replying,
-            # so we should enter waiting state, not exit the loop entirely.
-
-            # Don't add tool results since there are no tools in this branch
-            # Return: continue loop, enter waiting state
-            # Fix: return stop=True to exit inner LLM loop (turn_elapsed + state:idle)
-            return True, "", False
-
-        # Handle task status change
-        if sys_cmd:
-            logger.info(f"[Runner] System command received: {sys_cmd}")
-            if sys_cmd in ["task_complete", "task_failed"]:
-                completed = None
-                if task_logger.has_active_task():
-                    completed = task_logger.complete_task(
-                        completion_status="completed" if sys_cmd == "task_complete" else "failed",
-                        result_summary="Task finished",
-                    )
-                # --- Plugin Hook: on_task_complete ---
-                if completed and self._plugin_manager:
-                    await self._plugin_manager.run_hook(
-                        "on_task_complete",
-                        {
-                            "task_id": completed.get("task_id", ""),
-                            "completion_status": completed.get("completion_status", ""),
-                            "tools_used": completed.get("tools_used", []),
-                            "turns": completed.get("turns", 0),
-                            "agent_id": self._agent_id,
-                        },
-                    )
-                await _get_state_manager().set_state("idle")
-                await self._emit("state", "idle")
-                return True, "", False
-
-        return False, "Error: No output produced", False
 
     def _remove_tags(self, text: str, tags: list) -> str:
         """Remove specified XML tags (supports tags with attributes, e.g. <tool_call name="...">)"""

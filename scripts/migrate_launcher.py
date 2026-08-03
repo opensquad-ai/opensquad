@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 _migrate_launcher.py -- Extract ManagementHandler + _start_management_server from launcher.py.
 
@@ -14,6 +13,7 @@ Steps:
   3. Rewrite bare launcher globals -> self._ctx.attr
   4. Write the resulting file directly (plain Python, no string-escaping needed)
 """
+
 from __future__ import annotations
 
 import ast
@@ -37,30 +37,30 @@ def _load_lines(path: str) -> list[str]:
 # Global -> _Ctx attribute mapping  (longest-first to avoid substring hits)
 # ---------------------------------------------------------------------------
 GLOBAL_TO_ATTR = [
-    ("task_watch_stalled_notified",  "task_watch_stalled_notified"),
-    ("task_watch_heartbeats",         "task_watch_heartbeats"),
-    ("workspace_migration_tasks",      "workspace_migration_tasks"),
-    ("discover_plugin_services",       "discover_plugin_services"),
-    ("apply_config_defaults",          "apply_config_defaults"),
-    ("validate_agent_config",          "validate_agent_config"),
-    ("discover_agents",                "discover_agents"),
-    ("check_port_conflict",            "check_port_conflict"),
-    ("_resolve_discovery_port",        "_resolve_discovery_port"),
-    ("_cleanup_runtime_registry",      "_cleanup_runtime_registry"),
-    ("_read_json",                    "_read_json"),
-    ("_plugin_services",              "_plugin_services"),
-    ("_processes",                    "_processes"),
-    ("_shutdown_event",              "_shutdown_event"),
-    ("_log",                         "_log"),
-    ("syscfg",                       "syscfg"),
-    ("AGENTS_DIR",                   "AGENTS_DIR"),
-    ("PLUGINS_DIR",                  "PLUGINS_DIR"),
-    ("SKILLS_DIR",                   "SKILLS_DIR"),
-    ("ROLE_CARDS_DIR",               "ROLE_CARDS_DIR"),
-    ("COLLAB_CARDS_DIR",             "COLLAB_CARDS_DIR"),
-    ("MODEL_CARDS_DIR",              "MODEL_CARDS_DIR"),
-    ("MANAGEMENT_PORT",              "MANAGEMENT_PORT"),
-    ("STALL_THRESHOLD",              "STALL_THRESHOLD"),
+    ("task_watch_stalled_notified", "task_watch_stalled_notified"),
+    ("task_watch_heartbeats", "task_watch_heartbeats"),
+    ("workspace_migration_tasks", "workspace_migration_tasks"),
+    ("discover_plugin_services", "discover_plugin_services"),
+    ("apply_config_defaults", "apply_config_defaults"),
+    ("validate_agent_config", "validate_agent_config"),
+    ("discover_agents", "discover_agents"),
+    ("check_port_conflict", "check_port_conflict"),
+    ("_resolve_discovery_port", "_resolve_discovery_port"),
+    ("_cleanup_runtime_registry", "_cleanup_runtime_registry"),
+    ("_read_json", "_read_json"),
+    ("_plugin_services", "_plugin_services"),
+    ("_processes", "_processes"),
+    ("_shutdown_event", "_shutdown_event"),
+    ("_log", "_log"),
+    ("syscfg", "syscfg"),
+    ("AGENTS_DIR", "AGENTS_DIR"),
+    ("PLUGINS_DIR", "PLUGINS_DIR"),
+    ("SKILLS_DIR", "SKILLS_DIR"),
+    ("ROLE_CARDS_DIR", "ROLE_CARDS_DIR"),
+    ("COLLAB_CARDS_DIR", "COLLAB_CARDS_DIR"),
+    ("MODEL_CARDS_DIR", "MODEL_CARDS_DIR"),
+    ("MANAGEMENT_PORT", "MANAGEMENT_PORT"),
+    ("STALL_THRESHOLD", "STALL_THRESHOLD"),
 ]
 
 
@@ -102,13 +102,15 @@ def _extract_handler_body(lines: list[str]) -> list[str]:
 
 def load_server_slice(path: str) -> list[str]:
     lines = _load_lines(path)
-    return _slice_between(lines, "def _start_management_server(port: int = MANAGEMENT_PORT):", "# ── Task Watch Supervisor")
+    return _slice_between(
+        lines, "def _start_management_server(port: int = MANAGEMENT_PORT):", "# ── Task Watch Supervisor"
+    )
 
 
 def _find_handler_block_in_server_slice(server_lines: list[str]) -> list[str]:
     """Extract only the ManagementHandler class block from the server function slice."""
     start = _find_line_index(server_lines, "    class ManagementHandler(BaseHTTPRequestHandler):")
-    end = _find_line_index(server_lines, "    server = ThreadingHTTPServer((\"0.0.0.0\", port), Handler)")
+    end = _find_line_index(server_lines, '    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)')
     if end <= start:
         raise ValueError("ManagementHandler block end marker appears before start")
     return server_lines[start:end]
@@ -128,7 +130,7 @@ def dedent(lines: list[str], levels: int = 1) -> list[str]:
             out.append("\n")
             continue
         if ln.startswith(prefix):
-            out.append(ln[len(prefix):])
+            out.append(ln[len(prefix) :])
         else:
             out.append(ln)
     return out
@@ -189,63 +191,63 @@ def filter_handler_lines(lines: list[str]) -> list[str]:
 # Header template
 # ---------------------------------------------------------------------------
 HEADER = (
-    '# -*- coding: utf-8 -*-\n'
-    '# AUTO-GENERATED from launcher.py dynamic server slice\n'
-    '# DO NOT EDIT MANUALLY\n'
-    '\n'
+    "# -*- coding: utf-8 -*-\n"
+    "# AUTO-GENERATED from launcher.py dynamic server slice\n"
+    "# DO NOT EDIT MANUALLY\n"
+    "\n"
     '"""_launcher_api.py -- HTTP Management API handler for launcher.\n'
-    '\n'
-    'Extracted from launcher.py as part of P1 modularisation.\n'
-    'The ManagementHandler class is produced by create_management_handler()\n'
-    'which receives all launcher runtime state as constructor arguments.\n'
+    "\n"
+    "Extracted from launcher.py as part of P1 modularisation.\n"
+    "The ManagementHandler class is produced by create_management_handler()\n"
+    "which receives all launcher runtime state as constructor arguments.\n"
     '"""\n'
-    'from __future__ import annotations\n'
-    '\n'
-    'from typing import Any, Dict, Type\n'
-    'import hashlib\n'
-    'import json\n'
-    'import secrets\n'
-    'import urllib.parse\n'
-    '\n'
-    '\n'
-    'def create_management_handler(\n'
-    '    *,\n'
-    '    # Runtime state dicts\n'
-    '    procesos: Dict[str, Any],\n'
-    '    plug_svcs: Dict[str, Any],\n'
-    '    task_hb: Dict[str, Dict[str, Any]],\n'
-    '    task_sn: set,\n'
-    '    shut_ev: Any,\n'
-    '    ws_mig: Dict[str, Any],\n'
-    '    # Directory paths\n'
-    '    agents_dir: str,\n'
-    '    plugins_dir: str,\n'
-    '    skills_dir: str,\n'
-    '    role_cards_dir: str,\n'
-    '    collab_cards_dir: str,\n'
-    '    model_cards_dir: str,\n'
-    '    # Constants\n'
-    '    mgmt_port: int,\n'
-    '    stall_thresh: int,\n'
-    '    # Singletons / modules\n'
-    '    syscfg: Any,\n'
-    '    logger: Any,\n'
-    '    read_json: Any,\n'
-    '    chk_port: Any,\n'
-    '    res_disc_port: Any,\n'
-    '    cln_reg: Any,\n'
-    '    appl_def: Any,\n'
-    '    val_cfg: Any,\n'
-    '    disc_agents: Any,\n'
-    '    disc_plug_svcs: Any,\n'
-    '    AgentProcess: Type[Any],\n'
-    '    PluginServiceProcess: Type[Any],\n'
-    ') -> Type[Any]:\n'
+    "from __future__ import annotations\n"
+    "\n"
+    "from typing import Any, Dict, Type\n"
+    "import hashlib\n"
+    "import json\n"
+    "import secrets\n"
+    "import urllib.parse\n"
+    "\n"
+    "\n"
+    "def create_management_handler(\n"
+    "    *,\n"
+    "    # Runtime state dicts\n"
+    "    procesos: Dict[str, Any],\n"
+    "    plug_svcs: Dict[str, Any],\n"
+    "    task_hb: Dict[str, Dict[str, Any]],\n"
+    "    task_sn: set,\n"
+    "    shut_ev: Any,\n"
+    "    ws_mig: Dict[str, Any],\n"
+    "    # Directory paths\n"
+    "    agents_dir: str,\n"
+    "    plugins_dir: str,\n"
+    "    skills_dir: str,\n"
+    "    role_cards_dir: str,\n"
+    "    collab_cards_dir: str,\n"
+    "    model_cards_dir: str,\n"
+    "    # Constants\n"
+    "    mgmt_port: int,\n"
+    "    stall_thresh: int,\n"
+    "    # Singletons / modules\n"
+    "    syscfg: Any,\n"
+    "    logger: Any,\n"
+    "    read_json: Any,\n"
+    "    chk_port: Any,\n"
+    "    res_disc_port: Any,\n"
+    "    cln_reg: Any,\n"
+    "    appl_def: Any,\n"
+    "    val_cfg: Any,\n"
+    "    disc_agents: Any,\n"
+    "    disc_plug_svcs: Any,\n"
+    "    AgentProcess: Type[Any],\n"
+    "    PluginServiceProcess: Type[Any],\n"
+    ") -> Type[Any]:\n"
     '    """Factory: build ManagementHandler bound to launcher runtime."""\n'
-    '    from http.server import BaseHTTPRequestHandler\n'
-    '\n'
-    '    class _Ctx:\n'
-    '        __slots__ = (\n'
+    "    from http.server import BaseHTTPRequestHandler\n"
+    "\n"
+    "    class _Ctx:\n"
+    "        __slots__ = (\n"
     '            "_processes","_plugin_services","_task_watch_heartbeats",\n'
     '            "_task_watch_stalled_notified","_shutdown_event",\n'
     '            "_workspace_migration_tasks","_log","AGENTS_DIR","PLUGINS_DIR",\n'
@@ -255,48 +257,48 @@ HEADER = (
     '            "apply_config_defaults","validate_agent_config",\n'
     '            "discover_agents","discover_plugin_services",\n'
     '            "AgentProcess","PluginServiceProcess",\n'
-    '        )\n'
-    '\n'
-    '    _ctx = _Ctx()\n'
-    '    _ctx._processes                    = procesos\n'
-    '    _ctx._plugin_services              = plug_svcs\n'
-    '    _ctx._task_watch_heartbeats       = task_hb\n'
-    '    _ctx._task_watch_stalled_notified = task_sn\n'
-    '    _ctx._shutdown_event              = shut_ev\n'
-    '    _ctx._workspace_migration_tasks   = ws_mig\n'
-    '    _ctx._log                         = logger\n'
-    '    _ctx.AGENTS_DIR                  = agents_dir\n'
-    '    _ctx.PLUGINS_DIR                 = plugins_dir\n'
-    '    _ctx.SKILLS_DIR                  = skills_dir\n'
-    '    _ctx.ROLE_CARDS_DIR              = role_cards_dir\n'
-    '    _ctx.COLLAB_CARDS_DIR            = collab_cards_dir\n'
-    '    _ctx.MODEL_CARDS_DIR             = model_cards_dir\n'
-    '    _ctx.MANAGEMENT_PORT             = mgmt_port\n'
-    '    _ctx.STALL_THRESHOLD             = stall_thresh\n'
-    '    _ctx.syscfg                      = syscfg\n'
-    '    _ctx._read_json                  = read_json\n'
-    '    _ctx.check_port_conflict         = chk_port\n'
-    '    _ctx._resolve_discovery_port     = res_disc_port\n'
-    '    _ctx._cleanup_runtime_registry   = cln_reg\n'
-    '    _ctx.apply_config_defaults       = appl_def\n'
-    '    _ctx.validate_agent_config       = val_cfg\n'
-    '    _ctx.discover_agents             = disc_agents\n'
-    '    _ctx.discover_plugin_services    = disc_plug_svcs\n'
-    '    _ctx.AgentProcess               = AgentProcess\n'
-    '    _ctx.PluginServiceProcess       = PluginServiceProcess\n'
-    '\n'
-    '    ctx = _ctx\n'
-    '\n'
-    '    class ManagementHandler(BaseHTTPRequestHandler):\n'
+    "        )\n"
+    "\n"
+    "    _ctx = _Ctx()\n"
+    "    _ctx._processes                    = procesos\n"
+    "    _ctx._plugin_services              = plug_svcs\n"
+    "    _ctx._task_watch_heartbeats       = task_hb\n"
+    "    _ctx._task_watch_stalled_notified = task_sn\n"
+    "    _ctx._shutdown_event              = shut_ev\n"
+    "    _ctx._workspace_migration_tasks   = ws_mig\n"
+    "    _ctx._log                         = logger\n"
+    "    _ctx.AGENTS_DIR                  = agents_dir\n"
+    "    _ctx.PLUGINS_DIR                 = plugins_dir\n"
+    "    _ctx.SKILLS_DIR                  = skills_dir\n"
+    "    _ctx.ROLE_CARDS_DIR              = role_cards_dir\n"
+    "    _ctx.COLLAB_CARDS_DIR            = collab_cards_dir\n"
+    "    _ctx.MODEL_CARDS_DIR             = model_cards_dir\n"
+    "    _ctx.MANAGEMENT_PORT             = mgmt_port\n"
+    "    _ctx.STALL_THRESHOLD             = stall_thresh\n"
+    "    _ctx.syscfg                      = syscfg\n"
+    "    _ctx._read_json                  = read_json\n"
+    "    _ctx.check_port_conflict         = chk_port\n"
+    "    _ctx._resolve_discovery_port     = res_disc_port\n"
+    "    _ctx._cleanup_runtime_registry   = cln_reg\n"
+    "    _ctx.apply_config_defaults       = appl_def\n"
+    "    _ctx.validate_agent_config       = val_cfg\n"
+    "    _ctx.discover_agents             = disc_agents\n"
+    "    _ctx.discover_plugin_services    = disc_plug_svcs\n"
+    "    _ctx.AgentProcess               = AgentProcess\n"
+    "    _ctx.PluginServiceProcess       = PluginServiceProcess\n"
+    "\n"
+    "    ctx = _ctx\n"
+    "\n"
+    "    class ManagementHandler(BaseHTTPRequestHandler):\n"
     '        """Lightweight HTTP handler -- no FastAPI/uvicorn dependency."""\n'
-    '        _ctx = ctx\n'
-    '\n'
-    '        def log_message(self, fmt, *args):\n'
-    '            pass  # silence http.server spam\n'
-    '\n'
-    '        # ---- boilerplate / auth helpers ----\n'
-    '\n'
-    '        def _send_json(self, data: dict, status: int = 200):\n'
+    "        _ctx = ctx\n"
+    "\n"
+    "        def log_message(self, fmt, *args):\n"
+    "            pass  # silence http.server spam\n"
+    "\n"
+    "        # ---- boilerplate / auth helpers ----\n"
+    "\n"
+    "        def _send_json(self, data: dict, status: int = 200):\n"
 )
 
 
@@ -304,84 +306,84 @@ HEADER = (
 # Footer template
 # ---------------------------------------------------------------------------
 FOOTER = (
-    '\n'
-    '        @property\n'
-    '        def _server_version(self) -> str:\n'
+    "\n"
+    "        @property\n"
+    "        def _server_version(self) -> str:\n"
     '            return f"LauncherManagement/{_ctx.MANAGEMENT_PORT}"\n'
-    '\n'
-    '    return ManagementHandler\n'
-    '\n'
-    '\n'
-    '# ---- Convenience: start the HTTP server in background thread ----\n'
-    '\n'
-    'def _start_management_server(\n'
-    '    port: int,\n'
-    '    *,\n'
-    '    launcher_lock: Any,\n'
-    '    procesos: Dict[str, Any],\n'
-    '    plug_svcs: Dict[str, Any],\n'
-    '    task_hb: Dict[str, Dict[str, Any]],\n'
-    '    task_sn: set,\n'
-    '    shut_ev: Any,\n'
-    '    ws_mig: Dict[str, Any],\n'
-    '    agents_dir: str,\n'
-    '    plugins_dir: str,\n'
-    '    skills_dir: str,\n'
-    '    role_cards_dir: str,\n'
-    '    collab_cards_dir: str,\n'
-    '    model_cards_dir: str,\n'
-    '    mgmt_port: int,\n'
-    '    stall_thresh: int,\n'
-    '    syscfg: Any,\n'
-    '    logger: Any,\n'
-    '    read_json: Any,\n'
-    '    chk_port: Any,\n'
-    '    res_disc_port: Any,\n'
-    '    cln_reg: Any,\n'
-    '    appl_def: Any,\n'
-    '    val_cfg: Any,\n'
-    '    disc_agents: Any,\n'
-    '    disc_plug_svcs: Any,\n'
-    '    AgentProcess: Type[Any],\n'
-    '    PluginServiceProcess: Type[Any],\n'
-    ') -> None:\n'
+    "\n"
+    "    return ManagementHandler\n"
+    "\n"
+    "\n"
+    "# ---- Convenience: start the HTTP server in background thread ----\n"
+    "\n"
+    "def _start_management_server(\n"
+    "    port: int,\n"
+    "    *,\n"
+    "    launcher_lock: Any,\n"
+    "    procesos: Dict[str, Any],\n"
+    "    plug_svcs: Dict[str, Any],\n"
+    "    task_hb: Dict[str, Dict[str, Any]],\n"
+    "    task_sn: set,\n"
+    "    shut_ev: Any,\n"
+    "    ws_mig: Dict[str, Any],\n"
+    "    agents_dir: str,\n"
+    "    plugins_dir: str,\n"
+    "    skills_dir: str,\n"
+    "    role_cards_dir: str,\n"
+    "    collab_cards_dir: str,\n"
+    "    model_cards_dir: str,\n"
+    "    mgmt_port: int,\n"
+    "    stall_thresh: int,\n"
+    "    syscfg: Any,\n"
+    "    logger: Any,\n"
+    "    read_json: Any,\n"
+    "    chk_port: Any,\n"
+    "    res_disc_port: Any,\n"
+    "    cln_reg: Any,\n"
+    "    appl_def: Any,\n"
+    "    val_cfg: Any,\n"
+    "    disc_agents: Any,\n"
+    "    disc_plug_svcs: Any,\n"
+    "    AgentProcess: Type[Any],\n"
+    "    PluginServiceProcess: Type[Any],\n"
+    ") -> None:\n"
     '    """Start the HTTP management server in a dedicated daemon thread."""\n'
-    '    from http.server import ThreadingHTTPServer\n'
-    '    import threading\n'
-    '\n'
-    '    Handler = create_management_handler(\n'
-    '        procesos=procesos,\n'
-    '        plug_svcs=plug_svcs,\n'
-    '        task_hb=task_hb,\n'
-    '        task_sn=task_sn,\n'
-    '        shut_ev=shut_ev,\n'
-    '        ws_mig=ws_mig,\n'
-    '        agents_dir=agents_dir,\n'
-    '        plugins_dir=plugins_dir,\n'
-    '        skills_dir=skills_dir,\n'
-    '        role_cards_dir=role_cards_dir,\n'
-    '        collab_cards_dir=collab_cards_dir,\n'
-    '        model_cards_dir=model_cards_dir,\n'
-    '        mgmt_port=mgmt_port,\n'
-    '        stall_thresh=stall_thresh,\n'
-    '        syscfg=syscfg,\n'
-    '        logger=logger,\n'
-    '        read_json=read_json,\n'
-    '        chk_port=chk_port,\n'
-    '        res_disc_port=res_disc_port,\n'
-    '        cln_reg=cln_reg,\n'
-    '        appl_def=appl_def,\n'
-    '        val_cfg=val_cfg,\n'
-    '        disc_agents=disc_agents,\n'
-    '        disc_plug_svcs=disc_plug_svcs,\n'
-    '        AgentProcess=AgentProcess,\n'
-    '        PluginServiceProcess=PluginServiceProcess,\n'
-    '    )\n'
-    '\n'
+    "    from http.server import ThreadingHTTPServer\n"
+    "    import threading\n"
+    "\n"
+    "    Handler = create_management_handler(\n"
+    "        procesos=procesos,\n"
+    "        plug_svcs=plug_svcs,\n"
+    "        task_hb=task_hb,\n"
+    "        task_sn=task_sn,\n"
+    "        shut_ev=shut_ev,\n"
+    "        ws_mig=ws_mig,\n"
+    "        agents_dir=agents_dir,\n"
+    "        plugins_dir=plugins_dir,\n"
+    "        skills_dir=skills_dir,\n"
+    "        role_cards_dir=role_cards_dir,\n"
+    "        collab_cards_dir=collab_cards_dir,\n"
+    "        model_cards_dir=model_cards_dir,\n"
+    "        mgmt_port=mgmt_port,\n"
+    "        stall_thresh=stall_thresh,\n"
+    "        syscfg=syscfg,\n"
+    "        logger=logger,\n"
+    "        read_json=read_json,\n"
+    "        chk_port=chk_port,\n"
+    "        res_disc_port=res_disc_port,\n"
+    "        cln_reg=cln_reg,\n"
+    "        appl_def=appl_def,\n"
+    "        val_cfg=val_cfg,\n"
+    "        disc_agents=disc_agents,\n"
+    "        disc_plug_svcs=disc_plug_svcs,\n"
+    "        AgentProcess=AgentProcess,\n"
+    "        PluginServiceProcess=PluginServiceProcess,\n"
+    "    )\n"
+    "\n"
     '    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)\n'
-    '    t = threading.Thread(target=server.serve_forever, daemon=True,\n'
+    "    t = threading.Thread(target=server.serve_forever, daemon=True,\n"
     '                         name="launcher-mgmt-server")\n'
-    '    t.start()\n'
+    "    t.start()\n"
     '    logger.info(f"[Launcher] Management server started on port {port}")\n'
 )
 

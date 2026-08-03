@@ -13,7 +13,6 @@ import requests
 import websockets
 
 from opensquad import bus
-from opensquad.input_hub import input_hub
 from opensquad.message_queue import message_queue
 from opensquad.system_config import syscfg
 
