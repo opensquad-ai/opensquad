@@ -169,6 +169,7 @@ from opensquad.launcher.process_manager import (
     _read_json,
     _resolve_discovery_port,
     check_port_conflict,
+    set_process_tables,
 )
 
 # Workspace migration background task status table (shared across requests)
@@ -4505,6 +4506,39 @@ def _shutdown_all():
             pass
 
 
+def _ensure_single_launcher(port: int) -> bool:
+    """Exit when another healthy launcher already owns the management port.
+
+    Dual-launcher instances (e.g. uv-tools opensquad and anaconda editable
+    install both spawning launcher_main.py) share the runtime registry and
+    kill each other's agents as "stale" — a 60s kill/restart loop. The second
+    instance probes the port and steps aside instead of fighting for it.
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            pass
+    except OSError:
+        return True  # port free — we are the owner
+
+    # Port occupied: verify it is really a launcher before stepping aside.
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/workspace", timeout=3.0) as r:
+            if r.status == 200 and "workspace" in r.read().decode("utf-8", "ignore"):
+                _log.warning(
+                    f"[Launcher] Another launcher already owns port {port}; "
+                    "exiting (avoid dual-instance agent management)."
+                )
+                return False
+    except Exception:
+        pass
+    # Occupied by an unknown service — let the bind fail naturally.
+    return True
+
+
 def main():
     # Phase 1-2: Workspace + logging
     _init_workspace()
@@ -4513,8 +4547,18 @@ def main():
     # Phase 3: Args + agent discovery
     args, agents_info = _parse_args_and_discover_agents()
 
+    # Single-instance guard: a second launcher (different python install)
+    # must not register agents or start management on an owned port.
+    if not _ensure_single_launcher(args.mgmt_port):
+        return
+
     # Phase 4: Process table
     _register_process_table(agents_info)
+    # Inject our process tables into process_manager so its cleanup/stale
+    # logic sees the agents we manage. This was never wired up: without it,
+    # process_manager._processes stays empty and _cleanup_runtime_registry
+    # treats every live agent/plugin as stale and kills it (~60s loop).
+    set_process_tables(_processes, _plugin_services)
 
     # Phase 5-6: Background services + node registration
     _start_background_services(args.mgmt_port)
