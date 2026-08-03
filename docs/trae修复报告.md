@@ -229,3 +229,33 @@
 - `session_dispatcher.py` L89-104 clone 共享
 - `runner.py` L152-166 `config_data` 参数；L257-262 配置复用
 - `model_config.py` L62-66 `prompt_cache` 字段；L139 from_dict
+
+---
+
+## 附录：双 launcher / stale 杀循环 专项排查记录（2026-08-03 第二轮实测）
+
+> 背景：`opensquad web` 冷启动实测时发现 agent305 陷入"启动 → ~60s 被当 stale 杀 → 重启"循环。
+> 结论：**两层根因，均为历史遗留，非本次 15 项优化引入**；已修复并验证。
+
+### 根因 1：`set_process_tables()` 从未接线（致命）
+
+- `process_manager.py` 维护自己的 `_processes` / `_plugin_services`，并提供 `set_process_tables()` 注入接口（注释 "called once at startup"）
+- **`launcher_main.py` 从无调用**（git 历史确认）：`_cleanup_runtime_registry` 的 `managed` 判定使用 process_manager 的空 dict → **恒 False** → 任何 registry 中的存活 agent/plugin 都被当作 "previous run 残留" 杀掉
+- 之前未暴露：清理仅在 `runtime/list` 被调用时触发；前端轮询后触发即中招
+- **修复**：`_register_process_table` 后注入 `set_process_tables(_processes, _plugin_services)`（同一 dict 对象引用，后续修改可见）
+
+### 根因 2：双 launcher 实例（uv + anaconda）
+
+- `anaconda3/Scripts/opensquad.exe` 的 shebang 实际指向 **uv tools 的 python**；anaconda editable 安装是另一套入口 → 两套 gateway+launcher 并存
+- 两个 launcher 共享 runtime registry → 互相把对方的 agent 当 stale 杀
+- **修复**：`_ensure_single_launcher()` —— 启动时探测管理端口，已被健康 launcher 占用则直接退出
+
+### 验证（修复后）
+
+| 项 | 结果 |
+|---|---|
+| :9600 监听者 | 唯一（159552） |
+| agent305 存活 | **90s+ 稳定**（修复前 ~60s 必被杀） |
+| stale 杀记录 | 0 |
+| 全量回归 | 839 passed / 44 failed（与基线一致，零新增） |
+| 提交 | `e17913c`（dev + main 已同步推送） |
