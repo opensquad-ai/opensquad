@@ -260,10 +260,8 @@ scripts/_fix_pth.py
 #    uses its own lockfile and we don't pin them in source control) ──
 src/plugins/*/ui/package-lock.json
 
-# ── nexuschat-pro package-lock (platform-specific optional deps like
-#    @rollup/rollup-{win32,linux}-x64 make it non-portable across OSes;
-#    use `npm install --no-package-lock` in CI instead) ──
-src/opensquad/gateway/nexuschat-pro/package-lock.json
+# ── nexuschat-pro package-lock: committed as of v0.8.6 (npm v3 lockfiles are
+#    cross-platform; the Docker frontend stage and npm ci require it). ──
 
 # ── local tooling / workspace scratch ──
 .zcode/
