@@ -325,9 +325,9 @@ class AgentRunner:
         # Restore last process's cumulative stats from disk on startup, preventing stats from resetting after restart
         self._restore_cumulative_stats()
 
-        # Write token_stats.json once on startup (based on already-loaded history session)
-        # This allows the Launcher management panel to immediately display the progress bar without waiting for the first conversation
-        self._broadcast_token_stats_sync()
+        # Token stats file is now written in the background once the event loop
+        # is running (see run()): doing it synchronously here cost 0.5-1s of
+        # full-history tiktoken encoding on the boot critical path.
 
         # ── Startup readiness: buffer pre-ready messages ──
         self._agent_ready = False
@@ -776,6 +776,15 @@ class AgentRunner:
 
     async def run(self, initial_query: str | None = None, **kwargs):
         """Start and run the agent - continuous conversation mode (parallel multi-session)."""
+        # Background token stats (full-history tiktoken encoding, ~0.5-1s) no
+        # longer blocks boot: the management panel gets token_stats.json as soon
+        # as the worker finishes, while the runner starts consuming immediately.
+        try:
+            import asyncio as _asyncio
+
+            _asyncio.create_task(_asyncio.to_thread(self._broadcast_token_stats_sync))
+        except Exception:
+            pass
         import os as _os_env
 
         use_parallel = _os_env.environ.get("OPENSQUAD_PARALLEL_SESSIONS", "1").strip() not in (

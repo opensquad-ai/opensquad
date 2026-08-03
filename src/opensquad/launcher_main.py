@@ -156,6 +156,9 @@ BOOT_MODULE = "opensquad.agents_boot"
 _RUNTIME_LIST_TTL_S = 5.0
 _runtime_list_cache_at: float = 0.0
 _runtime_list_cache_result: dict | None = None
+_AGENTS_LIST_TTL_S = 5.0
+_agents_list_cache_at: float = 0.0
+_agents_list_cache_result: dict | None = None
 from opensquad.launcher.process_manager import (
     MANAGEMENT_PORT,
     MAX_RESTART_ATTEMPTS,
@@ -1054,7 +1057,15 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
         # ── handlers ──
 
         def _handle_list_agents(self):
-            """Return all discovered agents and their process status"""
+            """Return all discovered agents and their process status.
+
+            5s TTL cache: the web UI polls this endpoint and every call used to
+            read token_stats.json + profile.json per agent from disk.
+            """
+            global _agents_list_cache_at, _agents_list_cache_result
+            now = time.monotonic()
+            if _agents_list_cache_result is not None and now - _agents_list_cache_at < _AGENTS_LIST_TTL_S:
+                return self._send_json(_agents_list_cache_result)
             result = []
             for name, ap in _processes.items():
                 info = ap.get_status()
@@ -1115,7 +1126,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 else:
                     item["model_card"] = None
 
-            self._send_json({"agents": result})
+            _agents_list_cache_at = time.monotonic()
+            _agents_list_cache_result = {"agents": result}
+            self._send_json(_agents_list_cache_result)
 
         def _handle_start(self, name: str):
             """Start the specified agent"""

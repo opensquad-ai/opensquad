@@ -1023,6 +1023,14 @@ async def main(agent_dir: str, override_port: int | None = None):
     _early_runner = early_runner_artifacts.runner
     _runner_task = early_runner_artifacts.runner_task
 
+    # Prewarm the built-in tool schemas IMMEDIATELY (chat-ready is already
+    # live): if the user sends the first message before the extension phase
+    # finishes, _setup_prompt would otherwise import all lazy tool modules and
+    # build schemas on the event loop (1-3s). Plugin schemas are rebuilt after
+    # extensions finish (_post_extension prewarms again; the registry cache is
+    # invalidated on register, so the second run covers plugin tools).
+    asyncio.create_task(_prewarm_tool_schema(tool_registry, agent_logger))
+
     # Register model-switch ASAP — early runner already consumes WS commands.
     # Waiting until after plugins/MCP used to leave `_runner is None` when boot
     # was cancelled mid-way (UI: switch snaps back to default after ~1s).
