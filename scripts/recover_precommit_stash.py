@@ -42,11 +42,7 @@ def find_patches() -> list[str]:
     d = cache_dir()
     if not os.path.isdir(d):
         return []
-    return sorted(
-        os.path.join(d, f)
-        for f in os.listdir(d)
-        if f.startswith("patch") and not f.endswith(".json")
-    )
+    return sorted(os.path.join(d, f) for f in os.listdir(d) if f.startswith("patch") and not f.endswith(".json"))
 
 
 def patch_files(path: str) -> list[str]:
@@ -95,8 +91,10 @@ def main() -> int:
     if lost_total == 0:
         print("\n[recover] OK — no lost changes detected (all patch content is already in git).")
     else:
-        print(f"\n[recover] {lost_total} file(s) were missing; "
-              + ("restored." if args.apply else "run with --apply to restore."))
+        print(
+            f"\n[recover] {lost_total} file(s) were missing; "
+            + ("restored." if args.apply else "run with --apply to restore.")
+        )
     return 0
 
 

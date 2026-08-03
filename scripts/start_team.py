@@ -68,7 +68,7 @@ def run_command_in_new_window(cmd, title):
     else:  # Linux
         try:
             os.system(f'gnome-terminal --title="{title}" -- {cmd}')
-        except:
+        except Exception:
             print(f"    (Linux GUI terminal not detected, running in background: {title})")
             import subprocess
 

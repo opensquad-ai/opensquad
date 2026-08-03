@@ -729,9 +729,7 @@ class ChatAPI:
             if _tool_calls_for_session:
                 _sm.sync_tool_call_message(
                     _tool_calls_for_session,
-                    content=(
-                        last_msg.get("content") if _mode == "amended_existing_assistant" else None
-                    ),
+                    content=(last_msg.get("content") if _mode == "amended_existing_assistant" else None),
                     reasoning_content=(
                         last_msg.get("reasoning_content") if _mode == "amended_existing_assistant" else None
                     ),
@@ -1874,9 +1872,7 @@ class ChatAPI:
                         "[ChatAPI] FAILED to inject reasoning_content: no assistant message with tool_calls found"
                     )
                 else:
-                    logger.debug(
-                        "[ChatAPI] reasoning_content not injected (no assistant message in conversation yet)"
-                    )
+                    logger.debug("[ChatAPI] reasoning_content not injected (no assistant message in conversation yet)")
 
         # DEBUG: log message sequence before API call
         if logger.isEnabledFor(logging.DEBUG):

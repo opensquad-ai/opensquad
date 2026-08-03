@@ -3,6 +3,20 @@
 # Run all:  pre-commit run --all-files
 
 repos:
+  # ── Guard: never commit with unstaged changes ──────────────────
+  # pre-commit stashes unstaged files during the hook run; if a hook
+  # auto-modifies files (ruff --fix) the restore can fail and the unstaged
+  # work is silently dropped (recoverable via scripts/recover_precommit_stash.py).
+  # Failing fast here keeps that stash path from ever triggering.
+  - repo: local
+    hooks:
+      - id: no-unstaged
+        name: reject commits with unstaged changes
+        entry: python scripts/check_no_unstaged.py
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.15
     hooks:

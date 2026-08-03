@@ -2801,10 +2801,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             """
             global _runtime_list_cache_at, _runtime_list_cache_result
             now = time.monotonic()
-            if (
-                _runtime_list_cache_result is not None
-                and now - _runtime_list_cache_at < _RUNTIME_LIST_TTL_S
-            ):
+            if _runtime_list_cache_result is not None and now - _runtime_list_cache_at < _RUNTIME_LIST_TTL_S:
                 return self._send_json(_runtime_list_cache_result)
 
             cleanup = _cleanup_runtime_registry(force_kill=False)

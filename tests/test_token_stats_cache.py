@@ -47,7 +47,7 @@ def runner(monkeypatch):
     r = _make_runner()
     # Count real recomputes by wrapping compute_token_breakdown
     calls = {"n": 0}
-    real = runner_module.token_breakdown.compute_token_breakdown if hasattr(runner_module, "token_breakdown") else None
+    runner_module.token_breakdown.compute_token_breakdown if hasattr(runner_module, "token_breakdown") else None
     import opensquad.token_breakdown as tb
 
     def fake_compute(*a, **kw):
@@ -71,10 +71,7 @@ async def test_second_call_within_ttl_uses_cache(runner, monkeypatch):
 
 
 async def test_cached_call_still_broadcasts(runner):
-    from opensquad import bus
-
     emitted = []
-    original = bus.emit_async
 
     async def spy_emit(event_type, data):
         emitted.append((event_type, data))

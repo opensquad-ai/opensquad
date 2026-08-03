@@ -358,7 +358,7 @@ class SystemHandlerMixin:
         try:
             import json as _json
 
-            raw = body if isinstance(body, (bytes, bytearray, str)) else b""
+            raw = body if isinstance(body, bytes | bytearray | str) else b""
             data = _json.loads(raw or b"{}") if raw else {}
             title = (data.get("title") or "").strip()
         except Exception:

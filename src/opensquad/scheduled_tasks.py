@@ -57,7 +57,7 @@ def _compute_next_ts(schedule: dict[str, Any]) -> float | None:
     rtype = schedule.get("type", "once")
     if rtype == "once":
         ts = schedule.get("run_at_ts")
-        if isinstance(ts, (int, float)) and ts > now.timestamp():
+        if isinstance(ts, int | float) and ts > now.timestamp():
             return float(ts)
         return None
     if rtype == "daily":

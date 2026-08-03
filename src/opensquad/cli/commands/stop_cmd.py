@@ -399,7 +399,6 @@ def _taskkill_pid(pid: int) -> bool:
         return False
 
 
-
 def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
     """Kill OpenSQuad processes via process tree walk (Windows).
 

@@ -255,11 +255,10 @@ def ensure_lazy_routers(app: Any | None = None) -> None:
             # appended via include_router() would land AFTER it and be
             # shadowed (404). Insert the lazy routes before the first Mount
             # instead, preserving the import-time ordering.
-            from starlette.routing import Mount
-
             # Bake the /api/ai-web prefix into copies via a temp router
             # (raw route objects carry no prefix).
             from fastapi import APIRouter
+            from starlette.routing import Mount
 
             _lazy_api = APIRouter(prefix="/api/ai-web")
             _lazy_api.include_router(admin_router)

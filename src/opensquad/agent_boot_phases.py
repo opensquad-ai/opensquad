@@ -473,7 +473,7 @@ class AgentBootPhases:
             skill_count=len(skills),
         )
 
-        t_mem = __import__("time").perf_counter()
+        __import__("time").perf_counter()
         # ── Long-memory init moved OFF the chat-ready critical path ──
         # Importing the agent_memory package pulls in scipy (~760ms) + storage
         # modules (~1.6s total). It previously blocked the event loop (delaying

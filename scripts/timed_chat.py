@@ -25,7 +25,7 @@ def login() -> str:
     password = os.environ.get("SMOKE_PASSWORD", "smoke-pass-123")
     t0 = now()
     status = requests.get(f"{GATEWAY}/api/auth/registration-status", timeout=10).json()
-    t_reg_status = now() - t0
+    now() - t0
     t0 = now()
     if status.get("registration_open") and email == "smoke@test.local":
         r = requests.post(

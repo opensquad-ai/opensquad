@@ -308,7 +308,7 @@ class SessionManager:
             # regress below a seq already recorded in data (e.g. data replayed
             # from a log written by an earlier process run).
             data_seq = data.get("_save_seq") or 0
-            if isinstance(data_seq, (int, float)):
+            if isinstance(data_seq, int | float):
                 self._save_seq = max(self._save_seq, int(data_seq))
             self._save_seq += 1
             data["_save_seq"] = self._save_seq
@@ -492,7 +492,7 @@ class SessionManager:
         if not sid:
             return
         data_seq = data.get("_save_seq") or 0
-        if isinstance(data_seq, (int, float)):
+        if isinstance(data_seq, int | float):
             self._save_seq = max(self._save_seq, int(data_seq))
         self._save_seq += 1
         data["_save_seq"] = self._save_seq

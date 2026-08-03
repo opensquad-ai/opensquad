@@ -292,8 +292,21 @@ class ContextBuilder:
             if mode == MODE_PLAN:
                 _query = str(last_user_input or "").strip()
                 _EXEC_HINTS = (
-                    "启动", "运行", "执行", "部署", "安装", "修改", "创建", "删除",
-                    "测试", "重启", "搭建", "实现", "编写", "生成报告", "优化并实施",
+                    "启动",
+                    "运行",
+                    "执行",
+                    "部署",
+                    "安装",
+                    "修改",
+                    "创建",
+                    "删除",
+                    "测试",
+                    "重启",
+                    "搭建",
+                    "实现",
+                    "编写",
+                    "生成报告",
+                    "优化并实施",
                 )
                 _hits = [k for k in _EXEC_HINTS if k in _query]
                 if _hits and "PLAN_EXECUTION_NUDGE" not in dynamic_parts:
