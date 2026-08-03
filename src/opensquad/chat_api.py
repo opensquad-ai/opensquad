@@ -1464,6 +1464,12 @@ class ChatAPI:
                                     num_tokens += 120
                             # Claude tool_result / Gemini functionResponse / tool_use
                             num_tokens += count_multimodal_content_tokens(value, self.encoding)
+                    elif key == "reasoning_content" and isinstance(value, str):
+                        # Thinking text uploads with the message (DeepSeek V4
+                        # requires it on follow-up turns) and counts toward the
+                        # provider's input tokens; previously skipped (~2.5%
+                        # undercount on the 151735_a7s7 session).
+                        num_tokens += len(self.encoding.encode(value))
                     elif key == "tool_calls" and isinstance(value, list):
                         from opensquad.token_breakdown import tool_fn_text
 
@@ -1535,6 +1541,11 @@ class ChatAPI:
                         elif item.get("type") in ("audio_url", "video_url"):
                             num_tokens += 120
                     num_tokens += count_multimodal_content_tokens(value, self.encoding)
+            elif key == "reasoning_content" and isinstance(value, str):
+                # Thinking text uploads with the message (DeepSeek V4 requires
+                # it on follow-up turns) and counts toward the provider's input
+                # tokens; previously skipped (~2.5% undercount).
+                num_tokens += len(self.encoding.encode(value))
             elif key == "tool_calls" and isinstance(value, list):
                 from opensquad.token_breakdown import tool_fn_text
 
