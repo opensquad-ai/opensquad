@@ -7,10 +7,13 @@
 FROM node:20-slim AS frontend-build
 
 WORKDIR /build
-COPY src/opensquad/gateway/nexuschat-pro/package.json src/opensquad/gateway/nexuschat-pro/package-lock.json ./
-# npm ci has a known optional-dependencies bug (npm/cli#4828) that skips
-# platform binaries like @rollup/rollup-linux-x64-gnu; npm install with the
-# committed lockfile installs them correctly and still pins versions.
+# The committed package-lock.json is generated on Windows and only records
+# win32 optional deps (npm keeps only the current platform's binaries in the
+# lock's packages section), so npm ci/install cannot install
+# @rollup/rollup-linux-x64-gnu inside the Linux image. Install from
+# package.json instead (versions pinned by semver); the lockfile stays for
+# reproducible local/CI installs on Windows.
+COPY src/opensquad/gateway/nexuschat-pro/package.json ./
 RUN npm install --ignore-scripts
 
 COPY src/opensquad/gateway/nexuschat-pro/ ./
