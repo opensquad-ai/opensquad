@@ -2152,7 +2152,7 @@ async def upload_file(
     import hashlib
 
     upload_dir = Path(UPLOAD_DIR)
-    file_hash = hashlib.md5(f"{file.filename}{datetime.now()}".encode()).hexdigest()[:16]
+    file_hash = hashlib.md5(f"{file.filename}{datetime.now()}".encode(), usedforsecurity=False).hexdigest()[:16]
     ext = os.path.splitext(file.filename)[1]
     new_filename = f"{file_hash}{ext}"
     if folder_path:
@@ -2185,7 +2185,7 @@ async def upload_folder_as_zip(files: list[UploadFile] = File(...), current_user
 
     upload_dir = Path(UPLOAD_DIR)
     folder_name = files[0].filename.split("/")[0] if files and "/" in files[0].filename else "folder"
-    zip_filename = f"{folder_name}_{hashlib.md5(f'{folder_name}{datetime.now()}'.encode()).hexdigest()[:16]}.zip"
+    zip_filename = f"{folder_name}_{hashlib.md5(f'{folder_name}{datetime.now()}'.encode(), usedforsecurity=False).hexdigest()[:16]}.zip"
     zip_path = upload_dir / zip_filename
     file_list = []
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:

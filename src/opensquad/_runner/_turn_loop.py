@@ -820,7 +820,7 @@ class TurnLoop:
                 _fp_parts = []
                 for _t in _tool_results:
                     _fp_parts.append(
-                        f"{_t['name']}|{_t['args_json']}|{hashlib.md5(str(_t['result_text']).encode('utf-8', errors='replace')).hexdigest()[:8]}"
+                        f"{_t['name']}|{_t['args_json']}|{hashlib.md5(str(_t['result_text']).encode('utf-8', errors='replace'), usedforsecurity=False).hexdigest()[:8]}"
                     )
                 _fp = ";;".join(_fp_parts)
                 _sid_key = str(getattr(self.runner, "_turn_sid", "") or "")

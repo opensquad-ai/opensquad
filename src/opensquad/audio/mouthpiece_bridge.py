@@ -140,7 +140,7 @@ class MouthpieceSession:
         spoken = sanitize_for_tts(raw) or raw.strip()
         if not spoken:
             return
-        fp = hashlib.md5(spoken.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        fp = hashlib.md5(spoken.encode("utf-8", errors="ignore"), usedforsecurity=False).hexdigest()[:16]
         if fp in self._recent_fps:
             return
         self._recent_fps.append(fp)

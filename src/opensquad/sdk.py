@@ -48,7 +48,7 @@ class AgentConfig:
     gateway_url: str  # Gateway WebSocket address
     agent_id: str  # unique agent ID
     agent_name: str  # display name
-    agent_type: str  # type: coder/writer/analyst
+    agent_type: str  # agent type: coder/writer/analyst
     capabilities: list[str]  # capability list
     description: str = ""  # description
     node_id: str = ""  # node ID (passed in via AgentConfig for multi-node deployments)
@@ -346,8 +346,8 @@ class BaseAgent:
 
     async def _handle_chat(self, data: dict):
         """Handle chat message (subclasses should override this method)."""
-        user_id = data.get("user_id")
-        content = data.get("content")
+        user_id = data.get("user_id") or ""
+        content = data.get("content") or ""
         data.get("history", [])
 
         logger.info(f"Received chat from {user_id}: {content}")

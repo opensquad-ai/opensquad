@@ -27,7 +27,7 @@ def _run_cmd(cmd: list[str], cwd: str, log_file) -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
-            shell=_IS_WINDOWS,
+            shell=_IS_WINDOWS,  # nosec B602 - intentional: Windows needs shell for tool probes
         )
         for line in proc.stdout:
             log_file.write(line)
@@ -60,7 +60,10 @@ class PluginBuilder:
             for tool in ["node", "pnpm"]:
                 try:
                     r = subprocess.run(
-                        [tool, "--version"], capture_output=True, text=True, shell=_IS_WINDOWS, timeout=10
+                        [tool, "--version"],
+                        capture_output=True,
+                        text=True,
+                        shell=_IS_WINDOWS,  # nosec B602 - intentional: Windows needs shell for tool probes timeout=10
                     )
                     results[tool] = r.returncode == 0
                     results[f"{tool}_version"] = r.stdout.strip() if r.returncode == 0 else None
