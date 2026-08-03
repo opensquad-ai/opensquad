@@ -702,14 +702,13 @@ async def _initialize_extension_runtime_background(
 ) -> None:
     """Load plugins/skills/memory/context after the chat entrypoint is live."""
     try:
-        # Plugin discovery + tool registration is GIL/disk heavy (~1.8s for 12
-        # plugins) and runs entirely off the event loop: discover_and_load
-        # imports plugin modules and register_tools_to_agent writes schemas.
-        # ToolRegistry methods are lock-protected, so running this on a worker
-        # thread keeps the loop free for the already-started early runner to
-        # consume input_hub without stalling ("online but chat frozen").
-        plugin_runtime = await asyncio.to_thread(
-            BOOT_PHASES.initialize_plugin_runtime,
+        # Plugin loading stays on the event loop: several plugins (e.g.
+        # reminder) call asyncio.get_running_loop() in on_load, which cannot
+        # work on a worker thread (no running loop there). The earlier
+        # asyncio.to_thread attempt caused "no running event loop" failures
+        # and was reverted (same correctness-over-throughput decision as the
+        # async session archive). The manifest write dedup stays.
+        plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
             config=config,
             agent_dir=agent_dir,
             project_root=syscfg.get_workspace(),
