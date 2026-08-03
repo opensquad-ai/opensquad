@@ -79,26 +79,52 @@ if TYPE_CHECKING:
 # ── Lazy module references (P2-1) ────────────────────────────────────────
 # collab_board (~0.44s), agent_sessions (~1.53s) and sessions are heavy
 # imports that used to run at module load, delaying the gateway's first bind.
-# PEP 562 __getattr__ defers them until first use; the resolved binding is
-# cached on the module so subsequent access is a plain attribute hit.
-def __getattr__(name: str):
-    if name == "async_get_agent_session_reader":
-        from ..agent_sessions import async_get_reader as _reader
+#
+# NOTE: PEP 562 __getattr__ does NOT work here — it only fires on attribute
+# access (module.attr), while route handlers reference these names via plain
+# globals (LOAD_GLOBAL), which never consults __getattr__ (raised NameError
+# in agent_session_list). Explicit module-level proxy objects keep the import
+# deferred AND make the names resolvable from function bodies.
+class _LazyImport:
+    """Deferred import proxy: resolves on first call / attribute access."""
 
-        globals()[name] = _reader
-        return _reader
-    if name == "gateway_session_cache":
-        from ..sessions import gateway_session_cache as _cache
+    __slots__ = ("_attr", "_module", "_resolved")
 
-        globals()[name] = _cache
-        return _cache
-    if name.startswith("collab_board_"):
-        from opensquad import collab_board as _cb
+    def __init__(self, module: str, attr: str):
+        self._module = module
+        self._attr = attr
+        self._resolved = None
 
-        _func = getattr(_cb, name[len("collab_board_") :])
-        globals()[name] = _func
-        return _func
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    def _get(self):
+        if self._resolved is None:
+            import importlib
+
+            self._resolved = getattr(importlib.import_module(self._module), self._attr)
+        return self._resolved
+
+    def __call__(self, *args, **kwargs):
+        return self._get()(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._get(), name)
+
+
+async_get_agent_session_reader = _LazyImport("app.ai_web.agent_sessions", "async_get_reader")
+gateway_session_cache = _LazyImport("app.ai_web.sessions", "gateway_session_cache")
+for _cb_name in (
+    "append_public_discussion",
+    "create_task",
+    "delete_item",
+    "delete_task",
+    "list_items",
+    "list_plan_snapshots",
+    "list_tasks",
+    "save_plan_snapshot",
+    "update_task",
+    "upsert_item",
+):
+    globals()[f"collab_board_{_cb_name}"] = _LazyImport("opensquad.collab_board", _cb_name)
+del _cb_name
 
 
 def _normalize_session_message(msg: dict) -> dict:
