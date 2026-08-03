@@ -284,7 +284,7 @@ def main():
     # ── web (browser UI — auto-starts services) ──
     p_web = sub.add_parser(
         "web",
-        help="Open Web UI (auto-starts services + Vite if needed)",
+        help="Open Web UI (auto-starts services; built static UI preferred)",
     )
     _add_gateway_flag(p_web)
     p_web.add_argument(
@@ -296,6 +296,11 @@ def main():
         "--no-browser",
         action="store_true",
         help="Print URL only; do not open a browser",
+    )
+    p_web.add_argument(
+        "--dev",
+        action="store_true",
+        help="Use the Vite dev server instead of the built static UI (requires npm)",
     )
 
     # ── chat / shell (Claude-Code-like interactive UI) ──

@@ -163,6 +163,7 @@ class AgentRunner:
         session_manager=None,
         state_manager=None,
         agent_context=None,
+        config_data: dict | None = None,
     ):
         global _active_runner
         _active_runner = self
@@ -253,9 +254,13 @@ class AgentRunner:
         self._dynamic_context_prefix = ""
 
         # Tool Call Strategy Selection — must be initialized BEFORE ContextBuilder
-        # Load config to determine tool call mode (XML vs Native Function Calling)
+        # Load config to determine tool call mode (XML vs Native Function Calling).
+        # Prefer the already-loaded/validated config dict passed by the boot
+        # path; fall back to reading config_path only when it is not provided.
         _tool_strategy_config = {}
-        if config_path and _os.path.isfile(config_path):
+        if config_data is not None:
+            _tool_strategy_config = config_data
+        elif config_path and _os.path.isfile(config_path):
             try:
                 with open(config_path, encoding="utf-8") as f:
                     _tool_strategy_config = json.load(f)

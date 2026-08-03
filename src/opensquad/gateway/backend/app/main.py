@@ -189,11 +189,18 @@ cors_config = config.get("backend", {}).get("cors", {})
 _app_ready_lite = False
 _app_ready = False
 
+# DB table creation runs in the background so the TCP port + ready_lite become
+# available earlier; DB-backed lite endpoints wait on this event.
+_db_ready: asyncio.Event | None = None
+_db_task: asyncio.Task | None = None
+
 _LITE_HTTP_PREFIXES = (
     "/health",
     "/api/auth",
+    "/api/groups",
     "/api/ai-web/admin",
     "/api/ai-web/nodes",
+    "/api/ai-web/agents",
     "/api/ai-web/agent-sessions",
     "/api/launcher",
 )
@@ -219,6 +226,28 @@ class ReadinessMiddleware:
         if not _app_ready:
             path = scope.get("path", "")
             if _app_ready_lite and _path_allowed_lite(path):
+                # ready_lite is set as soon as the background DB init is
+                # scheduled; DB-backed lite endpoints wait here so they never
+                # touch uninitialized tables.
+                if _db_ready is not None and not _db_ready.is_set():
+                    try:
+                        await asyncio.wait_for(_db_ready.wait(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        _startup_log.warning(f"ReadinessMiddleware: DB not ready in 15s, 503 for {path}")
+                        await send(
+                            {
+                                "type": "http.response.start",
+                                "status": 503,
+                                "headers": [(b"content-type", b"text/plain")],
+                            }
+                        )
+                        await send(
+                            {
+                                "type": "http.response.body",
+                                "body": b"Database not ready yet, please retry in a few seconds",
+                            }
+                        )
+                        return
                 await self.app(scope, receive, send)
                 return
             # Allow health check to pass even before ready
@@ -275,7 +304,7 @@ class LazyRoutesMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management"""
-    global _app_ready_lite, _app_ready
+    global _app_ready_lite, _app_ready, _db_ready, _db_task
     _startup_log.info("Backend starting up...")
     # P2-9: warm the default ThreadPoolExecutor now so the first WS connection
     # does not pay thread-creation latency (~80ms on Windows) on its
@@ -310,9 +339,22 @@ async def lifespan(app: FastAPI):
         _agent_registry.ensure_liveness_loop(asyncio.get_running_loop())
     except Exception as _e:
         _startup_log.warning(f"agent liveness sweeper start failed: {_e}")
-    # Initialize database on startup (create tables)
-    await init_db()
-    _startup_log.info("Database initialized")
+    # Initialize database in the background — the TCP port and ready-lite
+    # become available immediately; DB-backed lite endpoints wait on
+    # _db_ready in ReadinessMiddleware.
+    _db_ready = asyncio.Event()
+
+    async def _init_db_background() -> None:
+        try:
+            await init_db()
+            _startup_log.info("Database initialized")
+        except Exception as _db_e:
+            _startup_log.error(f"Database init failed: {_db_e}")
+        finally:
+            if _db_ready is not None:
+                _db_ready.set()
+
+    _db_task = asyncio.create_task(_init_db_background())
 
     # Phase 1 (fast): CLI / auth / agent admin can proceed
     _app_ready_lite = True
@@ -429,6 +471,12 @@ async def lifespan(app: FastAPI):
     _heavy_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await _heavy_task
+
+    # Cancel the background DB-init task if still running.
+    if _db_task is not None and not _db_task.done():
+        _db_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _db_task
 
     # Stop config watcher
     _config_watch_stop.set()

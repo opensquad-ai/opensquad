@@ -672,6 +672,22 @@ def _init_jieba_sync() -> None:
     jieba.initialize()  # builds the prefix dict (~1.3s first time, cached after)
 
 
+async def _prewarm_tool_schema(tool_registry: Any, agent_logger: logging.Logger) -> None:
+    """Pre-generate OpenAI tool schemas + prompt descriptions in the background.
+
+    The first turn would otherwise pay a one-time 1-3s cost importing the lazy
+    built-in tool modules and building the schema. Warming the caches right
+    after agent_ready moves that cost out of the first-round TTFT critical
+    path. Runs in a thread so the GIL-bound imports never block the event loop.
+    """
+    try:
+        await asyncio.to_thread(tool_registry.generate_openai_tools, "all")
+        await asyncio.to_thread(tool_registry.generate_tool_descriptions)
+        agent_logger.info("[Boot] Tool schema prewarmed")
+    except Exception as exc:
+        agent_logger.warning(f"[Boot] Tool schema prewarm skipped: {exc}")
+
+
 async def _initialize_extension_runtime_background(
     config: dict,
     agent_dir: str,
@@ -686,7 +702,14 @@ async def _initialize_extension_runtime_background(
 ) -> None:
     """Load plugins/skills/memory/context after the chat entrypoint is live."""
     try:
-        plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
+        # Plugin discovery + tool registration is GIL/disk heavy (~1.8s for 12
+        # plugins) and runs entirely off the event loop: discover_and_load
+        # imports plugin modules and register_tools_to_agent writes schemas.
+        # ToolRegistry methods are lock-protected, so running this on a worker
+        # thread keeps the loop free for the already-started early runner to
+        # consume input_hub without stalling ("online but chat frozen").
+        plugin_runtime = await asyncio.to_thread(
+            BOOT_PHASES.initialize_plugin_runtime,
             config=config,
             agent_dir=agent_dir,
             project_root=syscfg.get_workspace(),
@@ -1102,19 +1125,26 @@ async def main(agent_dir: str, override_port: int | None = None):
     print("  Extensions (plugins/skills/memory) loading in background")
     print("=" * 50 + "\n")
 
-    # 9. Let extensions finish before starting the group-chat bridge; the early
-    # runner is already live and can process chat while this background task runs.
-    await extension_task
+    # 9. Extensions finish in the background — the early runner is already live
+    # and can process chat while plugins/skills load (now off the event loop).
+    # The group-chat bridge, jieba and tool-schema prewarm run AFTER the
+    # extension phase completes so "plugins before bridge" ordering is kept
+    # without blocking the main coroutine on extension completion.
+    async def _post_extension():
+        try:
+            await extension_task
+        except Exception as _ext_e:
+            agent_logger.warning(f"[Boot] Extension task failed: {_ext_e}")
+        # P0-2: jieba dictionary build is GIL-bound (~1.3s). Starting it only
+        # after plugins/skills finish avoids GIL contention with plugin imports;
+        # it still completes long before the user's first chat.
+        asyncio.create_task(_prewarm_tokenizer(agent_logger))
+        asyncio.create_task(_prewarm_tool_schema(tool_registry, agent_logger))
+        # Start group-chat bridge after plugin init (MCP runs fully in the
+        # background now, so the bridge no longer waits for MCP servers).
+        BOOT_PHASES.start_group_chat_bridge(config, agent_logger, data_dir)
 
-    # P0-2: jieba dictionary build is GIL-bound (~1.3s) — starting it while the
-    # extension task is still importing plugins made plugin loading 7x slower
-    # (GIL contention). Start it only now that plugins/skills are done; it still
-    # finishes long before the user's first chat.
-    asyncio.create_task(_prewarm_tokenizer(agent_logger))
-
-    # Start group-chat bridge after plugin init (MCP runs fully in the
-    # background now, so the bridge no longer waits for MCP servers).
-    BOOT_PHASES.start_group_chat_bridge(config, agent_logger, data_dir)
+    asyncio.create_task(_post_extension())
 
     await BOOT_PHASES.await_runner_shutdown(
         early_runner=_early_runner,

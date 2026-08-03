@@ -201,8 +201,6 @@ When participating in multi-agent collaboration projects:
 2. **Known facts**: For definite facts or conclusions, you MUST cite the source of information (e.g., file path/line number, command output, documentation link) so the user can verify.
 3. **Speculative content**: If a statement is based on inference or experience, clearly label it as speculation. Never present guesses as facts.
 
-���
-
 {{include:parts/common_3._tools_skills.md}}
 {{include:parts/tool_fc_3.1_built-in_tools_mcp_tools.md}}
 {{include:parts/common_3.2_mcp_service_usage_guide.md}}

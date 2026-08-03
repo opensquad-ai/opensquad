@@ -88,6 +88,22 @@ def _clone_chat_api(base) -> Any:
                 api.stream_parser = stream_parser
             except Exception:
                 pass
+    # Share read-only resources with the root instance so a new session does
+    # not pay client/tokenizer cold-start: the AsyncOpenAI/httpx client is
+    # safe for concurrent reuse (httpx.AsyncClient is documented thread-safe)
+    # and the tiktoken encoding is immutable. Request state stays isolated.
+    try:
+        base_client = getattr(base, "client", None)
+        if base_client is not None and getattr(api, "client", None) is None:
+            api.client = base_client
+    except Exception:
+        pass
+    try:
+        base_encoding = getattr(base, "_encoding", None)
+        if base_encoding is not None and getattr(api, "_encoding", None) is None:
+            api._encoding = base_encoding
+    except Exception:
+        pass
     return api
 
 

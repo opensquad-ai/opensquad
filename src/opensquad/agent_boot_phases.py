@@ -139,8 +139,13 @@ class AgentBootPhases:
         boot_t0 = __import__("time").perf_counter()
         from opensquad.structured_log import perf_event
 
-        await self._setup_web_server(config, logger)
-        await self._setup_gateway_adapter(config, logger, boot_t0)
+        # _setup_web_server (uvicorn import + port probing) and
+        # _setup_gateway_adapter are independent — run them concurrently so
+        # gateway registration is not delayed by the web-server port scan.
+        await asyncio.gather(
+            self._setup_web_server(config, logger),
+            self._setup_gateway_adapter(config, logger, boot_t0),
+        )
         # NOTE: group-chat bridge is deliberately NOT started here. Boot-time
         # MCP/plugin init (anyio TaskGroups with deadlines) fires a cancel
         # storm across concurrently-running tasks on Python 3.12+; starting the
@@ -371,6 +376,7 @@ class AgentBootPhases:
             agent_context=agent_context,
             session_manager=session_manager,
             state_manager=state_manager,
+            config_data=config,
         )
         try:
             from opensquad.audio import realtime_manager as rtm

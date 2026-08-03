@@ -56,10 +56,17 @@ def _make_llm_http_client(timeout: float):
     (e.g. 127.0.0.1:17897) that is offline, httpx routes the request there
     and raises APIConnectionError. trust_env=False forces a direct
     connection, mirroring the Vite reverse-proxy client in main.py.
+
+    Phased timeouts: connect fails fast (~10s) instead of blocking on the
+    full read budget; read stays at the model-level timeout so long prefills
+    are not cut short.
     """
     import httpx as _httpx
 
-    return _httpx.AsyncClient(trust_env=False, timeout=timeout)
+    return _httpx.AsyncClient(
+        trust_env=False,
+        timeout=_httpx.Timeout(connect=10.0, read=timeout, write=30.0, pool=10.0),
+    )
 
 
 def _get_tiktoken():
@@ -162,6 +169,8 @@ class ChatAPI:
         self.is_video_model = config.is_video_model
         self.use_file_api = config.use_file_api
         self.file_api_size_threshold = config.file_api_size_threshold
+        # Explicit prompt-caching opt-in (OpenAI-compat providers only).
+        self._enable_prompt_cache = bool(getattr(config, "prompt_cache", False))
         # file_id cache: path -> file_id, avoids re-uploading the same file within a session
         self._file_id_cache: OrderedDict[str, str] = OrderedDict()  # path -> file_id LRU cache (max 1000)
         self.is_audio_output = config.is_audio_output
@@ -240,6 +249,12 @@ class ChatAPI:
             base_url=self.base_url,
             timeout=self.timeout,
             http_client=_make_llm_http_client(self.timeout),
+            # SDK default is 2 retries, which stacks on top of the 10s connect
+            # timeout and turns a dead endpoint into ~65s of blind waiting.
+            # Retries=0 keeps worst-case feedback ~20s (phase-1 C-6 target
+            # <30s); transient failures are covered by the runner/turn-level
+            # retry logic instead.
+            max_retries=0,
         )
 
     def _ensure_client(self):
@@ -1913,6 +1928,14 @@ class ChatAPI:
             request_params["frequency_penalty"] = self.frequency_penalty
         if self.presence_penalty != 0.0:
             request_params["presence_penalty"] = self.presence_penalty
+
+        # Prompt caching (OpenAI-compat): DeepSeek-compatible endpoints opt in
+        # via chat_template_kwargs.cache.use; OpenAI/other providers cache the
+        # stable system prefix automatically, so nothing is injected there.
+        if self._enable_prompt_cache and (self.base_url or "").lower().find("deepseek") != -1:
+            extra_body = dict(request_params.get("extra_body") or {})
+            extra_body["chat_template_kwargs"] = {"cache": {"use": True}}
+            request_params["extra_body"] = extra_body
 
         # Add tools parameter if provided (for Native Function Calling)
         if tools:

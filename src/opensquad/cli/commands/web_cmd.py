@@ -105,8 +105,15 @@ def run_web(args: Namespace) -> None:
 
     url: str | None = None
 
-    # Prefer Vite when available (dev); else Gateway-hosted static UI
-    if _port_open("127.0.0.1", vite_port) or (not no_start and _ensure_frontend(vite_port)):
+    # Prefer Vite only for development (--dev) or when the built frontend is
+    # missing; otherwise serve the built static UI directly from Gateway to
+    # avoid the 5-15s Vite cold start on every `opensquad web`.
+    dev_mode = bool(getattr(args, "dev", False))
+    vite_up = _port_open("127.0.0.1", vite_port)
+    dist_index = os.path.join(_repo_root(), "src", "opensquad", "gateway", "nexuschat-pro", "dist", "index.html")
+    use_vite = dev_mode or not os.path.isfile(dist_index)
+
+    if use_vite and (vite_up or (not no_start and _ensure_frontend(vite_port))):
         url = f"http://127.0.0.1:{vite_port}"
     elif _gateway_static_available(gateway_url):
         url = gateway_url.rstrip("/") + "/"

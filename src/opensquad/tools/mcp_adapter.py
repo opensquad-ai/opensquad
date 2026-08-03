@@ -174,7 +174,9 @@ class MCPAdapter:
             return
 
         server_names = list(self._server_configs.keys())
-        tasks = [asyncio.create_task(self._connect_server(name, self._server_configs[name])) for name in server_names]
+        tasks = [
+            asyncio.create_task(self._connect_server_guarded(name, self._server_configs[name])) for name in server_names
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for server_name, result in zip(server_names, results, strict=True):
             if isinstance(result, Exception | asyncio.CancelledError):
@@ -247,6 +249,21 @@ class MCPAdapter:
                 logger.info(f"[MCP:{server_name}] {text}")
         except Exception:
             pass
+
+    async def _connect_server_guarded(self, server_name: str, cfg: dict):
+        """Connect to a single MCP server with a hard per-server timeout.
+
+        A hung subprocess spawn/initialize must not stall full_ready forever;
+        on timeout the connection is dropped and left to the existing
+        background health-check + reconnect loop.
+        """
+        connect_timeout = max(5.0, float(cfg.get("timeout", 10)))
+        try:
+            await asyncio.wait_for(self._connect_server(server_name, cfg), timeout=connect_timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"MCP server '{server_name}' connection timed out after {connect_timeout:.0f}s"
+            ) from None
 
     async def _connect_server(self, server_name: str, cfg: dict):
         """Connect to a single MCP server (Custom Implementation avoiding stdio_client generator issues)"""
@@ -381,6 +398,13 @@ class MCPAdapter:
         except Exception as e:
             logger.error(f"[MCP] Failed to connect to '{server_name}': {e}")
             raise
+        finally:
+            # If the connection never registered successfully (failure or
+            # guarded timeout), close the AsyncExitStack so the spawned
+            # subprocess does not leak.
+            if server_name not in self._exit_stacks:
+                with suppress(Exception):
+                    await asyncio.shield(stack.aclose())
 
     def get_all_tools(self) -> list[dict[str, Any]]:
         """

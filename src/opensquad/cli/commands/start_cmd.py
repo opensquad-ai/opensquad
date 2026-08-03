@@ -416,8 +416,32 @@ def _wait_ports_ready(
         print(f"  \u274c {name}: port {port} FAILED to start ({max_wait:.0f}s timeout)")
 
 
+def _workspace_gateway_is_local(gateway_ip: str) -> bool:
+    """True when the workspace system_config.json already binds hosts.gateway to gateway_ip."""
+    try:
+        last_ws_file = os.path.join(os.path.expanduser("~"), ".opensquad", "last_workspace.json")
+        if not os.path.isfile(last_ws_file):
+            return False
+        with open(last_ws_file, encoding="utf-8") as f:
+            ws_path = json.load(f).get("last_workspace", "")
+        if not ws_path:
+            return False
+        cfg_path = os.path.join(ws_path, "system_config.json")
+        if not os.path.isfile(cfg_path):
+            return False
+        with open(cfg_path, encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+        return cfg.get("hosts", {}).get("gateway") == gateway_ip
+    except Exception:
+        return False
+
+
 def _setup_local_mode(_root):
-    """Apply local-mode config: hosts.gateway = 0.0.0.0 and create .env.local."""
+    """Apply local-mode config: hosts.gateway = 0.0.0.0 and create .env.local.
+
+    Idempotent: skips config rewrites and the workspace-config subprocess when
+    the target local-mode state already exists (saves 0.3-2s per CLI cold start).
+    """
     src_dir = os.path.join(_root, "src")
     cfg_path = os.path.join(src_dir, "system_config.json")
 
@@ -425,20 +449,24 @@ def _setup_local_mode(_root):
         try:
             with open(cfg_path, encoding="utf-8-sig") as f:
                 cfg = json.load(f)
-            cfg.setdefault("hosts", {})["gateway"] = "0.0.0.0"
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
-            print("[start] Local mode: hosts.gateway = 0.0.0.0")
+            if cfg.setdefault("hosts", {}).get("gateway") != "0.0.0.0":
+                cfg["hosts"]["gateway"] = "0.0.0.0"
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                print("[start] Local mode: hosts.gateway = 0.0.0.0")
         except Exception as e:
             print(f"[start] Warning: Failed to update system_config.json: {e}")
 
-    with contextlib.suppress(Exception):
-        subprocess.run(
-            [_find_python(), os.path.join(_root, "scripts", "update_workspace_config.py"), "0.0.0.0"],
-            cwd=_root,
-            capture_output=True,
-            timeout=10,
-        )
+    # Skip the update_workspace_config.py subprocess when the workspace config
+    # already binds hosts.gateway to the requested address.
+    if not _workspace_gateway_is_local("0.0.0.0"):
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                [_find_python(), os.path.join(_root, "scripts", "update_workspace_config.py"), "0.0.0.0"],
+                cwd=_root,
+                capture_output=True,
+                timeout=10,
+            )
 
     frontend_dir = os.path.join(_root, "src", "opensquad", "gateway", "nexuschat-pro")
     env_local = os.path.join(frontend_dir, ".env.local")
@@ -476,9 +504,13 @@ def _setup_local_mode(_root):
                     pass
         if gateway_port is None:
             gateway_port = 9555  # safe default
+        desired_env = f"VITE_BACKEND_HOST=127.0.0.1\nVITE_BACKEND_PORT={gateway_port}\n"
+        if os.path.isfile(env_local):
+            with open(env_local, encoding="utf-8") as f:
+                if f.read() == desired_env:
+                    return
         with open(env_local, "w", encoding="utf-8") as f:
-            f.write("VITE_BACKEND_HOST=127.0.0.1\n")
-            f.write(f"VITE_BACKEND_PORT={gateway_port}\n")
+            f.write(desired_env)
         print(f"[start] Created .env.local: VITE_BACKEND_HOST=127.0.0.1, VITE_BACKEND_PORT={gateway_port}")
     except Exception as e:
         print(f"[start] Warning: Failed to create .env.local: {e}")
