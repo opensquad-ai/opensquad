@@ -98,7 +98,7 @@ jobs:
             python-version: ${{ matrix.python-version }}
 
         - name: Sync dependencies with uv
-          run: uv sync --python ${{ matrix.python-version }}
+          run: uv sync --extra dev --python ${{ matrix.python-version }}
 
         - name: Verify opensquad imports
           run: uv run python -c "import opensquad; print('OK')"
@@ -126,7 +126,7 @@ jobs:
             python-version: ${{ matrix.python-version }}
 
         - name: Sync dependencies with uv
-          run: uv sync --python ${{ matrix.python-version }}
+          run: uv sync --extra dev --python ${{ matrix.python-version }}
 
         - name: Run tests
           env:
@@ -183,10 +183,7 @@ jobs:
             python-version: "3.11"
 
         - name: Sync dependencies with uv
-          run: uv sync --python 3.11
-
-        - name: Install mypy
-          run: pip install mypy
+          run: uv sync --extra dev --python 3.11
 
         - name: Run mypy
           run: uv run mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores
@@ -226,7 +223,7 @@ jobs:
           run: pip install bandit
 
         - name: Run bandit
-          run: bandit -r src/ --skip B101 --quiet --severity-level high --confidence-level high --exit-non-zero-on-failure
+          run: bandit -r src/ --skip B101 --quiet --severity-level high --confidence-level high
 
     sca:
       name: pip-audit dependency scan
@@ -251,7 +248,7 @@ jobs:
           run: pip install pip-audit
 
         - name: Run pip-audit
-          run: uv run pip-audit --strict --progress-spinner=off --desc on
+          run: pip-audit --strict --progress-spinner=off --desc on
 
     codeql:
       name: CodeQL analysis
