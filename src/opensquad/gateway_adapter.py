@@ -108,6 +108,8 @@ class GatewayAdapter(BaseAgent):
         # Subscribe to session management events
         _sub("current_session", self.on_generic_event("current_session"))
         _sub("history_sync", self.on_generic_event("history_sync"))
+        # Ready-stage notifications (extensions/MCP finished loading)
+        _sub("agent_ready_stage", self.on_generic_event("agent_ready_stage"))
         _sub("session_list", self.on_generic_event("session_list"))
         # Subscribe to plan events
         _sub("plan", self.on_generic_event("plan"))

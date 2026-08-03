@@ -122,13 +122,26 @@ def init_standard_context(agent_md_path: str, memory_manager=None, bridge=None, 
         logger.info(f"[ContextBase] agent.md loaded from {_agent_md_path}")
 
 
+# agent.md content cache: (mtime, content). The file is read on every turn;
+# mtime invalidation keeps the cache correct even when the agent edits its own
+# agent.md via write_file while still avoiding a disk read per turn.
+_agent_md_cache: tuple[float, str] | None = None
+
+
 def _read_agent_md() -> str:
-    """Read agent.md file content. Re-reads on every call (agent may have modified it)."""
+    """Read agent.md file content. Re-reads only when the file mtime changes."""
+    global _agent_md_cache
     if not _agent_md_path or not os.path.exists(_agent_md_path):
+        _agent_md_cache = None
         return ""
     try:
+        mtime = os.path.getmtime(_agent_md_path)
+        if _agent_md_cache is not None and _agent_md_cache[0] == mtime:
+            return _agent_md_cache[1]
         with open(_agent_md_path, encoding="utf-8") as f:
-            return f.read().strip()
+            content = f.read().strip()
+        _agent_md_cache = (mtime, content)
+        return content
     except Exception as e:
         logger.warning(f"[ContextBase] Failed to read agent.md: {e}")
         return ""

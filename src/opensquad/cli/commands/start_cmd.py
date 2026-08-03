@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Default Vite dev server port; can be overridden by system_config.json ports.frontend
 _DEFAULT_VITE_PORT = 5173
@@ -35,8 +36,16 @@ def _get_managed_ports(syscfg):
     )
 
 
+# Cache the resolved interpreter for the process lifetime (each probe is a
+# subprocess round-trip; start_cmd calls _find_python several times).
+_find_python_cache: str | None = None
+
+
 def _find_python():
     """Find a usable Python interpreter (handles pip console_scripts .exe wrappers on Windows)."""
+    global _find_python_cache
+    if _find_python_cache:
+        return _find_python_cache
     import shutil
 
     # Prefer sys.executable — it's the actual python that's running right now
@@ -46,6 +55,7 @@ def _find_python():
         try:
             result = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0 and "Python" in result.stdout:
+                _find_python_cache = exe
                 return exe
         except Exception:
             pass
@@ -56,9 +66,11 @@ def _find_python():
             try:
                 result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
                 if result.returncode == 0 and "Python" in result.stdout:
+                    _find_python_cache = path
                     return path
             except Exception:
                 pass
+    _find_python_cache = "python"
     return "python"
 
 
@@ -292,10 +304,22 @@ def _install_windows_console_close_handler() -> None:
 def _kill_port_owners(*ports: int) -> None:
     """Force-kill any process listening on the given ports.
 
-    Windows: single ``netstat -ano`` parse (fast). Unix: lsof / fuser.
+    Windows: parallel socket probe first — netstat -ano (0.2-1s) only runs
+    when a managed port actually has a listener, so a cold start skips it.
     """
     ports = [p for p in ports if isinstance(p, int) and p > 0]
     if not ports:
+        return
+
+    # Fast path: parallel probe; nothing listening -> skip netstat entirely.
+
+    active = False
+    with ThreadPoolExecutor(max_workers=min(len(ports), 8)) as pool:
+        for listening in pool.map(lambda p: _port_listening(p), ports):
+            if listening:
+                active = True
+                break
+    if not active:
         return
 
     if sys.platform == "win32":

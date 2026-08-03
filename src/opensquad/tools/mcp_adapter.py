@@ -260,7 +260,7 @@ class MCPAdapter:
             full_env.update(env)
             env = full_env
 
-        timeout = cfg.get("timeout", 30)
+        timeout = cfg.get("timeout", 10)
         self._timeouts[server_name] = timeout
 
         # Windows npx compatibility

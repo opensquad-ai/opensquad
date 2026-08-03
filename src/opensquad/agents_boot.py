@@ -91,6 +91,10 @@ from opensquad.xml_parser import StreamingTagParser
 
 logger = logging.getLogger(__name__)
 
+# References to long-lived background tasks that must not be GC'd (MCP init
+# runs fully in the background since the chat-ready rework).
+_background_mcp_tasks: list[asyncio.Task] = []
+
 
 # ---------------------------------------------------------------------------
 # Model card hot-reload helpers (used by Runner for dynamic model switching)
@@ -1039,6 +1043,34 @@ async def main(agent_dir: str, override_port: int | None = None):
             runner=_early_runner,
         )
     )
+    # MCP stays fully in the background: chat-ready must not wait for MCP
+    # servers (playwright npx cold start measured ~6.6s). Keep a reference so
+    # the task is not GC'd, and log completion/errors instead of awaiting.
+    _background_mcp_tasks.append(mcp_task)
+
+    def _on_mcp_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            agent_logger.warning("[Boot] MCP background init cancelled")
+        elif t.exception():
+            agent_logger.warning(f"[Boot] MCP background init failed: {t.exception()}")
+        else:
+            agent_logger.info("[Boot] MCP background init finished")
+
+    mcp_task.add_done_callback(_on_mcp_done)
+
+    # Ready-stage notifications: chat-ready was already signaled by the runner
+    # (agent_ready). Extensions (plugins/skills) and MCP finishing are reported
+    # separately so the UI can show "tools loading" instead of silent waiting.
+    from opensquad.events import bus as _boot_bus
+
+    def _emit_ready_stage(stage: str) -> None:
+        try:
+            _boot_bus.emit("agent_ready_stage", {"agent_id": agent_id, "stage": stage})
+        except Exception:
+            pass
+
+    extension_task.add_done_callback(lambda _t: _emit_ready_stage("extensions_ready"))
+    mcp_task.add_done_callback(lambda _t: _emit_ready_stage("full_ready"))
 
     # 5. Start response router
     await setup_response_router(agent_logger)
@@ -1079,11 +1111,9 @@ async def main(agent_dir: str, override_port: int | None = None):
     # (GIL contention). Start it only now that plugins/skills are done; it still
     # finishes long before the user's first chat.
     asyncio.create_task(_prewarm_tokenizer(agent_logger))
-    await mcp_task
 
-    # Start group-chat bridge AFTER MCP/plugin init — the anyio cancel storm
-    # (which used to hit the concurrently-running bridge/SDK every boot) has
-    # passed by now, so login/join proceeds without retry churn.
+    # Start group-chat bridge after plugin init (MCP runs fully in the
+    # background now, so the bridge no longer waits for MCP servers).
     BOOT_PHASES.start_group_chat_bridge(config, agent_logger, data_dir)
 
     await BOOT_PHASES.await_runner_shutdown(

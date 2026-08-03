@@ -637,6 +637,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const SUMMARY_STREAM_DEBUG = true;
   const [wsStatus, setWsStatus] = useState<AIWebSocketStatus>('disconnected');
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('disconnected');
+  /** Ready-stage from agent: '' (unknown) -> 'loading' (extensions done, MCP loading) -> 'ready'. */
+  const [toolsStage, setToolsStage] = useState<'loading' | 'ready' | ''>('');
   const [inputText, setInputText] = useState('');
   /** Skill selected from the + menu or /skill; shown as /name chip until send/clear. */
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
@@ -2228,6 +2230,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           eventSidRef.current = '';
         }
       });
+
+    // Ready-stage notifications: chat is usable once WS connects; extensions /
+    // MCP finishing arrive later as agent_ready_stage (extensions_ready / full_ready).
+    const unsubReadyStage = onWs('agent_ready_stage', (msg: AIWSMessage) => {
+      const stage = ((msg as any).data?.stage) || '';
+      if (stage === 'extensions_ready') setToolsStage('loading');
+      else if (stage === 'full_ready') setToolsStage('ready');
+    });
 
     // Stream — accumulate chunks via ref, then sync to state (per-session)
     const streamSeqRef = { current: 0 };
@@ -4690,6 +4700,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       window.clearTimeout(bootstrapFailsafeTimer);
       unsubAuthExpired();
       unsubStatus();
+      unsubReadyStage();
       unsubStream();
       unsubMessage();
       unsubResponse();
@@ -8049,6 +8060,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             <p className="text-base font-medium text-textMain">{t('chat.agentStarting')}</p>
             <p className="text-xs text-textMuted">{t('chat.agentStartingHint')}</p>
           </div>
+        </div>
+      )}
+
+      {/* Tools still warming up after chat-ready: agent is usable, MCP/plugins loading */}
+      {toolsStage === 'loading' && (
+        <div className="flex items-center justify-center gap-2 px-3 py-1.5 text-xs text-yellow-600 bg-yellow-500/10 border-b border-yellow-500/20">
+          <Loader2 size={12} className="animate-spin" />
+          <span>工具加载中，可先开始对话（部分扩展工具就绪后自动启用）</span>
         </div>
       )}
 
