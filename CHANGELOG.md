@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.6]                                                                | 2026-08-03 | [0.8.5 → 0.8.6](https://github.com/opensquad-ai/opensquad/compare/v0.8.5...v0.8.6)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.6)  |
 | [0.8.5]                                                                | 2026-07-29 | [0.8.2 → 0.8.5](https://github.com/opensquad-ai/opensquad/compare/v0.8.2...v0.8.5)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.5)  |
 | [0.8.0]                                                                | 2026-07-22 | [0.6.0 → 0.8.0](https://github.com/opensquad-ai/opensquad/compare/v0.6.0...v0.8.0)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.0)  |
 | [0.6.0]                                                                | 2026-07-15 | [0.5.1 → 0.6.0](https://github.com/opensquad-ai/opensquad/compare/v0.5.1...v0.6.0)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.6.0)  |
@@ -29,6 +30,66 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.6] — 2026-08-03
+
+> Boot-to-first-turn latency rework + web interaction performance: MCP fully
+> backgrounded, lazy tool imports, TTL caches across launcher/gateway/agent,
+> file-tree git acceleration, fast shutdown, and a canonical message model.
+
+### Added
+
+- **file tree: git-accelerated indexing.** `utils/fs_index.py` lists git repos
+  via `git ls-files` (milliseconds, .gitignore respected) with a 10s TTL cache
+  and a bounded scandir fallback (depth cap, symlink-loop immune); the web UI
+  lazy-expands one level on demand and upgrades to a full listing on search.
+- **ready stages.** Agent emits `agent_ready_stage` (`extensions_ready` /
+  `full_ready`); web UI shows a "tools loading, you can chat now" strip.
+- **canonical message model.** `opensquad/messages.py` (ToolCall / ToolResult /
+  AssistantTurn) as the single tool-call parsing boundary; fixes parallel
+  `<tool_call>` blocks merging in the DSML strategy.
+- **turn-loop extraction.** `_runner/_turn_loop.py::TurnLoop` — deterministic
+  fake-runner tests for tool execution / stop / plain-text paths.
+- **commit guard.** Local pre-commit wrapper rejects commits with unstaged
+  changes (pre-commit's stash/restore could silently drop work) plus a
+  recovery tool (`scripts/recover_precommit_stash.py`).
+
+### Changed
+
+- **boot: MCP fully backgrounded.** The main coroutine no longer awaits MCP
+  init (playwright npx cold start ~6.6s); group-chat bridge starts after
+  plugins; per-server MCP timeout tightened (60s→8s config, 30s→10s default).
+- **boot: lazy tool imports.** `ToolRegistry.register_lazy()` defers built-in
+  tool module imports until first use (filesystem stays eager for configure).
+- **boot: gateway module imports deferred.** `_admin` already lazy; `_main`
+  now lazy-loads collab_board / agent_sessions / sessions via proxies.
+- **prompt build: agent.md cached by mtime** (was a disk read every turn).
+- **web latency: TTL caches.** Launcher `runtime/list` (5s), token stats
+  (12s per session), gateway readonly proxy endpoints (5s); frontend polls
+  reduced (12s→30s token, 3s→5s disk catch-up).
+- **streaming: first chunk flushes immediately** (no 30ms debounce).
+- **web boot: registration check runs in parallel** with token restore.
+- **CLI start: `_find_python` cached; port owners probed before netstat.**
+- **TUI: app.py split (6589→3898 lines) into 6 mixins.**
+- **compaction: token estimation, file-operation tracking, head+tail
+  truncation** in summary payloads.
+
+### Fixed
+
+- **stop command: 13.5s→0.8s tree kill.** `psutil.kill()` replaces serial
+  taskkill; wmic snapshot kept (psutil attr walks can take 17s); parallel
+  graceful shutdown in launcher; `TimeoutError` now reported.
+- **gateway `_main` lazy imports:** PEP 562 `__getattr__` does not fire for
+  function-body globals (LOAD_GLOBAL) — replaced with explicit lazy proxies
+  (agent-sessions 500 regression fixed).
+- **pre-commit stash rollback could silently drop unstaged work** — guard +
+  recovery tooling; lint debt cleaned (ruff fully green).
+- **session tool-call persistence** (chat_api) so history reloads do not lose
+  tool results.
+- **stale tests** referencing moved APIs repaired; pytest capture crash on
+  Windows fixed.
 
 ---
 
