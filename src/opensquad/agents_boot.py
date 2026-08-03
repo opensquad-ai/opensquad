@@ -702,13 +702,11 @@ async def _initialize_extension_runtime_background(
 ) -> None:
     """Load plugins/skills/memory/context after the chat entrypoint is live."""
     try:
-        # Plugin loading stays on the event loop: several plugins (e.g.
-        # reminder) call asyncio.get_running_loop() in on_load, which cannot
-        # work on a worker thread (no running loop there). The earlier
-        # asyncio.to_thread attempt caused "no running event loop" failures
-        # and was reverted (same correctness-over-throughput decision as the
-        # async session archive). The manifest write dedup stays.
-        plugin_runtime = BOOT_PHASES.initialize_plugin_runtime(
+        # Plugin loading: import/scan/manifest IO runs on a worker thread;
+        # on_load + registration stay on the event loop (plugins call
+        # asyncio.get_running_loop() inside on_load). The earlier coarse
+        # asyncio.to_thread of the WHOLE phase was reverted for that reason.
+        plugin_runtime = await BOOT_PHASES.initialize_plugin_runtime(
             config=config,
             agent_dir=agent_dir,
             project_root=syscfg.get_workspace(),
