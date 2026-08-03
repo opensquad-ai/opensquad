@@ -67,7 +67,7 @@ def pick_directory(initial_dir: str | None = None) -> dict[str, Any]:
         _pick_lock.release()
 
 
-def _pick_via_tkinter(initial_dir: str | None) -> str | None | bool:
+def _pick_via_tkinter(initial_dir: str | None) -> str | bool | None:
     """Return path string, empty string if cancelled, or None if unavailable."""
     try:
         import tkinter as tk
@@ -98,7 +98,7 @@ def _pick_via_tkinter(initial_dir: str | None) -> str | None | bool:
             pass
 
 
-def _pick_via_powershell(initial_dir: str | None) -> str | None | bool:
+def _pick_via_powershell(initial_dir: str | None) -> str | bool | None:
     """Windows Forms FolderBrowserDialog via PowerShell."""
     initial = (initial_dir or "").replace("'", "''")
     script = f"""
@@ -132,7 +132,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
     return None
 
 
-def _pick_via_osascript(initial_dir: str | None) -> str | None | bool:
+def _pick_via_osascript(initial_dir: str | None) -> str | bool | None:
     """macOS choose folder dialog."""
     if initial_dir:
         script = f'POSIX path of (choose folder with prompt "Select project folder" default location POSIX file "{initial_dir}")'
@@ -161,7 +161,7 @@ def _pick_via_osascript(initial_dir: str | None) -> str | None | bool:
     return ""
 
 
-def _pick_via_zenity(initial_dir: str | None) -> str | None | bool:
+def _pick_via_zenity(initial_dir: str | None) -> str | bool | None:
     """Linux zenity directory picker."""
     cmd = ["zenity", "--file-selection", "--directory", "--title=Select project folder"]
     if initial_dir:

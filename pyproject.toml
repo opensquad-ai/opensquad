@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opensquad"
-version = "0.8.5"
+version = "0.8.6"
 description = "OpenSquad - Local-first Multi-Agent Collaboration Framework"
 readme = "README.md"
 license = "MIT"
@@ -60,6 +60,7 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.4.0",
+    "mypy>=1.10",
 ]
 websearch = [
     "beautifulsoup4>=4.12",

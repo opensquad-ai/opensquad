@@ -17,9 +17,10 @@ Adds a plugin to the current Agent's `config.json` and automatically reloads.
 ```python
 # Step 1: Read current configuration
 import json
+
 config_path = "agents/coder/config.json"
 
-with open(config_path, 'r', encoding='utf-8') as f:
+with open(config_path, "r", encoding="utf-8") as f:
     config = json.load(f)
 
 # Step 2: Add plugin to tools array (if not already present)
@@ -40,13 +41,14 @@ for plugin in plugins_to_add:
         print(f"Set {plugin} level to core")
 
 # Step 4: Write back to configuration file
-with open(config_path, 'w', encoding='utf-8') as f:
+with open(config_path, "w", encoding="utf-8") as f:
     json.dump(config, f, ensure_ascii=False, indent=2)
 
 print("Configuration updated")
 
 # Step 5: Reload plugins
 import opensquad.tools.agent_setup as agent_setup
+
 result = agent_setup.reload_plugins()
 print(result)
 ```
@@ -96,10 +98,7 @@ if "chat_account" not in config["tools"]:
     config.setdefault("tool_levels", {})["chat_account"] = "core"
 
 # Save
-filesystem.write_file(
-    "agents/coder/config.json", 
-    json.dumps(config, ensure_ascii=False, indent=2)
-)
+filesystem.write_file("agents/coder/config.json", json.dumps(config, ensure_ascii=False, indent=2))
 
 # Reload
 agent_setup.reload_plugins()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -92,8 +93,6 @@ class AgentBootPhases:
             # the ~1-3s module import out of the boot critical path.
             if name == "filesystem":
                 try:
-                    import importlib
-
                     module = importlib.import_module(module_path)
                     registry.register(module, name, level=level)
                     if hasattr(module, "set_agent_id") and agent_id:

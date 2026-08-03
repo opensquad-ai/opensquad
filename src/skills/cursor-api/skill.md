@@ -49,14 +49,14 @@ resp = httpx.post(
         "Content-Type": "application/json",
     },
     json={
-        "model": "cursor-sonnet-4k",           # 模型 ID
+        "model": "cursor-sonnet-4k",  # 模型 ID
         "messages": [
             {"role": "system", "content": "You are a helpful coding assistant."},
-            {"role": "user", "content": "Write a Python function to merge two dicts."}
+            {"role": "user", "content": "Write a Python function to merge two dicts."},
         ],
         "max_tokens": 4096,
         "temperature": 0.7,
-        "stream": False,                        # 非流式
+        "stream": False,  # 非流式
     },
     timeout=60,
 )
@@ -86,10 +86,10 @@ with httpx.Client() as client:
             "model": "cursor-sonnet-4k",
             "messages": [
                 {"role": "system", "content": "You are a helpful coding assistant."},
-                {"role": "user", "content": "Explain Python decorators."}
+                {"role": "user", "content": "Explain Python decorators."},
             ],
             "max_tokens": 4096,
-            "stream": True,                      # 启用流式
+            "stream": True,  # 启用流式
         },
         timeout=120,
     ) as response:
@@ -205,9 +205,7 @@ class CursorAgent:
         self.api_key = api_key
         self.model = model
         self.base = "https://api.cursor.sh/v1"
-        self.messages = [
-            {"role": "system", "content": "You are a helpful coding assistant."}
-        ]
+        self.messages = [{"role": "system", "content": "You are a helpful coding assistant."}]
 
     def ask(self, prompt: str, stream: bool = False) -> str:
         """发送消息，返回回复内容。"""
@@ -243,9 +241,8 @@ class CursorAgent:
         return reply
 
     def reset(self):
-        self.messages = [
-            {"role": "system", "content": "You are a helpful coding assistant."}
-        ]
+        self.messages = [{"role": "system", "content": "You are a helpful coding assistant."}]
+
 
 # 使用
 agent = CursorAgent(api_key="sk-xxx")
