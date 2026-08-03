@@ -54,10 +54,11 @@ class ToolRegistry:
         """Register a tool set. Warns if namespace already exists."""
         with self._lock:
             if namespace in self._tools:
+                old_module = self._tools[namespace]["module"]
                 logger.warning(
                     "Tool namespace %r is being re-registered (old=%r, new=%r). This may indicate a plugin conflict.",
                     namespace,
-                    self._tools[namespace]["module"].__class__.__name__,
+                    old_module.__class__.__name__ if old_module is not None else "<lazy>",
                     tool_set.__class__.__name__,
                 )
             self._tools[namespace] = {"module": tool_set, "level": level}
@@ -65,6 +66,59 @@ class ToolRegistry:
         self._openai_tools_cache.clear()
         self._bare_name_index = None
         logger.info(f"Tool set '{namespace}' registered as [{level}].")
+
+    def register_lazy(
+        self,
+        module_path: str,
+        namespace: str,
+        level: str = "extended",
+        on_loaded=None,
+    ):
+        """Register a tool module by import path without importing it yet.
+
+        The module is imported on first use (tool call, description/schema
+        generation, bare-name index). ``on_loaded(module)`` runs after the
+        import so per-module configuration (agent id, allowed dirs) still
+        happens — just not during boot.
+        """
+        with self._lock:
+            self._tools[namespace] = {
+                "module": None,
+                "module_path": module_path,
+                "level": level,
+                "on_loaded": on_loaded,
+            }
+        self._desc_cache = None
+        self._openai_tools_cache.clear()
+        self._bare_name_index = None
+        logger.info(f"Tool set '{namespace}' registered lazily as [{level}] (import deferred).")
+
+    def _ensure_module(self, info: dict) -> object | None:
+        """Resolve a possibly-lazy tool module, importing it on first use."""
+        module = info.get("module")
+        if module is not None:
+            return module
+        module_path = info.get("module_path")
+        if not module_path:
+            return None
+        try:
+            import importlib
+
+            module = importlib.import_module(module_path)
+        except Exception as exc:
+            logger.error(f"[Registry] Lazy import failed for '{module_path}': {exc}")
+            return None
+        on_loaded = info.get("on_loaded")
+        if on_loaded is not None:
+            try:
+                on_loaded(module)
+            except Exception as exc:
+                logger.error(f"[Registry] on_loaded callback failed for '{module_path}': {exc}")
+        # Direct assignment (atomic); no lock here because callers may already
+        # hold self._lock (generate_tool_descriptions iterates under it) and
+        # Lock is not reentrant. A duplicate concurrent import is harmless.
+        info["module"] = module
+        return module
 
     def unregister(self, namespace: str):
         """Remove a tool set by namespace. Returns True if removed."""
@@ -117,7 +171,10 @@ class ToolRegistry:
         """Get detailed documentation for a specific tool set"""
         with self._lock:
             if namespace in self._tools:
-                return self._generate_single_tool_desc(namespace, self._tools[namespace]["module"], detail=True)
+                info = self._tools[namespace]
+                module = self._ensure_module(info)
+                if module is not None:
+                    return self._generate_single_tool_desc(namespace, module, detail=True)
 
         if namespace.startswith("mcp__") and self._mcp_adapter:
             return self._generate_mcp_desc(detail=True, filter_server=namespace)
@@ -138,7 +195,9 @@ class ToolRegistry:
                 # the two views of the tool set diverge.
                 if info["level"] == "hidden":
                     continue
-                desc = self._generate_single_tool_desc(namespace, info["module"], detail=(info["level"] == "core"))
+                desc = self._generate_single_tool_desc(
+                    namespace, self._ensure_module(info), detail=(info["level"] == "core")
+                )
                 descriptions.append(desc)
 
         if self._mcp_adapter:
@@ -263,7 +322,9 @@ class ToolRegistry:
                 if info["level"] == "hidden":
                     continue
 
-                module = info["module"]
+                module = self._ensure_module(info)
+                if module is None:
+                    continue
                 level = info["level"]
                 seen_funcs = set()  # Dedup: skip aliases
 
@@ -581,7 +642,9 @@ class ToolRegistry:
         with self._lock:
             items = list(self._tools.items())
         for namespace, info in items:
-            module = info["module"]
+            module = self._ensure_module(info)
+            if module is None:
+                continue
             level = info.get("level") or "extended"
             members = list(inspect.getmembers(module, inspect.isfunction)) + list(
                 inspect.getmembers(module, inspect.ismethod)
@@ -760,7 +823,11 @@ class ToolRegistry:
 
             module_info = self._tools[ns]
 
-        func = getattr(module_info["module"], fn, None)
+        module = self._ensure_module(module_info)
+        if module is None:
+            return f"Error: Module for namespace {ns} failed to load"
+
+        func = getattr(module, fn, None)
         if not func:
             tc_log.warning("[registry.call] Function %r not found in namespace %r", fn, ns)
             return f"Error: Function {fn} not found"

@@ -895,7 +895,14 @@ class GatewayAdapter(BaseAgent):
             return
 
         buf = self._stream_buffers.setdefault(sid, [])
+        # First frame goes out immediately (no 30ms debounce) to minimize TTFT;
+        # subsequent chunks keep the debounce merge to limit WS frame count.
+        pending_task = self._stream_flush_tasks.get(sid)
+        first_chunk = len(buf) == 0 and (pending_task is None or pending_task.done())
         buf.append(content)
+        if first_chunk:
+            self._stream_flush_tasks[sid] = asyncio.create_task(self._emit_stream_buffer(sid))
+            return
         # P2: enforce max_chunks limit — flush immediately if exceeded
         if len(buf) >= self._max_chunks:
             task = self._stream_flush_tasks.get(sid)

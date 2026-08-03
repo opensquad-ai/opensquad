@@ -433,6 +433,22 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const init = async () => {
+      // 0) Fire the registration check immediately — it is independent of the
+      //    token restore below, so running them in parallel saves one RTT on
+      //    startup (was: serial await after getMe/loadGroups).
+      const statusPromise = authAPI
+        .getRegistrationStatus()
+        .then((status) => {
+          setRegistrationStatus(status.registration_required ? 'required' : 'closed');
+        })
+        .catch((err: any) => {
+          // Non-fatal: fall back to "assume a user exists" so the user lands
+          // on the login screen rather than a stuck loading state. A 403
+          // on /auth/register will surface the real problem.
+          console.warn('[App] registration-status failed:', err);
+          setRegistrationStatus('error');
+        });
+
       // 1) Try to rehydrate a previous session from a stored token.
       const token = getAuthToken();
       if (token) {
@@ -456,24 +472,8 @@ const App: React.FC = () => {
         }
       }
 
-      // 2) Always query the backend for the first-launch wizard decision.
-      //    ``registration_required`` from the server is the source of truth
-      //    for "is this a fresh deployment?" — not localStorage.
-      try {
-        const status = await authAPI.getRegistrationStatus();
-        if (!status.registration_required) {
-          setRegistrationStatus('closed');
-        } else {
-          setRegistrationStatus('required');
-        }
-      } catch (err: any) {
-        // Non-fatal: fall back to "assume a user exists" so the user lands
-        // on the login screen rather than a stuck loading state. A 403
-        // on /auth/register will surface the real problem.
-        console.warn('[App] registration-status failed:', err);
-        setRegistrationStatus('error');
-      }
-
+      // 2) Wait for the registration decision before showing the shell.
+      await statusPromise;
       setIsLoading(false);
     };
     init();

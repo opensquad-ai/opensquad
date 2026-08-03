@@ -29,43 +29,76 @@ _SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
 # Import gateway authentication
 from app.api import get_current_user_dep
 from app.models import User
-from opensquad.collab_board import (
-    append_public_discussion as collab_board_append_public_discussion,
-)
-from opensquad.collab_board import (
-    create_task as collab_board_create_task,
-)
-from opensquad.collab_board import (
-    delete_item as collab_board_delete_item,
-)
-from opensquad.collab_board import (
-    delete_task as collab_board_delete_task,
-)
-from opensquad.collab_board import (
-    list_items as collab_board_list_items,
-)
-from opensquad.collab_board import (
-    list_plan_snapshots as collab_board_list_plan_snapshots,
-)
-from opensquad.collab_board import (
-    list_tasks as collab_board_list_tasks,
-)
-from opensquad.collab_board import (
-    save_plan_snapshot as collab_board_save_plan_snapshot,
-)
-from opensquad.collab_board import (
-    update_task as collab_board_update_task,
-)
-from opensquad.collab_board import (
-    upsert_item as collab_board_upsert_item,
-)
 
-from ..agent_sessions import async_get_reader as async_get_agent_session_reader
 from ..audit_routes import router as audit_router
 from ..registry import registry
-from ..sessions import gateway_session_cache
 
 logger = logging.getLogger(__name__)
+
+
+# Names provided lazily via __getattr__ below; the TYPE_CHECKING block exists
+# only for static analysis (ruff F821 / type checkers) — it never executes.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from opensquad.collab_board import (
+        append_public_discussion as collab_board_append_public_discussion,
+    )
+    from opensquad.collab_board import (
+        create_task as collab_board_create_task,
+    )
+    from opensquad.collab_board import (
+        delete_item as collab_board_delete_item,
+    )
+    from opensquad.collab_board import (
+        delete_task as collab_board_delete_task,
+    )
+    from opensquad.collab_board import (
+        list_items as collab_board_list_items,
+    )
+    from opensquad.collab_board import (
+        list_plan_snapshots as collab_board_list_plan_snapshots,
+    )
+    from opensquad.collab_board import (
+        list_tasks as collab_board_list_tasks,
+    )
+    from opensquad.collab_board import (
+        save_plan_snapshot as collab_board_save_plan_snapshot,
+    )
+    from opensquad.collab_board import (
+        update_task as collab_board_update_task,
+    )
+    from opensquad.collab_board import (
+        upsert_item as collab_board_upsert_item,
+    )
+
+    from ..agent_sessions import async_get_reader as async_get_agent_session_reader
+    from ..sessions import gateway_session_cache
+
+
+# ── Lazy module references (P2-1) ────────────────────────────────────────
+# collab_board (~0.44s), agent_sessions (~1.53s) and sessions are heavy
+# imports that used to run at module load, delaying the gateway's first bind.
+# PEP 562 __getattr__ defers them until first use; the resolved binding is
+# cached on the module so subsequent access is a plain attribute hit.
+def __getattr__(name: str):
+    if name == "async_get_agent_session_reader":
+        from ..agent_sessions import async_get_reader as _reader
+
+        globals()[name] = _reader
+        return _reader
+    if name == "gateway_session_cache":
+        from ..sessions import gateway_session_cache as _cache
+
+        globals()[name] = _cache
+        return _cache
+    if name.startswith("collab_board_"):
+        from opensquad import collab_board as _cb
+
+        _func = getattr(_cb, name[len("collab_board_") :])
+        globals()[name] = _func
+        return _func
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _normalize_session_message(msg: dict) -> dict:

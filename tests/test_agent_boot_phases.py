@@ -1,7 +1,6 @@
 import asyncio
 import sys
 import types
-from types import SimpleNamespace
 
 import opensquad.agent_boot_phases as agent_boot_phases_module
 from opensquad.agent_boot_phases import AgentBootPhases
@@ -10,10 +9,14 @@ from opensquad.agent_boot_phases import AgentBootPhases
 class DummyRegistry:
     def __init__(self):
         self.registered = []
+        self.lazy_registered = []
         self.mcp_adapters = []
 
     def register(self, module, name, level="extended"):
         self.registered.append((module, name, level))
+
+    def register_lazy(self, module_path, name, level="extended", on_loaded=None):
+        self.lazy_registered.append((module_path, name, level, on_loaded))
 
     def register_mcp_adapter(self, adapter, level="extended"):
         self.mcp_adapters.append((adapter, level))
@@ -93,7 +96,15 @@ def test_register_builtin_tools_wires_levels_and_filesystem(monkeypatch, tmp_pat
             self.allowed_dirs.append(allowed_dirs)
 
     fs_module = FilesystemModule()
-    system_module = SimpleNamespace()
+
+    class SystemModule:
+        def __init__(self):
+            self.agent_id = None
+
+        def set_agent_id(self, agent_id):
+            self.agent_id = agent_id
+
+    system_module = SystemModule()
 
     def fake_import(name):
         calls.append(name)
@@ -124,11 +135,14 @@ def test_register_builtin_tools_wires_levels_and_filesystem(monkeypatch, tmp_pat
 
     phases.register_builtin_tools(config, registry, str(tmp_path / "agent"))
 
-    assert sorted(calls) == ["mod.filesystem", "mod.system"]
-    assert sorted(item[1:] for item in registry.registered) == [
-        ("filesystem", "extended"),
-        ("system", "core"),
-    ]
+    # filesystem stays eager (needs configure); system is deferred (lazy).
+    assert sorted(calls) == ["mod.filesystem"]
+    assert [(n, l) for _, n, l in registry.registered] == [("filesystem", "extended")]
+    assert registry.lazy_registered == [("mod.system", "system", "core", registry.lazy_registered[0][3])]
+    # on_loaded must wire set_agent_id when the lazy module is finally imported
+    lazy_on_loaded = registry.lazy_registered[0][3]
+    lazy_on_loaded(system_module)
+    assert system_module.agent_id == "agent-1"
     assert fs_module.agent_ids == ["agent-1"]
     assert fs_module.config_paths == [str(tmp_path / "agent" / "config.json")]
     assert len(fs_module.allowed_dirs) == 1

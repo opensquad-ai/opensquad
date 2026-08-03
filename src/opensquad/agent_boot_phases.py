@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
 import logging
 import os
@@ -85,17 +84,36 @@ class AgentBootPhases:
             module_path = self.tool_modules.get(name)
             if not module_path:
                 continue
-            try:
-                module = importlib.import_module(module_path)
-                default_level = "core" if name in self.core_tools else "extended"
-                level = tool_levels.get(name, default_level)
-                registry.register(module, name, level=level)
-                if hasattr(module, "set_agent_id") and agent_id:
-                    module.set_agent_id(agent_id)
-                if name == "filesystem" and hasattr(module, "set_allowed_dirs"):
+            default_level = "core" if name in self.core_tools else "extended"
+            level = tool_levels.get(name, default_level)
+            # Lazy registration: import deferred until first use (tool call /
+            # prompt schema build). filesystem needs eager configure
+            # (set_allowed_dirs), so it stays eager; everything else defers
+            # the ~1-3s module import out of the boot critical path.
+            if name == "filesystem":
+                try:
+                    import importlib
+
+                    module = importlib.import_module(module_path)
+                    registry.register(module, name, level=level)
+                    if hasattr(module, "set_agent_id") and agent_id:
+                        module.set_agent_id(agent_id)
                     self._configure_filesystem_module(module, config, agent_dir)
+                except Exception as exc:
+                    logging.error(f"[Boot] Failed to register built-in tool '{name}': {exc}")
+                continue
+
+            def _on_loaded(module, _name=name, _agent_id=agent_id):
+                try:
+                    if hasattr(module, "set_agent_id") and _agent_id:
+                        module.set_agent_id(_agent_id)
+                except Exception as exc:
+                    logging.error(f"[Boot] set_agent_id failed for '{_name}': {exc}")
+
+            try:
+                registry.register_lazy(module_path, name, level=level, on_loaded=_on_loaded)
             except Exception as exc:
-                logging.error(f"[Boot] Failed to register built-in tool '{name}': {exc}")
+                logging.error(f"[Boot] Failed to lazy-register built-in tool '{name}': {exc}")
         from opensquad.structured_log import perf_event
 
         perf_event(
