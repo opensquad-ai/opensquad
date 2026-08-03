@@ -325,12 +325,12 @@ def _kill_port_pids(
 
 
 def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
-    """Snapshot all Windows processes via WMIC in a single subprocess call.
+    """Snapshot all Windows processes as {pid: (ppid, name_lower)}.
 
-    Returns {pid: (ppid, name_lower)} — typically completes in <2s
-    compared to psutil.process_iter which takes 30s+ for 300 processes.
-
-    Falls back to psutil if WMIC is unavailable.
+    WMIC first (~1s bulk CSV): ``psutil.process_iter(attrs=...)`` queries each
+    process individually and can take 10s+ on machines with uncooperative
+    processes (system/AV), while a bare ``process_iter()`` has no attrs.
+    psutil remains as a fallback when WMIC is unavailable.
     """
     try:
         result = subprocess.run(
@@ -367,7 +367,7 @@ def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Fallback: psutil (slower but always available)
+    # Fallback: psutil (attr queries are slow on some machines, but always works)
     try:
         import psutil
 
@@ -383,6 +383,21 @@ def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
         return procs
     except Exception:
         return {}
+
+
+def _taskkill_pid(pid: int) -> bool:
+    """taskkill fallback for a single PID (AccessDenied / kill() failures)."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        return True
+    except Exception:
+        return False
+
 
 
 def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
@@ -452,21 +467,29 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
                     stack.extend(children_of.get(cpid, []))
                 break
 
-    # ── Phase 5: kill via taskkill /F /T (fastest on Windows) ──
+    # ── Phase 5: kill via psutil.kill() (TerminateProcess, <1ms each) ──
+    # taskkill costs ~0.8s per invocation even when it succeeds, so it is only
+    # a fallback for AccessDenied / zombie processes.
     killed = 0
-    for pid in to_kill:
+    taskkill_pids: list[int] = []
+    for pid in sorted(to_kill):
         if pid in skip_pids:
             continue
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                check=False,
-                timeout=5,
-            )
+            psutil.Process(pid).kill()
             killed += 1
-        except Exception:
+        except psutil.AccessDenied:
+            taskkill_pids.append(pid)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             pass
+
+    # Fallback: parallel taskkill for the few pids psutil could not kill.
+    if taskkill_pids:
+        with ThreadPoolExecutor(max_workers=min(len(taskkill_pids), 8)) as pool:
+            futures = [pool.submit(_taskkill_pid, pid) for pid in taskkill_pids]
+            for future in as_completed(futures):
+                if future.result():
+                    killed += 1
 
     return killed, to_kill
 
@@ -595,9 +618,10 @@ def run_stop(args):
                     time.sleep(0.5)
                     if not _probe_port(launcher_port, timeout=0.3):
                         break
-            except urllib.error.URLError:
+            except (urllib.error.URLError, TimeoutError, OSError):
+                # TimeoutError is the common case: launcher accepted the
+                # connection but is still shutting agents down (or died).
                 print("[stop] Launcher not responding, proceeding to force kill.")
-                pass
     except Exception:
         pass
     graceful_elapsed = time.perf_counter() - graceful_start

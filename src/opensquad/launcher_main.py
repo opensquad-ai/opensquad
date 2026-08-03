@@ -153,6 +153,9 @@ BOOT_SCRIPT_DIR = os.path.dirname(os.path.abspath(opensquad.__file__))
 BOOT_MODULE = "opensquad.agents_boot"
 
 # ── Process management (extracted to opensquad.launcher.process_manager) ──
+_RUNTIME_LIST_TTL_S = 5.0
+_runtime_list_cache_at: float = 0.0
+_runtime_list_cache_result: dict | None = None
 from opensquad.launcher.process_manager import (
     MANAGEMENT_PORT,
     MAX_RESTART_ATTEMPTS,
@@ -645,11 +648,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 root = (qs.get("root") or [""])[0]
                 return self._handle_fs_list(name, rel, root)
             elif path.startswith("/api/agents/") and path.endswith("/fs/tree"):
-                # GET /api/agents/{name}/fs/tree?root=&max=
+                # GET /api/agents/{name}/fs/tree?root=&max=&depth=
                 name = path.split("/")[3]
                 root = (qs.get("root") or [""])[0]
                 max_e = (qs.get("max") or [""])[0]
-                return self._handle_fs_tree(name, root, max_e)
+                depth = (qs.get("depth") or [""])[0]
+                return self._handle_fs_tree(name, root, max_e, depth)
             elif path.startswith("/api/agents/") and path.endswith("/fs/read"):
                 # GET /api/agents/{name}/fs/read?path=&root=
                 name = path.split("/")[3]
@@ -1358,18 +1362,28 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             result["agent"] = name
             return self._send_json(result)
 
-        def _handle_fs_tree(self, name: str, root_override: str = "", max_entries: str = ""):
-            """GET /api/agents/{name}/fs/tree?root=&max= — full project tree (capped)."""
+        def _handle_fs_tree(self, name: str, root_override: str = "", max_entries: str = "", depth: str = ""):
+            """GET /api/agents/{name}/fs/tree?root=&max=&depth= — full project tree (capped).
+
+            Uses utils.fs_index: git ls-files acceleration, TTL cache and a
+            bounded walk fallback. ``depth`` limits entries to N path segments
+            (UI lazy expansion); ``has_more`` in the response signals deeper
+            content is available on demand.
+            """
             root, err = self._agent_fs_root(name, root_override)
             if err is not None:
                 return err
-            from opensquad.utils.project_fs import list_tree
+            from opensquad.utils.fs_index import list_tree
 
             try:
                 mx = int(max_entries) if str(max_entries).strip() else 10000
             except ValueError:
                 mx = 10000
-            result = list_tree(root, max_entries=mx)
+            try:
+                dp = int(depth) if str(depth).strip() else None
+            except ValueError:
+                dp = None
+            result = list_tree(root, max_entries=mx, max_depth=dp)
             if "error" in result:
                 return self._send_json({"error": result["error"]}, int(result.get("status") or 400))
             result["agent"] = name
@@ -2778,7 +2792,21 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             return self._send_json({"services": services})
 
         def _handle_runtime_list(self):
-            """GET /api/runtime/list — list runtime registry and managed process states."""
+            """GET /api/runtime/list — list runtime registry and managed process states.
+
+            ``_cleanup_runtime_registry`` scans processes and can take ~1.5s on
+            Windows; the frontend polls this endpoint, so the cleanup+response
+            is cached for 5s (cleanup is idempotent — it only reaps stale pids
+            that are already dead or unmanaged).
+            """
+            global _runtime_list_cache_at, _runtime_list_cache_result
+            now = time.monotonic()
+            if (
+                _runtime_list_cache_result is not None
+                and now - _runtime_list_cache_at < _RUNTIME_LIST_TTL_S
+            ):
+                return self._send_json(_runtime_list_cache_result)
+
             cleanup = _cleanup_runtime_registry(force_kill=False)
             managed_agents = []
             for ap in _processes.values():
@@ -2803,19 +2831,20 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         "should_run": psp.should_run,
                     }
                 )
-            return self._send_json(
-                {
-                    "runtime_registry": cleanup.get("remaining", []),
-                    "cleanup": {
-                        "cleaned": cleanup.get("cleaned", 0),
-                        "killed": cleanup.get("killed", 0),
-                    },
-                    "managed": {
-                        "agents": managed_agents,
-                        "plugins": managed_plugins,
-                    },
-                }
-            )
+            result = {
+                "runtime_registry": cleanup.get("remaining", []),
+                "cleanup": {
+                    "cleaned": cleanup.get("cleaned", 0),
+                    "killed": cleanup.get("killed", 0),
+                },
+                "managed": {
+                    "agents": managed_agents,
+                    "plugins": managed_plugins,
+                },
+            }
+            _runtime_list_cache_at = now
+            _runtime_list_cache_result = result
+            return self._send_json(result)
 
         def _handle_plugin_service_start(self, plugin_id: str):
             """POST /api/plugin-services/{id}/start — Start a plugin service"""
@@ -2901,8 +2930,13 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 _log.warning(f"[Launcher] Warning: Failed to sync services.{plugin_id}.enabled: {e}")
 
         def _handle_shutdown(self, body: dict):
-            """POST /api/shutdown — Gracefully stop agents, then confirm for force-kill."""
-            timeout = body.get("timeout", 10) if isinstance(body, dict) else 10
+            """POST /api/shutdown — Gracefully stop agents, then confirm for force-kill.
+
+            Agent termination is parallel: serial ``wait(timeout)`` per agent
+            made shutdown take N x timeout seconds and blocked the HTTP response.
+            """
+            timeout = body.get("timeout", 5) if isinstance(body, dict) else 5
+            targets = []
             stopped = 0
             for name, ap in list(_processes.items()):
                 if ap.is_alive():
@@ -2910,15 +2944,33 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         _log.info(f"[Launcher] Graceful shutdown: stopping agent {name}...")
                         ap.should_run = False
                         if ap.process and ap.process.poll() is None:
-                            ap.process.terminate()
-                            try:
-                                ap.process.wait(timeout=timeout)
-                            except subprocess.TimeoutExpired:
-                                ap.process.kill()
-                            stopped += 1
+                            targets.append(ap.process)
                     except Exception:
                         pass
-            # Also stop plugin services
+
+            def _stop_one(proc):
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return 1
+                except Exception:
+                    return 0
+
+            if targets:
+                try:
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+                        stopped = sum(pool.map(_stop_one, targets))
+                except Exception:
+                    for proc in targets:
+                        stopped += _stop_one(proc)
+
+            # Also stop plugin services (parallel via same pool is unnecessary:
+            # psp.stop() is a signal + return)
             for _pid, psp in list(_plugin_services.items()):
                 if psp.is_alive():
                     try:

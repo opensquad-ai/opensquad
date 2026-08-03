@@ -96,6 +96,8 @@ type ModuleTreeCache = {
   truncated: boolean;
   count: number;
   at: number;
+  /** depth-limited response: deeper content available on demand */
+  hasMore?: boolean;
 };
 const moduleTreeCache = new Map<string, ModuleTreeCache>();
 
@@ -122,9 +124,10 @@ function putModuleTreeCache(
   entries: TreeEntry[],
   truncated: boolean,
   count: number,
+  hasMore?: boolean,
 ): void {
   const key = projectCacheKey(agentId, rootPath);
-  moduleTreeCache.set(key, { entries, truncated, count, at: Date.now() });
+  moduleTreeCache.set(key, { entries, truncated, count, at: Date.now(), hasMore });
   if (moduleTreeCache.size <= TREE_CACHE_MAX) return;
   const oldest = [...moduleTreeCache.entries()].sort((a, b) => a[1].at - b[1].at);
   moduleTreeCache.delete(oldest[0][0]);
@@ -561,6 +564,12 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   }, [changedEntries]);
   const lastLiveNonceRef = useRef(0);
   const treeLoadedOnceRef = useRef(false);
+  /** Depth limit of the currently loaded tree (3 = shallow first paint; 0 = full). */
+  const treeDepthRef = useRef(3);
+  /** True when the response indicated deeper content is available (lazy expand). */
+  const treeHasMoreRef = useRef(true);
+  /** In-flight single-level loads per dir (dedupe concurrent expands). */
+  const lazyLoadingRef = useRef<Set<string>>(new Set());
   const prefetchGenRef = useRef(0);
   const fileContentCacheRef = useRef<
     Map<
@@ -926,16 +935,21 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     [prefetchDiffs, prefetchFileContent],
   );
 
-  const loadTree = useCallback(async (opts?: { silent?: boolean }) => {
+  const loadTree = useCallback(async (opts?: { silent?: boolean; depth?: number }) => {
     if (!agentId || !rootPath) return;
     const cached = getModuleTreeCache(agentId, rootPath);
     const firstPaint = !treeLoadedOnceRef.current;
+    // Depth keeps its last value unless overridden (search forces 0 = full).
+    const depth = opts?.depth ?? treeDepthRef.current;
     // Instant paint from module cache (session switch / remount with same root).
     if (cached && cached.entries.length > 0 && firstPaint) {
       setTreeEntries(cached.entries);
       setTreeTruncated(!!cached.truncated);
       setTreeCount(cached.count);
       treeLoadedOnceRef.current = true;
+      // Cached entries may be depth-limited; stay conservative about has_more.
+      treeHasMoreRef.current = cached.hasMore !== false;
+      treeDepthRef.current = cached.hasMore !== false ? Math.min(depth, 3) : 0;
       const topDirs = cached.entries
         .filter((e) => e.type === 'dir' && !e.path.includes('/'))
         .map((e) => e.path);
@@ -960,7 +974,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     if (!silent) setListLoading(true);
     setListError(null);
     try {
-      const resp = await adminAPI.listProjectTree(agentId, rootPath, 10000);
+      const resp = await adminAPI.listProjectTree(agentId, rootPath, 10000, depth);
       const entries = (resp.entries || []).map((e) => ({
         path: (e.path || '').replace(/\\/g, '/'),
         name: e.name,
@@ -971,7 +985,16 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setTreeEntries(entries);
       setTreeTruncated(!!resp.truncated);
       setTreeCount(resp.count ?? entries.length);
-      putModuleTreeCache(agentId, rootPath, entries, !!resp.truncated, resp.count ?? entries.length);
+      treeHasMoreRef.current = !!resp.has_more;
+      treeDepthRef.current = depth;
+      putModuleTreeCache(
+        agentId,
+        rootPath,
+        entries,
+        !!resp.truncated,
+        resp.count ?? entries.length,
+        !!resp.has_more,
+      );
       // Preserve fold state on soft refresh; only seed defaults on first load
       if (!treeLoadedOnceRef.current) {
         const topDirs = entries
@@ -1005,26 +1028,94 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     }
   }, [agentId, rootPath, prefetchFileContent]);
 
-  const toggleExpand = useCallback((dirPath: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(dirPath)) next.delete(dirPath);
-      else {
-        next.add(dirPath);
-        // Prefetch children when opening a folder
-        const kids = treeEntriesRef.current.filter(
-          (e) =>
-            e.type === 'file' &&
-            e.path.startsWith(dirPath ? `${dirPath}/` : '') &&
-            !e.path.slice(dirPath.length + (dirPath ? 1 : 0)).includes('/'),
-        );
-        for (const f of kids.slice(0, 40)) {
-          void prefetchFileContent(f.path);
+  /** 按需加载单层目录（深度受限树展开更深目录时调用），合并进现有树。 */
+  const lazyLoadDir = useCallback(
+    async (dirPath: string) => {
+      if (!agentId || !rootPath) return;
+      if (lazyLoadingRef.current.has(dirPath)) return;
+      lazyLoadingRef.current.add(dirPath);
+      try {
+        const resp = await adminAPI.listProjectDir(agentId, dirPath, rootPath);
+        const prefix = dirPath ? `${dirPath}/` : '';
+        const existing = new Set(treeEntriesRef.current.map((e) => e.path.replace(/\\/g, '/')));
+        const fresh: TreeEntry[] = [];
+        for (const e of resp.entries || []) {
+          const path = `${prefix}${e.name}`;
+          if (existing.has(path)) continue;
+          existing.add(path);
+          fresh.push({ path, name: e.name, type: e.type, size: e.size });
         }
+        if (fresh.length > 0) {
+          const merged = [...treeEntriesRef.current, ...fresh];
+          treeEntriesRef.current = merged;
+          setTreeEntries(merged);
+          // Warm previews for freshly revealed files.
+          for (const f of fresh.filter((x) => x.type === 'file').slice(0, 20)) {
+            void prefetchFileContent(f.path);
+          }
+        }
+      } catch {
+        // Single-level load failure must not break the existing tree.
+      } finally {
+        lazyLoadingRef.current.delete(dirPath);
       }
-      return next;
-    });
-  }, [prefetchFileContent]);
+    },
+    [agentId, rootPath, prefetchFileContent],
+  );
+
+  const toggleExpand = useCallback(
+    (dirPath: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(dirPath)) {
+          next.delete(dirPath);
+        } else {
+          next.add(dirPath);
+          // Lazy expand: when the loaded tree is depth-limited and this dir has
+          // no direct children yet, fetch one level on demand.
+          const hasMore = treeHasMoreRef.current;
+          const depthLimit = treeDepthRef.current;
+          const segCount = dirPath ? dirPath.split('/').length : 0;
+          const prefix = dirPath ? `${dirPath}/` : '';
+          const hasDirectKids = treeEntriesRef.current.some((e) => {
+            const p = e.path.replace(/\\/g, '/');
+            if (!p.startsWith(prefix)) return false;
+            const rest = p.slice(prefix.length);
+            return rest.length > 0 && !rest.includes('/');
+          });
+          const needsLazy =
+            hasMore && depthLimit > 0 && segCount >= depthLimit && !hasDirectKids;
+          if (needsLazy) void lazyLoadDir(dirPath);
+          // Prefetch children when opening a folder
+          const kids = treeEntriesRef.current.filter(
+            (e) =>
+              e.type === 'file' &&
+              e.path.startsWith(dirPath ? `${dirPath}/` : '') &&
+              !e.path.slice(dirPath.length + (dirPath ? 1 : 0)).includes('/'),
+          );
+          for (const f of kids.slice(0, 40)) {
+            void prefetchFileContent(f.path);
+          }
+        }
+        return next;
+      });
+    },
+    [prefetchFileContent, lazyLoadDir],
+  );
+
+  // Searching a depth-limited tree: upgrade to the full listing once (entering
+  // search), so matches are not restricted to the shallow first paint.
+  const prevSearchRef = useRef('');
+  useEffect(() => {
+    const prev = prevSearchRef.current;
+    const now = search.trim();
+    prevSearchRef.current = now;
+    if (!now) return;
+    if (prev && now) return; // already in search; keep-alive refreshes suffice
+    if (treeLoadedOnceRef.current && treeHasMoreRef.current && treeDepthRef.current > 0) {
+      void loadTree({ silent: true, depth: 0 });
+    }
+  }, [search, loadTree]);
 
   const expandToPath = useCallback((relPath: string) => {
     const ancestors = ancestorPaths(relPath);

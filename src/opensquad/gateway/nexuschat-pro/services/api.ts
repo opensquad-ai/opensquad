@@ -984,11 +984,12 @@ export const adminAPI = {
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/list?path=${q}${r}`);
   },
 
-  /** 一次性加载完整项目文件树（仅元数据，上限 10000） */
-  listProjectTree: async (name: string, root?: string, maxEntries: number = 10000) => {
+  /** 一次性加载完整项目文件树（仅元数据，上限 10000）。depth>0 时只返回该深度内的条目（UI 按需展开），has_more 标记还有更深内容 */
+  listProjectTree: async (name: string, root?: string, maxEntries: number = 10000, depth?: number) => {
     const params = new URLSearchParams();
     if (root) params.set('root', root);
     params.set('max', String(maxEntries || 10000));
+    if (depth) params.set('depth', String(depth));
     const q = params.toString();
     return apiRequest<{
       agent: string;
@@ -1005,6 +1006,8 @@ export const adminAPI = {
       count: number;
       truncated: boolean;
       max_entries: number;
+      max_depth?: number | null;
+      has_more?: boolean;
       skipped?: string[];
     }>(`/ai-web/admin/agents/${encodeURIComponent(name)}/fs/tree?${q}`);
   },
