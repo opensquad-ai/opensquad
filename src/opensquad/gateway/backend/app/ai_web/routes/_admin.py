@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import httpx
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
@@ -38,6 +39,54 @@ admin_router = APIRouter()  # prefix comes from main router include
 # Admin Management API — proxy to launcher.py :9600
 # ============================================================
 
+# Short-TTL cache for slow-but-readonly launcher endpoints. Every frontend
+# click fans out browser -> gateway -> launcher -> agent; these endpoints are
+# polled or re-opened constantly and their payloads change slowly, so cache
+# them at the gateway to cut the fan-out. Key = path + sorted query params.
+_PROXY_GET_CACHE_TTL_S = 5.0
+_PROXY_GET_CACHE_MAX = 64
+_PROXY_GET_CACHE: dict[str, tuple[float, dict]] = {}
+_PROXY_GET_CACHEABLE_PREFIXES = (
+    "/api/runtime/list",
+    "/api/workspace/list",
+    "/api/agents/",  # fs/tree, fs/list, fs/changed, fs/session-changes ...
+)
+
+
+def _proxy_cache_key(path: str, params: dict | None) -> str:
+    if params:
+        from urllib.parse import urlencode
+
+        return f"{path}?{urlencode(sorted(params.items()))}"
+    return path
+
+
+def _proxy_cache_get(path: str, params: dict | None) -> dict | None:
+    if not path.startswith(_PROXY_GET_CACHEABLE_PREFIXES):
+        return None
+    key = _proxy_cache_key(path, params)
+    entry = _PROXY_GET_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, result = entry
+    if expires_at <= time.monotonic():
+        _PROXY_GET_CACHE.pop(key, None)
+        return None
+    return result
+
+
+def _proxy_cache_set(path: str, params: dict | None, result: dict) -> None:
+    if not path.startswith(_PROXY_GET_CACHEABLE_PREFIXES):
+        return
+    if len(_PROXY_GET_CACHE) >= _PROXY_GET_CACHE_MAX:
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in _PROXY_GET_CACHE.items() if exp <= now]
+        for k in expired:
+            _PROXY_GET_CACHE.pop(k, None)
+        if len(_PROXY_GET_CACHE) >= _PROXY_GET_CACHE_MAX:
+            _PROXY_GET_CACHE.clear()
+    _PROXY_GET_CACHE[_proxy_cache_key(path, params)] = (time.monotonic() + _PROXY_GET_CACHE_TTL_S, result)
+
 
 async def _proxy_get(
     path: str,
@@ -47,7 +96,15 @@ async def _proxy_get(
     http_only: bool = False,
     timeout: float = 5.0,
 ) -> dict:
-    """GET proxy to launcher — prefer WS tunnel, fallback to HTTP"""
+    """GET proxy to launcher — prefer WS tunnel, fallback to HTTP.
+
+    Read-only slow endpoints (runtime list, workspace list, agent fs/*) are
+    cached for ``_PROXY_GET_CACHE_TTL_S`` seconds at the gateway so polling /
+    re-opening them does not fan out to launcher/agent on every click.
+    """
+    cached = _proxy_cache_get(path, params)
+    if cached is not None:
+        return cached
     _url = _launcher_url()
     # WS tunnel: no inbound port needed on home machine
     if not http_only and launcher_url is None and launcher_handler.has_connections():
@@ -58,7 +115,9 @@ async def _proxy_get(
 
             full_path = f"{path}?{urlencode(params)}"
         try:
-            return await launcher_handler.rpc(node_id, "GET", full_path, timeout=timeout)
+            result = await launcher_handler.rpc(node_id, "GET", full_path, timeout=timeout)
+            _proxy_cache_set(path, params, result)
+            return result
         except HTTPException:
             raise
         except Exception:
@@ -76,7 +135,9 @@ async def _proxy_get(
             if resp.status_code >= 400:
                 err = resp.json().get("error", f"Launcher returned {resp.status_code}")
                 raise HTTPException(resp.status_code, err)
-            return resp.json()
+            result = resp.json()
+            _proxy_cache_set(path, params, result)
+            return result
         except httpx.ConnectError:
             raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
         except HTTPException:

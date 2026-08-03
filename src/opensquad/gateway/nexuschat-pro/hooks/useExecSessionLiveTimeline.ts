@@ -296,12 +296,14 @@ export function useExecSessionLiveTimeline(
     // Re-request shortly after connect in case the first command raced ahead
     // of the agent WS being ready.
     const askAgain = window.setTimeout(askStats, 800);
-    // Only re-watch while this exec pane is busy — idle 12s polls still fan out
-    // token_stats and re-render the chat tree after the agent has stopped.
+    // Only re-watch while this exec pane is busy. Polls fan out token_stats
+    // and re-render the chat tree after the agent has stopped; the agent-side
+    // TTL cache (12s) makes 30s polling plenty — stats are recomputed at most
+    // once per TTL per session and broadcast on every turn boundary anyway.
     const askInterval = window.setInterval(() => {
       if (!busyRef.current) return;
       askStats();
-    }, 12000);
+    }, 30000);
 
     const forThisSession = (msg: AIWSMessage): boolean => {
       const sid = msgSid(msg);
@@ -672,12 +674,12 @@ export function useExecSessionLiveTimeline(
     void pullDisk();
     // Poll while the turn is live OR the parent forced catch-up (running exec).
     // WS stream/turn_* events are the real-time path; this disk pull is a
-    // catch-up fallback, so 3s (not 1.2s) is plenty.
+    // catch-up fallback, so 5s (not 3s) keeps the fan-out low.
     const pollId = window.setInterval(() => {
       if (!forceDiskPollRef.current && !busyRef.current) return;
       if (document.visibilityState !== 'visible') return;
       void pullDisk();
-    }, 3000);
+    }, 5000);
 
     return () => {
       unsubs.forEach((u) => {

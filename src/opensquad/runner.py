@@ -72,6 +72,10 @@ def _get_state_manager():
 # Module-level runner reference for tool hot-reload (each agent is an independent process, singleton-safe)
 _active_runner: AgentRunner | None = None
 
+# Token-stats recompute TTL (seconds). The frontend polls token stats every
+# 12s; full-history re-encoding is expensive on long sessions.
+_TOKEN_STATS_TTL_S = 12.0
+
 
 def do_plugin_reload() -> dict:
     """
@@ -300,6 +304,11 @@ class AgentRunner:
         # Historical cumulative token stats (across sessions/restarts), not written to chat_api
         # chat_api.total_* only records the current session (reset to 0 on new session)
         self._hist_input_tokens: int = 0
+        # Token-stats TTL cache: full-history tiktoken re-encoding costs
+        # 200-800ms on long sessions and runs on the event loop; the frontend
+        # polls every 12s and turn internals emit frequently, so recomputes
+        # collapse to at most one per TTL per session.
+        self._token_stats_cache: dict[str, tuple[float, dict]] = {}
         self._hist_output_tokens: int = 0
         self._hist_requests: int = 0
         self._hist_cache_read_tokens: int = 0
@@ -3873,6 +3882,21 @@ class AgentRunner:
             sid = forced or self._resolve_token_stats_sid()
             if sid and not (getattr(self, "_turn_sid", None) or "").strip():
                 self._turn_sid = sid
+
+            # ── TTL cache: collapse full-history re-encoding (200-800ms on
+            # long sessions, runs on the event loop) to at most one recompute
+            # per TTL per session. The cached payload is still broadcast on
+            # every call so pollers receive fresh events. ──
+            cache_key = sid or "default"
+            now = time.monotonic()
+            cached = self._token_stats_cache.get(cache_key)
+            if cached is not None and now - cached[0] < _TOKEN_STATS_TTL_S:
+                await bus.emit_async(
+                    "token_stats",
+                    {"sid": sid, "agent_id": self._agent_id, "data": cached[1]},
+                )
+                return
+
             chat_api = self._chat_api_for_token_stats(sid)
             req = self._req_for_token_stats(chat_api, sid)
 
@@ -3961,6 +3985,7 @@ class AgentRunner:
                         json.dump(token_data, f, ensure_ascii=False)
             except Exception:
                 pass
+            self._token_stats_cache[cache_key] = (time.monotonic(), token_data)
         except Exception as e:
             logger.error(f"[Runner] _broadcast_token_stats failed: {e}")
 
