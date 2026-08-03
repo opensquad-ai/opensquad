@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.7]                                                                | 2026-08-03 | [0.8.6 → 0.8.7](https://github.com/opensquad-ai/opensquad/compare/v0.8.6...v0.8.7)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.7)  |
 | [0.8.6]                                                                | 2026-08-03 | [0.8.5 → 0.8.6](https://github.com/opensquad-ai/opensquad/compare/v0.8.5...v0.8.6)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.6)  |
 | [0.8.5]                                                                | 2026-07-29 | [0.8.2 → 0.8.5](https://github.com/opensquad-ai/opensquad/compare/v0.8.2...v0.8.5)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.5)  |
 | [0.8.0]                                                                | 2026-07-22 | [0.6.0 → 0.8.0](https://github.com/opensquad-ai/opensquad/compare/v0.6.0...v0.8.0)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.0)  |
@@ -30,6 +31,61 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.7] — 2026-08-03
+
+> Boot-to-first-turn optimization round 2: static-UI web startup, MCP connect
+> timeouts, tool-schema prewarm, graded readiness, plus two launcher fixes
+> (process-table wiring, single-instance guard) that stop the stale-kill loop.
+
+### Added
+
+- **web: static-UI default.** `opensquad web` serves the built frontend from
+  Gateway :9555 and skips the Vite cold start (5-15s saved); `--dev` keeps
+  Vite for frontend work.
+- **lite whitelist extended.** `/api/groups` and `/api/ai-web/agents` are
+  available as soon as `ready_lite` is set (login first paint -0.5~1.5s).
+- **MCP connect hard timeout.** Per-server `asyncio.wait_for` (max(5, cfg))
+  with `finally` AsyncExitStack cleanup prevents hung spawns from stalling
+  full_ready and leaking subprocesses.
+- **Tool-schema background prewarm.** `generate_openai_tools` +
+  `generate_tool_descriptions` run in a thread after agent_ready, moving the
+  one-time lazy-import cost (1-3s) out of first-turn TTFT.
+- **prompt-cache opt-in (DeepSeek).** `model.prompt_cache: true` injects
+  `chat_template_kwargs.cache.use` for deepseek endpoints (default off).
+- **single-launcher guard.** A second launcher instance (uv vs anaconda
+  python installs) probes the management port and exits instead of sharing
+  the runtime registry and killing the first instance's agents.
+
+### Changed
+
+- **httpx graded timeouts.** `Timeout(connect=10, read=120, write=30,
+  pool=10)` + `max_retries=0`: dead endpoints now fail in ~12-22s instead of
+  blind-waiting 120s (x6 retries).
+- **`_setup_local_mode` idempotent.** Skips config rewrite, workspace-config
+  subprocess and .env.local writes when local mode is already active.
+- **connections setup parallel.** Web-server setup and gateway adapter run
+  concurrently (gather); config dict reused across AgentRunner/model_switch.
+- **`init_db` backgrounded.** TCP port + `ready_lite` come up immediately;
+  DB-backed lite endpoints wait on `_db_ready` (15s cap).
+- **plugin.json write dedup.** Manifests are only written when content
+  changed (12 plugins x redundant IO removed).
+- **cloned ChatAPI shares read-only resources.** httpx client and tiktoken
+  encoding reused from the root instance.
+
+### Fixed
+
+- **launcher stale-kill loop (root cause).** `set_process_tables()` was never
+  wired: process_manager's process table stayed empty, so cleanup treated
+  every live agent/plugin as stale and killed it every ~60s. Now injected
+  after registration.
+- **plugin to_thread regression reverted.** `asyncio.to_thread` broke plugins
+  whose `on_load` calls `get_running_loop()` (e.g. reminder); loading stays
+  on the event loop.
+- **async session archive reverted.** The threaded archive introduced a disk
+  visibility race (stale reads right after New Chat); back to synchronous.
 
 ---
 

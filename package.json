@@ -1,6 +1,6 @@
 {
   "name": "@opensquad-ai/opensquad",
-  "version": "0.8.7-dev.0",
+  "version": "0.8.7",
   "description": "OpenSquad — Local-first Multi-Agent Collaboration Framework. npm bootstrap that installs the Python `opensquad` CLI and proxies commands to it.",
   "bin": {
     "opensquad": "bin/opensquad.js"
