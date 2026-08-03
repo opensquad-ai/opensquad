@@ -8,7 +8,10 @@ FROM node:20-slim AS frontend-build
 
 WORKDIR /build
 COPY src/opensquad/gateway/nexuschat-pro/package.json src/opensquad/gateway/nexuschat-pro/package-lock.json ./
-RUN npm ci --ignore-scripts
+# npm ci has a known optional-dependencies bug (npm/cli#4828) that skips
+# platform binaries like @rollup/rollup-linux-x64-gnu; npm install with the
+# committed lockfile installs them correctly and still pins versions.
+RUN npm install --ignore-scripts
 
 COPY src/opensquad/gateway/nexuschat-pro/ ./
 RUN npm run build
