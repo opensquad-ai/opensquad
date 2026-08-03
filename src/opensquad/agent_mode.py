@@ -136,6 +136,15 @@ FORBIDDEN (tools are blocked; do not attempt):
 - Run shell / cmd / bash / powershell / background jobs
 - Git write operations, installs, or other mutating tools
 
+EXECUTION-REQUEST RULE (important): If the user asks you to DO something that
+requires running commands, starting services, deploying, installing, or editing
+code — e.g. "启动服务/运行/部署/执行/测试/修改" — do NOT loop through read-only
+investigation forever. Once you understand the codebase well enough to write a
+plan (or even earlier, when the request is unambiguous), call
+`agent_mode__request_switch` with `target_mode="build"` immediately and wait
+for approval. Endless read-only probing without a plan or a switch request is
+considered a failure mode.
+
 When the Markdown plan + `<plan>` checklist are ready for implementation, call
 `agent_mode__request_switch` with `target_mode="build"` and a short reason that
 references the plan file path. Wait for the user to approve before assuming

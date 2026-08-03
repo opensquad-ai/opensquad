@@ -13,6 +13,7 @@ import os
 import re
 import time
 import uuid
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -224,11 +225,63 @@ _REPO_ROOT = syscfg.project_root()
 
 router = APIRouter(prefix="/api/ai-web")
 router.include_router(audit_router)
-from ._admin import admin_router
-from ._market import market_router
 
-router.include_router(admin_router)
-router.include_router(market_router)
+# ── P1-5: admin/market routers are mounted LAZILY (first admin request, or
+# once the background startup task finishes). Importing ``_admin`` pulls in
+# launcher_handler/model_preset_service and ~1.1s of module-import time, which
+# used to block gateway startup. The AI-Web chat API itself stays eager.
+#
+# NOTE: mounting happens on the FastAPI ``app`` itself — app.include_router()
+# copies the sub-router's routes at include time, so adding routes to this
+# router after the app already included it would NOT propagate.
+_LAZY_ROUTERS_MOUNTED = False
+
+
+def ensure_lazy_routers(app: Any | None = None) -> None:
+    """Mount admin + market routers once. Idempotent; safe to call from a
+    background task or a middleware on every request."""
+    global _LAZY_ROUTERS_MOUNTED
+    if _LAZY_ROUTERS_MOUNTED:
+        return
+    _LAZY_ROUTERS_MOUNTED = True
+    try:
+        from ._admin import admin_router
+        from ._market import market_router
+
+        if app is not None:
+            # Mount on the FastAPI app with the same /api/ai-web prefix the
+            # eager router uses. IMPORTANT: the app's catch-all static mount
+            # (StaticFiles at "/") is registered at import time; routes
+            # appended via include_router() would land AFTER it and be
+            # shadowed (404). Insert the lazy routes before the first Mount
+            # instead, preserving the import-time ordering.
+            from starlette.routing import Mount
+
+            # Bake the /api/ai-web prefix into copies via a temp router
+            # (raw route objects carry no prefix).
+            from fastapi import APIRouter
+
+            _lazy_api = APIRouter(prefix="/api/ai-web")
+            _lazy_api.include_router(admin_router)
+            _lazy_api.include_router(market_router)
+            new_routes = _lazy_api.routes
+            routes = app.router.routes
+            insert_at = len(routes)
+            for i, r in enumerate(routes):
+                if isinstance(r, Mount):
+                    insert_at = i
+                    break
+            routes[insert_at:insert_at] = new_routes
+        else:
+            # No app reference (tests / unusual callers) — fall back to this
+            # router. Only takes effect if the app includes this router after
+            # this call.
+            router.include_router(admin_router)
+            router.include_router(market_router)
+        logging.getLogger(__name__).info("[routes] Lazy routers mounted (admin + market)")
+    except Exception:
+        logging.getLogger(__name__).exception("[routes] Lazy router mount failed")
+        _LAZY_ROUTERS_MOUNTED = False  # allow retry
 
 
 class ConfigUpdateRequest(BaseModel):

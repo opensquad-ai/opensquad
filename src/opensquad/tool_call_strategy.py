@@ -387,14 +387,21 @@ class ToolCallStrategySelector:
             - "xml": Force XML format (for compatibility)
 
         Tool Filters (Native FC only):
-            - "all": All tools (default, 124 tools)
-            - "baseline": High-frequency tools only (57 tools, ~46% reduction)
-            - "high": High + medium frequency tools (97 tools, ~22% reduction)
+            - "all": All tools (default for backward compat, 124+ tools)
+            - "baseline": High-frequency tools only (59 tools, ~65% reduction)
+            - "high": High + medium frequency tools (DEFAULT, ~77 tools, ~45% reduction)
             - List[str]: Custom namespace list
+        NOTE: since 0.8.5 the default is "high" (was "all") — set tool_filter
+        explicitly in config.json to override (e.g. "all" to restore).
         """
         model_config = config.get("model", {})
         mode = model_config.get("tool_call_mode", "auto")
-        tool_filter = model_config.get("tool_filter", "all")  # get filter config
+        # P0-1 perf: "all" (159 tools ≈ 16.7K tokens) is now opt-in. Every
+        # agent that does not explicitly configure tool_filter gets the curated
+        # "high" set (framework core + common plugins, ≈8K tokens) — a ~45%
+        # cut in per-request tool schema tokens, which directly reduces TTFT
+        # and cost. Override with "all" (or a namespace list) per agent.
+        tool_filter = model_config.get("tool_filter", "high")  # get filter config
         # api_protocol: API 协议类型 (openai / openai_compat / claude / google)
         provider = model_config.get("api_protocol", "")
         model_name = model_config.get("model_name", "")

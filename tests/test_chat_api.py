@@ -250,3 +250,19 @@ class TestPrepareMessages:
         system = chat.req[0]
         result = chat._prepare_messages()
         assert result[0] == system
+
+    def test_large_window_does_not_compress_at_128k(self, chat, monkeypatch):
+        """A 1M model must not be compacted at the common 128k card default."""
+        chat.token_max = 1_000_000
+        for i in range(10):
+            chat.add_user_message(f"message {i}")
+            chat.add_assistant_message(f"reply {i}")
+
+        monkeypatch.setattr(chat, "get_current_token_count", lambda tools: 200_000)
+        monkeypatch.setattr(chat, "_generate_summary", lambda msgs: "summary")
+        monkeypatch.setattr(chat, "_count_tokens", lambda msgs, tools=None: 20_000)
+
+        result = chat._prepare_messages()
+
+        assert result == chat.req
+        assert chat._auto_compressed is False

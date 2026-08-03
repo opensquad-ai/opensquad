@@ -77,6 +77,10 @@ class SessionManager:
         self._writer_running = False
         self._writer_shutdown_event: asyncio.Event | None = None
         self._writer_idle_event: asyncio.Event | None = None
+        # Parallel (non-focused) sessions whose live dicts were mutated by the
+        # async writer but have no snapshot coverage — flushed to disk after
+        # each batch (P0-5 fix: parallel-session messages never persisted).
+        self._dirty_parallel_sids: set[str] = set()
 
         # Save sequence number: monotonically increasing counter written to disk
         # with every _save_session().  Prevents the async writer from overwriting
@@ -536,6 +540,9 @@ class SessionManager:
                     )
                     return
                 mutation()
+                # P0-5: the writer snapshot only covers the focused session;
+                # mark parallel sessions dirty so the flush persists them too.
+                self._dirty_parallel_sids.add(target_sid)
 
         if self._writer_running and self._write_queue is not None:
             _wt = self._writer_task
@@ -674,6 +681,21 @@ class SessionManager:
                         # incremental records, so a full rewrite only runs every
                         # _snapshot_interval_sec / _snapshot_max_records records.
                         self._maybe_snapshot()
+                        # P0-5: persist parallel (non-focused) sessions touched by
+                        # this batch — they are not covered by _maybe_snapshot().
+                        if self._dirty_parallel_sids:
+                            for _dsid in list(self._dirty_parallel_sids):
+                                try:
+                                    _ddata = self._live_sessions.get(_dsid)
+                                    if _ddata is None:
+                                        _ddata = self._resolve_session_data(_dsid)
+                                    if _ddata is not None and _ddata is not self.session_data:
+                                        self._save_session_data(_ddata)
+                                except Exception as _de:
+                                    logger.warning(
+                                        f"[SessionManager] parallel session persist failed sid={_dsid}: {_de}"
+                                    )
+                            self._dirty_parallel_sids.clear()
 
                 # JSON serialization + disk writes are synchronous and can take
                 # seconds on huge sessions. Run them on a worker thread so the
@@ -1556,6 +1578,60 @@ class SessionManager:
                     return
 
         self._enqueue_mutation(_mutate)
+
+    def sync_tool_call_message(
+        self,
+        tool_calls: list[dict],
+        content: str | None = None,
+        reasoning_content: str | None = None,
+        *,
+        sid: str | None = None,
+    ):
+        """Persist an assistant message carrying ``tool_calls`` (tool-loop fix).
+
+        Patches the most recent assistant message that has no ``tool_calls``
+        yet (the LLM reply that produced these calls); if none exists, appends
+        a new assistant message. Without this, tool-call history lived only in
+        the in-memory ChatAPI ``req`` and was lost on every ``_load_history``
+        (turn bind) — the root cause of long agent tool loops where the LLM
+        re-issued identical read-only calls for hundreds of rounds.
+        """
+        target = self._resolve_session_data(sid)
+        target_id = target.get("id") or sid or self.session_data.get("id")
+
+        def _mutate():
+            messages = target.setdefault("messages", [])
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                if m.get("role") == "assistant" and not m.get("tool_calls"):
+                    m["tool_calls"] = tool_calls
+                    if content is not None:
+                        m["content"] = content
+                    elif not m.get("content"):
+                        m["content"] = None
+                    if reasoning_content is not None:
+                        m["reasoning_content"] = reasoning_content
+                    target["last_updated"] = utc_now_iso()
+                    self._append_log_record(
+                        target_id,
+                        {"op": "tail_patch", "patches": {"tool_calls": tool_calls, "content": m.get("content")}},
+                    )
+                    return
+            # No patchable assistant — append a fresh assistant(tool_calls) msg.
+            message = {
+                "role": "assistant",
+                "content": content or "",
+                "type": "api_sync",
+                "timestamp": utc_now_iso(),
+                "tool_calls": tool_calls,
+            }
+            if reasoning_content is not None:
+                message["reasoning_content"] = reasoning_content
+            messages.append(message)
+            target["last_updated"] = utc_now_iso()
+            self._append_log_record(target_id, {"op": "msg_append", "msg": message, "ts": message["timestamp"]})
+
+        self._enqueue_mutation_for(_mutate, sid=target_id)
 
     def get_messages(self, limit: int | None = None, *, sid: str | None = None) -> list[dict]:
         data = self._resolve_session_data(sid)

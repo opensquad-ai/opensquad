@@ -123,9 +123,21 @@ class ContextBuilder:
         self.config_path = config_path
 
         # Prompt snapshot / cache state (moved from AgentRunner)
-        self._has_prompt_snapshot = False
-        self._mcp_in_system_prompt: str = ""
-        self._last_base_system_prompt: str = ""
+        # Parallel sessions are independent: keep these per-session instead of
+        # letting one pane's prompt snapshot suppress another pane's first emit.
+        self._has_prompt_snapshot_by_sid: set[str] = set()
+        self._mcp_in_system_prompt_by_sid: dict[str, str] = {}
+        self._last_base_system_prompt_by_sid: dict[str, str] = {}
+
+    def _state_sid(self) -> str:
+        """Best-effort session id for per-session prompt cache state."""
+        try:
+            provider = getattr(self.chat_api, "_sid_provider", None)
+            if provider:
+                return str(provider() or "").strip()
+        except Exception:
+            pass
+        return ""
 
     async def build(
         self,
@@ -177,19 +189,22 @@ class ContextBuilder:
         if "{{MCP_CURRENT_STATE}}" in final:
             final = final.replace("{{MCP_CURRENT_STATE}}", "")
         base_final = final
+        sid = self._state_sid()
 
-        base_changed = base_final != self._last_base_system_prompt
+        last_base = self._last_base_system_prompt_by_sid.get(sid, "")
+        last_mcp = self._mcp_in_system_prompt_by_sid.get(sid, "")
+        base_changed = base_final != last_base
         if base_changed:
-            self._last_base_system_prompt = base_final
+            self._last_base_system_prompt_by_sid[sid] = base_final
             if mcp_state:
                 final = base_final + f"\n\n## MCP Service Status\n\n{mcp_state}"
-            self._mcp_in_system_prompt = mcp_state
+            self._mcp_in_system_prompt_by_sid[sid] = mcp_state
         else:
-            if mcp_state != self._mcp_in_system_prompt:
+            if mcp_state != last_mcp:
                 dynamic_parts["MCP_CURRENT_STATE"] = mcp_state
             else:
-                if self._mcp_in_system_prompt:
-                    final = base_final + f"\n\n## MCP Service Status\n\n{self._mcp_in_system_prompt}"
+                if last_mcp:
+                    final = base_final + f"\n\n## MCP Service Status\n\n{last_mcp}"
 
         # Layer 2: Standard injection (parallelize independent state queries)
         from opensquad import state_manager as _state_module
@@ -269,6 +284,24 @@ class ContextBuilder:
             if mode_section and mode_section not in final:
                 final += "\n\n" + mode_section
             apply_plan_gate_to_llm_params(llm_params, mode)
+
+            # Plan-mode execution-intent nudge: when the user's request contains
+            # execution verbs but the agent is still in Plan (read-only), push it
+            # to request a switch to Build instead of probing files forever.
+            # (Fix for the observed 172-round identical read-only loop.)
+            if mode == MODE_PLAN:
+                _query = str(last_user_input or "").strip()
+                _EXEC_HINTS = (
+                    "启动", "运行", "执行", "部署", "安装", "修改", "创建", "删除",
+                    "测试", "重启", "搭建", "实现", "编写", "生成报告", "优化并实施",
+                )
+                _hits = [k for k in _EXEC_HINTS if k in _query]
+                if _hits and "PLAN_EXECUTION_NUDGE" not in dynamic_parts:
+                    dynamic_parts["PLAN_EXECUTION_NUDGE"] = (
+                        f"[Plan-mode nudge] 用户请求包含执行类意图（{'、'.join(_hits[:4])}）。"
+                        f"若理解已足够，请立即调用 agent_mode__request_switch(target_mode='build') "
+                        f"请求切换模式并等待批准，而不要继续重复只读调查；若需求不清，先提出澄清问题。"
+                    )
         except Exception as e:
             logger.warning(f"[ContextBuilder] agent_mode injection error: {e}")
 
@@ -319,10 +352,15 @@ class ContextBuilder:
             is_changed,
         )
 
-    def mark_snapshot_emitted(self):
-        """Mark that the prompt snapshot has been emitted."""
-        self._has_prompt_snapshot = True
+    def mark_snapshot_emitted(self, sid: str | None = None):
+        """Mark that the prompt snapshot has been emitted for a session."""
+        self._has_prompt_snapshot_by_sid.add(sid if sid is not None else self._state_sid())
+
+    def reset_prompt_snapshot(self, sid: str | None = None):
+        """Force the next prompt build to emit a fresh snapshot for a session."""
+        self._has_prompt_snapshot_by_sid.discard(sid if sid is not None else self._state_sid())
 
     @property
     def has_prompt_snapshot(self) -> bool:
-        return self._has_prompt_snapshot
+        """Whether a prompt snapshot was emitted for the current session."""
+        return self._state_sid() in self._has_prompt_snapshot_by_sid

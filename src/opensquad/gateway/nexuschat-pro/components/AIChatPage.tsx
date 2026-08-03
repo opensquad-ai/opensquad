@@ -1500,6 +1500,41 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   useEffect(() => { pendingMessagesRef.current = pendingMessages; }, [pendingMessages]);
   useEffect(() => { busySessionsRef.current = busySessions; }, [busySessions]);
 
+  /** Optimistically release one session's busy/streaming state after stop/new-chat. */
+  const clearSessionRunState = useCallback((sid?: string | null) => {
+    const key = String(sid || '').trim();
+    const remaining = key
+      ? busySessionsRef.current.filter((id) => id !== key)
+      : [];
+    busySessionsRef.current = remaining;
+    setBusySessions(remaining);
+    if (key) {
+      if (streamingTextBySessionRef.current[key]) {
+        const st = { ...streamingTextBySessionRef.current };
+        delete st[key];
+        streamingTextBySessionRef.current = st;
+        setStreamingTextBySession(st);
+      }
+      if (isStreamingBySessionRef.current[key]) {
+        const ib = { ...isStreamingBySessionRef.current };
+        delete ib[key];
+        isStreamingBySessionRef.current = ib;
+        setIsStreamingBySession(ib);
+      }
+    }
+    if (
+      !key
+      || key === currentSessionIdRef.current
+      || key === agentCurrentSessionIdRef.current
+    ) {
+      streamingTextRef.current = '';
+      setStreamingText('');
+      setIsStreaming(false);
+      setAgentStatus(remaining.length > 0 ? 'working' : 'connected');
+      finalizingRef.current = false;
+    }
+  }, []);
+
   // When a session leaves busy_sessions and isn't currently selected → grey unread-complete dot.
   const prevBusySessionsRef = useRef<string[]>([]);
   useEffect(() => {
@@ -4977,7 +5012,10 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       if (!sid) return isAgentBusy;
       if (busySessionsRef.current.includes(sid)) return true;
       if (isStreamingBySessionRef.current[sid]) return true;
-      if (sid === currentSessionIdRef.current) {
+      if (
+        sid === currentSessionIdRef.current
+        && busySessionsRef.current.length === 0
+      ) {
         // Do not treat sleeping as busy — otherwise pending queue never drains
         // and the agent never receives a wake/chat to leave sleep.
         return (
@@ -5974,23 +6012,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return finalizeWorkflowAndAddMessage(updated, stoppedMsg);
     });
     setTurnStartedMs(undefined);
-    if (sid) {
-      const st = { ...streamingTextBySessionRef.current };
-      delete st[sid];
-      streamingTextBySessionRef.current = st;
-      setStreamingTextBySession(st);
-      const ib = { ...isStreamingBySessionRef.current };
-      delete ib[sid];
-      isStreamingBySessionRef.current = ib;
-      setIsStreamingBySession(ib);
-    }
-    if (!sid || sid === (currentSessionIdRef.current || '')) {
-      streamingTextRef.current = '';
-      setStreamingText('');
-      setIsStreaming(false);
-      setAgentStatus('connected');
-    }
-    finalizingRef.current = false;
+    clearSessionRunState(sid);
     eventSidRef.current = '';
   };
 
@@ -6033,6 +6055,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           pendingTargetPaneIdRef.current = focusedPaneId;
         }
         userStoppedRef.current = false;
+        clearSessionRunState(draftSid);
         setIsLoadingSession(false);
         setSessionBootstrapped(true);
         viewingHistorySessionRef.current = false;
@@ -6098,6 +6121,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (prevBusy && previousSid) {
       wsServiceRef.current?.stopTask({ session_id: previousSid });
     }
+    clearSessionRunState(previousSid);
     newSessionPendingRef.current = true;
     userStoppedRef.current = false;
     setIsLoadingSession(false);

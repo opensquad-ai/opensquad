@@ -13,6 +13,8 @@ from typing import Any
 # Python versions; without this the bridge task can silently vanish.
 _bridge_bg_tasks: set[asyncio.Task] = set()
 _bridge_ws_tasks: set[asyncio.Task] = set()
+# Background boot-phase tasks (long-memory init etc.) — same GC guard.
+_bg_init_tasks: set[asyncio.Task] = set()
 
 from opensquad import AgentRunner, bus
 from opensquad.skill_loader import init_skill_runtime, load_skills_from_config, register_skill_tools
@@ -472,20 +474,14 @@ class AgentBootPhases:
         )
 
         t_mem = __import__("time").perf_counter()
-        memory_manager = self._initialize_long_memory_runtime(
-            config=config,
-            data_dir=data_dir,
-            project_root=project_root,
-            agent_name=agent_name,
-            agent_logger=agent_logger,
-        )
-        perf_event(
-            "boot",
-            "long_memory_ready",
-            agent_id=config.get("agent_id", ""),
-            elapsed_ms=int((__import__("time").perf_counter() - t_mem) * 1000),
-            has_memory=memory_manager is not None,
-        )
+        # ── Long-memory init moved OFF the chat-ready critical path ──
+        # Importing the agent_memory package pulls in scipy (~760ms) + storage
+        # modules (~1.6s total). It previously blocked the event loop (delaying
+        # GatewayAdapter WS registration) AND — when started as a thread during
+        # plugin loading — stole the GIL from the loop thread (plugins 406ms →
+        # 3s). It is now spawned by start_long_memory_background() AFTER
+        # finalize_runner_runtime() (chat-ready), running in a thread with no
+        # competing CPU work.
         perf_event(
             "boot",
             "plugin_runtime_total",
@@ -495,8 +491,77 @@ class AgentBootPhases:
         return PluginRuntimeArtifacts(
             plugin_manager=plugin_manager,
             skills=skills,
-            memory_manager=memory_manager,
+            memory_manager=None,
         )
+
+    def start_long_memory_background(
+        self,
+        config: dict[str, Any],
+        data_dir: str,
+        project_root: str,
+        agent_name: str,
+        agent_logger: Any,
+        early_runner: Any,
+    ) -> asyncio.Task | None:
+        """P0-3: initialize long-term memory in a background thread after chat-ready.
+
+        The scipy import + AgentMemory construction (~1.6s, GIL-bound) must not
+        run while the event loop is doing boot work — the GIL contention made
+        plugin loading 4-7x slower. Spawned after finalize_runner_runtime();
+        the memory manager is hot-attached to the runner when ready.
+        """
+        if "long_memory" not in config.get("tools", []):
+            return None
+        t_mem = __import__("time").perf_counter()
+        from opensquad.structured_log import perf_event
+
+        _mem_ok = {"ready": False}
+
+        def _long_memory_background() -> None:
+            mm = None
+            try:
+                mm = self._initialize_long_memory_runtime(
+                    config=config,
+                    data_dir=data_dir,
+                    project_root=project_root,
+                    agent_name=agent_name,
+                    agent_logger=agent_logger,
+                )
+                if mm is not None:
+                    try:
+                        attach = getattr(early_runner, "attach_runtime_components", None)
+                        if callable(attach):
+                            attach(memory_manager=mm)
+                        else:
+                            early_runner._memory_manager = mm
+                        if getattr(early_runner, "_ctx", None) is not None:
+                            early_runner._ctx.memory_manager = mm
+                    except Exception:
+                        pass
+                    _mem_ok["ready"] = True
+            finally:
+                perf_event(
+                    "boot",
+                    "long_memory_ready",
+                    agent_id=config.get("agent_id", ""),
+                    elapsed_ms=int((__import__("time").perf_counter() - t_mem) * 1000),
+                    has_memory=_mem_ok["ready"],
+                )
+
+        async def _long_memory_scheduler() -> None:
+            try:
+                await asyncio.to_thread(_long_memory_background)
+            except Exception as exc:
+                agent_logger.error(f"[Boot] Long-memory background init failed: {exc}")
+
+        try:
+            task = asyncio.create_task(_long_memory_scheduler())
+            _bg_init_tasks.add(task)  # keep strong ref (GC guard)
+            return task
+        except RuntimeError:
+            # No running loop (tests) — run synchronously.
+            _long_memory_background()
+            return None
 
     async def initialize_context_runtime(
         self,
@@ -648,9 +713,14 @@ class AgentBootPhases:
             logging.warning(f"[Boot] Failed to read mcp_global.json: {exc}")
 
         try:
-            from opensquad.tools.mcp_adapter import init_mcp_adapter
+            # P2-7: import the MCP SDK off the event loop — its import chain
+            # (anyio/pydantic/transport) can take ~1s and previously blocked
+            # the loop, which in turn delayed the extension task (plugins) and
+            # the GatewayAdapter WS registration by seconds.
+            import importlib
 
-            await init_mcp_adapter(
+            mcp_mod = await asyncio.to_thread(importlib.import_module, "opensquad.tools.mcp_adapter")
+            await mcp_mod.init_mcp_adapter(
                 agent_dir=agent_dir,
                 global_disabled_servers=global_disabled,
                 registry=registry,

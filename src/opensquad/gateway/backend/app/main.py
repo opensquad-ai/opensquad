@@ -244,11 +244,47 @@ class ReadinessMiddleware:
         await self.app(scope, receive, send)
 
 
+class LazyRoutesMiddleware:
+    """
+    P1-5: mount the heavy admin/market routers on demand.
+
+    Normally the background startup task mounts them shortly after listen; this
+    middleware is the safety net for requests that arrive before then (e.g. an
+    admin call racing startup) so they never 404.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path.startswith("/api/ai-web/admin") or path.startswith("/api/ai-web/market"):
+                try:
+                    from app.ai_web.routes._main import ensure_lazy_routers
+
+                    # self.app is the middleware stack, NOT the FastAPI app —
+                    # resolve the real app from the module global (available by
+                    # request time).
+                    ensure_lazy_routers(globals().get("app"))
+                except Exception:
+                    pass
+        await self.app(scope, receive, send)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management"""
     global _app_ready_lite, _app_ready
     _startup_log.info("Backend starting up...")
+    # P2-9: warm the default ThreadPoolExecutor now so the first WS connection
+    # does not pay thread-creation latency (~80ms on Windows) on its
+    # asyncio.to_thread session-cache calls. Subsequent connects drop from
+    # ~85ms to ~5ms.
+    try:
+        await asyncio.to_thread(lambda: None)
+    except Exception:
+        pass
     # Capture the gateway event loop for scheduled-task delivery so timer-
     # fired tasks can route prompts to the Agent via the Gateway WS registry
     # even before any admin route lazily created a ScheduledTaskManager.
@@ -314,12 +350,24 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             _startup_log.warning(f"Model preset service init failed: {e}")
 
+    async def _task_lazy_routes():
+        # P1-5: import the heavy admin/market routers in the background so the
+        # gateway starts listening before their ~1.1s import completes.
+        try:
+            from app.ai_web.routes._main import ensure_lazy_routers
+
+            ensure_lazy_routers(app)
+            _startup_log.info("Lazy routes mounted (background)")
+        except Exception as e:
+            _startup_log.warning(f"Lazy route mount failed: {e}")
+
     async def _finish_heavy_startup() -> None:
         global _app_ready
         await asyncio.gather(
             _task_init_data(),
             _task_reset_users(),
             _task_model_presets(),
+            _task_lazy_routes(),
         )
         _app_ready = True
         _startup_log.info("Backend fully ready")
@@ -416,6 +464,9 @@ app.add_middleware(
 
 # Readiness middleware: returns 503 until DB + default data init completes
 app.add_middleware(ReadinessMiddleware)
+# P1-5: mounts heavy admin/market routers on first admin request (safety net;
+# the background startup task normally mounts them earlier).
+app.add_middleware(LazyRoutesMiddleware)
 
 
 # Register API routes

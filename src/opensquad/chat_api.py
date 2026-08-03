@@ -705,6 +705,49 @@ class ChatAPI:
         # (tool_calls added to assistant msg changes its token count)
         self.invalidate_token_cache()
 
+        # ── Tool-loop fix: persist tool_calls + tool message to the session file ──
+        # Previously this lived only in the in-memory req; any _load_history()
+        # (turn bind / session switch) rebuilt req from the session file, which
+        # had no tool messages → the LLM "forgot" every tool result and re-issued
+        # identical calls forever (observed: 172 identical rounds / 42 min).
+        try:
+            from opensquad.session_manager import get_session_manager
+
+            _sm = get_session_manager()
+            _sid = ""
+            if self._sid_provider is not None:
+                try:
+                    _sid = self._sid_provider() or ""
+                except Exception:
+                    _sid = ""
+            _tool_calls_for_session = None
+            if self.req:
+                for _m in reversed(self.req):
+                    if _m.get("role") == "assistant" and _m.get("tool_calls"):
+                        _tool_calls_for_session = _m.get("tool_calls")
+                        break
+            if _tool_calls_for_session:
+                _sm.sync_tool_call_message(
+                    _tool_calls_for_session,
+                    content=(
+                        last_msg.get("content") if _mode == "amended_existing_assistant" else None
+                    ),
+                    reasoning_content=(
+                        last_msg.get("reasoning_content") if _mode == "amended_existing_assistant" else None
+                    ),
+                    sid=_sid or None,
+                )
+            _sm.add_message(
+                "tool",
+                str(result) if result else "(empty result)",
+                msg_type="tool_result",
+                tool_call_id=tool_call_id,
+                name=tool_name,
+                sid=_sid or None,
+            )
+        except Exception as _sm_e:
+            logger.debug(f"[ChatAPI] session persistence of tool result skipped: {_sm_e}")
+
         logger.info(
             f"[ChatAPI] add_tool_result: tool={tool_name}, "
             f"call_id={tool_call_id}, mode={_mode}, "
@@ -829,9 +872,9 @@ class ChatAPI:
         # 1. Count current tokens (uses incremental cache when available)
         current_tokens = self.get_current_token_count(self._last_tools)
         threshold = syscfg.ctx_trigger_threshold()
-        # DeepSeek V4 / large-window models have token_max=1M, which makes
-        # token_max * 0.75 = 750k — compression would never fire.
-        threshold_tokens = min(int(self.token_max * threshold), 128_000)
+        # Use the model's declared context window. A 1M-token model must not
+        # be compacted at 128k just because that is the common card default.
+        threshold_tokens = int(self.token_max * threshold)
 
         if current_tokens <= threshold_tokens:
             logger.info("[CompressTrace] below threshold, no compression needed")
@@ -1820,9 +1863,20 @@ class ChatAPI:
                         f"[ChatAPI] Injected _prev_reasoning_content into {injected_count} assistant message(s) (always inject when present), len={len(self._prev_reasoning_content)}"
                     )
             if not injected:
-                logger.warning(
-                    "[ChatAPI] FAILED to inject reasoning_content: no assistant message with tool_calls found"
-                )
+                # P1-6: failing to inject is EXPECTED when the conversation has
+                # no assistant message yet (e.g. a fresh session whose first
+                # message is user-only) — that is not an error worth a WARNING
+                # on every turn. Only surface it when assistant messages exist
+                # but none matched, which would indicate a real regression.
+                has_assistant = any(m.get("role") == "assistant" for m in messages)
+                if has_assistant:
+                    logger.warning(
+                        "[ChatAPI] FAILED to inject reasoning_content: no assistant message with tool_calls found"
+                    )
+                else:
+                    logger.debug(
+                        "[ChatAPI] reasoning_content not injected (no assistant message in conversation yet)"
+                    )
 
         # DEBUG: log message sequence before API call
         if logger.isEnabledFor(logging.DEBUG):

@@ -96,6 +96,36 @@ def _focused_session_id(sm: Any | None = None) -> str:
         return ""
 
 
+# A focused session is considered "stale" (not worth resuming) when it has had
+# no activity for this long. Fresh sessions keep the user's active pane; stale
+# ones would otherwise drag yesterday's history into a new conversation
+# (slower first turn + context pollution).
+_STALE_SESSION_MAX_IDLE_S = 30 * 60
+
+
+def _is_fresh_session(sid: str, sm: Any) -> bool:
+    """True when the session exists and was updated within the idle window."""
+    if not sid:
+        return False
+    try:
+        data = sm.ensure_session_loaded(sid)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        return False
+    updated = data.get("last_updated") or data.get("created_at") or ""
+    if not updated:
+        return False
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).total_seconds() < _STALE_SESSION_MAX_IDLE_S
+    except Exception:
+        # Unparseable timestamp — treat as stale so we don't resume blindly.
+        return False
+
+
 def classify(source: str | None = None, channel: str | None = None) -> IngressKind:
     """Classify an inbound item as external, web, or system."""
     if is_external_ingress(source, channel):
@@ -122,7 +152,10 @@ def resolve_session_id(
     """Resolve the target session for an inbound item.
 
     - external → primary (fallback focused)
-    - web → keep ``session_id``, else focused
+    - web → keep ``session_id``; when absent, resume the focused session only if
+      it is fresh (<30 min idle), otherwise create a brand-new session so a
+      stale conversation's history never bleeds into a new chat
+      (P1-4: previously fell back to the last-used session — possibly days old).
     - system → keep ``session_id``, else focused (never steal primary)
     """
     kind = classify(source, channel)
@@ -131,7 +164,20 @@ def resolve_session_id(
         return resolve_primary_session_id(sm)
     if given and given != "unknown":
         return given
-    return _focused_session_id(sm)
+    focused = _focused_session_id(sm)
+    if kind == "web":
+        if focused and _is_fresh_session(focused, sm):
+            return focused
+        # Stale or no focused session → fresh session for the new conversation.
+        if sm is None:
+            from opensquad.session_manager import get_session_manager
+
+            sm = get_session_manager()
+        try:
+            return sm.create_parallel_session(origin="web_chat")
+        except Exception:
+            pass
+    return focused
 
 
 def push_ingress(

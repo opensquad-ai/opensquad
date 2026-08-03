@@ -97,6 +97,46 @@ def test_context_builder_init_minimal():
     assert not cb.has_prompt_snapshot
 
 
+def test_prompt_snapshot_state_is_per_session():
+    """Parallel sessions must not share prompt snapshot emission state."""
+
+    class FakeChatAPI:
+        _sid_provider = None
+
+        def set_sid(self, sid):
+            self._sid_provider = lambda: sid
+
+    class FakeStrategy:
+        def prepare_llm_call(self, base):
+            return {"system_prompt": base, "tools": None, "tool_choice": "auto"}
+
+    class FakeTaskManager:
+        def render(self):
+            return ""
+
+    cb = ContextBuilder(
+        chat_api=FakeChatAPI(),
+        tool_call_strategy=FakeStrategy(),
+        task_manager=FakeTaskManager(),
+    )
+    cb.chat_api.set_sid("session-a")
+    cb.mark_snapshot_emitted()
+    assert cb.has_prompt_snapshot
+
+    cb.chat_api.set_sid("session-b")
+    assert not cb.has_prompt_snapshot
+    cb.mark_snapshot_emitted()
+    assert cb.has_prompt_snapshot
+
+    cb.chat_api.set_sid("session-a")
+    assert cb.has_prompt_snapshot
+    cb.reset_prompt_snapshot()
+    assert not cb.has_prompt_snapshot
+
+    cb.chat_api.set_sid("session-b")
+    assert cb.has_prompt_snapshot
+
+
 @pytest.mark.asyncio
 async def test_context_builder_build_returns_tuple():
     """build() must return (system_prompt, dynamic_prefix, llm_params, is_changed)."""

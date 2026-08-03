@@ -647,6 +647,27 @@ async def _prewarm_chat_api(chat_api: Any, agent_logger: logging.Logger) -> None
         agent_logger.warning(f"[Boot] ChatAPI warmup skipped: {exc}")
 
 
+async def _prewarm_tokenizer(agent_logger: logging.Logger) -> None:
+    """Preload the jieba dictionary in the background (first load costs ~1.3s).
+
+    The tokenizer is used by memory/audio tooling on the first chat turn; loading
+    it during boot (which runs before the user usually sends a message) removes
+    that latency from the first-round reply. Runs in a thread so the CPU-bound
+    dictionary build never blocks the event loop.
+    """
+    try:
+        await asyncio.to_thread(_init_jieba_sync)
+        agent_logger.info("[Boot] jieba tokenizer prewarmed")
+    except Exception as exc:
+        agent_logger.debug(f"[Boot] jieba prewarm skipped: {exc}")
+
+
+def _init_jieba_sync() -> None:
+    import jieba
+
+    jieba.initialize()  # builds the prefix dict (~1.3s first time, cached after)
+
+
 async def _initialize_extension_runtime_background(
     config: dict,
     agent_dir: str,
@@ -696,6 +717,19 @@ async def _initialize_extension_runtime_background(
             agent_id=agent_id,
             agent_logger=agent_logger,
         )
+        # P0-3: long-memory init (GIL-heavy scipy import) starts AFTER chat-ready
+        # so it neither blocks boot nor steals the GIL from plugin loading.
+        try:
+            BOOT_PHASES.start_long_memory_background(
+                config=config,
+                data_dir=data_dir,
+                project_root=syscfg.get_workspace(),
+                agent_name=agent_name,
+                agent_logger=agent_logger,
+                early_runner=early_runner,
+            )
+        except Exception as _mem_e:
+            agent_logger.warning(f"[Boot] Long-memory background spawn failed: {_mem_e}")
         try:
             from opensquad.model_switch import init as _model_switch_init
 
@@ -978,15 +1012,10 @@ async def main(agent_dir: str, override_port: int | None = None):
         agent_logger.warning(f"[Boot] model_switch early init failed: {_e}")
 
     asyncio.create_task(_prewarm_chat_api(chat_api, agent_logger))
-    mcp_task = asyncio.create_task(
-        _initialize_mcp_background(
-            config,
-            tool_registry,
-            agent_dir,
-            agent_logger,
-            runner=_early_runner,
-        )
-    )
+    # P2-7: create the extension task FIRST so plugin/skill loading (sync,
+    # GIL-bound) runs before the MCP background task's import thread starts —
+    # creating MCP first let its ~1s SDK import steal the GIL from plugin
+    # loading (plugins 406ms -> 1.5s) and delayed agent registration.
     extension_task = asyncio.create_task(
         _initialize_extension_runtime_background(
             config=config,
@@ -999,6 +1028,15 @@ async def main(agent_dir: str, override_port: int | None = None):
             boot_main_t0=boot_main_t0,
             agent_id=agent_id,
             agent_context=agent_ctx,
+        )
+    )
+    mcp_task = asyncio.create_task(
+        _initialize_mcp_background(
+            config,
+            tool_registry,
+            agent_dir,
+            agent_logger,
+            runner=_early_runner,
         )
     )
 
@@ -1035,6 +1073,12 @@ async def main(agent_dir: str, override_port: int | None = None):
     # 9. Let extensions finish before starting the group-chat bridge; the early
     # runner is already live and can process chat while this background task runs.
     await extension_task
+
+    # P0-2: jieba dictionary build is GIL-bound (~1.3s) — starting it while the
+    # extension task is still importing plugins made plugin loading 7x slower
+    # (GIL contention). Start it only now that plugins/skills are done; it still
+    # finishes long before the user's first chat.
+    asyncio.create_task(_prewarm_tokenizer(agent_logger))
     await mcp_task
 
     # Start group-chat bridge AFTER MCP/plugin init — the anyio cancel storm

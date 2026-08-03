@@ -154,9 +154,9 @@ class ToolRegistry:
 
         Args:
             tool_filter: tool filtering strategy
-                - "all": all tools (default, backward compatible)
+                - "all": all tools (opt-in; largest schema payload)
                 - "baseline": high-frequency tools only (files, system, search, memory, MCP)
-                - "high": high-frequency + medium-frequency tools only
+                - "high": DEFAULT — high+medium frequency tools incl. all mandatory framework namespaces
                 - List[str]: specify namespace list (e.g. ["filesystem", "git"])
 
         Returns:
@@ -181,9 +181,25 @@ class ToolRegistry:
         if cache_key in self._openai_tools_cache:
             return list(self._openai_tools_cache[cache_key])
 
-        # Define high-frequency and medium-frequency tool namespaces
-        HIGH_FREQ_NAMESPACES = {"filesystem", "system", "websearch", "bocha_search", "long_memory", "memory", "help"}
-        MEDIUM_FREQ_NAMESPACES = {"git", "api_process", "vision", "mcp_query", "im", "media", "translate_tool"}
+        # Define high-frequency and medium-frequency tool namespaces.
+        # "high" (the default filter) MUST include every mandatory framework
+        # namespace (system, filesystem, collaboration, delegate_task, ...) plus
+        # the commonly-enabled plugin namespaces — otherwise agents lose tools
+        # they rely on. Service-level namespaces (asr_tts, agent_factory, ...)
+        # are curated out to keep the per-request schema lean.
+        HIGH_FREQ_NAMESPACES = {
+            "filesystem", "system", "websearch", "bocha_search", "long_memory",
+            "memory", "help", "im", "collaboration", "agent_setup",
+            "delegate_task", "workspace", "task_watch", "reminder",
+            "choice_tools", "goal", "agent_mode", "plugin_admin",
+            "mcp_query", "vision", "translate_tool", "external_api",
+            "whisper_transcribe", "sequential_think", "token_analytics",
+            "api_browser",
+        }
+        MEDIUM_FREQ_NAMESPACES = {
+            "git", "api_process", "media", "feishu_send", "telegram_send",
+            "email_assistant", "quick_note", "scheduled_tasks", "web_automation",
+        }
 
         # Determine which namespaces to include
         if tool_filter == "all":
