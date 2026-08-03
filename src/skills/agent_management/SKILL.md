@@ -748,18 +748,20 @@ config = load_config_from("agents/{name}/config.json")
 
 # 2. Create independent Bridge instance
 from opensquad.bridge import create_bridge
+
 agent_bridge = create_bridge(config)  # <- each process creates independently
 
 # 3. Login with account from config
 if agent_bridge.login():  # <- uses config.group_chat.email/password
     # 4. Replace process-level singleton (affects only current process)
     import opensquad.bridge as bridge_module
+
     bridge_module.bridge = agent_bridge  # <- process-level replacement
-    
+
     # 5. Join configured groups
     for group_id in config.group_chat.groups:
         agent_bridge.join_group_api(group_id)
-    
+
     # 6. Start WebSocket listener
     asyncio.create_task(agent_bridge.connect_ws())
 ```
@@ -1045,13 +1047,14 @@ import argparse
 import json
 from pathlib import Path
 
+
 def create_agent(name: str, email: str, password: str, group_id: str = None):
     """Automate Agent creation"""
-    
+
     # 1. Register account
     print(f"[1/5] Registering account {email}...")
     # Call chat_account.register_account tool
-    
+
     # 2. Create or join group
     if group_id:
         print(f"[2/5] Joining group {group_id}...")
@@ -1060,34 +1063,35 @@ def create_agent(name: str, email: str, password: str, group_id: str = None):
         print(f"[2/5] Creating new group...")
         # Call chat_account.create_group tool
         # group_id = returned group ID
-    
+
     # 3. Create Agent directory
     print(f"[3/5] Creating Agent directory...")
     # Call agent_factory.create_agent tool
-    
+
     # 4. Configure Agent
     print(f"[4/5] Configuring Agent...")
     config_path = Path(f"agents/{name}/config.json")
-    
+
     config = json.loads(config_path.read_text())
     config["group_chat"] = {
         "enabled": True,
         "email": email,
         "password": password,
         "base_url": "http://localhost:9555",
-        "groups": [group_id]
+        "groups": [group_id],
     }
-    
+
     config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False))
-    
+
     # 5. Start Agent
     print(f"[5/5] Starting Agent...")
     # Call agent_factory.start_agent tool
-    
+
     print(f"Agent {name} created successfully!")
     print(f"   - Email: {email}")
     print(f"   - Group: {group_id}")
     print(f"   - Directory: agents/{name}/")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Automate Agent creation")
@@ -1095,7 +1099,7 @@ if __name__ == "__main__":
     parser.add_argument("--email", required=True, help="Account email")
     parser.add_argument("--password", default="Agent@2026", help="Account password")
     parser.add_argument("--group", help="Group ID (optional)")
-    
+
     args = parser.parse_args()
     create_agent(args.name, args.email, args.password, args.group)
 ```

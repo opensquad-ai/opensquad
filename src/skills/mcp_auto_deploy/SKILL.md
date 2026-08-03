@@ -109,12 +109,8 @@ new_server = {
         "my-filesystem-server": {
             "enabled": true,
             "command": "npx",
-            "args": [
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                "C:/allowed/directory"
-            ],
-            "timeout": 60
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/allowed/directory"],
+            "timeout": 60,
         }
     }
 }
@@ -343,8 +339,8 @@ MCP 工具在 LLM 调用中应呈现为 `mcp__playwright__navigate` 格式。如
 # 搜索日志关键字
 keywords = [
     "[Registry] MCP get_all_tools failed",  # 静默失败
-    "MCP get_all_tools",                     # 注册过程
-    "mcp__",                                 # MCP 工具进入列表
+    "MCP get_all_tools",  # 注册过程
+    "mcp__",  # MCP 工具进入列表
 ]
 ```
 
@@ -380,6 +376,7 @@ data_dir = os.path.join(workspace, "data")
 mcp_config = os.path.join(data_dir, "mcp_config.json")
 if os.path.isfile(mcp_config):
     import json
+
     with open(mcp_config) as f:
         cfg = json.load(f)
     servers = cfg.get("mcpServers", {})
@@ -414,18 +411,18 @@ import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+
 async def call_mcp_tool(server_name, tool_name, arguments):
     server_config = mcp_servers[server_name]
     params = StdioServerParameters(
-        command=server_config["command"],
-        args=server_config["args"],
-        env=server_config.get("env")
+        command=server_config["command"], args=server_config["args"], env=server_config.get("env")
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
             return result.content
+
 
 result = asyncio.run(call_mcp_tool("playwright", "navigate", {"url": "https://example.com"}))
 ```

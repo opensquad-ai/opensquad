@@ -80,15 +80,15 @@ PM writes report:
 
 ```python
 board_update(
-    collab_id="abc123",          # Collaboration session ID (required)
-    task_name="",                # Optional task name
-    title="Task title",          # Entry title
+    collab_id="abc123",  # Collaboration session ID (required)
+    task_name="",  # Optional task name
+    title="Task title",  # Entry title
     content="Detailed content",  # Entry body (supports markdown)
-    status="doing",              # Status: pending/doing/done/blocked
-    progress=0,                  # Progress 0-100
-    visibility="public",         # Visibility: public/private
-    item_type="task",            # Type: requirement/plan/task/status/discussion
-    item_key="unique_key",       # Key to distinguish multiple entries of same type
+    status="doing",  # Status: pending/doing/done/blocked
+    progress=0,  # Progress 0-100
+    visibility="public",  # Visibility: public/private
+    item_type="task",  # Type: requirement/plan/task/status/discussion
+    item_key="unique_key",  # Key to distinguish multiple entries of same type
 )
 ```
 
@@ -96,10 +96,10 @@ board_update(
 
 ```python
 board_list(
-    collab_id="abc123",          # Collaboration session ID (required)
-    agent_id="",                 # Optional: filter by agent
-    scope="public",              # "public" or "all"
-    item_type="",                # Optional: filter by type (requirement/plan/task/status/discussion)
+    collab_id="abc123",  # Collaboration session ID (required)
+    agent_id="",  # Optional: filter by agent
+    scope="public",  # "public" or "all"
+    item_type="",  # Optional: filter by type (requirement/plan/task/status/discussion)
 )
 ```
 
@@ -126,7 +126,7 @@ board_update(
     item_key="req_scope",
     title="AI Healthcare Research",
     content="Research scope: diagnostic AI, treatment recommendation, patient monitoring, regulatory policy, ethical challenges",
-    status="P0"
+    status="P0",
 )
 
 # 2. Assign tasks in Task Assignment area
@@ -137,7 +137,7 @@ board_update(
     title="Diagnostic AI Research",
     content="# 调研FDA批准的AI系统 [ ]\n- [ ] 搜索FDA批准的AI放射系统列表\n- [ ] 收集各系统准确率数据\n# 分析临床案例 [ ]\n- [ ] 查找3个以上案例\n# 总结挑战 [ ]\n- [ ] 算法偏见、数据隐私、监管滞后",
     status="pending",
-    progress=0
+    progress=0,
 )
 
 board_update(
@@ -147,7 +147,7 @@ board_update(
     title="Treatment Recommendation Research",
     content="# 个性化用药AI [ ]\n- [ ] 研究个性化用药AI系统\n- [ ] 药物相互作用预测\n# 真实世界证据 [ ]\n- [ ] 收集RWE数据",
     status="pending",
-    progress=0
+    progress=0,
 )
 ```
 
@@ -196,7 +196,7 @@ board_update(
     title="AI Healthcare Applications Research Report",
     content="## 报告结构\n\n### 一、执行摘要\n- 3-5条核心发现\n\n### 二、诊断AI\n- FDA批准系统概览\n- 准确率数据对比\n- 临床案例分析\n\n### 三、治疗推荐系统\n- 个性化用药AI\n- 药物相互作用预测\n\n### 四、趋势与展望\n- 2026年趋势\n- 未来方向\n\n### 五、挑战与建议\n- 算法偏见\n- 数据隐私\n- 监管滞后",
     status="doing",
-    progress=30
+    progress=30,
 )
 ```
 
@@ -256,14 +256,14 @@ board_update(
     title="Diagnostic AI Research",
     content="# 调研FDA批准的AI系统 [x]\n- [x] 搜索FDA批准的AI放射系统列表（12个）\n- [x] 收集各系统准确率数据（最高94%）\n# 分析临床案例 [>]\n- [x] Mayo Clinic诊断时间缩短40%\n- [>] 正在读 Johns Hopkins 报告\n# 总结挑战 [ ]\n- [ ] 算法偏见、数据隐私、监管滞后",
     status="doing",
-    progress=50
+    progress=50,
 )
 
 # 4. Post interim findings for team awareness
 board_post_public_discussion(
     collab_id="abc123",
     title="诊断AI发现：FDA已批准12个AI放射系统",
-    content="关键数据点：\n1. Aidoc颅内出血检测准确率94%\n2. Mayo Clinic诊断时间缩短40%\n3. 主要挑战：算法偏见、数据隐私、监管滞后"
+    content="关键数据点：\n1. Aidoc颅内出血检测准确率94%\n2. Mayo Clinic诊断时间缩短40%\n3. 主要挑战：算法偏见、数据隐私、监管滞后",
 )
 
 # 5. Mark task as complete
@@ -274,7 +274,7 @@ board_update(
     title="Diagnostic AI Research",
     content="# 调研FDA批准的AI系统 [x]\n- [x] 搜索FDA批准的AI放射系统列表（12个）\n- [x] 收集各系统准确率数据（最高94%）\n# 分析临床案例 [x]\n- [x] Mayo Clinic诊断时间缩短40%\n- [x] Johns Hopkins每年挽救120条生命\n# 总结挑战 [x]\n- [x] 算法偏见\n- [x] 数据隐私\n- [x] 监管滞后",
     status="done",
-    progress=100
+    progress=100,
 )
 ```
 
@@ -328,17 +328,12 @@ board_update(
     title="AI Healthcare Applications Research Report",
     content="## 执行摘要\n\nAI在医疗领域的应用正在快速扩展...\n\n## 一、诊断AI\n\n### 1.1 FDA批准系统\n截至2026年，FDA已批准12个AI放射诊断系统...\n\n| 系统 | 适应症 | 准确率 |\n|------|--------|--------|\n| Aidoc | 颅内出血 | 94% |\n| Viz.ai | 大血管闭塞 | 91% |\n\n### 1.2 临床影响\n- Johns Hopkins: AI卒中检测每年挽救120条生命\n- Cleveland Clinic: 假阳性率降低35%\n\n## 二、治疗推荐系统\n...\n\n## 三、趋势与展望\n...\n\n## 四、挑战与建议\n...",
     status="done",
-    progress=100
+    progress=100,
 )
 # → Old version automatically saved as plan history snapshot
 
 # 4. Mark requirement as confirmed
-board_update(
-    collab_id="abc123",
-    item_type="requirement",
-    item_key="req_scope",
-    status="已确认"
-)
+board_update(collab_id="abc123", item_type="requirement", item_key="req_scope", status="已确认")
 ```
 
 **Authorization gate — PM must present to user:**

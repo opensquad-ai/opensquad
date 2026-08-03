@@ -143,7 +143,7 @@ assign_task(
         {"title": "注册API接口", "description": "POST /api/register, bcrypt加密, 邮箱验证"},
         {"title": "Token刷新", "description": "POST /api/token/refresh, access_token 15min, refresh_token 7days"},
     ],
-    item_key="task_coder_auth"
+    item_key="task_coder_auth",
 )
 # 返回: {subtask_ids: {'登录API接口': 'st_task_coder_auth_1', '注册API接口': 'st_task_coder_auth_2', ...}}
 
@@ -160,7 +160,7 @@ assign_task(
         {"title": "编写登录API单元测试", "description": "正常登录、错误密码、空字段等场景"},
         {"title": "编写注册API集成测试", "description": "重复注册检测、密码强度验证"},
     ],
-    item_key="task_qa_test"
+    item_key="task_qa_test",
 )
 ```
 
@@ -201,7 +201,7 @@ update_task_progress(
     item_key="task_coder_auth",
     subtask_id="st_task_coder_auth_1",
     status="doing",
-    note="开始实现登录API"
+    note="开始实现登录API",
 )
 
 # ... 执行实际工作 ...
@@ -213,7 +213,7 @@ update_task_progress(
     subtask_id="st_task_coder_auth_1",
     status="done",
     progress=100,
-    note="API已实现并通过本地测试"
+    note="API已实现并通过本地测试",
 )
 
 # 步骤5: 批量更新多个子任务（可选）
@@ -223,7 +223,7 @@ batch_update_tasks(
     updates=[
         {"subtask_id": "st_task_coder_auth_2", "status": "done", "progress": 100, "note": "注册API完成"},
         {"subtask_id": "st_task_coder_auth_3", "status": "doing", "progress": 30, "note": "正在实现Token刷新"},
-    ]
+    ],
 )
 ```
 

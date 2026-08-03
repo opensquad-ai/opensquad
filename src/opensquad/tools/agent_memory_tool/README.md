@@ -129,14 +129,14 @@ am.write(
     topic="中美贸易摩擦",
     keywords=["特朗普", "关税", "贸易战", "中国", "美国"],
     summary="特朗普政府对中国商品加征关税引发贸易摩擦",
-    importance=5
+    importance=5,
 )
 
 # 3. Query -- returns prompt-ready text / 查询 -- 返回可直接注入 prompt 的文本
 result = am.query(keywords=["特朗普", "贸易战"], depth="standard", token_budget=1000)
-print(result["prompt_text"])       # Ready to inject into agent prompt
-print(result["matched_entries"])   # Matched memory entries with scores
-print(result["expanded_keywords"]) # PPMI-expanded related terms
+print(result["prompt_text"])  # Ready to inject into agent prompt
+print(result["matched_entries"])  # Matched memory entries with scores
+print(result["expanded_keywords"])  # PPMI-expanded related terms
 
 # 4. Discover hidden reasoning chains / 发现隐藏推理链
 chain = am.find_chain(["特朗普", "A股"])
@@ -266,11 +266,7 @@ Auto-parses Chinese time expressions from user input and converts them to time r
 
 ```python
 # Enable auto time parsing / 启用自动时间解析
-result = am.query(
-    user_input="帮我找上周关于贸易战的记忆",
-    depth="standard",
-    auto_parse_time=True
-)
+result = am.query(user_input="帮我找上周关于贸易战的记忆", depth="standard", auto_parse_time=True)
 # "上周" is parsed as time_range, "贸易战" is used for keyword search
 # "上周" 被解析为 time_range，"贸易战" 用于关键词搜索
 ```
@@ -329,8 +325,8 @@ When `user_input` exceeds `long_threshold` (default 80 chars), the system uses T
 result = am.query(
     user_input="一段很长的用户输入文本......(500+ 字符)",
     depth="standard",
-    long_threshold=80,    # Trigger threshold / 触发阈值
-    core_ratio=0.2,       # Top 20% = core words / 前 20% = 核心词
+    long_threshold=80,  # Trigger threshold / 触发阈值
+    core_ratio=0.2,  # Top 20% = core words / 前 20% = 核心词
     important_ratio=0.4,  # Next 40% = important words / 接下来 40% = 重要词
 )
 ```
@@ -357,7 +353,7 @@ new_id = am.write(
     keywords=["地球", "形状"],
     summary="地球是一个扁球体，不是完美的球形",
     importance=5,
-    supersedes=old_entry_id   # Old entry's importance auto-decrements
+    supersedes=old_entry_id,  # Old entry's importance auto-decrements
 )
 
 # Sleep consolidation -- prune low-frequency vocab, rebuild matrices

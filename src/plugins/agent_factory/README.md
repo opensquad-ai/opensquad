@@ -88,10 +88,7 @@ print(result)
 
 ```python
 # Assign a model card to an existing Agent
-result = agent_factory__assign_model_card(
-    dir_name="coder",
-    card_name="deepseek_chat"
-)
+result = agent_factory__assign_model_card(dir_name="coder", card_name="deepseek_chat")
 print(result)
 # Output:
 # {
@@ -115,7 +112,7 @@ result = agent_factory__create_model_card(
     api_key="sk-xxx",
     token_max=128000,
     temperature=0.3,
-    is_image=True
+    is_image=True,
 )
 print(result)
 # Output:
@@ -131,46 +128,25 @@ print(result)
 
 ```python
 # 1. Register a ChatPro account
-chat_account__register_account(
-    email="new_agent@ai",
-    password="password123",
-    name="New Agent"
-)
+chat_account__register_account(email="new_agent@ai", password="password123", name="New Agent")
 
 # 2. Create the Agent directory
-agent_factory__create_agent(
-    dir_name="new_agent",
-    agent_name="New Agent",
-    description="Test Agent"
-)
+agent_factory__create_agent(dir_name="new_agent", agent_name="New Agent", description="Test Agent")
 
 # 3. Assign a model card (instead of manually configuring model parameters)
-agent_factory__assign_model_card(
-    dir_name="new_agent",
-    card_name="deepseek_chat"
-)
+agent_factory__assign_model_card(dir_name="new_agent", card_name="deepseek_chat")
 
 # 4. Configure other options (groups, tools, etc.)
 agent_factory__configure_agent(
     dir_name="new_agent",
     config={
-        "group_chat": {
-            "enabled": True,
-            "email": "new_agent@ai",
-            "password": "password123",
-            "groups": ["g1"]
-        },
-        "tools": {
-            "level": "extended"
-        }
-    }
+        "group_chat": {"enabled": True, "email": "new_agent@ai", "password": "password123", "groups": ["g1"]},
+        "tools": {"level": "extended"},
+    },
 )
 
 # 5. Set the role
-agent_factory__set_agent_role(
-    dir_name="new_agent",
-    role_content="You are a professional programming assistant..."
-)
+agent_factory__set_agent_role(dir_name="new_agent", role_content="You are a professional programming assistant...")
 
 # 6. Start the Agent
 agent_factory__start_agent(dir_name="new_agent")

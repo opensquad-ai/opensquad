@@ -90,9 +90,9 @@ Public Repos: 42
 List repository contributors sorted by commit count in descending order.
 
 ```python
-vcs.repo_contributors()                          # auto-infer repo from git remote
+vcs.repo_contributors()  # auto-infer repo from git remote
 vcs.repo_contributors("opensquad-ai/opensuqad")  # specify repository
-vcs.repo_contributors(limit=10)                  # show only top 10
+vcs.repo_contributors(limit=10)  # show only top 10
 ```
 
 Example output:
