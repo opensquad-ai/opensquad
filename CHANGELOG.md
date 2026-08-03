@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.8]                                                                | 2026-08-04 | [0.8.7 → 0.8.8](https://github.com/opensquad-ai/opensquad/compare/v0.8.7...v0.8.8)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.8)  |
 | [0.8.7]                                                                | 2026-08-03 | [0.8.6 → 0.8.7](https://github.com/opensquad-ai/opensquad/compare/v0.8.6...v0.8.7)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.7)  |
 | [0.8.6]                                                                | 2026-08-03 | [0.8.5 → 0.8.6](https://github.com/opensquad-ai/opensquad/compare/v0.8.5...v0.8.6)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.6)  |
 | [0.8.5]                                                                | 2026-07-29 | [0.8.2 → 0.8.5](https://github.com/opensquad-ai/opensquad/compare/v0.8.2...v0.8.5)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.5)  |
@@ -31,6 +32,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.8] — 2026-08-04
+
+> 400 context-overflow fix (reasoning_content injection amplification),
+> tool-bubble render fix, and three latency optimizations.
+
+### Fixed
+
+- **400 context overflow (root cause).** chat() copied the latest
+  reasoning_content into EVERY historical tool_calls message (121 copies on
+  session 151735_a7s7), multiplying requests ~2.75x (362K -> 998K tokens)
+  past the 1M context limit. Now injected once into the most recent
+  assistant message (DeepSeek's actual "subsequent turns" semantics).
+- **tool results rendered as chat bubbles.** buildTimelineFromSession showed
+  role='tool' messages (LLM context) as dialogue on history replay;
+  MessageBubble defensively skips them too.
+- **reasoning_content token undercount.** _count_tokens counted content but
+  skipped reasoning_content (~2.5% undercount); both counters now include it.
+
+### Changed
+
+- **tool-schema prewarm starts earlier.** Built-in schemas prewarm right
+  after the early runner (chat-ready), so a first message sent before
+  extensions finish no longer pays 1-3s lazy-import on the event loop;
+  plugin schemas rebuild after extensions complete.
+- **startup token stats backgrounded.** _broadcast_token_stats_sync moved out
+  of AgentRunner.__init__ (0.5-1s full-history tiktoken encoding) into a
+  background worker once the event loop runs.
+- **agents list TTL cache.** _handle_list_agents cached 5s (was reading
+  token_stats.json + profile.json per agent on every poll).
 
 ---
 
