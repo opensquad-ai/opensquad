@@ -518,6 +518,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
     """Start the HTTP management server in a dedicated thread"""
     import hashlib
     import secrets
+    import socket as _socket_mod
     import urllib.parse
     from http.server import BaseHTTPRequestHandler
     from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
@@ -4088,7 +4089,38 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 }
             )
 
-    server = _ThreadingHTTPServer(("0.0.0.0", port), ManagementHandler)
+    # Exclusive bind on Windows: ThreadingHTTPServer defaults to
+    # allow_reuse_address=True, whose SO_REUSEADDR semantics on Windows let a
+    # SECOND launcher bind the same port and stay alive (dual-launcher
+    # stale-kill loops). An exclusive bind makes the loser fail with EADDRINUSE
+    # and exit via the except below.
+    class _ExclusiveHTTPServer(_ThreadingHTTPServer):
+        # Windows: SO_REUSEADDR allows a second bind; keep it exclusive so a
+        # loser launcher fails with EADDRINUSE and exits. POSIX: reuse is
+        # harmless (no dual-bind) and avoids TIME_WAIT restart stalls.
+        allow_reuse_address = os.name != "nt"
+
+        def server_bind(self):
+            # Windows default does NOT make bind exclusive: two processes can
+            # bind 0.0.0.0:9600 unless the owner set SO_EXCLUSIVEADDRUSE.
+            # Without it the second launcher "succeeds" and both stay alive.
+            if os.name == "nt":
+                try:
+                    self.socket.setsockopt(_socket_mod.SOL_SOCKET, _socket_mod.SO_EXCLUSIVEADDRUSE, 1)
+                except (AttributeError, OSError):
+                    pass
+            super().server_bind()
+
+    _log.info(f"[Launcher] Binding management port {port} (exclusive={os.name != 'nt'})")
+    try:
+        server = _ExclusiveHTTPServer(("0.0.0.0", port), ManagementHandler)
+    except OSError as e:
+        # Port already owned (a concurrent launcher won the bind race after
+        # both passed the _ensure_single_launcher probe): step aside entirely.
+        # Staying alive would register agents and manage the runtime registry
+        # in parallel with the owner, causing stale-kill loops.
+        _log.error(f"[Launcher] Cannot bind management port {port} ({e}); exiting.")
+        os._exit(1)
     _log.info(f"[Launcher] Management API started on http://0.0.0.0:{port}")
     server.serve_forever()
 
