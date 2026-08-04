@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from opensquad.ingress_policy import resolve_primary_session_id, resolve_session_id
 from opensquad.input_hub import get_input_hub
+from opensquad.model_config import ModelConfig
 from opensquad.session_parallel import (
     MAX_PARALLEL_TURNS,
     ParallelTurnScheduler,
@@ -52,6 +53,15 @@ def _clone_chat_api(base) -> Any:
     stream_parser = StreamingTagParser(handlers={})
     try:
         if cfg is not None:
+            # ChatAPI/ClaudeAPI constructors expect a ModelConfig instance, not a
+            # raw dict. Convert the rebuilt dict so attribute access like
+            # config.api_key does not raise AttributeError.
+            if isinstance(cfg, dict):
+                cfg = ModelConfig.from_dict(
+                    cfg,
+                    prompt=getattr(base, "prompt", "") or "",
+                    provider=getattr(base, "provider", "openai") or "openai",
+                )
             api = cls(config=cfg, stream_parser=stream_parser)
         else:
             api = cls(
