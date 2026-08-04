@@ -904,7 +904,12 @@ export function migrateProjectPathsToWorkspaces(
   defaultRoot: string | null | undefined,
 ): WorkspaceStoreSnapshot {
   const snap = loadWorkspaceStore(agentId);
-  if (snap.migrated) return snap;
+  // Skip only when migration already produced a usable active workspace. A
+  // previous run that finished with ZERO workspaces (e.g. the first migrate
+  // fired before the profile/working-directory resolved, so defaultRoot was
+  // empty) or that left no activeWorkspaceId must be retried when a real root
+  // becomes available — otherwise the chat pane never mounts on refresh.
+  if (snap.migrated && snap.workspaces.length > 0 && !!snap.chrome.activeWorkspaceId) return snap;
 
   const meta = loadSessionProjectMeta(agentId);
   const paths = new Set<string>();

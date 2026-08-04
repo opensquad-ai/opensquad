@@ -433,7 +433,7 @@ class AgentBootPhases:
         )
         return EarlyRunnerArtifacts(runner=early_runner, runner_task=runner_task)
 
-    def initialize_plugin_runtime(
+    async def initialize_plugin_runtime(
         self,
         config: dict[str, Any],
         agent_dir: str,
@@ -452,7 +452,10 @@ class AgentBootPhases:
         plugin_manager = PluginManager(agent_id=config.get("agent_id", ""))
         t_plugin_discovery = __import__("time").perf_counter()
         agent_tool_names = config.get("tools", []) or []
-        plugin_manager.discover_and_load(wanted_names=agent_tool_names)
+        # Import/scan/manifest-IO run on a worker thread; on_load + tool/hook
+        # registration stay on the event loop (plugins need a running loop
+        # inside on_load). Keeps the boot loop responsive while plugins load.
+        await plugin_manager.discover_and_load_async(wanted_names=agent_tool_names)
         t_plugin_register = __import__("time").perf_counter()
         plugin_tool_count = plugin_manager.register_tools_to_agent(
             registry=tool_registry,

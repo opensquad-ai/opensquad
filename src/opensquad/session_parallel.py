@@ -152,3 +152,17 @@ class ParallelTurnScheduler:
         task = self._tasks.get(sid)
         if task and not task.done():
             task.cancel()
+
+    def finish(self, sid: str) -> None:
+        """Drop one session's turn marker immediately.
+
+        The dispatcher also reaps finished tasks on its ~5s idle loop, but the
+        runner's turn-completion path emits ``busy_sessions`` *before* the task
+        wrapper has a chance to ``discard`` — so the UI would otherwise keep
+        showing the composer as busy until the next reap tick (seconds of
+        perceived lag after the reply already rendered). Called by the runner
+        before broadcasting the final busy_sessions set.
+        """
+        self._busy_sessions.discard(sid)
+        self._tasks.pop(sid, None)
+        self._sem.release()

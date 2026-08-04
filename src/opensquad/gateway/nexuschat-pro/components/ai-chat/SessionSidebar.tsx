@@ -346,6 +346,29 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
     if (isOpen) void loadSessions({ silent: false });
   }, [isOpen, loadSessions, workspaceRootPath, workspaceId]);
 
+  // Warm the timeline cache for the newest sessions as soon as the list
+  // renders — not just on hover. Clicking a session that was never hovered
+  // then paints from cache instantly instead of a spinner. Throttled so a
+  // burst never saturates the connection pool (current/list stay fast).
+  useEffect(() => {
+    if (!isOpen || !agentId) return;
+    const targets = sessions
+      .filter((s) => s.id && s.id !== currentSessionId && !getCachedSessionTimeline(agentId, s.id)?.length)
+      .slice(0, 6);
+    if (!targets.length) return;
+    let cancelled = false;
+    void (async () => {
+      for (const s of targets) {
+        if (cancelled) return;
+        prefetchSessionTimeline(s.id);
+        await new Promise((r) => window.setTimeout(r, 150));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, agentId, sessions, currentSessionId, prefetchSessionTimeline]);
+
   // Silent keep-alive refresh — no manual button; reconnect/list changes stay fresh.
   // Real-time updates arrive via SESSION_LIST_REFRESH_EVENT (WS session_list /
   // history_sync / current_session) — see the listener below — so this interval

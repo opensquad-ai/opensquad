@@ -1,8 +1,27 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+
+/**
+ * Strip modulepreload for the two heavy deferred chunks (mermaid graph
+ * renderer + TipTap/ProseMirror editor). Vite adds a <link rel=modulepreload>
+ * for every dynamic-import dependency, so a refresh would otherwise download
+ * ~3.7MB of editor/mermaid code (it just wouldn't *execute*). Both chunks are
+ * loaded on demand at runtime — chat hydrate / file-tab open fetch them when
+ * actually needed.
+ */
+function stripDeferredChunkPreload(): Plugin {
+  return {
+    name: 'strip-deferred-chunk-preload',
+    transformIndexHtml(html: string) {
+      return html
+        .replace(/<link[^>]*rel="modulepreload"[^>]*href="[^"]*vendor-mermaid-[^"]*\.js"[^>]*>\s*/g, '')
+        .replace(/<link[^>]*rel="modulepreload"[^>]*href="[^"]*vendor-editor-[^"]*\.js"[^>]*>\s*/g, '');
+    },
+  };
+}
 
 // 查找 system_config.json：优先工作区，回退到安装目录，再回退到 example 模板，最后使用默认值
 function loadSystemConfig(): { ports: Record<string, number>; hosts: Record<string, string> } {
@@ -136,7 +155,7 @@ export default defineConfig(({ mode }) => {
           },
         }
       },
-      plugins: [react()],
+      plugins: [react(), stripDeferredChunkPreload()],
       define: {
         'import.meta.env.VITE_APP_VERSION': JSON.stringify(loadAppVersion()),
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
@@ -150,6 +169,15 @@ export default defineConfig(({ mode }) => {
       },
       build: {
         chunkSizeWarningLimit: 500,
+        modulePreload: {
+          // Disable Vite's runtime modulepreload polyfill. Without this the
+          // polyfill preloads EVERY chunk in the entry's __vite__mapDeps list —
+          // including vendor-mermaid (3.2MB) — on first paint even when no
+          // message contains a mermaid block. With it off, dynamic chunks load
+          // only when actually imported (chat message with mermaid, opening a
+          // file tab, navigating to a route page).
+          polyfill: false,
+        },
         rollupOptions: {
           output: {
             manualChunks(id) {
@@ -165,10 +193,47 @@ export default defineConfig(({ mode }) => {
               if (id.includes('node_modules/marked') || id.includes('node_modules/highlight.js')) {
                 return 'vendor-markdown';
               }
-              // Lucide icons
+              // Lucide icons — NOT grouped into a manual chunk. Return
+              // undefined so Rollup tree-shakes them into whichever chunk
+              // imports them: the first-paint bundle only carries the icons
+              // the chat path actually renders, and async route chunks carry
+              // their own. (Forcing them into vendor-icons merged ~876KB of
+              // icons into the critical path.)
               if (id.includes('node_modules/lucide-react')) {
-                return 'vendor-icons';
+                return undefined;
               }
+              // Mermaid + its whole dependency tree (cytoscape, d3, dagre,
+              // katex, dompurify, …). mermaidHydrate already loads mermaid via
+              // dynamic import; grouping it here keeps the huge graph libraries
+              // out of vendor-other so they are only fetched when a chat
+              // message actually contains a mermaid block.
+              if (
+                id.includes('node_modules/mermaid')
+                || id.includes('node_modules/@mermaid-js')
+                || id.includes('node_modules/cytoscape')
+                || id.includes('node_modules/d3')
+                || id.includes('node_modules/dagre')
+                || id.includes('node_modules/dompurify')
+                || id.includes('node_modules/katex')
+                || id.includes('node_modules/dayjs')
+                || id.includes('node_modules/khroma')
+                || id.includes('node_modules/non-layered-tidy-tree-layout')
+                || id.includes('node_modules/@braintree')
+                || id.includes('node_modules/stylis')
+                || id.includes('node_modules/uqr')
+                || id.includes('node_modules/ts-dedent')
+                || id.includes('node_modules/he')
+                || id.includes('node_modules/layout-elk')
+                || id.includes('node_modules/elkjs')
+                || id.includes('node_modules/@zenuml')
+              ) {
+                return 'vendor-mermaid';
+              }
+              // TipTap / ProseMirror rich-text editor — kept in vendor-other.
+              // Splitting the prosemirror-* packages into their own chunk
+              // breaks their cross-package circular imports at module init
+              // (Fragment/Node undefined at runtime), so we do NOT split them;
+              // FileDocumentEditor stays lazy but resolves against vendor-other.
               // Other dependencies
               if (id.includes('node_modules/')) {
                 return 'vendor-other';

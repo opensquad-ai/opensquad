@@ -2361,6 +2361,16 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         delete ib[clearSid];
         isStreamingBySessionRef.current = ib;
         setIsStreamingBySession(ib);
+        // A final message means this session's turn is over — release its
+        // parallel busy marker immediately instead of waiting for the next
+        // busy_sessions broadcast. The backend dispatcher re-broadcasts on a
+        // ~5s idle loop, so without this the composer stays in "executing"
+        // (busy) for seconds after the reply already rendered.
+        if (busySessionsRef.current.includes(clearSid)) {
+          const remaining = busySessionsRef.current.filter((id) => id !== clearSid);
+          busySessionsRef.current = remaining;
+          setBusySessions(remaining);
+        }
       }
       if (!clearSid || clearSid === (currentSessionIdRef.current || '')) {
         streamingTextRef.current = '';

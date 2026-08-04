@@ -200,35 +200,117 @@ class PluginManager:
             logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
         return loaded
 
-    def _load_plugin(self, plugin_dir: str, dir_name: str) -> str | None:
-        """
-        Import plugin.py and load the plugin class (must have __plugin_meta__).
-        """
+    def _import_plugin_class(self, plugin_dir: str, dir_name: str):
+        """Import plugin.py and find the @register class. Pure import — runs off-loop."""
         module_path = f"plugins.{dir_name}.plugin"
         try:
             plugin_module = importlib.import_module(module_path)
         except ImportError as e:
             logger.error(f"[PluginManager] Cannot import {module_path}: {e}")
             return None
-
-        plugin_class = None
         for attr_name in dir(plugin_module):
             attr = getattr(plugin_module, attr_name)
             if isinstance(attr, type) and hasattr(attr, "__plugin_meta__"):
-                plugin_class = attr
-                break
+                return attr
+        logger.error(f"[PluginManager] No @register plugin class found in {module_path}")
+        return None
 
+    def _load_plugin(self, plugin_dir: str, dir_name: str) -> str | None:
+        """Synchronous load (compat entry)."""
+        plugin_class = self._import_plugin_class(plugin_dir, dir_name)
         if plugin_class is None:
-            logger.error(f"[PluginManager] No @register plugin class found in {module_path}")
             return None
-
         return self._load_new_style(plugin_class, plugin_dir, dir_name)
+
+    async def discover_and_load_async(self, wanted_names: list[str] | None = None) -> list[str]:
+        """Async discovery: import/IO/scan off the event loop; on_load + registration on it.
+
+        Same policy as discover_and_load; keeps plugin.on_load() on the loop
+        because plugins call asyncio.get_running_loop() there.
+        """
+        import asyncio as _asyncio
+
+        loaded = []
+        if not os.path.isdir(self.plugins_dir):
+            logger.warning(f"[PluginManager] Plugins directory not found: {self.plugins_dir}")
+            return loaded
+
+        wanted: set[str] | None = None
+        if wanted_names is not None:
+            wanted = {str(n) for n in wanted_names if n}
+        skipped = 0
+
+        for entry in sorted(os.listdir(self.plugins_dir)):
+            plugin_dir = os.path.join(self.plugins_dir, entry)
+            if not os.path.isdir(plugin_dir):
+                continue
+            plugin_py = os.path.join(plugin_dir, "plugin.py")
+            if not os.path.isfile(plugin_py):
+                continue
+
+            plugin_json_path = os.path.join(plugin_dir, "plugin.json")
+            _pmeta: dict | None = None
+            if os.path.isfile(plugin_json_path):
+                try:
+                    with open(plugin_json_path, encoding="utf-8") as _f:
+                        _pmeta = json.load(_f)
+                    if _pmeta.get("service_only"):
+                        logger.info(f"[PluginManager] Plugin '{entry}' is service_only, skipping agent load.")
+                        continue
+                except Exception:
+                    _pmeta = None
+
+            if wanted is not None:
+                if _pmeta is not None:
+                    if not self._plugin_wanted_by_manifest(_pmeta, wanted, entry):
+                        skipped += 1
+                        logger.debug(
+                            "[PluginManager] Skipping '%s' (not in agent tools / no auto_register / no hooks)",
+                            entry,
+                        )
+                        continue
+                elif entry not in wanted:
+                    skipped += 1
+                    logger.debug("[PluginManager] Skipping '%s' (no plugin.json and not in wanted)", entry)
+                    continue
+
+            try:
+                # Import + scan + manifest IO on a worker thread; on_load and
+                # hook/tool registration stay on the event loop.
+                plugin_class = await _asyncio.to_thread(self._import_plugin_class, plugin_dir, entry)
+                if plugin_class is None:
+                    continue
+                prepared = await _asyncio.to_thread(
+                    self._prepare_new_style, plugin_class, plugin_dir, entry
+                )
+                if prepared is None:
+                    continue
+                name = self._finalize_new_style(prepared)
+                if name:
+                    loaded.append(name)
+            except Exception as e:
+                logger.error(f"[PluginManager] Failed to load plugin from {entry}: {e}", exc_info=True)
+
+        self._hook_chain_cache.clear()
+        self._plugin_hooks_index.clear()
+        if skipped:
+            logger.info(f"[PluginManager] Loaded {len(loaded)} plugins (skipped {skipped} unused): {loaded}")
+        else:
+            logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
+        return loaded
 
     # ------------------------------------------------------------------
     # Plugin loading
     # ------------------------------------------------------------------
 
     def _load_new_style(self, plugin_class, plugin_dir: str, dir_name: str) -> str | None:
+        """Synchronous load (tests / direct calls): prepare off-loop, finalize on-loop."""
+        prepared = self._prepare_new_style(plugin_class, plugin_dir, dir_name)
+        if prepared is None:
+            return None
+        return self._finalize_new_style(prepared)
+
+    def _prepare_new_style(self, plugin_class, plugin_dir: str, dir_name: str) -> dict | None:
         """
         Load a plugin decorated with @register.
 
@@ -377,14 +459,9 @@ class PluginManager:
         # Scan @hook methods
         hook_map = get_hook_methods(plugin_instance)
 
-        # Scan @on_event methods -> auto-subscribe to EventBus
+        # Scan @on_event methods (subscription happens in _finalize on the
+        # event loop; EventBus.subscribe may schedule loop work).
         event_methods = get_event_methods(plugin_instance)
-        if event_methods and event_bus:
-            self._event_subscriptions[name] = []
-            for em in event_methods:
-                event_bus.subscribe(em["event_type"], em["bound_method"])
-                self._event_subscriptions[name].append((em["event_type"], em["bound_method"]))
-                logger.info(f"[PluginManager] Plugin '{name}': subscribed to EventBus '{em['event_type']}'")
 
         # Auto-generate plugin.json
         generated = generate_plugin_json(plugin_class, plugin_instance)
@@ -478,8 +555,50 @@ class PluginManager:
             "project_root": project_root,
         }
 
-        # Call on_load()
+
+        # Split boundary: everything above runs off the event loop
+        # (import/IO/scan); on_load + registration stay on the loop because
+        # several plugins call asyncio.get_running_loop() in on_load.
+        return {
+            "name": name,
+            "plugin_type": plugin_type,
+            "plugin_instance": plugin_instance,
+            "metadata": metadata,
+            "hook_map": hook_map,
+            "tool_wrappers": tool_wrappers,
+            "event_methods": event_methods,
+            "plugin_dir": plugin_dir,
+            "project_root": project_root,
+            "version": meta.get("version", "?"),
+        }
+
+    def _finalize_new_style(self, prepared: dict) -> str | None:
+        """Event-loop half of plugin loading: on_load + registration."""
+        # on_load MUST run on the event loop: several plugins call
+        # asyncio.get_running_loop() here (reminder/self_learn/websearch).
+        plugin_instance = prepared["plugin_instance"]
+        name = prepared["name"]
+        plugin_type = prepared.get("plugin_type", "unknown")
+        event_methods = prepared.get("event_methods") or []
+        metadata = prepared["metadata"]
+        hook_map = prepared["hook_map"]
+        tool_wrappers = prepared["tool_wrappers"]
+        plugin_dir = prepared["plugin_dir"]
+        project_root = prepared["project_root"]
         plugin_instance.on_load()
+
+        # EventBus subscription + shared-state writes stay on the loop.
+        if event_methods:
+            try:
+                from opensquad.events import bus as _event_bus
+
+                self._event_subscriptions[name] = []
+                for em in event_methods:
+                    _event_bus.subscribe(em["event_type"], em["bound_method"])
+                    self._event_subscriptions[name].append((em["event_type"], em["bound_method"]))
+                    logger.info(f"[PluginManager] Plugin '{name}': subscribed to EventBus '{em['event_type']}'")
+            except Exception as _sub_e:
+                logger.warning(f"[PluginManager] Event subscription failed for '{name}': {_sub_e}")
 
         # Record initial config.json mtime so check_reload_needed() can detect future changes
         persisted_config_path_for_mtime = os.path.join(project_root, "data", "plugins", name, "config.json")
@@ -497,7 +616,7 @@ class PluginManager:
         self._index_plugin_hooks(name, hook_map)
 
         logger.info(
-            f"[PluginManager] Loaded: {name} v{meta.get('version', '?')} "
+            f"[PluginManager] Loaded: {name} v{prepared.get('version', '?')} "
             f"(type={plugin_type}, tools={len(tool_wrappers)}, "
             f"hooks={list(hook_map.keys())}, events={len(event_methods)})"
         )

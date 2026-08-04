@@ -421,18 +421,20 @@ def _start_launcher_ws_tunnel(management_port: int):
                     _ka_task = asyncio.create_task(_keepalive())
 
                     try:
-                        async for raw in ws:
-                            try:
-                                msg = json.loads(raw)
-                            except Exception:
-                                continue
+                        # P0: admin requests used to be relayed serially inside
+                        # this read loop with a synchronous urlopen() call, so
+                        # ONE slow request (cold fs/tree scan, plugin-data DB
+                        # query) blocked EVERY other request routed through the
+                        # tunnel (Web refresh bursts queue up for seconds).
+                        # Each admin_request is now dispatched to its own task
+                        # and the blocking HTTP relay runs in a worker thread,
+                        # so slow requests no longer serialize the tunnel.
+                        # websockets forbids concurrent send() on one
+                        # connection, so all sends share a lock.
+                        _send_lock = asyncio.Lock()
+                        _pending_tasks: set[asyncio.Task] = set()
 
-                            if msg.get("type") == "keepalive":
-                                continue
-
-                            if msg.get("type") != "admin_request":
-                                continue
-
+                        async def _relay_admin_request(_ws, _send_lock, msg):
                             req_id = msg.get("req_id", "")
                             method = msg.get("method", "GET").upper()
                             path = msg.get("path", "/")
@@ -445,7 +447,8 @@ def _start_launcher_ws_tunnel(management_port: int):
                             _admin_timeout = 60
                             if "/api/plugins/" in path and path.rstrip("/").endswith("/data"):
                                 _admin_timeout = 90
-                            try:
+
+                            def _http_relay():
                                 data = json.dumps(body).encode("utf-8") if body else None
                                 headers = {"Content-Type": "application/json"} if data else {}
                                 req = _ureq.Request(
@@ -455,43 +458,59 @@ def _start_launcher_ws_tunnel(management_port: int):
                                     method=method,
                                 )
                                 with _ureq.urlopen(req, timeout=_admin_timeout) as resp:
-                                    resp_body = json.loads(resp.read())
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": 200,
-                                            "body": resp_body,
-                                        }
-                                    )
-                                )
+                                    return json.loads(resp.read())
+
+                            try:
+                                resp_body = await asyncio.to_thread(_http_relay)
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": 200,
+                                    "body": resp_body,
+                                }
                             except _uerr.HTTPError as e:
                                 err_body = {}
                                 with contextlib.suppress(Exception):
                                     err_body = json.loads(e.read())
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": e.code,
-                                            "body": err_body,
-                                        }
-                                    )
-                                )
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": e.code,
+                                    "body": err_body,
+                                }
                             except Exception as e:
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": 502,
-                                            "body": {"error": str(e)},
-                                        }
-                                    )
-                                )
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": 502,
+                                    "body": {"error": str(e)},
+                                }
+                            try:
+                                async with _send_lock:
+                                    await _ws.send(json.dumps(payload))
+                            except Exception:
+                                pass
+
+                        async for raw in ws:
+                            try:
+                                msg = json.loads(raw)
+                            except Exception:
+                                continue
+
+                            if msg.get("type") == "keepalive":
+                                continue
+
+                            if msg.get("type") != "admin_request":
+                                continue
+
+                            task = asyncio.create_task(_relay_admin_request(ws, _send_lock, msg))
+                            _pending_tasks.add(task)
+                            task.add_done_callback(_pending_tasks.discard)
                     finally:
+                        for _t in list(_pending_tasks):
+                            _t.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.gather(*list(_pending_tasks), return_exceptions=True)
                         _ka_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await _ka_task
@@ -518,6 +537,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
     """Start the HTTP management server in a dedicated thread"""
     import hashlib
     import secrets
+    import socket as _socket_mod
     import urllib.parse
     from http.server import BaseHTTPRequestHandler
     from http.server import ThreadingHTTPServer as _ThreadingHTTPServer
@@ -4088,7 +4108,38 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 }
             )
 
-    server = _ThreadingHTTPServer(("0.0.0.0", port), ManagementHandler)
+    # Exclusive bind on Windows: ThreadingHTTPServer defaults to
+    # allow_reuse_address=True, whose SO_REUSEADDR semantics on Windows let a
+    # SECOND launcher bind the same port and stay alive (dual-launcher
+    # stale-kill loops). An exclusive bind makes the loser fail with EADDRINUSE
+    # and exit via the except below.
+    class _ExclusiveHTTPServer(_ThreadingHTTPServer):
+        # Windows: SO_REUSEADDR allows a second bind; keep it exclusive so a
+        # loser launcher fails with EADDRINUSE and exits. POSIX: reuse is
+        # harmless (no dual-bind) and avoids TIME_WAIT restart stalls.
+        allow_reuse_address = os.name != "nt"
+
+        def server_bind(self):
+            # Windows default does NOT make bind exclusive: two processes can
+            # bind 0.0.0.0:9600 unless the owner set SO_EXCLUSIVEADDRUSE.
+            # Without it the second launcher "succeeds" and both stay alive.
+            if os.name == "nt":
+                try:
+                    self.socket.setsockopt(_socket_mod.SOL_SOCKET, _socket_mod.SO_EXCLUSIVEADDRUSE, 1)
+                except (AttributeError, OSError):
+                    pass
+            super().server_bind()
+
+    _log.info(f"[Launcher] Binding management port {port} (exclusive={os.name != 'nt'})")
+    try:
+        server = _ExclusiveHTTPServer(("0.0.0.0", port), ManagementHandler)
+    except OSError as e:
+        # Port already owned (a concurrent launcher won the bind race after
+        # both passed the _ensure_single_launcher probe): step aside entirely.
+        # Staying alive would register agents and manage the runtime registry
+        # in parallel with the owner, causing stale-kill loops.
+        _log.error(f"[Launcher] Cannot bind management port {port} ({e}); exiting.")
+        os._exit(1)
     _log.info(f"[Launcher] Management API started on http://0.0.0.0:{port}")
     server.serve_forever()
 

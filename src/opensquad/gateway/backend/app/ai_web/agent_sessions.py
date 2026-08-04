@@ -600,7 +600,12 @@ class AgentSessionReader:
 
     def get_session_history(self, session_id: str) -> dict[str, Any] | None:
         """Read-only: get a session's full data by id."""
-        self._reload(force=True)
+        # Non-force reload: the mtime + incremental-log tracking in _reload()
+        # already picks up agent writes; force=True forced a current_session.json
+        # read + full log replay on EVERY history-session request, which made a
+        # refresh burst (list + current + N paged) re-parse the same current
+        # session once per request.
+        self._reload()
 
         # Current session — return a copy with internal events filtered out
         if session_id == self.session_data.get("id"):

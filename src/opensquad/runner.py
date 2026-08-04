@@ -1256,6 +1256,17 @@ class AgentRunner:
             try:
                 sched = getattr(self, "_parallel_scheduler", None)
                 if sched:
+                    # Drop this session's busy marker BEFORE broadcasting —
+                    # the task wrapper's discard runs only after this coro
+                    # returns, and the dispatcher's reap+emit loop ticks at
+                    # most every ~5s. Without this, the final busy_sessions
+                    # event still lists the just-finished sid and the frontend
+                    # keeps the composer in "executing" state long after the
+                    # reply rendered.
+                    try:
+                        sched.finish(sid)
+                    except Exception:
+                        pass
                     await self._emit_busy_sessions(sched.busy_sessions)
             except Exception:
                 pass
