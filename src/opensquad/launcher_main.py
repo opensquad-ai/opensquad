@@ -421,18 +421,20 @@ def _start_launcher_ws_tunnel(management_port: int):
                     _ka_task = asyncio.create_task(_keepalive())
 
                     try:
-                        async for raw in ws:
-                            try:
-                                msg = json.loads(raw)
-                            except Exception:
-                                continue
+                        # P0: admin requests used to be relayed serially inside
+                        # this read loop with a synchronous urlopen() call, so
+                        # ONE slow request (cold fs/tree scan, plugin-data DB
+                        # query) blocked EVERY other request routed through the
+                        # tunnel (Web refresh bursts queue up for seconds).
+                        # Each admin_request is now dispatched to its own task
+                        # and the blocking HTTP relay runs in a worker thread,
+                        # so slow requests no longer serialize the tunnel.
+                        # websockets forbids concurrent send() on one
+                        # connection, so all sends share a lock.
+                        _send_lock = asyncio.Lock()
+                        _pending_tasks: set[asyncio.Task] = set()
 
-                            if msg.get("type") == "keepalive":
-                                continue
-
-                            if msg.get("type") != "admin_request":
-                                continue
-
+                        async def _relay_admin_request(_ws, _send_lock, msg):
                             req_id = msg.get("req_id", "")
                             method = msg.get("method", "GET").upper()
                             path = msg.get("path", "/")
@@ -445,7 +447,8 @@ def _start_launcher_ws_tunnel(management_port: int):
                             _admin_timeout = 60
                             if "/api/plugins/" in path and path.rstrip("/").endswith("/data"):
                                 _admin_timeout = 90
-                            try:
+
+                            def _http_relay():
                                 data = json.dumps(body).encode("utf-8") if body else None
                                 headers = {"Content-Type": "application/json"} if data else {}
                                 req = _ureq.Request(
@@ -455,43 +458,59 @@ def _start_launcher_ws_tunnel(management_port: int):
                                     method=method,
                                 )
                                 with _ureq.urlopen(req, timeout=_admin_timeout) as resp:
-                                    resp_body = json.loads(resp.read())
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": 200,
-                                            "body": resp_body,
-                                        }
-                                    )
-                                )
+                                    return json.loads(resp.read())
+
+                            try:
+                                resp_body = await asyncio.to_thread(_http_relay)
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": 200,
+                                    "body": resp_body,
+                                }
                             except _uerr.HTTPError as e:
                                 err_body = {}
                                 with contextlib.suppress(Exception):
                                     err_body = json.loads(e.read())
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": e.code,
-                                            "body": err_body,
-                                        }
-                                    )
-                                )
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": e.code,
+                                    "body": err_body,
+                                }
                             except Exception as e:
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "admin_response",
-                                            "req_id": req_id,
-                                            "status": 502,
-                                            "body": {"error": str(e)},
-                                        }
-                                    )
-                                )
+                                payload = {
+                                    "type": "admin_response",
+                                    "req_id": req_id,
+                                    "status": 502,
+                                    "body": {"error": str(e)},
+                                }
+                            try:
+                                async with _send_lock:
+                                    await _ws.send(json.dumps(payload))
+                            except Exception:
+                                pass
+
+                        async for raw in ws:
+                            try:
+                                msg = json.loads(raw)
+                            except Exception:
+                                continue
+
+                            if msg.get("type") == "keepalive":
+                                continue
+
+                            if msg.get("type") != "admin_request":
+                                continue
+
+                            task = asyncio.create_task(_relay_admin_request(ws, _send_lock, msg))
+                            _pending_tasks.add(task)
+                            task.add_done_callback(_pending_tasks.discard)
                     finally:
+                        for _t in list(_pending_tasks):
+                            _t.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.gather(*list(_pending_tasks), return_exceptions=True)
                         _ka_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await _ka_task

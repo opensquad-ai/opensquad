@@ -172,13 +172,15 @@ const App: React.FC = () => {
   const BATCH_SIZE  = 3;   // 每批并发挂载数量
   const BATCH_DELAY = 2000; // 批次间隔 ms（拉长，避免和群聊争 DB 连接）
 
-  // model-presets 刷新：登录后 500ms 就触发，与群聊加载无关，不依赖 chatReady
+  // model-presets 刷新：登录后触发，与群聊加载无关，不依赖 chatReady。
+  // 延后到 3s——首屏 hydrate（agent config / current / list）先抢到浏览器
+  // 连接池；POST refresh 无法复用 GET 缓存，提前发只会挤占关键路径。
   useEffect(() => {
     if (!currentUser) return;
     preloadSystemConfig();
     const t = setTimeout(() => {
       fetch('/api/ai-web/model-presets/refresh', { method: 'POST' }).catch(() => {});
-    }, 500);
+    }, 3000);
     return () => clearTimeout(t);
   }, [currentUser?.id]);
 

@@ -583,6 +583,15 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     >
   >(new Map());
   const filePrefetchInflightRef = useRef<Set<string>>(new Set());
+  /**
+   * Cap concurrent fs/read prefetch. The file tree warms up to 20 files on
+   * first paint; without a cap those fire simultaneously through the gateway
+   * WS tunnel and saturate the browser's 6-connection pool, which queues the
+   * session hydrate requests (current / list) behind them. Saturating is a
+   * "skip" — clicking a file still loads it on demand via openFile.
+   */
+  const filePrefetchActiveRef = useRef(0);
+  const FILE_PREFETCH_MAX_CONCURRENCY = 4;
 
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const activeFileRef = useRef<string | null>(null);
@@ -813,6 +822,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       if (filePrefetchInflightRef.current.has(relPath)) return;
       // Skip images for prefetch budget (open still loads them on demand)
       if (isImageFile(relPath)) return;
+      if (filePrefetchActiveRef.current >= FILE_PREFETCH_MAX_CONCURRENCY) return;
+      filePrefetchActiveRef.current += 1;
       filePrefetchInflightRef.current.add(relPath);
       try {
         const resp = await adminAPI.readProjectFile(agentId, relPath, rootPath);
@@ -850,6 +861,8 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       } catch {
         /* ignore prefetch errors */
       } finally {
+        filePrefetchActiveRef.current -= 1;
+        if (filePrefetchActiveRef.current < 0) filePrefetchActiveRef.current = 0;
         filePrefetchInflightRef.current.delete(relPath);
       }
     },
@@ -962,7 +975,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           const parent = e.path.slice(0, e.path.lastIndexOf('/'));
           return warmDirs.has(parent);
         })
-        .slice(0, 50);
+        .slice(0, 20);
       for (const f of warmFiles) {
         void prefetchFileContent(f.path);
       }
@@ -1010,7 +1023,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             const parent = e.path.slice(0, e.path.lastIndexOf('/'));
             return warmDirs.has(parent);
           })
-          .slice(0, 50);
+          .slice(0, 20);
         for (const f of warmFiles) {
           void prefetchFileContent(f.path);
         }

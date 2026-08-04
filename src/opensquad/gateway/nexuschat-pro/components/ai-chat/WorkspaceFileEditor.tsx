@@ -2,7 +2,7 @@
  * WorkspaceFileEditor — center-pane editor for an L2 file tab.
  * Cache-first paint + soft revalidate (no loading flash on switch).
  */
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Eye,
   FileCode2,
@@ -12,9 +12,17 @@ import {
   Save,
 } from 'lucide-react';
 import { adminAPI } from '../../services/api';
-import { FileDocumentEditor, type FileDocMode } from './FileDocumentEditor';
+import type { FileDocMode } from './FileDocumentEditor';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
+
+// TipTap/ProseMirror is heavy. The editor is only needed when a file tab is
+// actually opened — loading it lazily keeps it out of the first-paint bundle
+// (refresh / chat hydrate must not wait on the editor chunk). FileDocumentEditor
+// is a named export, so map it onto .default for React.lazy.
+const FileDocumentEditor = lazy(() =>
+  import('./FileDocumentEditor').then((m) => ({ default: m.FileDocumentEditor })),
+);
 
 type FileViewMode = FileDocMode | 'diff';
 
@@ -366,13 +374,21 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
           ) : null}
         </div>
       ) : (
-        <FileDocumentEditor
-          fileName={basename(relPath)}
-          value={draftContent}
-          onChange={setDraftContent}
-          mode={viewMode}
-          isMarkdown={isMarkdownFile(relPath)}
-        />
+        <Suspense
+          fallback={
+            <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
+              <Loader2 size={14} className="animate-spin" /> 加载编辑器…
+            </div>
+          }
+        >
+          <FileDocumentEditor
+            fileName={basename(relPath)}
+            value={draftContent}
+            onChange={setDraftContent}
+            mode={viewMode}
+            isMarkdown={isMarkdownFile(relPath)}
+          />
+        </Suspense>
       )}
     </div>
   );
