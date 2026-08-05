@@ -3,6 +3,7 @@
  * Cache-first paint + soft revalidate (no loading flash on switch).
  */
 import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Eye,
   FileCode2,
@@ -12,6 +13,7 @@ import {
   Save,
 } from 'lucide-react';
 import { adminAPI } from '../../services/api';
+import i18n from '../../i18n';
 import type { FileDocMode } from './FileDocumentEditor';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
@@ -112,6 +114,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
   relPath,
   onDirtyChange,
 }) => {
+  const { t } = useTranslation();
   const ck = cacheKey(agentId, rootPath, relPath);
   const initial = fileCache.get(ck);
 
@@ -232,7 +235,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
         applyEntry(entry);
       } catch (err: any) {
         if (gen !== loadGen.current) return;
-        setError(err?.message || '加载失败');
+        setError(err?.message || t('workspaceEditor.loadFailed'));
       } finally {
         if (gen === loadGen.current) setLoading(false);
       }
@@ -269,11 +272,11 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
         at: Date.now(),
       });
     } catch (err: any) {
-      alert(err?.message || '保存失败');
+      alert(err?.message || t('workspaceEditor.saveFailed'));
     } finally {
       setSaving(false);
     }
-  }, [agentId, rootPath, relPath, dirty, draftContent, fileMeta, ck]);
+  }, [agentId, rootPath, relPath, dirty, draftContent, fileMeta, ck, t]);
 
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -298,12 +301,12 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
               </span>
             ) : null}
             {dirty ? (
-              <span className="text-[9px] text-amber-600 dark:text-amber-400 shrink-0">未保存</span>
+              <span className="text-[9px] text-amber-600 dark:text-amber-400 shrink-0">{t('workspaceEditor.unsaved')}</span>
             ) : null}
           </div>
           <div className="text-[10px] text-textMuted font-mono truncate" title={relPath}>
             {relPath}
-            {fileMeta?.truncated ? ' · 已截断' : ''}
+            {fileMeta?.truncated ? t('aiChat.truncated') : ''}
           </div>
         </div>
         {!imageSrc && !showSpinner && !error && !isImageFile(relPath) ? (
@@ -311,9 +314,9 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
             <div className="inline-flex rounded-md border border-border/80 overflow-hidden text-[10px]">
               {(
                 [
-                  { id: 'rich' as const, label: '富文本', Icon: Pencil },
-                  { id: 'source' as const, label: '源码', Icon: FileCode2 },
-                  { id: 'preview' as const, label: '预览', Icon: Eye },
+                  { id: 'rich' as const, label: t('workspaceEditor.richText'), Icon: Pencil },
+                  { id: 'source' as const, label: t('workspaceEditor.source'), Icon: FileCode2 },
+                  { id: 'preview' as const, label: t('workspaceEditor.preview'), Icon: Eye },
                   { id: 'diff' as const, label: 'Diff', Icon: FileText },
                 ] as Array<{ id: FileViewMode; label: string; Icon: typeof Pencil }>
               ).map(({ id, label, Icon }) => (
@@ -347,7 +350,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
                 className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50"
               >
                 {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
-                保存
+                {t('workspaceEditor.save')}
               </button>
             ) : null}
           </div>
@@ -355,7 +358,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
       </div>
       {showSpinner ? (
         <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-          <Loader2 size={14} className="animate-spin" /> 加载中…
+          <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
         </div>
       ) : error ? (
         <div className="px-3 py-4 text-[12px] text-red-400">{error}</div>
@@ -377,7 +380,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
         <Suspense
           fallback={
             <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-              <Loader2 size={14} className="animate-spin" /> 加载编辑器…
+              <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
             </div>
           }
         >
@@ -397,7 +400,13 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
 /** Ask before discarding dirty file edits (for tab close). */
 export function confirmDiscardFileDirty(dirty: boolean): boolean {
   if (!dirty) return true;
-  return window.confirm('文件有未保存的更改，确定关闭？');
+  const lang = i18n?.language || 'zh';
+  const msg =
+    i18n?.getFixedT(lang)?.('workspaceEditor.unsavedConfirm') ||
+    (lang === 'en'
+      ? 'This file has unsaved changes. Close anyway?'
+      : '文件有未保存的更改，确定关闭？');
+  return window.confirm(msg);
 }
 
 /** Prefetch into shared cache so first open can paint instantly. */

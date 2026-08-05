@@ -5,6 +5,7 @@
  * file contents load only when the user clicks a file.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Check,
   ChevronDown,
@@ -516,6 +517,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   treeOnly = false,
   onOpenFile,
 }) => {
+  const { t } = useTranslation();
   const [browsePath, setBrowsePath] = useState('');
   const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([]);
   const [treeTruncated, setTreeTruncated] = useState(false);
@@ -635,7 +637,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const projectLabel = useMemo(() => {
-    if (!rootPath) return '默认工作区';
+    if (!rootPath) return t('aiChat.defaultWorkspace');
     const parts = rootPath.replace(/\\/g, '/').split('/').filter(Boolean);
     return parts[parts.length - 1] || rootPath;
   }, [rootPath]);
@@ -1035,7 +1037,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setTreeTruncated(false);
         setTreeCount(0);
       }
-      setListError(err?.message || '无法加载项目文件树');
+      setListError(err?.message || t('aiChat.loadTreeFailed'));
     } finally {
       if (!silent) setListLoading(false);
     }
@@ -1176,10 +1178,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     } catch (err: any) {
       if (!silent) {
         setChangedEntries([]);
-        setChangedError(err?.message || '无法加载变动文件');
+        setChangedError(err?.message || t('aiChat.loadChangedFailed'));
         onSessionChangesRef.current?.({ additions: 0, deletions: 0, count: 0 });
       } else {
-        setChangedError(err?.message || '无法加载变动文件');
+        setChangedError(err?.message || t('aiChat.loadChangedFailed'));
       }
     } finally {
       if (!silent) setChangedLoading(false);
@@ -1350,7 +1352,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         }
       } catch (err: any) {
         if (!painted) {
-          setFileError(err?.message || '无法加载 diff');
+          setFileError(err?.message || t('aiChat.loadDiffFailed'));
         }
       } finally {
         if (!painted || (activeFileRef.current || '').replace(/\\/g, '/') === norm) {
@@ -1490,7 +1492,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setBrowsePath(parentRel(finalPath));
         expandToPath(finalPath);
       } catch (err: any) {
-        setFileError(err?.message || '无法读取文件');
+        setFileError(err?.message || t('aiChat.readFileFailed'));
       } finally {
         setFileLoading(false);
       }
@@ -1513,9 +1515,9 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setFileMeta(null);
       setFileLoading(false);
       setMdRaw(false);
-      setFileError('该文件已因撤回被删除，无法查看内容');
+      setFileError(t('aiChat.fileRevertedDeleted'));
     },
-    [expandToPath],
+    [expandToPath, t],
   );
 
   /** All-files: dirty (session-changed, not kept) → same red/green diff as 变动文件. */
@@ -1666,7 +1668,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       setDiffMeta(null);
       setFileContent('');
       setImageSrc(null);
-      setFileError('该文件已因撤回被删除，无法查看内容');
+      setFileError(t('aiChat.fileRevertedDeleted'));
       return;
     }
     const dirty = !!ch;
@@ -1728,7 +1730,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         });
         await loadChanged({ silent: true });
       } catch (err: any) {
-        setChangedError(err?.message || '撤回失败');
+        setChangedError(err?.message || t('aiChat.revertFailed'));
       } finally {
         setRevertingPath(null);
       }
@@ -1767,7 +1769,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         await loadChanged({ silent: true });
         void loadTree({ silent: true });
       } catch (err: any) {
-        setChangedError(err?.message || '保留变动失败');
+        setChangedError(err?.message || t('aiChat.keepFailed'));
       } finally {
         setKeepingPath(null);
       }
@@ -1895,7 +1897,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       });
     }
     setInlineCreate({ kind });
-    setCreateName(kind === 'file' ? '未命名文档.md' : '新建文件夹');
+    setCreateName(kind === 'file' ? t('aiChat.untitledDocument') : t('aiChat.newFolder'));
   }, [closeMenus, browsePath]);
 
   const commitCreate = useCallback(async () => {
@@ -1921,7 +1923,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         setExpanded((prev) => new Set(prev).add(parent || rel));
       }
     } catch (err: any) {
-      setListError(err?.message || '创建失败');
+      setListError(err?.message || t('aiChat.createFailed'));
       setInlineCreate(null);
     } finally {
       setActionBusy(false);
@@ -1958,7 +1960,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       if (tab === 'changed') await loadChanged();
       else await loadTree();
     } catch (err: any) {
-      setListError(err?.message || '重命名失败');
+      setListError(err?.message || t('aiChat.renameFailed'));
       setRenamingPath(null);
     } finally {
       setActionBusy(false);
@@ -1979,7 +1981,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     closeMenus();
     if (!agentId || !rootPath || !relPath) return;
     const label = basename(relPath);
-    if (!window.confirm(`确定删除「${label}」？此操作不可撤销。`)) return;
+    if (!window.confirm(t('aiChat.deleteConfirm', { name: label }))) return;
     setActionBusy(true);
     try {
       await adminAPI.deleteProjectPath(agentId, relPath, rootPath);
@@ -1991,7 +1993,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       if (tab === 'changed') await loadChanged();
       else await loadTree();
     } catch (err: any) {
-      setListError(err?.message || '删除失败');
+      setListError(err?.message || t('aiChat.deleteFailed'));
     } finally {
       setActionBusy(false);
     }
@@ -2003,7 +2005,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     try {
       await adminAPI.revealProjectPath(agentId, relPath, rootPath);
     } catch (err: any) {
-      setListError(err?.message || '无法打开所在目录');
+      setListError(err?.message || t('aiChat.revealFailed'));
     }
   }, [closeMenus, agentId, rootPath]);
 
@@ -2015,7 +2017,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     try {
       await adminAPI.openProjectTerminal(agentId, dir, rootPath);
     } catch (err: any) {
-      setListError(err?.message || '无法在终端中打开');
+      setListError(err?.message || t('aiChat.terminalFailed'));
     }
   }, [closeMenus, agentId, rootPath]);
 
@@ -2060,14 +2062,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => void startCreate('file', isRoot ? browsePath : target.path)}
             >
-              新建文档
+              {t('aiChat.newDocument')}
             </button>
             <button
               type="button"
               className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => void startCreate('dir', isRoot ? browsePath : target.path)}
             >
-              新建文件夹
+              {t('aiChat.newFolder')}
             </button>
             <div className="my-1 h-px bg-black/8 dark:bg-white/10" />
           </>
@@ -2077,21 +2079,21 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doReveal(target.path)}
         >
-          打开所在目录
+          {t('aiChat.revealInFolder')}
         </button>
         <button
           type="button"
           className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doTerminal(target)}
         >
-          在终端中打开
+          {t('aiChat.openInTerminal')}
         </button>
         <button
           type="button"
           className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
           onClick={() => void doCopyPath(target.path)}
         >
-          复制路径
+          {t('aiChat.copyPath')}
         </button>
         {!isRoot ? (
           <>
@@ -2101,14 +2103,14 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               className="w-full px-3 py-1.5 text-left hover:bg-primary/10"
               onClick={() => startRename(target.path)}
             >
-              重命名
+              {t('aiChat.sessionSidebar.rename')}
             </button>
             <button
               type="button"
               className="w-full px-3 py-1.5 text-left hover:bg-primary/10 text-red-500"
               onClick={() => void doDelete(target.path)}
             >
-              删除
+              {t('common.delete')}
             </button>
           </>
         ) : null}
@@ -2137,7 +2139,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索文件…"
+              placeholder={t('aiChat.searchFilesPlaceholder')}
               autoFocus
               className="w-full pl-7 pr-2 py-1 text-[11px] rounded-md bg-black/[0.03] dark:bg-white/5 border border-border/60 text-textMuted placeholder:text-textMuted/40 outline-none focus:border-primary/40"
             />
@@ -2148,28 +2150,28 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {/* Tabs */}
       <div className="flex items-center gap-0 px-1.5 pt-1.5 pb-0 border-b border-border flex-shrink-0">
         {([
-          { id: 'changed' as const, label: '变动文件' },
-          { id: 'all' as const, label: '所有文件' },
-        ]).map((t) => (
+          { id: 'changed' as const, label: t('aiChat.changedFiles') },
+          { id: 'all' as const, label: t('aiChat.allFiles') },
+        ]).map((tt) => (
           <button
-            key={t.id}
+            key={tt.id}
             type="button"
             onClick={() => {
-              setTab(t.id);
+              setTab(tt.id);
               setInlineCreate(null);
               setRenamingPath(null);
               closeMenus();
-              if (t.id === 'changed') setShowPreview(false);
+              if (tt.id === 'changed') setShowPreview(false);
               else setShowPreview(true);
             }}
             className={`px-2.5 py-1.5 text-[11px] relative transition-colors ${
-              tab === t.id
+              tab === tt.id
                 ? 'text-textMain font-medium'
                 : 'text-textMuted/55 hover:text-textMuted'
             }`}
           >
-            {t.label}
-            {tab === t.id ? (
+            {tt.label}
+            {tab === tt.id ? (
               <span className="absolute left-2 right-2 bottom-0 h-[1.5px] rounded-full bg-textMain/50" />
             ) : null}
           </button>
@@ -2180,11 +2182,11 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       {tab === 'all' && rootPath && !listLoading ? (
         <div className="px-2.5 py-1 border-b border-border/40 text-[10px] text-textMuted/50 flex-shrink-0 flex items-center gap-2">
           <span>
-            已加载 {treeCount.toLocaleString()} 项
-            {treeTruncated ? '（已达上限 10000）' : ''}
+            {t('aiChat.loadedItems', { count: treeCount.toLocaleString() })}
+            {treeTruncated ? t('aiChat.truncatedLimit') : ''}
           </span>
           {search.trim() ? (
-            <span className="truncate">· 搜索 {visibleRows.length} 条</span>
+            <span className="truncate">{t('aiChat.searchingCount', { count: visibleRows.length })}</span>
           ) : null}
         </div>
       ) : null}
@@ -2204,18 +2206,18 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
       >
         {!rootPath ? (
           <div className="px-3 py-4 text-[11px] text-textMuted leading-relaxed" data-fs-empty="1">
-            请在聊天栏底部选择项目文件夹后再浏览文件。
+            {t('aiChat.chooseProjectFolderHint')}
           </div>
         ) : tab === 'changed' ? (
           changedLoading && filteredChanged.length === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-              <Loader2 size={12} className="animate-spin" /> 加载中…
+              <Loader2 size={12} className="animate-spin" /> {t('common.loading')}
             </div>
           ) : changedError && filteredChanged.length === 0 ? (
             <div className="px-3 py-3 text-[11px] text-textMuted">{changedError}</div>
           ) : filteredChanged.length === 0 ? (
             <div className="px-3 py-3 text-[11px] text-textMuted/60" data-fs-empty="1">
-              暂无变动文件
+              {t('aiChat.noChangedFiles')}
             </div>
           ) : (
             <div className="flex flex-col min-h-0">
@@ -2246,7 +2248,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       <button
                         type="button"
                         className="p-0.5 rounded shrink-0 text-textMuted/50 hover:text-textMuted"
-                        title={isOpenRow ? '折叠' : '展开 diff'}
+                        title={isOpenRow ? t('aiChat.collapseDiff') : t('aiChat.expandDiff')}
                         onClick={() => void toggleChangedExpand(e.path)}
                       >
                         {isOpenRow ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -2285,7 +2287,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       <button
                         type="button"
                         className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-emerald-500/15 shrink-0 disabled:opacity-40"
-                        title="保留全部变动（从 Changes 移除，磁盘内容不变；消息撤回仍可回滚）"
+                        title={t('aiChat.keepAllChangesTitle')}
                         disabled={isKeeping || isReverting}
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -2301,7 +2303,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       <button
                         type="button"
                         className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 shrink-0 disabled:opacity-40"
-                        title="撤回此文件"
+                        title={t('aiChat.revertFile')}
                         disabled={isReverting || isKeeping}
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -2341,10 +2343,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                           />
                         ) : isDiffLoading ? (
                           <div className="flex items-center gap-2 px-3 py-2 text-[10px] text-textMuted/70">
-                            <Loader2 size={11} className="animate-spin" /> 准备中…
+                            <Loader2 size={11} className="animate-spin" /> {t('aiChat.preparing')}
                           </div>
                         ) : (
-                          <div className="px-3 py-2 text-[11px] text-textMuted">无 diff</div>
+                          <div className="px-3 py-2 text-[11px] text-textMuted">{t('aiChat.noDiff')}</div>
                         )}
                       </div>
                     ) : null}
@@ -2355,7 +2357,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           )
         ) : listLoading && treeEntries.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-            <Loader2 size={12} className="animate-spin" /> 正在加载文件树…
+            <Loader2 size={12} className="animate-spin" /> {t('aiChat.loadingTree')}
           </div>
         ) : listError && treeEntries.length === 0 ? (
           <div className="px-3 py-3 text-[11px] text-red-400">{listError}</div>
@@ -2393,13 +2395,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     else setInlineCreate(null);
                   }}
                   className="flex-1 min-w-0 px-1 py-0.5 text-[11px] rounded border border-primary/40 bg-bgLight outline-none font-mono"
-                  placeholder={inlineCreate.kind === 'dir' ? '文件夹名称' : '文件名'}
+                  placeholder={inlineCreate.kind === 'dir' ? t('aiChat.folderNamePlaceholder') : t('aiChat.fileNamePlaceholder')}
                 />
               </div>
             ) : null}
             {visibleRows.length === 0 && !inlineCreate ? (
               <div className="px-3 py-3 text-[11px] text-textMuted/60" data-fs-empty="1">
-                {search.trim() ? '无匹配文件' : '空工作区'}
+                {search.trim() ? t('aiChat.noMatchingFiles') : t('aiChat.emptyWorkspace')}
               </div>
             ) : (
               visibleRows.map((e) => {
@@ -2451,7 +2453,13 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                           toggleExpand(e.path);
                           setBrowsePath(e.path);
                         }}
-                        title={e.skipped ? '已跳过深层内容' : isOpenDir ? '折叠' : '展开'}
+                        title={
+                          e.skipped
+                            ? t('aiChat.skippedDeep')
+                            : isOpenDir
+                              ? t('aiChat.collapse')
+                              : t('aiChat.expand')
+                        }
                       >
                         {e.skipped || !hasKids ? (
                           <span className="w-3" />
@@ -2487,10 +2495,10 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         className={`flex-1 min-w-0 ml-1 text-left truncate font-mono border-0 bg-transparent p-0 cursor-pointer ${nameClass}`}
                         title={
                           isMissing
-                            ? `${e.path}（已因撤回删除，无法查看）`
+                            ? `${e.path}${t('aiChat.revertDeletedSuffix')}`
                             : ch
                               ? `${e.path}  (+${ch.additions || 0} -${ch.deletions || 0})`
-                              : e.path + (e.skipped ? '（未展开深层）' : '')
+                              : e.path + (e.skipped ? t('aiChat.notExpandedSuffix') : '')
                         }
                         onClick={() => {
                           if (e.type === 'dir') {
@@ -2503,7 +2511,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       >
                         {e.name}
                         {isMissing ? (
-                          <span className="ml-1 text-[9px] text-rose-400/80 no-underline">已删除</span>
+                          <span className="ml-1 text-[9px] text-rose-400/80 no-underline">{t('aiChat.deleted')}</span>
                         ) : e.skipped ? (
                           <span className="ml-1 text-[9px] opacity-50">…</span>
                         ) : null}
@@ -2525,7 +2533,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       <button
                         type="button"
                         className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 shrink-0 border-0 bg-transparent cursor-pointer"
-                        title="更多"
+                        title={t('aiChat.more')}
                         onClick={(ev) =>
                           openContextMenu(ev, { path: e.path, type: e.type, name: e.name })
                         }
@@ -2572,7 +2580,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
             className="flex-1 min-w-0 text-[13px] font-medium leading-none text-textMuted truncate"
             title={rootPath || projectLabel || undefined}
           >
-            工作区文件
+            {t('aiChat.workspaceFiles')}
           </div>
           <div className="flex items-center gap-0.5 shrink-0">
             <button
@@ -2581,7 +2589,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               className={`p-1.5 rounded-md hover:bg-primary/10 ${
                 showSearch ? 'bg-black/[0.06] dark:bg-white/10' : ''
               }`}
-              title="搜索"
+              title={t('common.search')}
             >
               <Search size={13} className="text-textMuted" />
             </button>
@@ -2594,7 +2602,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 }}
                 disabled={!rootPath}
                 className="p-1.5 rounded-md hover:bg-primary/10 disabled:opacity-40"
-                title="新建"
+                title={t('aiChat.new')}
               >
                 <Plus size={13} className="text-textMuted" />
               </button>
@@ -2606,7 +2614,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     onClick={() => void startCreate('file')}
                   >
                     <FileText size={12} className="text-neutral-400" />
-                    新建文档
+                    {t('aiChat.newDocument')}
                   </button>
                   <button
                     type="button"
@@ -2614,7 +2622,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     onClick={() => void startCreate('dir')}
                   >
                     <FolderPlus size={12} className="text-neutral-400" />
-                    新建文件夹
+                    {t('aiChat.newFolder')}
                   </button>
                 </div>
               ) : null}
@@ -2625,7 +2633,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               className={`p-1.5 rounded-md hover:bg-primary/10 ${
                 treeOnly ? 'hidden' : ''
               }`}
-              title={showPreview ? '隐藏预览' : '显示预览'}
+              title={showPreview ? t('aiChat.hidePreview') : t('aiChat.showPreview')}
             >
               {showPreview ? (
                 <Eye size={13} className="text-textMuted" />
@@ -2637,7 +2645,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               type="button"
               onClick={onClose}
               className="p-1.5 rounded-md hover:bg-primary/10"
-              title="关闭"
+              title={t('common.close')}
             >
               <X size={13} className="text-textMuted" />
             </button>
@@ -2664,7 +2672,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     </div>
                     <div className="text-[10px] text-textMuted font-mono truncate" title={activeFile}>
                       {activeFile}
-                      {fileMeta?.truncated ? ' · 已截断' : ''}
+                      {fileMeta?.truncated ? t('aiChat.truncated') : ''}
                     </div>
                   </div>
                   {isMarkdownFile(activeFile) && !imageSrc && !fileLoading && !fileError && !diffLines ? (
@@ -2672,15 +2680,15 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                       type="button"
                       onClick={() => setMdRaw((v) => !v)}
                       className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-border/70 text-textMuted hover:bg-primary/10 hover:text-textMain"
-                      title={mdRaw ? '渲染预览' : '原始源码'}
+                      title={mdRaw ? t('aiChat.renderPreview') : t('aiChat.rawSource')}
                     >
-                      {mdRaw ? '预览' : '源码'}
+                      {mdRaw ? t('aiChat.preview') : t('aiChat.source')}
                     </button>
                   ) : null}
                 </div>
                 {fileLoading ? (
                   <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-                    <Loader2 size={14} className="animate-spin" /> 加载中…
+                    <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
                   </div>
                 ) : fileError ? (
                   <div className="px-3 py-4 text-[11px] text-red-400">{fileError}</div>
@@ -2700,7 +2708,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                     size={fileMeta?.size}
                   />
                 ) : isImageFile(activeFile) && !fileContent ? (
-                  <div className="px-3 py-4 text-[11px] text-textMuted">无图片数据</div>
+                  <div className="px-3 py-4 text-[11px] text-textMuted">{t('aiChat.noImageData')}</div>
                 ) : isMarkdownFile(activeFile) && !mdRaw ? (
                   <MarkdownPreview content={fileContent} />
                 ) : (
@@ -2709,7 +2717,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
               </>
             ) : (
               <div className="flex-1 flex items-center justify-center px-4 text-center text-[11px] text-textMuted/60">
-                选择文件以预览
+                {t('aiChat.selectFileToPreview')}
               </div>
             )}
           </div>

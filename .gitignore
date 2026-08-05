@@ -211,6 +211,22 @@ scripts/check_completion.py
 scripts/test_new_session_ws.py
 scripts/manual_tests/
 
+# ── Local daily reports / personal scratch documents (not source) ──
+daily_reports/
+*.excalidraw
+/a\股*报告*.md
+/docs/*_test_report_*.md
+/新建文档.md
+
+# ── One-off debug / repair / test-automation scripts (contain local creds) ──
+scripts/fix_workspace_target.py
+scripts/fix_desktop_workspace_target.py
+scripts/list_agents_quick.py
+scripts/test_full_chat_e2e.py
+scripts/test_multi_turn_ws.py
+# pnpm lock accidentally generated alongside the tracked npm lockfile
+src/plugins/task_watch/ui/pnpm-lock.yaml
+
 # ── Root-level local dev / debug artifacts (open-source hygiene) ──
 /_old_*.py
 # Screenshots & UI captures (tracked assets live under src/ or doc_*/)

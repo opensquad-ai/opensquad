@@ -74,11 +74,35 @@ def _model_path() -> str:
 
 # ── Model auto-download ────────────────────────────────────────────────
 # The 1.2GB weights are excluded from git. On first run (or when a deployment
-# lacks them) we fetch them from Hugging Face in the background so the reranker
-# sidecar can start once the download completes. Download never blocks the
-# websearch service boot; search keeps Bing order until weights exist.
+# lacks them) we fetch them in the background so the reranker sidecar can
+# start once the download completes. Download never blocks the websearch
+# service boot; search keeps Bing order until weights exist.
+#
+# The actual download flow is owned by ``websearch.reranker_model_store``,
+# which is the same module the admin UI uses for its "Download model"
+# button — this means a user-initiated download and a first-boot
+# auto-download are mutually consistent (only one runs at a time, both
+# write to the same status file).
 _MODEL_REPO_ID = "Qwen/Qwen3-Reranker-0.6B"
 _MODEL_REVISION = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+
+
+# Imported lazily so this module still loads on frozen Agent Python
+# builds that don't include the model store (defensive).
+def _model_store():
+    try:
+        from plugins.websearch.reranker_model_store import is_complete, start_download
+
+        return is_complete, start_download
+    except ImportError:
+        try:
+            from reranker_model_store import is_complete, start_download  # type: ignore[no-redef]
+
+            return is_complete, start_download
+        except ImportError:
+            return None, None
+
+
 _download_started = False
 _download_lock = threading.Lock()
 
@@ -108,10 +132,19 @@ def _auto_download_model(model_dir: str) -> bool:
 
     Spawns a daemon thread so it never blocks the service; the guardian or the
     next start will pick up the model once it is on disk.
+
+    Prefers the shared ``reranker_model_store`` (which the admin UI also uses
+    and which provides multi-mirror fallback).  Falls back to a direct
+    ``huggingface_hub`` call against ``hf-mirror.com`` if the model store
+    module is unavailable (e.g. frozen Agent Python embed that doesn't
+    bundle it).
     """
     global _download_started
-    if _model_is_complete(model_dir):
+
+    is_complete, store_start = _model_store()
+    if is_complete is not None and is_complete():
         return True
+
     with _download_lock:
         if _download_started:
             return True
@@ -121,36 +154,65 @@ def _auto_download_model(model_dir: str) -> bool:
         print("[WebSearch] Reranker auto-download disabled (WEBSEARCH_RERANKER_AUTO_DOWNLOAD=0)")
         return False
 
-    try:
-        import huggingface_hub
-    except ImportError:
-        print("[WebSearch] huggingface_hub not available for model auto-download")
-        return False
-
     def _do_download() -> None:
-        try:
-            os.makedirs(model_dir, exist_ok=True)
-            print(f"[WebSearch] Downloading {_MODEL_REPO_ID}@{_MODEL_REVISION[:8]} → {model_dir} (1.2GB)…")
-            # Default to the hf-mirror endpoint (fast in CN); override with
-            # WEBSEARCH_HF_ENDPOINT (e.g. https://huggingface.co) if needed.
-            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-            huggingface_hub.snapshot_download(
-                repo_id=_MODEL_REPO_ID,
-                revision=_MODEL_REVISION,
-                local_dir=model_dir,
-                local_dir_use_symlinks=False,
-            )
-            if _model_is_complete(model_dir):
-                print("[WebSearch] Reranker model downloaded; starting sidecar")
-                start_reranker_sidecar()
-            else:
-                print("[WebSearch] Reranker model download incomplete; retry on next start")
-        except Exception as e:
-            print(f"[WebSearch] Reranker model download failed (non-fatal): {e}")
+        # Preferred: route through the model store (mirror chain,
+        # status persistence, idempotent).  This shares state with the
+        # admin UI's "Download" button.
+        if store_start is not None:
+            try:
+                result = store_start(force=False)
+                # The model_store reports its own progress; once it
+                # returns, the weights are on disk and the sidecar can
+                # spawn — if not, it already wrote a status file with
+                # the failure reason.
+                if result.get("ready") is True or result.get("started"):
+                    # Re-trigger the sidecar now that weights exist.
+                    try:
+                        start_reranker_sidecar()
+                    except Exception as e:  # pragma: no cover
+                        print(f"[WebSearch] Reranker re-spawn after download failed: {e}")
+                return
+            except Exception as e:
+                print(f"[WebSearch] Reranker model_store download failed, falling back to direct HF call: {e}")
+                # fall through to legacy path
 
-    t = threading.Thread(target=_do_download, name="reranker-model-download", daemon=True)
+        # Legacy fallback: best-effort single-mirror download. Kept
+        # around for frozen builds that don't bundle the model store.
+        try:
+            import huggingface_hub
+        except ImportError:
+            print("[WebSearch] huggingface_hub not available for model auto-download")
+            return
+
+        def _legacy() -> None:
+            try:
+                os.makedirs(model_dir, exist_ok=True)
+                print(f"[WebSearch] Downloading {_MODEL_REPO_ID}@{_MODEL_REVISION[:8]} → {model_dir} (1.2GB)…")
+                os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+                huggingface_hub.snapshot_download(
+                    repo_id=_MODEL_REPO_ID,
+                    revision=_MODEL_REVISION,
+                    local_dir=model_dir,
+                    local_dir_use_symlinks=False,
+                )
+                if _model_is_complete(model_dir):
+                    print("[WebSearch] Reranker model downloaded; starting sidecar")
+                    start_reranker_sidecar()
+                else:
+                    print("[WebSearch] Reranker model download incomplete; retry on next start")
+            except Exception as e:
+                print(f"[WebSearch] Reranker model download failed (non-fatal): {e}")
+
+        t = threading.Thread(target=_legacy, name="reranker-model-download-legacy", daemon=True)
+        t.start()
+        print("[WebSearch] Reranker model download started in background (legacy fallback)")
+        return True
+
+    # Run on a tiny background thread so the calling websearch boot
+    # isn't blocked even if the model_store import is slow.
+    t = threading.Thread(target=_do_download, name="reranker-model-bootstrap", daemon=True)
     t.start()
-    print("[WebSearch] Reranker model download started in background")
+    print("[WebSearch] Reranker model download scheduled")
     return True
 
 

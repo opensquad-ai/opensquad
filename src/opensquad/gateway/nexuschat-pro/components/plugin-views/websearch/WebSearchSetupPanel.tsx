@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowLeft, RefreshCw, Loader2, AlertCircle, CheckCircle2, LogIn, Copy, Check, Ban,
+  Brain, Globe,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
 import type { PluginViewProps } from '../registry';
+import ModelDownloadCard from '../ModelDownloadCard';
 
 type SetupData = {
   needs_bing_login?: boolean;
@@ -15,6 +17,20 @@ type SetupData = {
   steps_zh?: string[];
   profile_dir?: string;
   description?: string;
+  browser_config?: {
+    browser?: string;
+    options?: string[];
+  };
+  reranker?: {
+    ready?: boolean;
+    model_dir?: string;
+    snapshot_dir?: string;
+    files?: Record<string, number>;
+    missing?: string[];
+    repo_id?: string;
+    revision?: string;
+    download?: Record<string, any>;
+  };
 };
 
 const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
@@ -26,6 +42,9 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
   const [data, setData] = useState<SetupData>({});
   const [copied, setCopied] = useState(false);
   const [serviceAlive, setServiceAlive] = useState<boolean | null>(null);
+  const [browserSel, setBrowserSel] = useState('chrome');
+  const [browserPath, setBrowserPath] = useState('');
+  const [browserSaving, setBrowserSaving] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -33,6 +52,8 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
     try {
       const payload = await pluginAPI.getPluginData('websearch');
       setData(payload || {});
+      const bc = payload?.browser_config;
+      if (bc?.browser) setBrowserSel(bc.browser);
       try {
         const svc = await pluginServiceAPI.list();
         const row = (svc.plugin_services || []).find((s: any) => s.plugin_id === 'websearch');
@@ -132,6 +153,32 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
     }
   };
 
+  const saveBrowser = async () => {
+    setBrowserSaving(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const target = browserSel === 'custom' ? browserPath.trim() : browserSel;
+      if (!target) {
+        setError(zh ? '请选择浏览器或填写可执行文件路径' : 'Pick a browser or enter an executable path');
+        return;
+      }
+      const res = await pluginAPI.pluginAction('websearch', 'set_browser', {
+        browser: target,
+      });
+      if (!res?.ok) {
+        setError(res?.error || (zh ? '保存浏览器选择失败' : 'Failed to save browser choice'));
+      } else {
+        setInfo(zh ? '浏览器已保存，重启服务后生效' : 'Browser saved; restart the service to apply');
+        await refresh();
+      }
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBrowserSaving(false);
+    }
+  };
+
   const ready = !!data.bing_login_ready;
   const steps = data.steps_zh || [];
 
@@ -187,6 +234,48 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
             {data.description && (
               <p className="text-[12px] text-textMuted leading-relaxed">{data.description}</p>
             )}
+
+            {/* ── Browser selection ─────────────────────────────── */}
+            <div className="rounded-lg border border-border bg-bgLight/40 p-3 space-y-2">
+              <div className="flex items-center gap-2 text-[12px] font-medium text-textMain/90">
+                <Globe size={14} className="text-sky-400" />
+                {zh ? '浏览器选择' : 'Browser'}
+              </div>
+              <p className="text-[11px] text-textMuted leading-relaxed">
+                {zh
+                  ? '选择用于 Bing 搜索的浏览器。所有浏览器均支持持久化 Cookie（登录后重启服务即生效）。'
+                  : 'Pick the browser used for Bing search. All options persist cookies (login once, restart to apply).'}
+              </p>
+              <select
+                value={browserSel}
+                onChange={(e) => setBrowserSel(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-bgDark border border-border text-[12px] text-textMain focus:outline-none focus:border-primary/50"
+              >
+                <option value="chrome">{zh ? 'Google Chrome' : 'Google Chrome'}</option>
+                <option value="msedge">{zh ? 'Microsoft Edge' : 'Microsoft Edge'}</option>
+                <option value="chromium">{zh ? '自带的 Chromium' : 'Bundled Chromium'}</option>
+                <option value="firefox">{zh ? 'Mozilla Firefox' : 'Mozilla Firefox'}</option>
+                <option value="custom">{zh ? '自定义可执行文件路径…' : 'Custom executable path…'}</option>
+              </select>
+              {browserSel === 'custom' && (
+                <input
+                  type="text"
+                  value={browserPath}
+                  onChange={(e) => setBrowserPath(e.target.value)}
+                  placeholder={zh ? '例如 C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe' : 'e.g. C:\\Program Files\\...\\brave.exe'}
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-bgDark border border-border text-[12px] text-textMain focus:outline-none focus:border-primary/50"
+                />
+              )}
+              <button
+                type="button"
+                disabled={browserSaving}
+                onClick={() => void saveBrowser()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50"
+              >
+                {browserSaving ? <Loader2 size={13} className="animate-spin" /> : <Globe size={13} />}
+                {zh ? '保存浏览器' : 'Save browser'}
+              </button>
+            </div>
 
             {!ready && steps.length > 0 && (
               <ol className="list-decimal list-inside space-y-1.5 text-[12px] text-textMain/90">
@@ -279,6 +368,24 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
 
             {info && <div className="text-[12px] text-emerald-300/90">{info}</div>}
             {error && <div className="text-[12px] text-red-400">{error}</div>}
+
+            {/* ── Reranker model card ─────────────────────────────── */}
+            <div className="pt-2 border-t border-border/40 space-y-2">
+              <div className="flex items-center gap-2 text-[12px] font-medium text-textMain/90">
+                <Brain size={14} className="text-cyan-400" />
+                {zh ? 'Qwen3-Reranker 权重模型（约 1.2GB）' : 'Qwen3-Reranker model (~1.2GB)'}
+              </div>
+              <p className="text-[11px] text-textMuted leading-relaxed">
+                {zh
+                  ? '用于搜索结果的相关性重排；未下载时搜索仍可用，但会按 Bing 默认顺序返回。'
+                  : 'Used to re-order search results by relevance. Search still works without it, falling back to Bing order.'}
+              </p>
+              <RerankerCard
+                locale={zh ? 'zh' : 'en'}
+                initial={data.reranker}
+                onChanged={refresh}
+              />
+            </div>
           </>
         )}
       </div>
@@ -296,4 +403,73 @@ export const mount = (el: HTMLElement, props: PluginViewProps) => {
 export const unmount = (_el: HTMLElement) => {
   root?.unmount();
   root = null;
+};
+
+/**
+ * RerankerCard
+ *
+ * Thin wrapper around the shared ModelDownloadCard. Uses a
+ * plugin-specific selector chain so it reads/writes the `reranker`
+ * sub-object returned by ``/api/plugins/websearch/data`` and the
+ * ``download_reranker`` action.
+ */
+const RerankerCard: React.FC<{
+  locale: 'zh' | 'en';
+  initial?: SetupData['reranker'];
+  onChanged?: () => void;
+}> = ({ locale, initial, onChanged }) => {
+  const isZh = locale !== 'en';
+  // Lift the initial payload into ModelDownloadCard by pre-seeding
+  // its first refresh; we still always re-fetch on mount so the data
+  // is current.
+  void initial;
+
+  return (
+    <ModelDownloadCard
+      pluginName="websearch"
+      actionName="download_reranker"
+      title={isZh ? 'Reranker 模型' : 'Reranker model'}
+      titleEn="Reranker model"
+      description={
+        isZh
+          ? '默认走 hf-mirror.com（国内友好），若返回 401/403/超时自动切换到 huggingface.co；最后尝试 ModelScope 镜像。'
+          : 'Downloads from hf-mirror.com first (CN-friendly); on 401/403/timeout it falls back to huggingface.co and finally ModelScope.'
+      }
+      iconClass="text-cyan-400"
+      locale={locale}
+      readySelector={(s) => !!(s.reranker && s.reranker.ready)}
+      modelDirSelector={(s) => (s.reranker && s.reranker.snapshot_dir) || (s.reranker && s.reranker.model_dir) || ''}
+      downloadStateSelector={(s) => (s.reranker && s.reranker.download) || {}}
+      renderExtras={(s) => {
+        const r = s.reranker;
+        if (!r) return null;
+        if (r.missing && r.missing.length > 0) {
+          return (
+            <p className="text-[11px] text-amber-500">
+              {isZh ? '缺失文件：' : 'Missing: '}
+              {r.missing.join(', ')}
+            </p>
+          );
+        }
+        if (r.files && Object.keys(r.files).length > 0) {
+          const items = Object.entries(r.files).filter(([, n]) => typeof n === 'number' && n > 0);
+          if (items.length === 0) return null;
+          return (
+            <ul className="text-[11px] text-textMuted space-y-0.5">
+              {items.slice(0, 6).map(([name, size]) => (
+                <li key={name}>
+                  {name} — {(Number(size) / (1024 * 1024)).toFixed(1)} MB
+                </li>
+              ))}
+              {items.length > 6 ? <li>… +{items.length - 6} more</li> : null}
+            </ul>
+          );
+        }
+        return null;
+      }}
+      onDownloaded={() => {
+        if (onChanged) onChanged();
+      }}
+    />
+  );
 };

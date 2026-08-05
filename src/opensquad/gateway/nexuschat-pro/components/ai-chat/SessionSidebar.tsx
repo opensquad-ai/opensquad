@@ -613,7 +613,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                 ? 'bg-textMuted'
                 : 'bg-transparent border border-border'
             }`}
-            title={unseenComplete ? '任务已完成' : undefined}
+            title={unseenComplete ? t('aiChat.taskCompleted') : undefined}
           />
         )}
         <div className="min-w-0 flex-1">
@@ -676,7 +676,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <button
               type="button"
               className="p-0.5 rounded hover:bg-primary/15"
-              title={pinned ? '取消置顶' : '置顶'}
+              title={pinned ? t('aiChat.unpin') : t('aiChat.sessionSidebar.pinned')}
               onClick={(e) => {
                 e.stopPropagation();
                 setSessionPinned(agentId, session.id, !pinned);
@@ -688,7 +688,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <button
               type="button"
               className="p-0.5 rounded hover:bg-primary/15"
-              title={archived ? '取消归档' : '归档'}
+              title={archived ? t('aiChat.unarchive') : t('aiChat.archive')}
               onClick={(e) => {
                 e.stopPropagation();
                 setSessionArchived(agentId, session.id, !archived);
@@ -700,7 +700,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <button
               type="button"
               className="p-0.5 rounded hover:bg-primary/15"
-              title="重命名"
+              title={t('aiChat.sessionSidebar.rename')}
               onClick={(e) => startRename(e, session)}
             >
               <Pencil size={11} />
@@ -708,7 +708,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
             <button
               type="button"
               className="p-0.5 rounded hover:bg-rose-500/20 text-rose-500"
-              title="删除"
+              title={t('common.delete')}
               onClick={(e) => {
                 e.stopPropagation();
                 setConfirmingDeleteId(session.id);
@@ -814,7 +814,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
           <MessageSquarePlus size={16} className="text-sky-500" />
-          新建对话
+          {t('aiChat.newChat')}
         </button>
         <button
           type="button"
@@ -835,7 +835,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           }`}
         >
           <Sparkles size={16} className={skillsActive ? 'text-primary' : 'text-textMuted/70'} />
-          Skill 库
+          {t('nav.skills')}
         </button>
         <button
           type="button"
@@ -869,43 +869,43 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush"
       >
         {!workspaceRootPath ? (
-          <div className="px-3 py-4 text-[11px] text-textMuted/70">请先打开或创建一个工作区</div>
+          <div className="px-3 py-4 text-[11px] text-textMuted/70">{t('aiChat.needWorkspaceFirst')}</div>
         ) : error ? (
           <div className="px-3 py-2 text-[11px] text-rose-500">{error}</div>
         ) : (
           <>
             <SidebarSection
-              title="置顶"
+              title={t('aiChat.sessionSidebar.pinned')}
               count={sections.pinned.length}
               open={sectionOpen.pinned}
               onToggle={() => setSectionOpen((s) => ({ ...s, pinned: !s.pinned }))}
             >
               {sections.pinned.length === 0 ? (
-                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">{t('aiChat.none')}</div>
               ) : (
                 sections.pinned.map((s) => renderRow(s, `pinned:${s.id}`))
               )}
             </SidebarSection>
             <SidebarSection
-              title="最近"
+              title={t('aiChat.recent')}
               count={sections.recent.length}
               open={sectionOpen.recent}
               onToggle={() => setSectionOpen((s) => ({ ...s, recent: !s.recent }))}
             >
               {sections.recent.length === 0 ? (
-                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">{t('aiChat.none')}</div>
               ) : (
                 sections.recent.map((s) => renderRow(s, `recent:${s.id}`))
               )}
             </SidebarSection>
             <SidebarSection
-              title="归档"
+              title={t('aiChat.archive')}
               count={sections.archive.length}
               open={sectionOpen.archive}
               onToggle={() => setSectionOpen((s) => ({ ...s, archive: !s.archive }))}
             >
               {sections.archive.length === 0 ? (
-                <div className="px-3 py-1 text-[10px] text-textMuted/50">无</div>
+                <div className="px-3 py-1 text-[10px] text-textMuted/50">{t('aiChat.none')}</div>
               ) : (
                 sections.archive.map((s) => renderRow(s, `archive:${s.id}`))
               )}
@@ -918,7 +918,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                   onClick={() => void loadMoreSessions()}
                   className="w-full rounded-lg px-2 py-1.5 text-[11px] text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
                 >
-                  {loadingMore ? '加载中...' : '加载更多会话'}
+                  {loadingMore ? t('common.loading') : t('aiChat.loadMoreSessions')}
                 </button>
               </div>
             ) : null}

@@ -24,4 +24,4 @@ You are the Quality Assurance engineer (QA) of the OpenSquad development collabo
 
 ## Available tools
 
-`filesystem`, `workspace`, `collaboration`, `delegate_task`, `task_watch`, `im`, `websearch`, `vision`, `mcp_query`.
+See the base prompt §3.1 for the full tool catalog. Your registered tools are listed in your function definitions; the most relevant for this role are filesystem / vision (read code), collaboration / delegate_task / task_watch (team), im (group chat), websearch (research), mcp_query (extend capabilities at runtime).

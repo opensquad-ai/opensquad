@@ -2,6 +2,7 @@
  * WorkspacePaneShell — one split leaf: L2 tab bar + content (chat / file / preview) + composer.
  */
 import React, { useMemo, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
@@ -80,6 +81,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
   chatSlot,
   handlers,
 }) => {
+  const { t } = useTranslation();
   const labels: ContentTabLabel[] = useMemo(() => {
     return tabs.open.map((tab) => {
       if (tab.kind === 'file') {
@@ -87,12 +89,12 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
         return { tab, title: name, dirty: !!fileDirtyMap[tab.id] };
       }
       if (tab.kind === 'scheduled-tasks') {
-        return { tab, title: tabTitles[tab.id]?.trim() || '定时任务' };
+        return { tab, title: tabTitles[tab.id]?.trim() || t('aiChat.scheduledTasks') };
       }
       const title = tabTitles[tab.id]?.trim() || tab.id;
       return { tab, title };
     });
-  }, [tabs.open, tabTitles, fileDirtyMap]);
+  }, [tabs.open, tabTitles, fileDirtyMap, t]);
 
   const active = parseContentTabKey(tabs.activeKey);
   const openSessionTabs = useMemo(
@@ -199,7 +201,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
             className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
             onClick={handlers.onFocus}
           >
-            无打开的标签 — 点击 + 新建对话，或从右侧打开文件
+            {t('aiChat.noOpenTabsHint')}
           </div>
         ) : null}
 
@@ -259,7 +261,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
               >
                 <Loader2 size={28} className="text-primary animate-spin" />
                 <p className="text-sm">
-                  {handlers.sessionLoadingLabel || '加载会话中...'}
+                  {handlers.sessionLoadingLabel || t('aiChat.loadingSession')}
                 </p>
               </div>
             ) : null}
@@ -282,7 +284,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                             className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
                             onClick={handlers.onFocus}
                           >
-                            会话内容不可用
+                            {t('aiChat.sessionUnavailable')}
                           </div>
                         )}
                   </div>
@@ -293,7 +295,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                   className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
                   onClick={handlers.onFocus}
                 >
-                  会话内容不可用
+                  {t('aiChat.sessionUnavailable')}
                 </div>
               ) : null}
             </div>

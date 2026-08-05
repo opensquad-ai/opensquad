@@ -4,6 +4,7 @@
  * Tabs support smooth drag-and-drop reordering (does not trigger file-upload overlay).
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Clock,
   Columns2,
@@ -75,6 +76,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
   onClosePane,
   canClosePane = false,
 }) => {
+  const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [overKey, setOverKey] = useState<string | null>(null);
@@ -296,7 +298,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                 type="button"
                 draggable={false}
                 className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-primary/15 transition-opacity shrink-0"
-                title="关闭"
+                title={t('common.close')}
                 onClick={(e) => {
                   e.stopPropagation();
                   onClose(tab);
@@ -313,7 +315,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
         type="button"
         onClick={onNewSession}
         className="p-1 rounded-md text-textMuted hover:bg-primary/10 shrink-0"
-        title="新建对话"
+        title={t('aiChat.newChat')}
       >
         <Plus size={14} />
       </button>
@@ -329,7 +331,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             onSplitRow?.();
           }}
           className="p-1 rounded-md text-textMuted hover:bg-primary/10 disabled:opacity-30"
-          title="左右分屏"
+          title={t('aiChat.splitLeftRight')}
         >
           <Columns2 size={14} />
         </button>
@@ -343,7 +345,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             onSplitCol?.();
           }}
           className="p-1 rounded-md text-textMuted hover:bg-primary/10 disabled:opacity-30"
-          title="上下分屏"
+          title={t('aiChat.splitTopBottom')}
         >
           <Rows2 size={14} />
         </button>
@@ -358,7 +360,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
             className={`p-1 rounded-md text-textMuted hover:bg-primary/10 ${
               menuOpen ? 'bg-black/[0.06] dark:bg-white/10' : ''
             }`}
-            title="更多"
+            title={t('aiChat.more')}
           >
             <MoreHorizontal size={14} />
           </button>
@@ -372,7 +374,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                   onCloseAll?.();
                 }}
               >
-                关闭全部
+                {t('aiChat.closeAllTabs')}
               </button>
               {canClosePane ? (
                 <button
@@ -383,7 +385,7 @@ export const ContentTabBar: React.FC<ContentTabBarProps> = ({
                     onClosePane?.();
                   }}
                 >
-                  关闭此窗格
+                  {t('aiChat.closePane')}
                 </button>
               ) : null}
             </div>

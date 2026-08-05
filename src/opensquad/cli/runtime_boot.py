@@ -179,6 +179,7 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
     workspace = bootstrap_workspace()
     syscfg.set_workspace(workspace)
     os.environ["OPENSQUAD_WORKSPACE"] = workspace
+    os.environ["OPENSQUAD_USER_DATA"] = workspace
     python_path = os.path.join(root, "src")
     if "PYTHONPATH" in os.environ:
         if python_path not in os.environ["PYTHONPATH"]:

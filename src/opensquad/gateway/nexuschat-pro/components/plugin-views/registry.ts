@@ -93,6 +93,10 @@ const PLUGIN_VIEW_LOADERS: Record<string, () => Promise<PluginViewAdapter>> = {
     const { mount, unmount } = await import("./websearch/WebSearchSetupPanel");
     return { mount, unmount };
   },
+  "whisper_transcribe:panel": async () => {
+    const { mount, unmount } = await import("./whisper/WhisperPanel");
+    return { mount, unmount };
+  },
 };
 
 // Adapter cache — avoids re-importing on every mount

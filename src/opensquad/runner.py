@@ -817,6 +817,35 @@ class AgentRunner:
         except Exception:
             pass
 
+    async def _release_busy_state(self, sid: str, reason: str = "") -> None:
+        """Proactively drop a session from the parallel-scheduler busy set
+        and broadcast the updated busy_sessions snapshot.
+
+        Used by early-exit error paths (LLM API failure, plugin errors, etc.)
+        so the front-end composer releases "executing" the moment the error
+        frame is delivered, instead of waiting for the parallel-turn finally
+        block to run (which can lag by tens of seconds when the LLM call
+        itself was what hung).
+        """
+        sched = getattr(self, "_parallel_scheduler", None)
+        if not sched:
+            return
+        try:
+            sched.finish(sid)
+        except Exception as e:
+            logger.debug("[Runner] _release_busy_state finish(sid=%s) raised: %s", sid, e)
+        try:
+            await self._emit_busy_sessions(sched.busy_sessions)
+            if reason:
+                logger.info(
+                    "[Runner] released busy sid=%s reason=%s remaining=%s",
+                    sid,
+                    reason,
+                    sorted(sched.busy_sessions),
+                )
+        except Exception as e:
+            logger.debug("[Runner] _release_busy_state emit failed sid=%s: %s", sid, e)
+
     async def _dispatcher_idle_tick(self) -> None:
         """Periodic idle work while waiting for parallel-session input."""
         if self._plugin_manager and self._plugin_manager.check_reload_needed():
@@ -1131,6 +1160,11 @@ class AgentRunner:
                 except Exception as e:
                     logger.error("[Runner] parallel chat() failed sid=%s: %s", sid, e)
                     await self._emit("error", {"message": str(e)[:300]})
+                    # Release busy state immediately so the front-end composer
+                    # drops "executing" without waiting for the turn finally
+                    # block (the LLM call may have been the hang and the
+                    # finally block can lag by tens of seconds).
+                    await self._release_busy_state(sid, reason=f"llm_error:{type(e).__name__}")
                     turn_failed = True
                     break
 

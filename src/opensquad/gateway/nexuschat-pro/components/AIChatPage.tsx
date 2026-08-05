@@ -4568,6 +4568,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
     });
 
+    // Error frame → release busy state immediately. Backend has just emitted
+    // (or is about to emit) the final "error" frame and busy_sessions snapshot
+    // for the failing turn, but the snapshot can lag by seconds when the LLM
+    // call itself was the hang. We must not leave the composer stuck in
+    // "executing" while we wait for the scheduler reap loop.
+    const unsubError = aiWsService.on('error', (msg: AIWSMessage) => {
+      const data: any = (msg as any).content || (msg as any).data || msg;
+      const errSid = String(
+        (msg as any).sid
+        || (data && typeof data === 'object' ? (data.session_id || data.sid) : '')
+        || agentCurrentSessionIdRef.current
+        || currentSessionIdRef.current
+        || ''
+      ).trim();
+      const message = typeof data === 'string'
+        ? data
+        : String(data?.message || data?.error || data?.detail || '');
+      if (message) {
+        console.warn('[AIChatPage] ws error frame sid=%s message=%s', errSid || '-', message.slice(0, 200));
+      }
+      if (errSid) {
+        clearSessionRunState(errSid);
+      } else {
+        clearSessionRunState();
+      }
+    });
+
     const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
       const data: any = (msg as any).content || (msg as any).data || msg;
       const sid = String(data?.primary_session_id || '').trim();
@@ -4750,6 +4777,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubCurrentSession();
       unsubSessionList();
       unsubBusySessions();
+      unsubError();
       unsubPrimarySession();
       unsubHistorySync();
       unsubFilePush();
