@@ -38,7 +38,7 @@ if __package__ in (None, ""):
         hf_snapshot_via_hub,
     )
 else:
-    from ._model_downloader import (
+    from plugins._model_downloader import (
         ModelStore,
         hf_snapshot_via_hub,
     )
@@ -57,11 +57,14 @@ SNAPSHOT_REV = REVISION
 # Files the model needs to be considered "ready".
 # We deliberately keep this small: missing shards is the most common
 # incomplete-download failure mode and is easy to detect.
+# NOTE: ``special_tokens_map.json`` is intentionally NOT required — HF's
+# LFS/xet placeholder mechanism (`./.no_exist/`) may keep it out of the
+# ``snapshots/<rev>`` dir even on a legitimate deploy, and AutoTokenizer
+# reads the same special-token definitions from ``tokenizer_config.json``.
 REQUIRED_FILES = (
     "config.json",
     "tokenizer.json",
     "tokenizer_config.json",
-    "special_tokens_map.json",
     "merges.txt",
     "vocab.json",
     "chat_template.jinja",
@@ -126,9 +129,27 @@ def _snapshot_dir() -> str:
     return os.path.join(model_dir(), "snapshots", SNAPSHOT_REV)
 
 
-def is_complete() -> bool:
-    """Check that all required files plus at least one weight file exist."""
-    snap = _snapshot_dir()
+def _legacy_snapshot_dir() -> str:
+    """Path used by the pre-UI manual deploy (``service/reranker/models``).
+
+    The reranker sidecar (``service/reranker/deploy.py``) loads weights from
+    ``service/reranker/models/models--Qwen--Qwen3-Reranker-0.6B/snapshots/<rev>``,
+    which is also what ships inside the frozen bundle.  ``ModelStore`` downloads
+    into the writable workspace path instead, so treat either location as ready.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "service",
+        "reranker",
+        "models",
+        f"models--{REPO_ID.replace('/', '--')}",
+        "snapshots",
+        SNAPSHOT_REV,
+    )
+
+
+def _snapshot_flat_complete(snap: str) -> bool:
+    """True when a snapshot dir has all required files plus a weight file."""
     if not os.path.isdir(snap):
         return False
     for name in REQUIRED_FILES:
@@ -137,8 +158,23 @@ def is_complete() -> bool:
     return any(any(f.endswith(ext) for ext in WEIGHT_GLOBS) for f in os.listdir(snap))
 
 
-def file_sizes() -> dict[str, int]:
-    snap = _snapshot_dir()
+def _active_snapshot_dir() -> str:
+    """Return the snapshot dir that actually holds the weights (workspace first)."""
+    if _snapshot_flat_complete(_snapshot_dir()):
+        return _snapshot_dir()
+    if _snapshot_flat_complete(_legacy_snapshot_dir()):
+        return _legacy_snapshot_dir()
+    return _snapshot_dir()
+
+
+def is_complete() -> bool:
+    """Check that the model is present in the workspace path or the legacy
+    ``service/reranker/models`` deploy path."""
+    return _snapshot_flat_complete(_snapshot_dir()) or _snapshot_flat_complete(_legacy_snapshot_dir())
+
+
+def file_sizes(snap: str | None = None) -> dict[str, int]:
+    snap = snap or _snapshot_dir()
     if not os.path.isdir(snap):
         return {}
     out: dict[str, int] = {}
@@ -152,21 +188,22 @@ def file_sizes() -> dict[str, int]:
     return out
 
 
-def missing_files() -> list[str]:
-    snap = _snapshot_dir()
+def missing_files(snap: str | None = None) -> list[str]:
+    snap = snap or _snapshot_dir()
     if not os.path.isdir(snap):
         return list(REQUIRED_FILES)
     return [n for n in REQUIRED_FILES if not os.path.isfile(os.path.join(snap, n))]
 
 
 def get_status() -> dict[str, Any]:
-    snap = _snapshot_dir()
+    active = _active_snapshot_dir()
     return {
         "ready": is_complete(),
         "model_dir": model_dir(),
-        "snapshot_dir": snap,
-        "files": file_sizes(),
-        "missing": missing_files(),
+        "snapshot_dir": active,
+        "legacy_snapshot_dir": _legacy_snapshot_dir(),
+        "files": file_sizes(active),
+        "missing": missing_files(active),
         "repo_id": REPO_ID,
         "revision": SNAPSHOT_REV,
         "download": _get_store().get_status(),

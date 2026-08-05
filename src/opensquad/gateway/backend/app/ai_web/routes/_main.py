@@ -1487,7 +1487,10 @@ async def agent_session_delete(
 ):
     """
     Delete a history session file.
-    Cannot delete the agent's current active session.
+    Cannot delete the agent's current active session (callers must rotate via
+    the WS ``abandon_current_draft`` command first). The operation is
+    idempotent — a sid that is no longer current and has no history snapshot
+    is treated as a successful no-op.
     """
     reader = await async_get_agent_session_reader(agent_id)
     if not reader:
@@ -1497,7 +1500,7 @@ async def agent_session_delete(
     if not success:
         raise HTTPException(
             400,
-            "Cannot delete session (it may be the current active session or does not exist)",
+            "Cannot delete session (it is the current active session)",
         )
 
     return {"message": "Session deleted", "session_id": session_id}

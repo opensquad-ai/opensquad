@@ -635,6 +635,19 @@ class UserWebSocketHandler:
                             msg_type="system",
                         )
 
+                    if command == "abandon_current_draft":
+                        # Same gateway-side cache reset as new_session — we are about
+                        # to switch focus to a fresh sid, so any cached fallback history
+                        # for the abandoned session must not survive a refresh.
+                        await gateway_session_cache.async_clear_session(user_id, agent_id)
+                        await gateway_session_cache.async_add_message(
+                            user_id,
+                            agent_id,
+                            "user",
+                            "__ABANDON_CURRENT_DRAFT__",
+                            msg_type="system",
+                        )
+
                     # Forward command to agent — never saved to session history
                     sent = await registry.send_to_agent(
                         agent_id,

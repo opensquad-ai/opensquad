@@ -166,6 +166,13 @@ export const ModelDownloadCard: React.FC<ModelDownloadCardProps> = ({
         <p className="text-[11px] text-textMuted leading-relaxed">{displayDesc}</p>
       ) : null}
 
+      {ready ? (
+        <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
+          <CheckCircle2 size={12} className="shrink-0" />
+          <span>{isZh ? '模型已下载' : 'Model downloaded'}</span>
+        </div>
+      ) : null}
+
       <p className="text-[11px] text-textMuted break-all">
         {isZh ? '目录：' : 'Path: '}
         {modelDir || '—'}

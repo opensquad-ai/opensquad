@@ -979,6 +979,94 @@ class AgentRunner:
                     new_sid,
                 )
             return
+        if content == "__ABANDON_CURRENT_DRAFT__":
+            # Sidebar delete-on-current: the user clicked the trash icon on the
+            # agent's currently-focused session. Unlike __NEW_SESSION__ (which
+            # reuses an empty draft and therefore never changes the sid), this
+            # path always mints a fresh sid via SessionManager.abandon_current_draft
+            # so the frontend's waitForRotation poll can observe the change and
+            # proceed to delete the abandoned sid from history.
+            input_hub.clear_stop_request()
+            try:
+                for sid in list(getattr(input_hub, "_stop_sessions", set()) or set()):
+                    input_hub.clear_session_stop(sid)
+            except Exception:
+                pass
+            try:
+                from opensquad.goal_mode import clear_goal_memory
+
+                clear_goal_memory()
+            except Exception:
+                pass
+            self._reset_session_stats()
+            drained = input_hub.get_all_pending()
+            replay_user: list[dict] = []
+            for item in drained or []:
+                raw = str(item.get("content") or "")
+                if not raw or raw.startswith("__"):
+                    continue
+                replay_user.append(item)
+            if drained and not replay_user:
+                logger.info(
+                    "[Runner] Abandon-draft drained %d system/empty pending item(s)",
+                    len(drained),
+                )
+            old_sid, new_sid = _get_session_manager().abandon_current_draft()
+            try:
+                from opensquad.utils.path_utils import get_workspace_root
+                from opensquad.utils.session_changeset import clear_for_new_session
+
+                clear_for_new_session(get_workspace_root())
+            except Exception:
+                logger.debug("[Runner] session changeset clear skipped (abandon)", exc_info=True)
+            self._turn_sid = new_sid
+            self._load_history()
+            logger.info(
+                "[Runner] Current session abandoned (parallel): old=%s new=%s",
+                old_sid or "-",
+                new_sid or "-",
+            )
+            await self._emit("turn_start", 0)
+            await bus.emit_async("session_list", _get_session_manager().get_session_list())
+            await bus.emit_async(
+                "current_session",
+                {"id": new_sid, "title": "Current Session"},
+            )
+            try:
+                await self._broadcast_token_stats()
+            except Exception:
+                pass
+            await self._emit("info", "Current session abandoned")
+            now_ms = int(datetime.now().timestamp() * 1000)
+            await self._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
+            # Re-queue any real user messages onto the new session inbox.
+            for item in replay_user:
+                try:
+                    input_hub.push(
+                        content=str(item.get("content") or ""),
+                        source=item.get("source", "web"),
+                        images=item.get("images"),
+                        attachments=item.get("attachments"),
+                        channel=item.get("channel", ""),
+                        sender_name=item.get("sender_name", ""),
+                        chat_name=item.get("chat_name", ""),
+                        source_chat_id=item.get("source_chat_id", ""),
+                        user_id=item.get("user_id", ""),
+                        client_id=item.get("client_id", ""),
+                        session_id=new_sid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[Runner] Failed to requeue drained chat after abandon",
+                        exc_info=True,
+                    )
+            if replay_user:
+                logger.info(
+                    "[Runner] Requeued %d user message(s) onto new sid=%s",
+                    len(replay_user),
+                    new_sid,
+                )
+            return
         if content.startswith("__LOAD_SESSION__:"):
             sid = content.split(":", 1)[1]
             if _get_session_manager().load_history_session(sid):
@@ -1722,6 +1810,51 @@ class AgentRunner:
                     # Re-send turn_elapsed to close any workflow timer block that may exist in the frontend
                     _now_ms = int(datetime.now().timestamp() * 1000)
                     await self._emit("turn_elapsed", {"started_ms": _now_ms, "ended_ms": _now_ms})
+                    initial_query = None
+                    continue
+
+                if initial_query == "__ABANDON_CURRENT_DRAFT__":
+                    # Serial-mode mirror of the parallel handler above. Used by
+                    # the sidebar delete-on-current flow when the user has the
+                    # agent in legacy serial mode. The new sid is always
+                    # different from the old so the frontend's rotation poll
+                    # can detect the change.
+                    logger.info("[Runner] Command: Abandon current session (serial)")
+                    self._reset_session_stats()
+                    _drain_before = input_hub.get_all_pending()
+                    if _drain_before:
+                        self._pending_buffer.extend(
+                            [
+                                {
+                                    "content": _d["content"],
+                                    "source": _d.get("source", "web"),
+                                    "images": _d.get("images"),
+                                    "attachments": _d.get("attachments"),
+                                    "channel": _d.get("channel", ""),
+                                }
+                                for _d in _drain_before
+                            ]
+                        )
+                    _old_sid, _new_sid = _get_session_manager().abandon_current_draft()
+                    self._turn_sid = _new_sid
+                    self._load_history()  # Reload (now empty)
+                    try:
+                        from opensquad.goal_mode import clear_goal_memory, notify_goal_changed
+
+                        clear_goal_memory()
+                        await notify_goal_changed(None, text="Goal cleared (abandoned session)")
+                    except Exception:
+                        pass
+                    await self._emit("turn_start", 0)
+                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                    await bus.emit_async(
+                        "current_session",
+                        {"id": _new_sid, "title": "Current Session"},
+                    )
+                    await self._broadcast_token_stats()
+                    await self._emit("info", "Current session abandoned")
+                    _now_ms2 = int(datetime.now().timestamp() * 1000)
+                    await self._emit("turn_elapsed", {"started_ms": _now_ms2, "ended_ms": _now_ms2})
                     initial_query = None
                     continue
 

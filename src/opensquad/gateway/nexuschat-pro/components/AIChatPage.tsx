@@ -6526,7 +6526,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     await loadSessionTimelineFast(sessionId);
   };
 
-  /** Delete a session; if it is the agent-current, rotate via new_session first so it becomes a history file. */
+  /** Delete a session; if it is the agent-current, rotate via abandon_current_draft first so it becomes a history file (or is dropped for an empty draft). */
   const handleDeleteSession = async (sessionId: string) => {
     const isAgentCurrent = sessionId === agentCurrentSessionIdRef.current;
 
@@ -6535,7 +6535,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const started = Date.now();
         const seq = ++newSessionFallbackSeqRef.current;
         newSessionPendingRef.current = true;
-        wsServiceRef.current?.newSession();
+        // Use abandonCurrent rather than newSession: newSession reuses an empty
+        // draft (sid never changes), so waitForRotation would time out for the
+        // exact case the user reported ("无法放弃当前会话，删除失败"). abandonCurrent
+        // always mints a fresh sid for both empty and non-empty current.
+        wsServiceRef.current?.abandonCurrent();
         const tick = window.setInterval(async () => {
           if (seq !== newSessionFallbackSeqRef.current) {
             window.clearInterval(tick);

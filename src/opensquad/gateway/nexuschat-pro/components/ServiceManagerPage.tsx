@@ -3,7 +3,7 @@ import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
-  LayoutGrid, List, AlertTriangle, Copy,
+  LayoutGrid, List, AlertTriangle, Copy, Download, Database, HardDrive, CheckCircle2,
 } from 'lucide-react';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -98,6 +98,174 @@ function SetupHintBanner({ svc }: { svc: ServiceStatus }) {
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ── Service model deploy strip ───────────────────────────────────────
+// Shows a per-service text hint about its weight-model readiness and, when
+// the model is not yet downloaded, a "Download model" button that triggers the
+// plugin's download action (auto-deploy). Supported services map a plugin_id
+// to the plugin action + status selectors below.
+const MODEL_SERVICES: Record<string, {
+  action: string;
+  titleZh: string;
+  titleEn: string;
+  readyZh: string;
+  readyEn: string;
+  missingZh: string;
+  missingEn: string;
+  readySel: (d: any) => boolean;
+  missingSel: (d: any) => string[];
+  dirSel: (d: any) => string;
+}> = {
+  websearch: {
+    action: 'download_reranker',
+    titleZh: 'Reranker 模型',
+    titleEn: 'Reranker model',
+    readyZh: 'Reranker 模型已下载',
+    readyEn: 'Reranker model downloaded',
+    missingZh: 'Reranker 模型未下载',
+    missingEn: 'Reranker model not downloaded',
+    readySel: (d) => !!(d?.reranker?.ready),
+    missingSel: (d) => d?.reranker?.missing || [],
+    dirSel: (d) => (d?.reranker?.snapshot_dir) || (d?.reranker?.model_dir) || '',
+  },
+  whisper: {
+    action: 'download_model',
+    titleZh: 'Whisper 模型',
+    titleEn: 'Whisper model',
+    readyZh: 'Whisper 模型已下载',
+    readyEn: 'Whisper model downloaded',
+    missingZh: 'Whisper 模型未下载',
+    missingEn: 'Whisper model not downloaded',
+    readySel: (d) => !!d?.ready,
+    missingSel: () => [],
+    dirSel: (d) => d?.model_dir || '',
+  },
+  sensevoice: {
+    action: 'download_model',
+    titleZh: 'SenseVoice 模型',
+    titleEn: 'SenseVoice model',
+    readyZh: 'SenseVoice 模型已下载',
+    readyEn: 'SenseVoice model downloaded',
+    missingZh: 'SenseVoice 模型未下载',
+    missingEn: 'SenseVoice model not downloaded',
+    readySel: (d) => !!d?.ready,
+    missingSel: (d) => d?.missing || [],
+    dirSel: (d) => d?.model_dir || '',
+  },
+};
+
+function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
+  const { i18n } = useTranslation();
+  const zh = (i18n.language || '').startsWith('zh');
+  const spec = MODEL_SERVICES[pluginId];
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setError(null);
+      const d = await pluginAPI.getPluginData(pluginId);
+      setData(d);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [pluginId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // Poll while downloading
+  useEffect(() => {
+    if (data?.download?.state !== 'downloading') return;
+    const t = window.setInterval(() => { void refresh(); }, 1500);
+    return () => window.clearInterval(t);
+  }, [data?.download?.state, refresh]);
+
+  if (!spec) return null;
+  const ready = spec.readySel(data);
+  const missing = spec.missingSel(data);
+  const dir = spec.dirSel(data);
+  const downloading = data?.download?.state === 'downloading';
+  const progress = Number(data?.download?.progress || 0);
+
+  const onDownload = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await pluginAPI.pluginAction(pluginId, spec.action, { force: false });
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  return (
+    <div className={`rounded-lg border px-2.5 py-2 space-y-1.5 ${
+      ready ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-border bg-bgLight/40'
+    }`}>
+      <div className={`flex items-center gap-1.5 text-[11px] font-medium ${
+        ready ? 'text-emerald-300' : 'text-textMain/90'
+      }`}>
+        {ready
+          ? <CheckCircle2 size={12} className="shrink-0 text-emerald-400" />
+          : <HardDrive size={12} className="shrink-0 text-amber-400" />}
+        <span>{zh ? spec.titleZh : spec.titleEn}</span>
+        <span className={`ml-auto text-[10px] font-medium ${
+          ready ? 'text-emerald-400' : 'text-amber-400'
+        }`}>
+          {ready ? (zh ? spec.readyZh : spec.readyEn) : (zh ? spec.missingZh : spec.missingEn)}
+        </span>
+      </div>
+
+      {dir ? (
+        <p className="text-[10px] text-textMuted break-all">{dir}</p>
+      ) : null}
+
+      {error ? (
+        <p className="text-[10px] text-red-400">{error}</p>
+      ) : null}
+
+      {(downloading || data?.download?.state === 'error') && (
+        <div className="space-y-1">
+          <div className="flex justify-between text-[10px] text-textMuted">
+            <span className="truncate">
+              {data?.download?.message || data?.download?.state}
+              {data?.download?.source ? (
+                <span className="text-textMuted/70">
+                  {' '}({data?.download?.mirror_index || 1}/{data?.download?.mirror_total || 1} {zh ? '镜像' : 'mirror'}: {data?.download?.source})
+                </span>
+              ) : null}
+            </span>
+            <span>{progress.toFixed(0)}%</span>
+          </div>
+          <div className="h-1 rounded-full bg-bgDark overflow-hidden">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {!ready && !downloading && (
+        <button
+          type="button"
+          disabled={busy || loading}
+          onClick={() => void onDownload()}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50 transition-colors"
+        >
+          {busy ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}
+          {zh ? '下载并部署模型' : 'Download & deploy model'}
+        </button>
+      )}
     </div>
   );
 }
@@ -748,6 +916,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           </div>
         </div>
         <SetupHintBanner svc={svc} />
+        <ServiceModelDeploy pluginId={svc.plugin_id} />
         {configPanel}
         {logsPanel}
       </div>
@@ -786,6 +955,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
       </div>
 
       <SetupHintBanner svc={svc} />
+      <ServiceModelDeploy pluginId={svc.plugin_id} />
 
       {configPanel}
 

@@ -355,6 +355,27 @@ class GatewayAdapter(BaseAgent):
             await self._try_wake_agent("urgent-command")
             return
 
+        if command == "abandon_current_draft":
+            # Sidebar delete-on-current flow. Forces the Runner to mint a fresh
+            # sid (so the empty-draft reuse logic in start_new_session does not
+            # keep the same sid) and to drop the current shell so the follow-up
+            # delete_session call can clean it up. See SessionManager.abandon_current_draft.
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                n = job_manager.cancel_all("abandon_current_draft")
+                if n:
+                    logger.info(f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on abandon_current_draft")
+            except Exception:
+                logger.debug(
+                    "[Adapter] sub-agent cancel_all on abandon_current_draft skipped",
+                    exc_info=True,
+                )
+            input_hub.push_urgent("__ABANDON_CURRENT_DRAFT__", source="gateway")
+            logger.info("[Adapter] Abandon-current-draft command sent via urgent queue")
+            await self._try_wake_agent("urgent-command")
+            return
+
         if command == "withdraw_turn":
             # Stop any in-flight turn, then truncate session from the user message timestamp.
             input_hub.request_stop()

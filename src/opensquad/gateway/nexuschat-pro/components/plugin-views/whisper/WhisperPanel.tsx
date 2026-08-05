@@ -216,6 +216,13 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
             ) : null}
           </div>
 
+          {ready ? (
+            <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
+              <CheckCircle2 size={12} className="shrink-0" />
+              <span>{zh ? '模型已下载' : 'Model downloaded'}</span>
+            </div>
+          ) : null}
+
           <div className="text-[11px] text-textMuted">
             {zh
               ? '选择要下载并启用的模型大小。模型越大精度越高，但首次下载与启动更慢。'
