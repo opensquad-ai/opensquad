@@ -613,12 +613,18 @@ class ChatAPI:
                 self._cached_token_count = None
         self._trim_history_if_needed()
 
-    def add_assistant_message(self, content: str, reasoning_content: str | None = None):
-        """Add assistant message and sync reasoning_content to session for persistence."""
+    def add_assistant_message(self, content: str, reasoning_content: str | None = None, *, force_record: bool = False):
+        """Add assistant message and sync reasoning_content to session for persistence.
+
+        ``force_record=True`` records the message even when both content and
+        reasoning are empty — required for native-FC turns that carry only
+        ``tool_calls`` (the tool-call anchor must exist for the API to accept
+        the following ``role=tool`` continuation).
+        """
         msg = {"role": "assistant", "content": content}
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
-        if content or reasoning_content:
+        if content or reasoning_content or force_record:
             self.req.append(msg)
             # Incremental token count update
             if self._cached_token_count is not None:
@@ -2326,7 +2332,15 @@ class ChatAPI:
             self.total_input_tokens += self._count_tokens(messages, self._last_tools)
             self.total_output_tokens += len(self.encoding.encode(res_text)) if res_text else 0
 
-        self.add_assistant_message(api_content, reasoning_content=api_reasoning)
+        self.add_assistant_message(
+            api_content,
+            reasoning_content=api_reasoning,
+            # Bugfix: a native-FC turn may return ONLY tool_calls with empty
+            # content. The assistant message MUST still be recorded (req +
+            # session) so the tool-result continuation has a valid anchor and
+            # the UI workflow does not show a dangling tool step after refresh.
+            force_record=bool(parsed_tool_data) or finish_reason == "tool_calls",
+        )
 
         # CRITICAL FIX: Remove the premature tool_calls injection into self.req.
         # The fix previously added tool_calls to self.req BEFORE the runner called
