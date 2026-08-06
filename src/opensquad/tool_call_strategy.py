@@ -395,7 +395,7 @@ class ToolCallStrategySelector:
         explicitly in config.json to override (e.g. "all" to restore).
         """
         model_config = config.get("model", {})
-        mode = model_config.get("tool_call_mode", "auto")
+        mode = model_config.get("tool_call_mode", "native")
         # P0-1 perf: "all" (159 tools ≈ 16.7K tokens) is now opt-in. Every
         # agent that does not explicitly configure tool_filter gets the curated
         # "high" set (framework core + common plugins, ≈8K tokens) — a ~45%

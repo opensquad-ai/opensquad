@@ -110,13 +110,21 @@ def test_auto_generate_secrets_is_idempotent_for_real_values(tmp_path):
         "gateway_token": "real_gateway_token_keep_me",
         "external_api_key": "real_external_api_key_keep_me",
     }
-    target.write_text(json.dumps({"auth": real}, ensure_ascii=False), encoding="utf-8")
+    # SEC-2: a fully configured workspace also carries a real (non-placeholder)
+    # jwt.secret_key — it must remain untouched like the auth secrets.
+    target.write_text(
+        json.dumps(
+            {"auth": real, "jwt": {"secret_key": "real_jwt_secret_key_keep_me_0123456789abcdef"}}, ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
 
     replaced = _auto_generate_secrets(str(target))
     assert replaced is False
 
     data = json.loads(target.read_text(encoding="utf-8"))
     assert data["auth"] == real  # untouched
+    assert data["jwt"]["secret_key"] == "real_jwt_secret_key_keep_me_0123456789abcdef"  # untouched
 
 
 def test_auto_generate_secrets_partial_placeholders(tmp_path):
@@ -161,6 +169,31 @@ def test_auto_generate_secrets_handles_missing_auth_section(tmp_path):
     assert data["auth"]["node_secret"]  # non-empty
     assert data["auth"]["gateway_token"]
     assert data["auth"]["external_api_key"]
+
+
+def test_auto_generate_secrets_replaces_jwt_placeholder(tmp_path):
+    """SEC-2: a 'CHANGE_ME' style jwt.secret_key must be replaced with a random key."""
+    from opensquad._syscfg._config import _auto_generate_secrets
+
+    target = tmp_path / "system_config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "auth": {"node_secret": "real", "gateway_token": "real", "external_api_key": "real"},
+                "jwt": {"secret_key": "YOUR_JWT_SECRET_KEY_CHANGE_ME_MIN_32_CHARS", "algorithm": "HS256"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    replaced = _auto_generate_secrets(str(target))
+    assert replaced is True
+
+    data = json.loads(target.read_text(encoding="utf-8"))
+    new_key = data["jwt"]["secret_key"]
+    assert len(new_key) >= 32
+    assert "change_me" not in new_key.lower()
+    assert new_key != "YOUR_JWT_SECRET_KEY_CHANGE_ME_MIN_32_CHARS"
 
 
 def test_auto_generate_secrets_handles_corrupted_file(tmp_path, caplog):

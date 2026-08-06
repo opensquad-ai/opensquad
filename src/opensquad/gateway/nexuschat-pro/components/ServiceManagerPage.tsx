@@ -4,9 +4,11 @@ import {
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
   LayoutGrid, List, AlertTriangle, Copy, Download, Database, HardDrive, CheckCircle2,
+  Trash2, Folder, Cpu, X,
 } from 'lucide-react';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
+import { HoverTooltip } from './HoverTooltip';
 import {
   adminHeaderBar,
   adminHeaderGhostBtn,
@@ -103,57 +105,61 @@ function SetupHintBanner({ svc }: { svc: ServiceStatus }) {
 }
 
 // ── Service model deploy strip ───────────────────────────────────────
-// Shows a per-service text hint about its weight-model readiness and, when
-// the model is not yet downloaded, a "Download model" button that triggers the
-// plugin's download action (auto-deploy). Supported services map a plugin_id
-// to the plugin action + status selectors below.
+// Per-service model download / uninstall card modeled on the SenseVoice
+// "本地" design: clean title row, single line status, one primary
+// button. Specifics (model name, size hint, install / uninstall action,
+// status selectors) are wired up below in MODEL_SERVICES.
 const MODEL_SERVICES: Record<string, {
   action: string;
-  titleZh: string;
-  titleEn: string;
-  readyZh: string;
-  readyEn: string;
-  missingZh: string;
-  missingEn: string;
+  uninstallAction: string;
+  /** Human-readable model name (e.g. "SenseVoice Small", "Whisper base"). */
+  modelName: (d: any) => string;
+  /** Localized model name (English). */
+  modelNameEn: string;
+  /** Badge next to the title, e.g. "本地" (local). */
+  badgeZh?: string;
+  badgeEn?: string;
   readySel: (d: any) => boolean;
   missingSel: (d: any) => string[];
   dirSel: (d: any) => string;
+  /** Where the persisted download state lives in the plugin data payload. */
+  downloadStateSel: (d: any) => any;
 }> = {
   websearch: {
     action: 'download_reranker',
-    titleZh: 'Reranker 模型',
-    titleEn: 'Reranker model',
-    readyZh: 'Reranker 模型已下载',
-    readyEn: 'Reranker model downloaded',
-    missingZh: 'Reranker 模型未下载',
-    missingEn: 'Reranker model not downloaded',
+    uninstallAction: 'uninstall_reranker',
+    modelName: (d) => 'Qwen3-Reranker 0.6B',
+    modelNameEn: 'Qwen3-Reranker 0.6B',
+    badgeZh: '本地',
+    badgeEn: 'Local',
     readySel: (d) => !!(d?.reranker?.ready),
     missingSel: (d) => d?.reranker?.missing || [],
     dirSel: (d) => (d?.reranker?.snapshot_dir) || (d?.reranker?.model_dir) || '',
+    downloadStateSel: (d) => d?.reranker?.download || {},
   },
   whisper: {
     action: 'download_model',
-    titleZh: 'Whisper 模型',
-    titleEn: 'Whisper model',
-    readyZh: 'Whisper 模型已下载',
-    readyEn: 'Whisper model downloaded',
-    missingZh: 'Whisper 模型未下载',
-    missingEn: 'Whisper model not downloaded',
+    uninstallAction: 'uninstall_model',
+    modelName: (d) => `Whisper ${d?.model || 'base'}`,
+    modelNameEn: 'Whisper',
+    badgeZh: '本地',
+    badgeEn: 'Local',
     readySel: (d) => !!d?.ready,
     missingSel: () => [],
     dirSel: (d) => d?.model_dir || '',
+    downloadStateSel: (d) => d?.download || {},
   },
   sensevoice: {
     action: 'download_model',
-    titleZh: 'SenseVoice 模型',
-    titleEn: 'SenseVoice model',
-    readyZh: 'SenseVoice 模型已下载',
-    readyEn: 'SenseVoice model downloaded',
-    missingZh: 'SenseVoice 模型未下载',
-    missingEn: 'SenseVoice model not downloaded',
+    uninstallAction: 'uninstall_model',
+    modelName: () => 'SenseVoice Small',
+    modelNameEn: 'SenseVoice Small',
+    badgeZh: '本地',
+    badgeEn: 'Local',
     readySel: (d) => !!d?.ready,
     missingSel: (d) => d?.missing || [],
     dirSel: (d) => d?.model_dir || '',
+    downloadStateSel: (d) => d?.download || {},
   },
 };
 
@@ -165,8 +171,13 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [copiedDir, setCopiedDir] = useState(false);
 
   const refresh = useCallback(async () => {
+    // Only plugins registered in MODEL_SERVICES expose a model query module;
+    // skip the rest to avoid 404 noise for e.g. telegram / external_api.
+    if (!MODEL_SERVICES[pluginId]) return;
     try {
       setError(null);
       const d = await pluginAPI.getPluginData(pluginId);
@@ -180,25 +191,31 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  // Poll while downloading
-  useEffect(() => {
-    if (data?.download?.state !== 'downloading') return;
-    const t = window.setInterval(() => { void refresh(); }, 1500);
-    return () => window.clearInterval(t);
-  }, [data?.download?.state, refresh]);
-
   if (!spec) return null;
   const ready = spec.readySel(data);
-  const missing = spec.missingSel(data);
   const dir = spec.dirSel(data);
-  const downloading = data?.download?.state === 'downloading';
-  const progress = Number(data?.download?.progress || 0);
+  const downloadState = spec.downloadStateSel(data) || {};
+  const downloading = downloadState.state === 'downloading';
+  const progress = Number(downloadState.progress || 0);
+  const downloadStateKey = downloadState.state;
+
+  // Poll while downloading
+  useEffect(() => {
+    if (downloadStateKey !== 'downloading') return;
+    const t = window.setInterval(() => { void refresh(); }, 1500);
+    return () => window.clearInterval(t);
+  }, [downloadStateKey, refresh]);
 
   const onDownload = async () => {
     setBusy(true);
     setError(null);
+    setInfo(null);
     try {
-      await pluginAPI.pluginAction(pluginId, spec.action, { force: false });
+      const res = await pluginAPI.pluginAction(pluginId, spec.action, { force: false });
+      // show immediate "started" feedback even if the response is just
+      // an idempotent "already present" message
+      setInfo(res?.message || (zh ? '已开始下载' : 'Download started'));
+      await refresh();
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -207,44 +224,116 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
     }
   };
 
+  const onUninstall = async () => {
+    if (!window.confirm(
+      zh
+        ? `确定要卸载 ${spec.modelName(data)} 吗？\n\n模型文件将从磁盘删除并释放空间。`
+        : `Uninstall ${spec.modelNameEn}?\n\nThe model files will be removed from disk to free space.`,
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction(pluginId, spec.uninstallAction, {});
+      setInfo(res?.message || (zh ? '已卸载' : 'Uninstalled'));
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const onCancel = async () => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction(pluginId, 'cancel_download', {});
+      setInfo(res?.message || (zh ? '已取消下载' : 'Download cancelled'));
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const modelName = zh ? spec.modelName(data) : spec.modelNameEn;
+  const badge = zh ? spec.badgeZh : spec.badgeEn;
+
+  const onCopyDir = async () => {
+    if (!dir) return;
+    try {
+      await navigator.clipboard.writeText(dir);
+      setCopiedDir(true);
+      window.setTimeout(() => setCopiedDir(false), 1500);
+    } catch {
+      /* clipboard unavailable — ignore */
+    }
+  };
+
   return (
-    <div className={`rounded-lg border px-2.5 py-2 space-y-1.5 ${
-      ready ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-border bg-bgLight/40'
-    }`}>
-      <div className={`flex items-center gap-1.5 text-[11px] font-medium ${
-        ready ? 'text-emerald-300' : 'text-textMain/90'
-      }`}>
-        {ready
-          ? <CheckCircle2 size={12} className="shrink-0 text-emerald-400" />
-          : <HardDrive size={12} className="shrink-0 text-amber-400" />}
-        <span>{zh ? spec.titleZh : spec.titleEn}</span>
-        <span className={`ml-auto text-[10px] font-medium ${
-          ready ? 'text-emerald-400' : 'text-amber-400'
-        }`}>
-          {ready ? (zh ? spec.readyZh : spec.readyEn) : (zh ? spec.missingZh : spec.missingEn)}
-        </span>
+    <div className={`mt-2 rounded-lg border ${
+      ready ? 'border-emerald-500/25 bg-emerald-500/[0.04]' : 'border-border bg-bgLight/30'
+    } px-3 py-2.5`}>
+      {/* Title row: model name + status badge */}
+      <div className="flex items-center gap-2 min-w-0">
+        <Cpu size={13} className={ready ? 'text-emerald-400 shrink-0' : 'text-textMuted shrink-0'} />
+        <span className="text-[12px] font-semibold text-textMain truncate">{modelName}</span>
+        {badge ? (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${
+            ready
+              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+              : 'bg-bgDark/60 text-textMuted border border-border'
+          }`}>
+            {badge}
+          </span>
+        ) : null}
       </div>
 
-      {dir ? (
-        <p className="text-[10px] text-textMuted break-all">{dir}</p>
-      ) : null}
+      {/* Status row: path tooltip */}
+      <div className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-textMuted min-w-0">
+        {ready
+          ? <CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
+          : <Download size={11} className="text-textMuted shrink-0" />}
+        {ready && dir ? (
+          <HoverTooltip text={dir} maxWidth="24rem">
+            <button
+              type="button"
+              tabIndex={0}
+              onClick={() => void onCopyDir()}
+              title={zh ? '点击复制地址' : 'Click to copy path'}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-textMuted/80 hover:text-primary hover:bg-bgLight/60 border border-dashed border-border transition-colors shrink-0"
+            >
+              {copiedDir
+                ? <Check size={9} className="text-emerald-400 shrink-0" />
+                : <Folder size={9} className="shrink-0" />}
+              <span className="whitespace-nowrap">
+                {copiedDir ? (zh ? '已复制' : 'Copied') : (zh ? '地址' : 'Path')}
+              </span>
+            </button>
+          </HoverTooltip>
+        ) : null}
+      </div>
 
-      {error ? (
-        <p className="text-[10px] text-red-400">{error}</p>
-      ) : null}
-
-      {(downloading || data?.download?.state === 'error') && (
-        <div className="space-y-1">
-          <div className="flex justify-between text-[10px] text-textMuted">
-            <span className="truncate">
-              {data?.download?.message || data?.download?.state}
-              {data?.download?.source ? (
+      {/* Progress bar (only when actively downloading or errored) */}
+      {(downloading || downloadState.state === 'error') ? (
+        <div className="mt-2 space-y-1">
+          <div className="flex justify-between gap-2 text-[10px] text-textMuted min-w-0">
+            <span className="truncate min-w-0">
+              {downloadState.message || downloadState.state}
+              {downloadState.source ? (
                 <span className="text-textMuted/70">
-                  {' '}({data?.download?.mirror_index || 1}/{data?.download?.mirror_total || 1} {zh ? '镜像' : 'mirror'}: {data?.download?.source})
+                  {' '}({downloadState.mirror_index || 1}/{downloadState.mirror_total || 1} {zh ? '镜像' : 'mirror'}: {downloadState.source})
                 </span>
               ) : null}
             </span>
-            <span>{progress.toFixed(0)}%</span>
+            <span className="shrink-0">{progress.toFixed(0)}%</span>
           </div>
           <div className="h-1 rounded-full bg-bgDark overflow-hidden">
             <div
@@ -252,20 +341,66 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
               style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
             />
           </div>
+          {downloadState.file ? (
+            <p className="text-[10px] text-textMuted break-all">
+              {zh ? '当前文件：' : 'Current file: '}
+              {downloadState.file}
+            </p>
+          ) : null}
         </div>
-      )}
+      ) : null}
 
-      {!ready && !downloading && (
-        <button
-          type="button"
-          disabled={busy || loading}
-          onClick={() => void onDownload()}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50 transition-colors"
-        >
-          {busy ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}
-          {zh ? '下载并部署模型' : 'Download & deploy model'}
-        </button>
-      )}
+      {/* Inline feedback (info / error) — clearly visible, doesn't get clipped */}
+      {error ? (
+        <p className="mt-2 text-[10.5px] text-red-400 break-all">{error}</p>
+      ) : null}
+      {info && !error ? (
+        <p className="mt-2 text-[10.5px] text-textMuted break-all">{info}</p>
+      ) : null}
+
+      {/* Single primary action button */}
+      <div className="mt-2.5 flex items-center gap-1.5">
+        {!ready ? (
+          <>
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onCancel()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-[11px] font-medium text-textMuted hover:border-red-500/40 disabled:opacity-50 transition-colors"
+              title={zh ? '取消当前下载' : 'Cancel current download'}
+            >
+              <X size={11} />
+              {zh ? '取消' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onDownload()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-[11px] font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              {busy || downloading
+                ? <Loader2 size={11} className="animate-spin" />
+                : <Download size={11} />}
+              {zh ? '下载模型' : 'Download model'}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => void onUninstall()}
+              disabled={busy || downloading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[11px] font-medium disabled:opacity-50 transition-colors"
+              title={zh ? '卸载模型文件并释放磁盘空间' : 'Remove model files from disk'}
+            >
+              {busy
+                ? <Loader2 size={11} className="animate-spin" />
+                : <Trash2 size={11} />}
+              {zh ? '卸载模型' : 'Uninstall'}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -39,7 +39,11 @@ from typing import Any
 # the absolute path.  When loaded as part of the ``plugins.whisper``
 # package, ``plugins/`` is already importable.
 try:
-    from plugins._model_downloader import ModelStore  # type: ignore[no-redef]
+    from plugins._model_downloader import (  # type: ignore[no-redef]
+        ModelStore,
+        force_remove_file,
+        force_remove_status_file,
+    )
 except ImportError:
     # Loading as a standalone script (e.g. the Agent Python embed which
     # has no ``plugins`` package) — add the parent dir to sys.path.
@@ -47,7 +51,11 @@ except ImportError:
     _plugins_dir = os.path.abspath(os.path.join(_here, "..", ".."))
     if _plugins_dir not in sys.path:
         sys.path.insert(0, _plugins_dir)
-    from _model_downloader import ModelStore  # type: ignore[no-redef]
+    from _model_downloader import (  # type: ignore[no-redef]
+        ModelStore,
+        force_remove_file,
+        force_remove_status_file,
+    )
 
 logger = logging.getLogger("plugins.whisper.model_store")
 
@@ -608,16 +616,14 @@ def start_download(*, model: str | None = None, force: bool = False) -> dict[str
         return {**get_status(), "started": False, "message": "Model already present"}
 
     if force:
-        # Wipe both locations so the worker re-downloads.
+        # Wipe both locations so the worker re-downloads. Use the shared
+        # force-remove helper so read-only / locked files don't abort
+        # the reinstall (a common case in frozen _internal/ bundles).
         for path in (
             os.path.join(model_dir(), _dest_filename(target)),
             os.path.join(_legacy_cache_dir(), _dest_filename(target)),
         ):
-            try:
-                if os.path.isfile(path):
-                    os.remove(path)
-            except OSError:
-                pass
+            force_remove_file(path)
 
     return store.start_download(_download_worker, force=force)
 
@@ -643,6 +649,50 @@ def _write_selected_model(model: str) -> None:
         os.replace(tmp, cfg_path)
     except OSError as e:
         logger.warning("[whisper] failed to persist model selection: %s", e)
+
+
+def uninstall(model: str | None = None) -> dict[str, Any]:
+    """Delete the downloaded .pt for the given (or selected) Whisper model.
+
+    Removes the file from both the workspace store (``model_dir()``) and the
+    legacy ``~/.cache/whisper`` cache, and clears any persisted download status
+    so the UI returns to the idle "not downloaded" state.
+
+    Read-only / locked files (e.g. inside a frozen ``_internal/`` bundle, or
+    held open by 360 安全卫士) are tolerated: we clear the read-only bit, then
+    if the OS still refuses we rename the file to ``<name>.dead_<rand>`` so
+    the model is at least no longer "ready" for the service.
+    """
+    target = (model or _read_selected_model()).strip().lower()
+    if target not in MODELS:
+        return {"ok": False, "error": f"Unknown whisper model: {target!r}"}
+    fname = _dest_filename(target)
+    removed_any = False
+    notes: list[str] = []
+    for path in (
+        os.path.join(model_dir(), fname),
+        os.path.join(_legacy_cache_dir(), fname),
+    ):
+        removed, info = force_remove_file(path)
+        if removed:
+            removed_any = True
+            if info and info != "removed":
+                notes.append(f"{os.path.basename(path)}: {info}")
+        elif info and info not in ("not present",):
+            notes.append(f"{os.path.basename(path)}: {info}")
+    force_remove_status_file(_status_path())
+    msg = "Model uninstalled" if removed_any else "No model files to remove"
+    if notes:
+        # Surface non-fatal notes (e.g. "renamed to base.pt.dead_xxx because
+        # file is locked by AV") so the UI can show why disk usage didn't
+        # drop to zero.
+        msg = f"{msg} ({'; '.join(notes)})"
+    return {
+        **get_status(),
+        "uninstalled": removed_any,
+        "notes": notes,
+        "message": msg,
+    }
 
 
 def reset_for_tests() -> None:

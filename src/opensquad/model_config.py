@@ -166,6 +166,6 @@ class ModelConfig:
             "is_video_model": self.is_video_model,
             "use_file_api": self.use_file_api,
             "file_api_size_threshold": self.file_api_size_threshold,
-            "tool_call_mode": "auto",  # default for delegate
+            "tool_call_mode": "native",  # default for delegate
             "tool_filter": "all",  # default for delegate
         }

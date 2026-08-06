@@ -26,6 +26,9 @@ try:
     from plugins.whisper.model_store import (
         start_download as whisper_start_download,
     )
+    from plugins.whisper.model_store import (
+        uninstall as whisper_uninstall,
+    )
 except ImportError:
     from model_store import (  # type: ignore[no-redef]
         get_status as whisper_status,
@@ -35,6 +38,9 @@ except ImportError:
     )
     from model_store import (
         start_download as whisper_start_download,
+    )
+    from model_store import (
+        uninstall as whisper_uninstall,
     )
 
 logger = logging.getLogger("plugins.whisper.query")
@@ -72,6 +78,10 @@ def handle_action(project_root: str, action: str, data: dict | None = None) -> d
             model=data.get("model"),
             force=bool(data.get("force", False)),
         )
+        return {"ok": True, "action": action, **result}
+
+    if action in ("uninstall_model", "uninstall"):
+        result = whisper_uninstall(model=data.get("model"))
         return {"ok": True, "action": action, **result}
 
     if action in ("status", "refresh_status", "refresh"):

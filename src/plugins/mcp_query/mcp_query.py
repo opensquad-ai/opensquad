@@ -16,6 +16,12 @@ import sys
 
 from opensquad.tools.mcp_adapter import get_mcp_adapter
 
+# SEC-10: command whitelist + forbidden arg tokens.  add_server is reachable
+# from LLM tool calls, so a malicious prompt must not be able to spawn
+# arbitrary subprocesses (e.g. `bash -c ...`).
+ALLOWED_COMMANDS = frozenset({"npx", "uvx", "node", "python", "python3", "pnpm", "bun"})
+FORBIDDEN_ARG_TOKENS = ("-c", "/c", ";", "&&", "||", "|", "$(", "`", ">", "<")
+
 
 def list_servers() -> str:
     """
@@ -103,6 +109,33 @@ async def add_server(
             {"status": "error", "message": "MCP adapter not initialized. Please enable MCP in config.json first."},
             ensure_ascii=False,
         )
+
+    # SEC-10: command whitelist + args separator rejection.
+    if command not in ALLOWED_COMMANDS:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": (
+                    f"Command '{command}' is not in the allowed whitelist "
+                    f"({', '.join(sorted(ALLOWED_COMMANDS))}). "
+                    "Only pre-approved launchers may be used to start MCP servers."
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    for _arg in args or []:
+        if not isinstance(_arg, str):
+            continue
+        if any(_tok in _arg for _tok in FORBIDDEN_ARG_TOKENS):
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"Argument contains a forbidden token (shell metacharacter / inline code): {_arg!r}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
 
     # Windows npx compatibility
     resolved_command = command

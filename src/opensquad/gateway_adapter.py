@@ -788,6 +788,16 @@ class GatewayAdapter(BaseAgent):
             except Exception as e:
                 logger.error("[Adapter] Scheduled-task parallel session spawn failed: %s", e)
 
+        # Crosstalk guard: a scheduled-task fire MUST get its own dedicated
+        # parallel session. If session creation failed above, abort the fire
+        # instead of letting resolve_session_id fall back to the focused/latest
+        # session — that would cross-wire the task's output into the user's
+        # active chat ("串线"). The gateway ties the execution status to the
+        # spawn watchdog, so this fire is marked failed and can be retried.
+        if is_scheduled and not session_id:
+            logger.error("[Adapter] Scheduled-task fire aborted (no dedicated session) exec=%s", user_id)
+            return
+
         # Route via IngressPolicy: external → primary; web keeps/falls back focused
         try:
             from opensquad.ingress_policy import classify, resolve_session_id

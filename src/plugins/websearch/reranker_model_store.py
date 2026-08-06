@@ -21,27 +21,30 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import sys
 from typing import Any
 
-# Allow direct import when the file is loaded as a script (e.g. by the
-# service process which is a frozen Agent Python without the `plugins`
-# package context).
-if __package__ in (None, ""):
-    _here = os.path.dirname(os.path.abspath(__file__))
-    _plugins_dir = os.path.abspath(os.path.join(_here, "..", ".."))
-    if _plugins_dir not in sys.path:
-        sys.path.insert(0, _plugins_dir)
-    from plugins._model_downloader import (  # type: ignore[no-redef]
-        ModelStore,
-        hf_snapshot_via_hub,
-    )
-else:
-    from plugins._model_downloader import (
-        ModelStore,
-        hf_snapshot_via_hub,
-    )
+# Always import ``_model_downloader`` as a top-level module so the launcher's
+# two load paths (data endpoint via import_module, action endpoint via
+# spec_from_file_location) share ONE module instance — and therefore one
+# ``ModelStore`` singleton.  A shared singleton is what lets the UI see a
+# running download thread across requests.  Put the plugins root (where
+# ``_model_downloader.py`` lives) on sys.path so it resolves everywhere.
+_here = os.path.dirname(os.path.abspath(__file__))
+_plugins_root = os.path.abspath(os.path.join(_here, ".."))
+for _p in (_plugins_root, _here):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from _model_downloader import (  # noqa: E402
+    FileMirror,
+    FileSpec,
+    JobContext,
+    ModelStore,
+    fetch_with_mirrors,
+    force_remove_status_file,
+    force_remove_tree,
+)
 
 logger = logging.getLogger("plugins.websearch.reranker_model")
 
@@ -213,113 +216,61 @@ def get_status() -> dict[str, Any]:
 # ── Download worker ───────────────────────────────────────────────────
 
 
-# Endpoints to try, in order. The first one that succeeds wins.
-# ``HF_ENDPOINT`` and ``MODELSCOPE_ENDPOINT`` are respected by the
-# respective SDKs.  We override per attempt so a single bad mirror doesn't
-# poison subsequent retries.
+# Mirror endpoints. We use plain HTTP (no huggingface_hub / modelscope SDK
+# required) so the download works in any environment, including the frozen
+# launcher bundle where those SDKs are often absent. ``hf-mirror.com`` is
+# tried first (CN-friendly), then ``huggingface.co``.
 HF_MIRRORS = (
     os.environ.get("WEBSEARCH_RERANKER_HF_MIRROR", "https://hf-mirror.com"),
     "https://huggingface.co",
 )
 
-# ModelScope SDK uses the ``MODELSCOPE_ENDPOINT`` env var when set.
-_MODELSCOPE_ENDPOINT = "https://www.modelscope.cn"
+# Files the deployment needs. The weights are a single ``model.safetensors``
+# (~1.2 GB) plus the tokenizer / config files.
+DOWNLOAD_FILES = (
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "merges.txt",
+    "vocab.json",
+    "chat_template.jinja",
+    "model.safetensors",
+)
 
 
-def _try_modelscope(job) -> bool:
-    """Try downloading via ModelScope SDK. Returns True on success."""
-    try:
-        from modelscope.hub.snapshot_download import snapshot_download
-    except ImportError:
-        logger.info("[websearch.reranker] modelscope SDK unavailable, skipping")
-        return False
-
-    job.set_message("Trying ModelScope mirror…")
-    job.set_mirror(3, 3, "modelscope.cn")
-    snap_dir = _snapshot_dir()
-    try:
-        # Force the ModelScope endpoint env var (the SDK reads it).
-        os.environ["MODELSCOPE_ENDPOINT"] = _MODELSCOPE_ENDPOINT
-        snapshot_download(
-            REPO_ID,
-            local_dir=os.path.join(model_dir(), "modelscope"),
+def _build_file_specs() -> list[FileSpec]:
+    """Build (file, mirror) pairs for every file across all HF endpoints."""
+    specs: list[FileSpec] = []
+    for fn in DOWNLOAD_FILES:
+        mirrors = tuple(
+            FileMirror(
+                name=fn,
+                url=f"{ep.rstrip('/')}/{REPO_ID}/resolve/{REVISION}/{fn}",
+                label=ep.replace("https://", ""),
+            )
+            for ep in HF_MIRRORS
         )
-        # Move files from the modelscope path into the snapshot path the
-        # service code actually reads.
-        ms_dir = os.path.join(model_dir(), "modelscope")
-        if os.path.isdir(ms_dir):
-            os.makedirs(snap_dir, exist_ok=True)
-            for entry in os.listdir(ms_dir):
-                src = os.path.join(ms_dir, entry)
-                dst = os.path.join(snap_dir, entry)
-                if os.path.isfile(src):
-                    shutil.move(src, dst)
-            try:
-                shutil.rmtree(ms_dir, ignore_errors=True)
-            except OSError:
-                pass
-        return is_complete()
-    except Exception as e:
-        logger.warning("[websearch.reranker] modelscope failed: %s", e)
-        job.set_message(f"ModelScope failed: {e}")
-        return False
+        specs.append(FileSpec(name=fn, mirrors=mirrors))
+    return specs
 
 
-def _try_hf(job) -> bool:
-    """Try downloading via huggingface_hub with mirror fallback."""
-    job.set_message("Trying Hugging Face mirrors…")
-    snap_dir = _snapshot_dir()
-
-    def _progress_cb() -> None:
-        # huggingface_hub lacks a streaming progress hook we can wire up
-        # without forking the SDK; the UI just sees "Downloading" until
-        # the call returns. We bump the message periodically instead.
-        job.set_message("Hugging Face download in progress…")
-
-    for idx, endpoint in enumerate(HF_MIRRORS, start=1):
-        label = endpoint.replace("https://", "")
-        job.set_mirror(idx, len(HF_MIRRORS), label)
-        try:
-            hf_snapshot_via_hub(
-                REPO_ID,
-                REVISION,
-                snap_dir,
-                endpoints=[endpoint],
-            )
-            if is_complete():
-                return True
-            # Incomplete download — try the next mirror.
-            logger.warning(
-                "[websearch.reranker] HF mirror %s returned incomplete files",
-                endpoint,
-            )
-        except Exception as e:
-            logger.warning(
-                "[websearch.reranker] HF mirror %s failed: %s",
-                endpoint,
-                e,
-            )
-            job.set_message(f"Mirror {idx}/{len(HF_MIRRORS)} ({label}) failed: {e}")
-        _progress_cb()
-    return False
-
-
-def _download_worker(job) -> None:
+def _download_worker(job: JobContext) -> None:
     if is_complete():
         job.mark_done("Reranker model already present")
         return
-    # Try the mirror chain. First success wins.
-    if _try_hf(job):
-        job.mark_done("Qwen3-Reranker model downloaded")
-        return
-    if _try_modelscope(job):
-        job.mark_done("Qwen3-Reranker model downloaded (ModelScope)")
-        return
-    raise RuntimeError(
-        "All reranker mirrors failed. "
-        "Check the network (some endpoints require login from outside CN) "
-        "or set WEBSEARCH_RERANKER_HF_MIRROR to a known-good endpoint."
+    # Stream every file with mirror fallback into the snapshot dir. Progress
+    # is reported per-file so the UI shows a real progress bar.
+    fetch_with_mirrors(
+        job,
+        _build_file_specs(),
+        dest_subdir=os.path.join("snapshots", SNAPSHOT_REV),
     )
+    if not is_complete():
+        raise RuntimeError(
+            "Reranker download finished but files are still missing. "
+            "Download may be incomplete or the mirror served stale files."
+        )
+    job.mark_done("Qwen3-Reranker model downloaded")
 
 
 # ── Public API ─────────────────────────────────────────────────────────
@@ -332,14 +283,67 @@ def start_download(*, force: bool = False) -> dict[str, Any]:
         store.mark_ready("Reranker model already present")
         return {**get_status(), "started": False, "message": "Model already present"}
     if force:
-        # Wipe snapshot so the worker re-downloads.
-        snap = _snapshot_dir()
-        try:
-            if os.path.isdir(snap):
-                shutil.rmtree(snap, ignore_errors=True)
-        except OSError:
-            pass
+        # Wipe snapshot so the worker re-downloads. Use the shared
+        # force-remove helper so read-only / locked files don't abort
+        # the reinstall (a common case in frozen _internal/ bundles).
+        for snap in (_snapshot_dir(), _legacy_snapshot_dir()):
+            force_remove_tree(snap)
     return store.start_download(_download_worker, force=force)
+
+
+def cancel_download() -> dict[str, Any]:
+    """Cancel any in-flight reranker download so the button becomes actionable.
+
+    Returns the current status; the running thread exits at its next progress
+    tick and the store returns to the idle state.
+    """
+    store = _get_store()
+    store.cancel()
+    return get_status()
+
+
+def uninstall() -> dict[str, Any]:
+    """Delete the downloaded reranker weights so the model is no longer ready.
+
+    Removes both the writable workspace snapshot (ModelStore download target)
+    and the legacy ``service/reranker/models`` deploy path.  In a frozen bundle
+    the legacy path lives under read-only ``_internal/``, so removal is
+    attempted but tolerated if the OS refuses — the workspace copy is the one
+    the download UI owns.  Also clears any persisted download status so the UI
+    returns to the idle "not downloaded" state.
+
+    Any in-flight download is cancelled first so a stuck / slow thread cannot
+    leave the store wedged in "Download already in progress".
+
+    Read-only / locked files (e.g. inside a frozen ``_internal/`` bundle, or
+    held open by 360 安全卫士) are tolerated: we clear the read-only bit, then
+    if the OS still refuses we rename the file to ``<name>.dead_<rand>`` so
+    the model is at least no longer "ready" for the service.
+    """
+    store = _get_store()
+    store.cancel()
+    removed_any = False
+    notes: list[str] = []
+    for snap in (_snapshot_dir(), _legacy_snapshot_dir()):
+        if not os.path.isdir(snap):
+            continue
+        removed, info = force_remove_tree(snap)
+        if removed:
+            removed_any = True
+            if info and info not in ("removed",):
+                notes.append(f"{os.path.basename(snap)}: {info}")
+        elif info and info not in ("not present",):
+            notes.append(f"{os.path.basename(snap)}: {info}")
+    force_remove_status_file(_status_path())
+    msg = "Model uninstalled" if removed_any else "No model files to remove"
+    if notes:
+        msg = f"{msg} ({'; '.join(notes)})"
+    return {
+        **get_status(),
+        "uninstalled": removed_any,
+        "notes": notes,
+        "message": msg,
+    }
 
 
 def reset_for_tests() -> None:

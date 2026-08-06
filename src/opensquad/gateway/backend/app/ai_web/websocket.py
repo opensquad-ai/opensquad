@@ -58,11 +58,9 @@ def _check_node_secret(received: str) -> bool:
     """
     Validate node_secret using a constant-time comparison.
 
-    - If Gateway has not configured auth.node_secret (empty string), the
-      comparison falls back to permitting the connection for local dev
-      convenience, but logs a prominent warning so production deployments
-      are not silently left open.
-    - If configured, use ``hmac.compare_digest`` to prevent timing side-channels.
+    SEC-12: an unset node_secret must NOT fall back to permitting the
+    connection.  Failing closed here ensures a misconfigured deployment
+    cannot silently run with authentication disabled.
     """
     from opensquad.system_config import syscfg
 
@@ -70,9 +68,9 @@ def _check_node_secret(received: str) -> bool:
     if not expected:
         logging.warning(
             "[WS] auth.node_secret is NOT configured — /ai-ws/register and "
-            "/ai-ws/launcher are open. Set auth.node_secret in production!"
+            "/ai-ws/launcher connections are REJECTED. Set auth.node_secret!"
         )
-        return True  # local dev fallback
+        return False
     if not isinstance(received, str):
         received = received or ""
     return hmac.compare_digest(received, expected)
@@ -358,7 +356,14 @@ class AgentWebSocketHandler:
                             _csid = str(_cs.get("id") or _cs.get("session_id") or "").strip()
                         else:
                             _csid = str(_cs or "").strip()
-                        if _csid:
+                        # Only a real user-facing current_session may become the
+                        # agent's canonical current session. A scheduled-task
+                        # parallel-session spawn announces current_session merely
+                        # to bind exec.session_id — recording it here would
+                        # overwrite the user's latest session id and cross-wire
+                        # the user's next connect into the scheduled pane ("串线").
+                        _cs_is_scheduled = isinstance(user_id, str) and user_id.startswith("scheduled-task:")
+                        if _csid and not _cs_is_scheduled:
                             _agent_current_session_id[agent_id] = _csid
                         # Also invalidate Gateway in-memory cache so stale
                         # user messages from previous session aren't served

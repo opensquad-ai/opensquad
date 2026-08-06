@@ -283,3 +283,24 @@ src/plugins/*/ui/package-lock.json
 .zcode/
 _ws_run.log.err
 src/plugins/websearch/service/reranker/models/
+
+# ── Local optimization audit docs (generated reports, not source) ──
+优化doc/
+
+# ── WorkBuddy local agent state / memory (per-instance, not source) ──
+.workbuddy/
+
+# HYG-2: mypy cache dir
+.mypy_cache/
+
+# ── Local authored skills (source of skill dirs, published copies live in build/) ──
+# Keep authored skill sources out of the tracked tree; published skill content
+# is generated under build/backend-*/run/_internal/skills/ (already ignored by build/).
+/docs/方案讨论最终轮/skill/
+docs/方案讨论*/skill/
+
+# ── Local private report / proposal docs (per-instance analysis, not source) ──
+# Optimization reports, plan-discussion rounds and execution summaries are
+# generated locally for review and are NOT part of the source tree.
+docs/report_*.md
+docs/方案讨论*/

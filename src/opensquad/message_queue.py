@@ -6,7 +6,6 @@ The agent checks this pipeline each conversation turn.
 import asyncio
 import contextlib
 import logging
-import queue
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -95,7 +94,7 @@ class MessageQueue:
 
             return True
 
-        except queue.Full:
+        except asyncio.QueueFull:
             self._stats["dropped"] += 1
             logger.warning(f"[Queue] Queue full! Message dropped from {msg.sender_name}")
             return False
@@ -125,7 +124,7 @@ class MessageQueue:
         while True:
             try:
                 msg = self._queue.get_nowait()
-            except (queue.Empty, asyncio.QueueEmpty):
+            except asyncio.QueueEmpty:
                 break
             # task_done must be paired with get; do it immediately so the
             # unfinished-task counter stays consistent even if append raises.
@@ -162,7 +161,7 @@ class MessageQueue:
             msg = self._queue.get_nowait()
             self._queue.put_nowait(msg)  # put it back
             return msg
-        except (queue.Empty, asyncio.QueueEmpty):
+        except asyncio.QueueEmpty:
             return None
 
     @property
@@ -179,7 +178,7 @@ class MessageQueue:
             try:
                 self._queue.get_nowait()
                 self._queue.task_done()
-            except queue.Empty:
+            except asyncio.QueueEmpty:
                 break
         self._stats["consumed"] = 0
         self._stats["received"] = 0

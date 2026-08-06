@@ -99,48 +99,6 @@ class EventPipeline:
         lines.append("--- End External Events ---")
         return "\n".join(lines)
 
-    async def push(self, source: str, content: str, metadata: dict[str, Any] | None = None):
-        """Push an event into the pipeline."""
-        evt = PipelineEvent(
-            source=source,
-            content=content,
-            metadata=metadata or {},
-        )
-        with self._lock:
-            self._events.append(evt)
-        self._stats["pushed"] += 1
-        self._has_events.set()
-        logger.debug(f"[EventPipeline] Pushed: {source} — {content[:80]}")
-
-    async def drain(self) -> list[PipelineEvent]:
-        """
-        Drain all accumulated events. Called by tool execution path
-        before returning results to LLM.
-        """
-        with self._lock:
-            events = list(self._events)
-            self._events.clear()
-        if events:
-            self._stats["drained"] += len(events)
-            self._has_events.clear()
-            logger.debug(f"[EventPipeline] Drained {len(events)} event(s)")
-        return events
-
-    async def drain_formatted(self) -> str:
-        """Drain and return as formatted string for LLM attachment."""
-        events = await self.drain()
-        if not events:
-            return ""
-        lines = ["", "--- External Events (arrived during processing) ---"]
-        for evt in events:
-            lines.append(evt.format_for_llm())
-        lines.append("--- End External Events ---")
-        return "\n".join(lines)
-
-    async def has_pending(self) -> bool:
-        """Check if there are pending events (non-blocking)."""
-        return len(self._events) > 0
-
     @property
     def size(self) -> int:
         return len(self._events)

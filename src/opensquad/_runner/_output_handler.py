@@ -17,6 +17,35 @@ from opensquad.tool import logger
 
 __all__ = ["OutputHandler"]
 
+# PERF-4: markers that identify tool-result payloads when they are emitted as
+# plain text (i.e. without a proper <tool_result> tag).  These must never
+# surface in the chat pane.
+_TOOL_RESULT_MARKERS = (
+    '"status"',
+    "'status'",
+    "read_range",
+    "total_lines",
+    "executed. Result:",
+)
+
+
+def _looks_like_tool_result(text: str) -> bool:
+    """Heuristic: does ``text`` look like a leaked tool result payload?"""
+    if len(text) > 4000:
+        return False
+    lower = text.lower()
+    hits = sum(1 for m in _TOOL_RESULT_MARKERS if m.lower() in lower)
+    # A single weak marker is not enough (e.g. user text may mention "status");
+    # require the JSON-object shape OR two markers.
+    if hits >= 2:
+        return True
+    if hits == 1:
+        stripped = text.strip()
+        return stripped.startswith(("{", "[{")) and any(
+            k in stripped for k in ('"status"', "'status'", "read_range", "total_lines")
+        )
+    return False
+
 
 class OutputHandler:
     """
@@ -65,6 +94,13 @@ class OutputHandler:
             text = filter_native_tokens(text)
             if not text:
                 return
+            # PERF-4: guard against tool-result JSON leaking into the chat pane.
+            # When the LLM emits raw tool output (instead of a proper
+            # <tool_result> tag), the default handler would otherwise surface it
+            # as if it were a user-facing message.
+            stripped = text.strip()
+            if _looks_like_tool_result(stripped):
+                return
             streamed_user_text.append(text)
             emit_with_sid("to_user_stream", text)
 
@@ -106,6 +142,12 @@ class OutputHandler:
                 "sleep": lambda x: None,
                 "to_system": lambda x: None,
                 "option": lambda x: None,
+                # PERF-4: tool_result is a machine-readable tag; never surface it
+                # to the chat pane.  It was previously missing from _handlers, so
+                # raw tool JSON leaked via the default handler.
+                "tool_result": lambda x: None,
+                "result": lambda x: None,
+                "tool_response": lambda x: None,
             }
         )
 

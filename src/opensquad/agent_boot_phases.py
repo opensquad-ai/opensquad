@@ -341,7 +341,7 @@ class AgentBootPhases:
                 "is_think": model_cfg.get("is_think", False),
                 "reasoning_effort": model_cfg.get("reasoning_effort", "high"),
                 "thinking_budget_tokens": model_cfg.get("thinking_budget_tokens", 10000),
-                "tool_call_mode": model_cfg.get("tool_call_mode", "auto"),
+                "tool_call_mode": model_cfg.get("tool_call_mode", "native"),
                 "tool_filter": model_cfg.get("tool_filter", "all"),
                 "parent_prompt": system_prompt,
             }

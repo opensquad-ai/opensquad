@@ -288,6 +288,10 @@ def _is_placeholder_secret(value: object) -> bool:
         return False
     if not value:
         return True
+    lowered = value.lower()
+    # SEC-2: any "change me" style JWT placeholder must be treated as unset.
+    if "change_me" in lowered or lowered.startswith("your_jwt"):
+        return True
     return value in {
         "YOUR_GATEWAY_TOKEN_HERE",
         "YOUR_NODE_SECRET_HERE",
@@ -329,7 +333,18 @@ def _auto_generate_secrets(target_path: str) -> bool:
 
             new_val = _secrets.token_urlsafe(32)
             auth[key] = new_val
-            replaced.append(key)
+            replaced.append(f"auth.{key}")
+
+    # SEC-2: JWT secret_key lives under a separate "jwt" section.  A non-empty
+    # "CHANGE_ME" style placeholder was previously accepted as a real secret,
+    # letting anyone forge gateway JWTs on non-Docker deploys.  Treat it as
+    # unset and auto-generate a strong random key.
+    jwt = data.setdefault("jwt", {})
+    if _is_placeholder_secret(jwt.get("secret_key", "")):
+        import secrets as _secrets
+
+        jwt["secret_key"] = _secrets.token_hex(32)
+        replaced.append("jwt.secret_key")
 
     if not replaced:
         return False

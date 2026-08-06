@@ -15,7 +15,7 @@ def _normalize_tags(raw: Any) -> list[str]:
         return []
     if isinstance(raw, str):
         return [t.strip() for t in raw.replace(";", ",").split(",") if t.strip()]
-    if isinstance(raw, (list, tuple, set)):
+    if isinstance(raw, list | tuple | set):
         out: list[str] = []
         for item in raw:
             if item is None:

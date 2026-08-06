@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowLeft, RefreshCw, Loader2, AlertCircle, CheckCircle2, Mic, Download,
-  HardDrive, Database,
+  Database, Trash2, MapPin, Cpu,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
+import { HoverTooltip } from '../../HoverTooltip';
 import type { PluginViewProps } from '../registry';
 
 type WhisperModel = {
@@ -112,6 +113,30 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
     }
   };
 
+  const onUninstall = async () => {
+    if (!window.confirm(
+      zh
+        ? `确定要卸载 Whisper ${status.model || ''} 模型吗？\n\n模型文件将从磁盘删除并释放空间。`
+        : `Uninstall Whisper ${status.model || ''}?\n\nThe model file will be removed from disk to free space.`,
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction('whisper', 'uninstall_model', {
+        model: selectedModel || undefined,
+      });
+      await refresh();
+      setInfo(res?.message || (zh ? '模型已卸载' : 'Model uninstalled'));
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onStartService = async () => {
     setBusy(true);
     setError(null);
@@ -198,32 +223,72 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
         ) : null}
 
         {/* ── Model picker ──────────────────────────────────────── */}
-        <div className="rounded-lg border border-border bg-bgLight/40 p-3 space-y-2">
-          <div className="flex items-center gap-2 text-sm">
-            {ready ? (
-              <CheckCircle2 size={16} className="text-emerald-500" />
-            ) : (
-              <HardDrive size={16} className="text-amber-500" />
-            )}
-            <span className="font-medium">
-              {zh ? '当前模型：' : 'Current model: '}
-              {status.model || '—'}
+        <div className={`rounded-lg border ${
+          ready ? 'border-emerald-500/25 bg-emerald-500/[0.04]' : 'border-border bg-bgLight/30'
+        } p-3 space-y-2`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Cpu size={14} className={ready ? 'text-emerald-400 shrink-0' : 'text-textMuted shrink-0'} />
+            <span className="text-[12px] font-semibold text-textMain truncate">
+              Whisper {status.model || 'base'}
+            </span>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${
+              ready
+                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+                : 'bg-bgDark/60 text-textMuted border border-border'
+            }`}>
+              {zh ? '本地' : 'Local'}
             </span>
             {status.model ? (
-              <span className="text-[11px] text-textMuted">
-                ({((Number(status.file_size) || 0) / (1024 * 1024)).toFixed(0)} MB)
+              <span className="text-[10.5px] text-textMuted shrink-0">
+                {((Number(status.file_size) || 0) / (1024 * 1024)).toFixed(0)} MB
               </span>
             ) : null}
           </div>
 
-          {ready ? (
-            <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
-              <CheckCircle2 size={12} className="shrink-0" />
-              <span>{zh ? '模型已下载' : 'Model downloaded'}</span>
-            </div>
-          ) : null}
+          <p className="text-[11px] text-textMuted leading-relaxed line-clamp-2">
+            {zh
+              ? 'OpenAI 开源的离线语音转录模型。默认从 Azure CDN 拉取 .pt；失败后切换到 hf-mirror.com / huggingface.co。'
+              : "OpenAI's offline ASR model. Fetches the .pt from Azure CDN; falls back to hf-mirror.com / huggingface.co on 401/403/timeout."}
+          </p>
 
-          <div className="text-[11px] text-textMuted">
+          <div className="flex items-center gap-1.5 text-[10.5px] text-textMuted min-w-0">
+            {ready
+              ? <CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
+              : <Download size={11} className="text-textMuted shrink-0" />}
+            <span className="truncate min-w-0">
+              {ready
+                ? (zh ? '模型已就绪' : 'Model ready')
+                : (zh ? '未下载' : 'Not downloaded')}
+            </span>
+            {ready && status.model_dir ? (
+              <HoverTooltip text={status.model_dir} maxWidth="24rem">
+                <button
+                  type="button"
+                  tabIndex={0}
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-textMuted/80 hover:text-primary hover:bg-bgLight/60 border border-dashed border-border transition-colors shrink-0"
+                  title={status.model_dir}
+                >
+                  <MapPin size={9} className="shrink-0" />
+                  <span className="whitespace-nowrap">{zh ? '下载目录' : 'Download path'}</span>
+                </button>
+              </HoverTooltip>
+            ) : null}
+            {ready && status.legacy_cache_dir ? (
+              <HoverTooltip text={status.legacy_cache_dir} maxWidth="24rem">
+                <button
+                  type="button"
+                  tabIndex={0}
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-textMuted/80 hover:text-primary hover:bg-bgLight/60 border border-dashed border-border transition-colors shrink-0"
+                  title={status.legacy_cache_dir}
+                >
+                  <Database size={9} className="shrink-0" />
+                  <span className="whitespace-nowrap">{zh ? '兼容缓存' : 'Legacy cache'}</span>
+                </button>
+              </HoverTooltip>
+            ) : null}
+          </div>
+
+          <div className="text-[11px] text-textMuted pt-1">
             {zh
               ? '选择要下载并启用的模型大小。模型越大精度越高，但首次下载与启动更慢。'
               : 'Pick a model size. Larger = better accuracy, slower first download and load.'}
@@ -263,17 +328,6 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
               );
             })}
           </div>
-
-          <p className="text-[11px] text-textMuted break-all">
-            {zh ? '下载目录：' : 'Download path: '}
-            {status.model_dir || '—'}
-          </p>
-          {status.legacy_cache_dir ? (
-            <p className="text-[11px] text-textMuted/70 break-all">
-              {zh ? '兼容缓存：' : 'Legacy cache: '}
-              {status.legacy_cache_dir}
-            </p>
-          ) : null}
         </div>
 
         {/* ── Progress ──────────────────────────────────────────── */}
@@ -325,6 +379,17 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-xs disabled:opacity-50"
             >
               {zh ? '重新下载' : 'Re-download'}
+            </button>
+          ) : null}
+          {ready ? (
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onUninstall()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-500/15 text-red-400 text-xs hover:bg-red-500/25 disabled:opacity-50"
+            >
+              <Trash2 size={12} />
+              {zh ? '卸载模型' : 'Uninstall'}
             </button>
           ) : null}
 

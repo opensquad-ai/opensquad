@@ -428,6 +428,7 @@ const RerankerCard: React.FC<{
     <ModelDownloadCard
       pluginName="websearch"
       actionName="download_reranker"
+      uninstallActionName="uninstall_reranker"
       title={isZh ? 'Reranker 模型' : 'Reranker model'}
       titleEn="Reranker model"
       description={
@@ -443,7 +444,10 @@ const RerankerCard: React.FC<{
       renderExtras={(s) => {
         const r = s.reranker;
         if (!r) return null;
-        if (r.missing && r.missing.length > 0) {
+        // Only show the missing-file list once a download has been attempted
+        // (state becomes non-empty). Before the first download every file is
+        // "missing", so listing them is noise.
+        if (r.download && r.download.state && r.missing && r.missing.length > 0) {
           return (
             <p className="text-[11px] text-amber-500">
               {isZh ? '缺失文件：' : 'Missing: '}

@@ -48,6 +48,11 @@ def _get_async_openai():
     return _async_openai_client
 
 
+# PERF-11: shared client for downloading generated-image URLs (reused across
+# calls instead of opening a fresh connection per image).
+_image_download_client = None
+
+
 def _make_llm_http_client(timeout: float):
     """Build an httpx.AsyncClient that ignores system proxy env vars.
 
@@ -889,7 +894,25 @@ class ChatAPI:
         # be compacted at 128k just because that is the common card default.
         threshold_tokens = int(self.token_max * threshold)
 
-        if current_tokens <= threshold_tokens:
+        # PERF-3 (400-token hard guard): the local tiktoken/cl100k estimate
+        # systematically undercounts (~2.6-3x) versus the provider's real
+        # accounting (DeepSeek uses ~1.35 chars/token; relay wrappers inflate
+        # further).  If the *scaled* estimate would exceed a high watermark
+        # (85% of max), force compression so the request never hits a 400.
+        # This is a safety net on top of the normal threshold-based path.
+        _scaled_estimate = current_tokens * 3
+        _hard_watermark = int(self.token_max * 0.85)
+        if _scaled_estimate > _hard_watermark and current_tokens <= threshold_tokens:
+            logger.warning(
+                "[CompressTrace] HARD GUARD triggered: local estimate %d tokens, scaled x3 = %d > 85%% of max %d. "
+                "Forcing compression to avoid 400.",
+                current_tokens,
+                _scaled_estimate,
+                self.token_max,
+            )
+            self._emit_with_sid("status", "Context near limit, compacting (hard guard)...")
+
+        if current_tokens <= threshold_tokens and _scaled_estimate <= _hard_watermark:
             logger.info("[CompressTrace] below threshold, no compression needed")
             return self.req
 
@@ -1664,14 +1687,18 @@ class ChatAPI:
                 try:
                     import httpx
 
-                    async with httpx.AsyncClient(timeout=60.0) as http:
-                        resp = await http.get(url)
-                        resp.raise_for_status()
-                        ctype = resp.headers.get("content-type", "image/png").split(";")[0].strip()
-                        saved = await self._save_generated_image_bytes(resp.content, ctype or "image/png")
-                        if saved:
-                            output_media.append(saved)
-                            continue
+                    # PERF-11: reuse a module-level client instead of opening a
+                    # fresh connection per image download.
+                    global _image_download_client
+                    if _image_download_client is None or _image_download_client.is_closed:
+                        _image_download_client = httpx.AsyncClient(timeout=60.0)
+                    resp = await _image_download_client.get(url)
+                    resp.raise_for_status()
+                    ctype = resp.headers.get("content-type", "image/png").split(";")[0].strip()
+                    saved = await self._save_generated_image_bytes(resp.content, ctype or "image/png")
+                    if saved:
+                        output_media.append(saved)
+                        continue
                 except Exception as e:
                     logger.warning(f"[ChatAPI] Failed to download image url, falling back to remote url: {e}")
                 output_media.append({"type": "image", "url": url, "mime": "image/png"})

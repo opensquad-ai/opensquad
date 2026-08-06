@@ -1252,11 +1252,14 @@ class MemoryStore:
         if not keywords:
             return {}
 
+        # PERF-8: batch IN query instead of one query per keyword (N+1).
+        placeholders = ",".join("?" for _ in keywords)
+        rows = self._conn.execute(
+            f"SELECT entry_id, keyword FROM keyword_index WHERE keyword IN ({placeholders})", keywords
+        ).fetchall()
         hits = defaultdict(int)
-        for kw in keywords:
-            rows = self._conn.execute("SELECT entry_id FROM keyword_index WHERE keyword=?", (kw,)).fetchall()
-            for row in rows:
-                hits[row[0]] += 1
+        for entry_id, _kw in rows:
+            hits[entry_id] += 1
 
         return dict(sorted(hits.items(), key=lambda x: x[1], reverse=True))
 
@@ -1400,10 +1403,11 @@ class MemoryStore:
         if not entry_ids:
             return
         now = time.time()
-        for eid in entry_ids:
-            self._conn.execute(
-                "UPDATE entries SET access_count = access_count + 1, last_accessed = ? WHERE id = ?", (now, eid)
-            )
+        # PERF-8: executemany instead of one UPDATE per entry (N+1).
+        self._conn.executemany(
+            "UPDATE entries SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+            [(now, eid) for eid in entry_ids],
+        )
         self._conn.commit()
 
     # ========================

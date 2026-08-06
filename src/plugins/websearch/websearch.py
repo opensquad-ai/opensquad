@@ -95,6 +95,16 @@ def _make_request(endpoint: str, params: dict) -> dict:
     logger.info(f"Sending GET request to: {url}")
     logger.debug(f"Request params: {params}")
 
+    # SEC-8: SSRF guard — never fetch internal/loopback addresses, even if the
+    # endpoint string is influenced by LLM output.
+    try:
+        from opensquad.utils.ssrf import assert_public_http_url
+
+        assert_public_http_url(url)
+    except ValueError as e:
+        logger.error(f"SSRF guard rejected URL {url}: {e}")
+        return {"error": f"Blocked internal URL: {e}"}
+
     try:
         response = requests.get(url, params=params, timeout=TIMEOUT)
         response.raise_for_status()  # Raise an exception if status code is not 2xx

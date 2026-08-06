@@ -22,5 +22,5 @@
   "image_cfg_scale": 1.0,
   "audio_output_voice": "alloy",
   "render_mode": "full",
-  "tool_call_mode": "auto"
+  "tool_call_mode": "native"
 }

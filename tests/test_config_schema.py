@@ -230,7 +230,7 @@ class TestDefaults:
         assert m["temperature"] == 0.3
         assert m["token_max"] == 100000
         assert m["timeout"] == 120.0
-        assert m["tool_call_mode"] == "auto"
+        assert m["tool_call_mode"] == "native"
         assert m["is_image"] is False
         assert m["max_video_frames"] == 8
         assert m["top_k"] == 0

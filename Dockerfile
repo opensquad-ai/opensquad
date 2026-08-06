@@ -36,9 +36,13 @@ RUN apt-get update && \
 # Install Python dependencies + package.
 # README.md is required by pyproject.toml (readme = "README.md") for metadata;
 # src/ is required for the editable install (src-layout, packages.find where=["src"]).
+# C-4 note: a true dependency-layer cache would require `uv sync --frozen`
+# with pyproject.toml + uv.lock copied before src/; uv is not yet installed in
+# this image, so we keep the straightforward order. The image installs
+# non-editable (stable artifact) instead of editable.
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir .
 
 # Copy helper scripts
 COPY scripts/ ./scripts/

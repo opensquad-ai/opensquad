@@ -609,7 +609,6 @@ class TurnLoop:
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
                         img_paths = evt.metadata.get("image_paths", [])
                         if img_paths:
-                            self.runner._current_images.extend(img_paths)
                             already = set(self.runner._current_images)
                             new_img_paths = [p for p in img_paths if p not in already]
                             if new_img_paths:

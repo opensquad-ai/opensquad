@@ -3274,8 +3274,24 @@ class AgentRunner:
                                 f"[Runner] Message queue pushed to pipeline: {len(pending_msgs)} messages (flow through role=tool)"
                             )
 
-                        # Sleep before next poll
-                        await asyncio.sleep(_wait_poll_interval)
+                        # Sleep before next poll — PERF-7: instead of a pure
+                        # busy-poll sleep, wait on the input/message events with
+                        # a timeout equal to the old poll interval.  New input
+                        # wakes us immediately; idle behaves exactly as before.
+                        try:
+                            _events = [
+                                input_hub.get_input_event(),
+                                message_queue.get_message_event(),
+                            ]
+                            _done, _pending = await asyncio.wait(
+                                [asyncio.create_task(ev.wait()) for ev in _events],
+                                timeout=_wait_poll_interval,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for _t in _pending:
+                                _t.cancel()
+                        except Exception:
+                            await asyncio.sleep(_wait_poll_interval)
 
                     if task_finished:
                         break
@@ -3599,8 +3615,10 @@ class AgentRunner:
 
         # Pattern 3: Cross-turn repetition (detecting if model repeats exactly what it said last turn)
         current_clean = text.strip()
-        # Find the last assistant message in session history
-        history = _get_session_manager().get_messages()
+        # PERF-6: limit the history slice — we only compare against the most
+        # recent assistant message, so pulling the whole history (and deep
+        # copying it) is unnecessary on long-running sessions.
+        history = _get_session_manager().get_messages(limit=200)
         last_asst = None
         for msg in reversed(history):
             if msg.get("role") == "assistant":
@@ -3699,11 +3717,25 @@ class AgentRunner:
         res_str = AgentRunner._truncate_result_text(res_str, max_len)
         return f"[{now}] Tool '{name}' executed. Result: {res_str}"
 
+    # PERF-1: cache tool_output_max_chars with an mtime key so the hot path
+    # (every tool execution) stops re-reading + re-parsing the whole config.json.
+    _tool_output_max_cache: int | None = None
+    _tool_output_max_cache_mtime: float = 0.0
+
     def _get_tool_output_max_chars(self) -> int:
         """
         Read tool_output_max_chars from agent config.json.
         Returns 0 for no limit; defaults to 50000 chars if not configured.
         """
+        mtime = 0.0
+        if self._config_path and _os.path.isfile(self._config_path):
+            try:
+                mtime = _os.path.getmtime(self._config_path)
+            except OSError:
+                mtime = 0.0
+        if self._tool_output_max_cache is not None and mtime == self._tool_output_max_cache_mtime:
+            return self._tool_output_max_cache
+        value = 50000
         try:
             if self._config_path and _os.path.isfile(self._config_path):
                 with open(self._config_path, encoding="utf-8") as _f:
@@ -3712,11 +3744,14 @@ class AgentRunner:
                 if val is not None:
                     v = int(val)
                     if v < 0:
-                        return 0  # negative also means no limit
-                    return v
+                        value = 0  # negative also means no limit
+                    else:
+                        value = v
         except Exception:
             pass
-        return 50000
+        self._tool_output_max_cache = value
+        self._tool_output_max_cache_mtime = mtime
+        return value
 
     def _prepare_task(self, query: str) -> tuple[str, str]:
         task_id, cleaned = extract_and_remove_first_tag(query[:30])
@@ -4097,7 +4132,10 @@ class AgentRunner:
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
             encoding = getattr(chat_api, "encoding", None)
-            stats = compute_token_breakdown(
+            # PERF-5: token re-encoding (tiktoken, 200-800ms on long sessions)
+            # must not block the event loop — offload to a worker thread.
+            stats = await asyncio.to_thread(
+                compute_token_breakdown,
                 req,
                 tools,
                 encoding=encoding,

@@ -40,7 +40,7 @@ class ModelConfigSchema(BaseModel):
     # Per-call wall-clock budget (seconds). Thinking models often need 600–1200+.
     # Boot raises timeout to 1200 when is_think / high effort and this is still ≤120.
     timeout: float = Field(default=120.0, gt=0, description="LLM call timeout in seconds")
-    tool_call_mode: str = Field(default="auto", pattern=r"^(auto|native|xml)$")
+    tool_call_mode: str = Field(default="native", pattern=r"^(auto|native|xml)$")
     is_image: bool = Field(default=False)
     is_video: bool = Field(default=False)
     is_audio_model: bool = Field(default=False)

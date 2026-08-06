@@ -20,43 +20,43 @@ auto-download that ``service/reranker_sidecar.py`` performs.
 
 from __future__ import annotations
 
+import os as _os
+import sys as _sys
 from typing import Any
 
-try:
-    from plugins.websearch.reranker_model_store import (
-        get_status as reranker_status,
-    )
-    from plugins.websearch.reranker_model_store import (
-        start_download as reranker_start_download,
-    )
-except ImportError:
-    from reranker_model_store import (  # type: ignore[no-redef]
-        get_status as reranker_status,
-    )
-    from reranker_model_store import (
-        start_download as reranker_start_download,
-    )
+# The launcher's *action* endpoint loads query.py via ``spec_from_file_location``
+# (a fresh module each call), while the *data* endpoint uses import_module /
+# sys.modules.  To keep ONE shared module instance (and therefore one shared
+# ``ModelStore._store`` singleton so a running download thread stays visible),
+# we always import the sibling modules as top-level modules and put both our
+# directory and the plugins root on sys.path so they resolve everywhere.
+_here = _os.path.dirname(_os.path.abspath(__file__))
+_plugins_root = _os.path.abspath(_os.path.join(_here, ".."))
+for _p in (_plugins_root, _here):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 
-try:
-    from plugins.websearch.setup_status import (
-        dismiss_setup_banner,
-        get_browser_config,
-        get_setup_status,
-        mark_login_done,
-        set_browser,
-        spawn_login_setup,
-        write_plugin_status,
-    )
-except ImportError:
-    from setup_status import (  # type: ignore[no-redef]
-        dismiss_setup_banner,
-        get_browser_config,
-        get_setup_status,
-        mark_login_done,
-        set_browser,
-        spawn_login_setup,
-        write_plugin_status,
-    )
+from reranker_model_store import (  # noqa: E402
+    cancel_download as reranker_cancel_download,
+)
+from reranker_model_store import (
+    get_status as reranker_status,
+)
+from reranker_model_store import (
+    start_download as reranker_start_download,
+)
+from reranker_model_store import (
+    uninstall as reranker_uninstall,
+)
+from setup_status import (  # noqa: E402
+    dismiss_setup_banner,
+    get_browser_config,
+    get_setup_status,
+    mark_login_done,
+    set_browser,
+    spawn_login_setup,
+    write_plugin_status,
+)
 
 
 def query_data(project_root: str, params: dict | None = None) -> dict[str, Any]:
@@ -91,6 +91,13 @@ def handle_action(project_root: str, action: str, data: dict | None = None) -> d
 
     if action in ("reranker_status", "reranker_refresh"):
         return {"ok": True, "action": action, **reranker_status()}
+
+    if action in ("cancel_download", "cancel_reranker", "reranker_cancel"):
+        return {"ok": True, "action": action, **reranker_cancel_download()}
+
+    if action in ("uninstall_reranker", "reranker_uninstall", "uninstall_model"):
+        result = reranker_uninstall()
+        return {"ok": True, "action": action, **result}
 
     # ── Bing login actions (legacy) ──────────────────────────────────
     if action in ("status", "refresh_status", "refresh"):

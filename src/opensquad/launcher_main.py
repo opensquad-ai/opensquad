@@ -1981,7 +1981,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     "api_key": "",
                     "base_url": "",
                     "model_name": "",
-                    "tool_call_mode": "auto",  # Default: auto-detect (recommended) — use Native FC if supported, otherwise fall back to XML
+                    "tool_call_mode": "native",  # Default: Native FC (forced) — use native function calling
                     "tool_filter": "high",  # Default: load common tools (97) — balance between features and performance
                 },
                 "tools": [

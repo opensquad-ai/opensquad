@@ -71,8 +71,8 @@ def test_auto_mode_selects_xml_for_unknown():
     print("✅ auto 模式为未知模型自动降级到 XML")
 
 
-def test_default_mode_is_auto():
-    """验证未指定 tool_call_mode 时默认为 auto"""
+def test_default_mode_is_native():
+    """验证未指定 tool_call_mode 时默认为 native（Native FC）"""
     config = {
         "model": {
             "provider": "openai_compat",
@@ -88,7 +88,7 @@ def test_default_mode_is_auto():
 
     # GPT-4 支持 FC，应该选择 Native
     assert isinstance(strategy, NativeToolCallStrategy)
-    print("✅ 默认模式为 auto，GPT-4 自动选择 Native FC")
+    print("✅ 默认模式为 native（Native FC）")
 
 
 def test_both_strategies_produce_valid_output():
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     test_native_mode_works()
     test_auto_mode_selects_native_for_glm5()
     test_auto_mode_selects_xml_for_unknown()
-    test_default_mode_is_auto()
+    test_default_mode_is_native()
     test_both_strategies_produce_valid_output()
 
     print("\n" + "=" * 60)

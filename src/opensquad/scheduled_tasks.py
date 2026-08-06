@@ -755,16 +755,16 @@ class ScheduledTaskManager:
         """
         loop = self._loop or _gateway_loop
         if loop is None or not loop.is_running():
-            from opensquad.ingress_policy import push_ingress
-
-            sid = push_ingress(content, source="scheduled-task", channel="external", model_card=model_card)
-            with self._lock:
-                for e in self._executions:
-                    if e.get("id") == exec_id:
-                        e["session_id"] = sid
-                        break
-                self._save_persisted()
-            return True
+            # Never fall back to gateway-local ingress: it routes to the primary
+            # (focused) session, cross-wiring the scheduled-task output into the
+            # user's latest chat ("串线"). Without a live loop we cannot target a
+            # dedicated agent session, so fail the fire and let the spawn watchdog
+            # redeliver via the registry path instead.
+            logger.error(
+                "[ScheduledTasks] no running loop to deliver exec=%s — not falling back to primary (crosstalk guard)",
+                exec_id,
+            )
+            return False
         registry = self._import_registry()
         if registry is None:
             return False

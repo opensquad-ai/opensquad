@@ -16,9 +16,14 @@ through ``model_switch.apply_model_reload`` / ``_resolve_card``.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# PERF-10: cap the per-session ChatAPI map so a long-lived runner cannot grow
+# it without bound as sessions come and go (LRU semantics via OrderedDict).
+_SESSION_API_MAP_MAX = 64
 
 
 def session_card_map(runner: Any) -> dict[str, str]:
@@ -33,7 +38,13 @@ def session_api_map(runner: Any) -> dict[str, Any]:
     apis = getattr(runner, "_session_chat_apis", None)
     if not isinstance(apis, dict):
         apis = {}
+    if not isinstance(apis, OrderedDict):
+        # Convert in place preserving existing entries (PERF-10).
+        apis = OrderedDict(apis)
         runner._session_chat_apis = apis
+    # PERF-10: bound the map; evict the least-recently-touched session first.
+    while len(apis) > _SESSION_API_MAP_MAX:
+        apis.popitem(last=False)
     return apis
 
 

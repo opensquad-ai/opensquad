@@ -89,3 +89,12 @@ data/sessions/
 
 # Tests not needed in the runtime image
 tests/
+
+# SEC-3: exclude PyInstaller packaged backend copies, caches and secrets from the image
+src/opensquad/gateway/nexuschat-pro/resources/backend-*
+src/opensquad/build/
+logs/
+htmlcov/
+.mypy_cache/
+.venv/
+model_cards/*.json

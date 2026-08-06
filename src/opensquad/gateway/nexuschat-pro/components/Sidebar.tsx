@@ -7,13 +7,11 @@ import { useTranslation } from 'react-i18next';
 import { setLanguage } from '../i18n';
 import { pluginAPI, PluginInfo, adminAPI, AdminAgent } from '../services/api';
 import { hasPluginViewAdapter } from './plugin-views/registry';
-import * as LucideIcons from 'lucide-react';
 
 interface SidebarProps {
   currentUser: User | null;
   onUpdateUser: (updatedUser: User) => void;
-  onLogout: () => void;
-  theme: string;
+  onLogout: () => void;  theme: string;
   onToggleTheme: () => void;
   onOpenProfile: () => void;
   onOpenSettings: () => void;
@@ -27,6 +25,31 @@ interface AgentShortcutItem {
 }
 
 const AGENT_SHORTCUTS_CACHE_KEY = 'agent_nav_shortcuts_cache_v1';
+
+// FE-4: whitelist of icons plugins may request via `contributes.navigation.icon`.
+// Kept explicit so lucide-react can be tree-shaken (removes ~780KB from bundle).
+const PLUGIN_NAV_ICONS: Record<string, React.FC<{ size?: number; className?: string }>> = {
+  message: MessageCircle,
+  users: Users,
+  settings: Settings,
+  calendar: Calendar,
+  star: Star,
+  puzzle: Puzzle,
+  server: Server,
+  book: BookOpen,
+  user: UserCircle,
+  cpu: Cpu,
+  scroll: ScrollText,
+  store: Store,
+  grid: LayoutGrid,
+  history: History,
+  zap: Zap,
+  bot: Bot,
+  layers: Layers,
+  board: KanbanSquare,
+  radio: Radio,
+  loader: Loader2,
+};
 
 function loadAgentShortcutsCache(): AgentShortcutItem[] {
   try {
@@ -371,8 +394,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                 {/* 插件动态生成的导航项 */}
                 {pluginNavItems.map((item) => {
                     const isImage = item.iconType === 'image' && !!item.iconUrl;
+                    // FE-4: whitelist lookup instead of `import * as
+                    // LucideIcons` + dynamic index (allows tree-shaking).
                     const LucideIcon = (!isImage && item.icon)
-                        ? (LucideIcons as any)[item.icon] as React.FC<{ size?: number; className?: string }> | undefined
+                        ? PLUGIN_NAV_ICONS[item.icon]
                         : undefined;
                     const isInitial = !isImage && !LucideIcon;
                     return (
