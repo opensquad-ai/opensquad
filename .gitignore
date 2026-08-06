@@ -300,7 +300,9 @@ src/plugins/websearch/service/reranker/models/
 docs/方案讨论*/skill/
 
 # ── Local private report / proposal docs (per-instance analysis, not source) ──
-# Optimization reports, plan-discussion rounds and execution summaries are
-# generated locally for review and are NOT part of the source tree.
+# Optimization reports, plan-discussion rounds, fix-plan drafts and execution
+# summaries are generated locally for review and are NOT part of the source tree.
 docs/report_*.md
 docs/方案讨论*/
+docs/优化修复方案_*.md
+plan_fix_*.md
