@@ -664,9 +664,15 @@ class AgentSessionReader:
     def delete_session(self, session_id: str) -> bool:
         """Delete a history session file from disk.
 
-        Cannot delete the agent's current active session (empty or not).
-        Empty current chats are abandoned via Agent ``new_session`` (which
-        archives them into history/), then deleted as history files.
+        Refuses to delete the agent's currently-active session — callers must
+        rotate via the WS ``abandon_current_draft`` command (which mints a new
+        sid and either archives the old one to history/ or drops it for an
+        empty draft) and then call this method against the now-orphan sid.
+
+        The operation is idempotent: a sid that does not exist anywhere
+        (already dropped, no history snapshot) is treated as a successful
+        no-op, so the delete-on-current flow does not need to special-case
+        the empty-draft branch in the runner.
         """
         self._reload(force=True)
         # Cannot delete the current session — agent owns current_session.json
@@ -677,17 +683,23 @@ class AgentSessionReader:
         self._list_meta_cache.pop(session_id, None)
         file_path = os.path.join(self.history_dir, f"{session_id}.json")
         log_path = os.path.join(self.history_dir, f"{session_id}.json.log")
-        removed = False
+        any_existed = False
         for p in (file_path, log_path):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                    removed = True
-                    logger.info(f"Deleted session file: {p}")
-                except Exception as e:
-                    logger.error(f"Failed to delete session {session_id}: {e}")
-                    return False
-        return bool(removed)
+            existed = os.path.exists(p)
+            any_existed = any_existed or existed
+            if not existed:
+                continue
+            try:
+                os.remove(p)
+                logger.info(f"Deleted session file: {p}")
+            except Exception as e:
+                logger.error(f"Failed to delete session {session_id}: {e}")
+                return False
+        # Idempotent: caller asked to delete and there is nothing left to
+        # remove (runner already dropped the empty draft). Treat as success.
+        if not any_existed:
+            logger.info(f"Delete session {session_id}: no files present, treating as idempotent success")
+        return True
 
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 

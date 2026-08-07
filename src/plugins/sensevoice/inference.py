@@ -160,7 +160,7 @@ class SenseVoiceONNX:
             "<|en/zh|>": "en",
         }
         for name, out in zip(self.outputs, outputs, strict=False):
-            if "ctc_logits" not in name or out.ndim != 3:
+            if "logits" not in name or out.ndim != 3:
                 continue
             tok_ids = out.argmax(axis=-1)[0]
             chars = []

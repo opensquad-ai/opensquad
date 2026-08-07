@@ -5,11 +5,31 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Any
+
+# `_model_downloader` ships helpers (ModelStore, force_remove_file,
+# force_remove_status_file) that the uninstall path needs. We import via
+# the same absolute / fallback pattern used by the other plugin stores so
+# that frozen / non-frozen code paths both work.
+try:
+    from plugins._model_downloader import (  # type: ignore[no-redef]
+        force_remove_file,
+        force_remove_status_file,
+    )
+except ImportError:
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _plugins_dir = os.path.abspath(os.path.join(_here, "..", ".."))
+    if _plugins_dir not in sys.path:
+        sys.path.insert(0, _plugins_dir)
+    from _model_downloader import (  # type: ignore[no-redef]
+        force_remove_file,
+        force_remove_status_file,
+    )
 
 logger = logging.getLogger("plugins.sensevoice.model_store")
 
@@ -25,6 +45,18 @@ OPTIONAL_FILES = ("configuration.json",)
 
 # ModelScope raw resolve URLs (master branch of iic/SenseVoiceSmall).
 MODELSCOPE_BASE = "https://www.modelscope.cn/models/iic/SenseVoiceSmall/resolve/master"
+
+# The official ``iic/SenseVoiceSmall`` repo does NOT ship the quantized ONNX
+# file this service loads (``model_quant.onnx``) — it only ships ``model.pt``
+# (PyTorch). The ONNX/INT8 export is hosted by sherpa-onnx instead, so we
+# fetch the ONNX weights from its HF mirrors and keep the tokenizer / CMVN /
+# config files from the official repo.
+SHERPA_ONNX_REPO = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+SHERPA_ONNX_FILENAME = "model.int8.onnx"
+SHERPA_ONNX_MIRRORS: tuple[str, ...] = (
+    os.environ.get("SENSEVOICE_ONNX_MIRROR", "https://hf-mirror.com"),
+    "https://huggingface.co",
+)
 
 _download_lock = threading.Lock()
 _download_thread: threading.Thread | None = None
@@ -99,10 +131,24 @@ def read_status() -> dict[str, Any]:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
+            # A persisted "downloading" state with no live thread means the
+            # process (or the download) was interrupted — e.g. the user closed
+            # the app mid-download. Reset it so the UI button becomes usable.
+            if data.get("state") == "downloading" and not _download_alive():
+                data["state"] = "error"
+                data["message"] = "Download interrupted — click download to retry"
+                data["progress"] = 0.0
+                _write_status(data)
             return data
     except (OSError, ValueError):
         pass
     return {"state": "idle", "message": "", "progress": 0.0, "file": ""}
+
+
+def _download_alive() -> bool:
+    global _download_thread
+    with _download_lock:
+        return bool(_download_thread and _download_thread.is_alive())
 
 
 def model_ready(directory: str | None = None) -> bool:
@@ -166,6 +212,41 @@ def _download_one(url: str, dest: str, file_index: int, total_files: int) -> Non
     os.replace(tmp, dest)
 
 
+def _download_file(root: str, name: str, file_index: int, total_files: int) -> None:
+    """Fetch one model file, trying each mirror in order. Raises on total failure."""
+    dest = os.path.join(root, name)
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        return
+    if name == "model_quant.onnx":
+        # The ONNX weights are NOT in the official repo; pull from sherpa-onnx.
+        urls = [
+            f"{ep.rstrip('/')}/{SHERPA_ONNX_REPO}/resolve/main/{SHERPA_ONNX_FILENAME}" for ep in SHERPA_ONNX_MIRRORS
+        ]
+        labels = [ep.replace("https://", "") for ep in SHERPA_ONNX_MIRRORS]
+    else:
+        urls = [f"{MODELSCOPE_BASE}/{name}"]
+        labels = ["modelscope.cn"]
+    last: Exception | None = None
+    for idx, (url, label) in enumerate(zip(urls, labels, strict=False)):
+        try:
+            _write_status(
+                {
+                    "state": "downloading",
+                    "message": f"Downloading {name} ({label})…",
+                    "file": name,
+                    "progress": round((file_index / max(total_files, 1)) * 100, 1),
+                }
+            )
+            _download_one(url, dest, file_index, total_files)
+            return
+        except Exception as e:  # noqa: BLE001 - try next mirror
+            last = e
+            logger.warning("[sensevoice] mirror %s failed for %s: %s", label, name, e)
+    if last is not None:
+        raise last
+    raise RuntimeError(f"no mirror produced {name}")
+
+
 def _run_download() -> None:
     root = model_dir()
     files = list(REQUIRED_FILES) + [f for f in OPTIONAL_FILES if f not in REQUIRED_FILES]
@@ -173,45 +254,14 @@ def _run_download() -> None:
         _write_status(
             {
                 "state": "downloading",
-                "message": "Starting SenseVoice model download from ModelScope…",
+                "message": "Starting SenseVoice model download…",
                 "file": "",
                 "progress": 0.0,
             }
         )
-        # Prefer modelscope SDK when available (handles LFS / auth better).
-        try:
-            from modelscope.hub.snapshot_download import snapshot_download
-
-            _write_status(
-                {
-                    "state": "downloading",
-                    "message": "Downloading via ModelScope SDK…",
-                    "file": "",
-                    "progress": 5.0,
-                }
-            )
-            snapshot_download("iic/SenseVoiceSmall", local_dir=root)
-            if model_ready(root):
-                _write_status(
-                    {
-                        "state": "ready",
-                        "message": "Model downloaded successfully",
-                        "file": "",
-                        "progress": 100.0,
-                    }
-                )
-                return
-            logger.warning("[sensevoice] modelscope download incomplete; falling back to HTTP")
-        except Exception as e:
-            logger.info("[sensevoice] modelscope SDK unavailable or failed (%s); using HTTP", e)
-
         total = len(files)
         for i, name in enumerate(files):
-            dest = os.path.join(root, name)
-            if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-                continue
-            url = f"{MODELSCOPE_BASE}/{name}"
-            _download_one(url, dest, i, total)
+            _download_file(root, name, i, total)
 
         if not model_ready(root):
             missing = [n for n in REQUIRED_FILES if not os.path.isfile(os.path.join(root, n))]
@@ -249,6 +299,44 @@ def _run_download() -> None:
             _download_thread = None
 
 
+def uninstall() -> dict[str, Any]:
+    """Delete the SenseVoice model files so the model is no longer ready.
+
+    Removes required/optional files from every candidate model directory
+    (workspace download target + legacy deploy paths) and clears any persisted
+    download status so the UI returns to the idle "not downloaded" state.
+
+    Read-only / locked files (e.g. inside a frozen ``_internal/`` bundle, or
+    held open by 360 安全卫士) are tolerated: we clear the read-only bit, then
+    if the OS still refuses we rename the file to ``<name>.dead_<rand>`` so
+    the model is at least no longer "ready" for the service.
+    """
+    removed_any = False
+    notes: list[str] = []
+    for directory in _candidate_model_dirs():
+        if not os.path.isdir(directory):
+            continue
+        for name in (*REQUIRED_FILES, *OPTIONAL_FILES):
+            p = os.path.join(directory, name)
+            removed, info = force_remove_file(p)
+            if removed:
+                removed_any = True
+                if info and info != "removed":
+                    notes.append(f"{name}: {info}")
+            elif info and info not in ("not present",):
+                notes.append(f"{name}: {info}")
+    force_remove_status_file(status_path())
+    msg = "Model uninstalled" if removed_any else "No model files to remove"
+    if notes:
+        msg = f"{msg} ({'; '.join(notes)})"
+    return {
+        **get_status(),
+        "uninstalled": removed_any,
+        "notes": notes,
+        "message": msg,
+    }
+
+
 def start_download(*, force: bool = False) -> dict[str, Any]:
     """Start background model download. Idempotent while a download is running."""
     global _download_thread
@@ -267,14 +355,12 @@ def start_download(*, force: bool = False) -> dict[str, Any]:
         if _download_thread and _download_thread.is_alive():
             return {**get_status(), "started": False, "message": "Download already in progress"}
         if force:
-            # Remove required files so re-download replaces them.
+            # Remove required files so re-download replaces them. Use the
+            # shared force-remove helper so read-only files in frozen
+            # _internal/ bundles don't block the reinstall.
             for name in REQUIRED_FILES:
                 p = os.path.join(model_dir(), name)
-                try:
-                    if os.path.isfile(p):
-                        os.remove(p)
-                except OSError:
-                    pass
+                force_remove_file(p)
         t = threading.Thread(target=_run_download, name="sensevoice-download", daemon=True)
         _download_thread = t
         t.start()

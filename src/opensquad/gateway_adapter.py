@@ -355,6 +355,27 @@ class GatewayAdapter(BaseAgent):
             await self._try_wake_agent("urgent-command")
             return
 
+        if command == "abandon_current_draft":
+            # Sidebar delete-on-current flow. Forces the Runner to mint a fresh
+            # sid (so the empty-draft reuse logic in start_new_session does not
+            # keep the same sid) and to drop the current shell so the follow-up
+            # delete_session call can clean it up. See SessionManager.abandon_current_draft.
+            try:
+                from opensquad.sub_agent_runner import job_manager
+
+                n = job_manager.cancel_all("abandon_current_draft")
+                if n:
+                    logger.info(f"[Adapter] cancelled {n} sub-agent job(s)/runner(s) on abandon_current_draft")
+            except Exception:
+                logger.debug(
+                    "[Adapter] sub-agent cancel_all on abandon_current_draft skipped",
+                    exc_info=True,
+                )
+            input_hub.push_urgent("__ABANDON_CURRENT_DRAFT__", source="gateway")
+            logger.info("[Adapter] Abandon-current-draft command sent via urgent queue")
+            await self._try_wake_agent("urgent-command")
+            return
+
         if command == "withdraw_turn":
             # Stop any in-flight turn, then truncate session from the user message timestamp.
             input_hub.request_stop()
@@ -766,6 +787,16 @@ class GatewayAdapter(BaseAgent):
                     )
             except Exception as e:
                 logger.error("[Adapter] Scheduled-task parallel session spawn failed: %s", e)
+
+        # Crosstalk guard: a scheduled-task fire MUST get its own dedicated
+        # parallel session. If session creation failed above, abort the fire
+        # instead of letting resolve_session_id fall back to the focused/latest
+        # session — that would cross-wire the task's output into the user's
+        # active chat ("串线"). The gateway ties the execution status to the
+        # spawn watchdog, so this fire is marked failed and can be retried.
+        if is_scheduled and not session_id:
+            logger.error("[Adapter] Scheduled-task fire aborted (no dedicated session) exec=%s", user_id)
+            return
 
         # Route via IngressPolicy: external → primary; web keeps/falls back focused
         try:

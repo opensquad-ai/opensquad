@@ -454,7 +454,7 @@ class SubAgentRunner:
         _model = self.chat_api_cfg.get("model") or self.chat_api_cfg.get("model_name") or ""
         fake_config = {
             "model": {
-                "tool_call_mode": self.chat_api_cfg.get("tool_call_mode", "auto"),
+                "tool_call_mode": self.chat_api_cfg.get("tool_call_mode", "native"),
                 "tool_filter": self.chat_api_cfg.get("tool_filter", "all"),
                 "api_protocol": _proto,
                 "model_name": _model,

@@ -75,6 +75,30 @@ def init(runner, config_path: str = "") -> None:
         )
 
 
+def expand_secret_value(value: str) -> str:
+    """Expand ``${ENV_VAR}`` / ``${ENV_VAR:-default}`` placeholders in a secret.
+
+    Model cards may reference credentials via environment variables instead of
+    embedding raw keys (SEC-1).  A raw key is returned unchanged so existing
+    deployments keep working; a placeholder with no matching env var yields an
+    empty string (callers log a clear "not configured" error).
+    """
+    if not value or "${" not in value:
+        return value
+
+    def _repl(match: "re.Match[str]") -> str:
+        name = match.group(1)
+        default = match.group(2)
+        env_val = os.environ.get(name)
+        if env_val:
+            return env_val
+        return default if default is not None else ""
+
+    import re
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}", _repl, value)
+
+
 def _resolve_card(card_name: str) -> dict:
     """Load a model card JSON from the workspace ``model_cards/`` directory.
 
@@ -103,6 +127,9 @@ def _resolve_card(card_name: str) -> dict:
         cfg = json.load(f)
     if not cfg.get("model_name"):
         raise ValueError(f"model card {safe!r} has no model_name")
+    # SEC-1: expand ${ENV_VAR} placeholders so model cards never need to embed raw keys.
+    if cfg.get("api_key"):
+        cfg["api_key"] = expand_secret_value(str(cfg["api_key"]))
     cfg["_card"] = safe
     return cfg
 

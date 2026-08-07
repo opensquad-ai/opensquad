@@ -4568,6 +4568,33 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       });
     });
 
+    // Error frame → release busy state immediately. Backend has just emitted
+    // (or is about to emit) the final "error" frame and busy_sessions snapshot
+    // for the failing turn, but the snapshot can lag by seconds when the LLM
+    // call itself was the hang. We must not leave the composer stuck in
+    // "executing" while we wait for the scheduler reap loop.
+    const unsubError = aiWsService.on('error', (msg: AIWSMessage) => {
+      const data: any = (msg as any).content || (msg as any).data || msg;
+      const errSid = String(
+        (msg as any).sid
+        || (data && typeof data === 'object' ? (data.session_id || data.sid) : '')
+        || agentCurrentSessionIdRef.current
+        || currentSessionIdRef.current
+        || ''
+      ).trim();
+      const message = typeof data === 'string'
+        ? data
+        : String(data?.message || data?.error || data?.detail || '');
+      if (message) {
+        console.warn('[AIChatPage] ws error frame sid=%s message=%s', errSid || '-', message.slice(0, 200));
+      }
+      if (errSid) {
+        clearSessionRunState(errSid);
+      } else {
+        clearSessionRunState();
+      }
+    });
+
     const unsubPrimarySession = aiWsService.on('primary_session', (msg: AIWSMessage) => {
       const data: any = (msg as any).content || (msg as any).data || msg;
       const sid = String(data?.primary_session_id || '').trim();
@@ -4750,6 +4777,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       unsubCurrentSession();
       unsubSessionList();
       unsubBusySessions();
+      unsubError();
       unsubPrimarySession();
       unsubHistorySync();
       unsubFilePush();
@@ -6498,7 +6526,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     await loadSessionTimelineFast(sessionId);
   };
 
-  /** Delete a session; if it is the agent-current, rotate via new_session first so it becomes a history file. */
+  /** Delete a session; if it is the agent-current, rotate via abandon_current_draft first so it becomes a history file (or is dropped for an empty draft). */
   const handleDeleteSession = async (sessionId: string) => {
     const isAgentCurrent = sessionId === agentCurrentSessionIdRef.current;
 
@@ -6507,7 +6535,11 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         const started = Date.now();
         const seq = ++newSessionFallbackSeqRef.current;
         newSessionPendingRef.current = true;
-        wsServiceRef.current?.newSession();
+        // Use abandonCurrent rather than newSession: newSession reuses an empty
+        // draft (sid never changes), so waitForRotation would time out for the
+        // exact case the user reported ("无法放弃当前会话，删除失败"). abandonCurrent
+        // always mints a fresh sid for both empty and non-empty current.
+        wsServiceRef.current?.abandonCurrent();
         const tick = window.setInterval(async () => {
           if (seq !== newSessionFallbackSeqRef.current) {
             window.clearInterval(tick);
@@ -8290,6 +8322,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       <div className="flex-1 flex flex-col h-full min-w-0">
         {/* Messages Area */}
         <div className="flex-1 relative min-h-0" style={{ minHeight: 0 }}>
+        {/* Session loading overlay — panel-level (outside the scroll container)
+            so it never overlaps/overlays timeline messages while loading a
+            legacy full-pane history. z-40 > jump rail (z-30) and messages. */}
+        {isLoadingSession && (
+          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-panel/95 backdrop-blur-[1px] text-textMuted pointer-events-none">
+            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
+            <p className="text-sm">{sessionLoadingLabel}</p>
+          </div>
+        )}
         {/* User-turn jump rail on panel far-right (outside padded scroll / max-w column) */}
         {soloUserNavNodes.length > 0 && (
           <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-center justify-end pr-1 overflow-visible">
@@ -8332,14 +8373,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
         <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
           <div className={soloColumnClass}>
-          {/* Session loading overlay — only for legacy full-pane history loads */}
-          {isLoadingSession && (
-            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-panel/70 backdrop-blur-[1px] text-textMuted pointer-events-none">
-              <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
-              <p className="text-sm">{sessionLoadingLabel}</p>
-            </div>
-          )}
-
           {/* Render timeline entries (messages + workflow blocks interleaved) */}
           {/* Lazy loading indicator at top */}
           {isLoadingMore && (

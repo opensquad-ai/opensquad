@@ -547,8 +547,14 @@ class TestAgentSessionReader:
         assert not hist_path.exists()
 
     def test_delete_non_existent_session(self, local_reader):
-        """Returns False for a session that does not exist."""
-        assert local_reader.delete_session("no-such") is False
+        """Returns True (idempotent success) for a session that does not exist.
+
+        The sidebar delete-on-current flow uses ``abandon_current_draft`` to
+        drop empty drafts in place; the subsequent ``delete_session`` call
+        then sees a sid that has no history snapshot. Treating that as a
+        successful no-op keeps the front-end rotation poll simple.
+        """
+        assert local_reader.delete_session("no-such") is True
 
     # ── LRU cache ─────────────────────────────────────────────────────
 
@@ -746,8 +752,8 @@ class TestAgentSessionReader:
 
     @pytest.mark.asyncio
     async def test_async_delete_session(self, local_reader):
-        """Async wrapper for delete."""
-        assert await local_reader.async_delete_session("no-such") is False
+        """Async wrapper for delete — idempotent (matches sync delete_session)."""
+        assert await local_reader.async_delete_session("no-such") is True
 
 
 # =====================================================================

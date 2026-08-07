@@ -557,6 +557,7 @@ def run_start(args):
     # (feishu.enabled, external_api.enabled) are invisible to services.
     syscfg.set_workspace(workspace)
     os.environ["OPENSQUAD_WORKSPACE"] = workspace
+    os.environ["OPENSQUAD_USER_DATA"] = workspace
     # Also set PYTHONPATH for subprocesses
     python_path = os.path.join(_root, "src")
     if "PYTHONPATH" in os.environ:

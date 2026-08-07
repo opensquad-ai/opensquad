@@ -235,7 +235,7 @@ class SelfLearnPlugin(Plugin):
                 return result
             except Exception as e:
                 # TimeoutError often has an empty str(); name it explicitly.
-                if isinstance(e, (TimeoutError, concurrent.futures.TimeoutError, asyncio.TimeoutError)):
+                if isinstance(e, TimeoutError | concurrent.futures.TimeoutError | asyncio.TimeoutError):
                     last_err = f"TimeoutError ({self._LOOP_CALL_TIMEOUT_S}s waiting for agent loop)"
                 else:
                     last_err = str(e) or type(e).__name__

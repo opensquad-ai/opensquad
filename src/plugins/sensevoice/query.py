@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from plugins.sensevoice.model_store import get_status, start_download
+from plugins.sensevoice.model_store import get_status, start_download, uninstall
 
 logger = logging.getLogger("plugins.sensevoice.query")
 
@@ -43,6 +43,10 @@ def handle_action(project_root: str, action: str, data: dict | None = None) -> d
     if action in ("download_model", "download"):
         force = bool(data.get("force", False))
         result = start_download(force=force)
+        return {"ok": True, "action": action, **result}
+
+    if action in ("uninstall_model", "uninstall"):
+        result = uninstall()
         return {"ok": True, "action": action, **result}
 
     if action in ("status", "refresh_status", "refresh"):

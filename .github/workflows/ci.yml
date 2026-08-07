@@ -91,6 +91,8 @@ jobs:
 
         - name: Install uv
           uses: astral-sh/setup-uv@v4
+          with:
+            enable-cache: true
 
         - name: Set up Python ${{ matrix.python-version }}
           uses: actions/setup-python@v5
@@ -119,6 +121,8 @@ jobs:
 
         - name: Install uv
           uses: astral-sh/setup-uv@v4
+          with:
+            enable-cache: true
 
         - name: Set up Python ${{ matrix.python-version }}
           uses: actions/setup-python@v5
@@ -135,7 +139,10 @@ jobs:
           continue-on-error: true
           env:
             PYTHONPATH: src
-          run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html
+          # CI-5/CI-3: coverage gate now enforced explicitly here (the global
+          # addopts was removed so local pytest stays fast). fail_under=80 is
+          # read from [tool.coverage.report] in pyproject.toml.
+          run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html --cov-fail-under=80
 
         - name: Upload coverage report
           if: matrix.python-version == '3.11'
@@ -180,6 +187,8 @@ jobs:
 
         - name: Install uv
           uses: astral-sh/setup-uv@v4
+          with:
+            enable-cache: true
 
         - name: Set up Python 3.11
           uses: actions/setup-python@v5
@@ -245,6 +254,8 @@ jobs:
 
         - name: Install uv
           uses: astral-sh/setup-uv@v4
+          with:
+            enable-cache: true
 
         - name: Set up Python 3.11
           uses: actions/setup-python@v5

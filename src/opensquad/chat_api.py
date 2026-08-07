@@ -48,6 +48,11 @@ def _get_async_openai():
     return _async_openai_client
 
 
+# PERF-11: shared client for downloading generated-image URLs (reused across
+# calls instead of opening a fresh connection per image).
+_image_download_client = None
+
+
 def _make_llm_http_client(timeout: float):
     """Build an httpx.AsyncClient that ignores system proxy env vars.
 
@@ -257,14 +262,37 @@ class ChatAPI:
             max_retries=0,
         )
 
-    def _ensure_client(self):
+    def _is_client_closed(self) -> bool:
+        """True when the lazily-built client can no longer send requests.
+
+        The AsyncOpenAI client wraps an ``httpx.AsyncClient`` that owns the
+        connection pool. ``reload_model`` / ``update_model`` close the *old*
+        pool asynchronously (``_close_old``), and session clones share the
+        same client via ``_clone_chat_api``. If that shared pool is closed
+        while ``self.client`` still references it, the next LLM streaming call
+        fails with ``APIConnectionError: Cannot send a request, as the client
+        has been closed`` — which is what silently aborts a turn right after a
+        tool call. Detect the closed underlying httpx client so ``_ensure_client``
+        can rebuild it.
+        """
         if self.client is None:
+            return False
+        try:
+            inner = getattr(self.client, "client", None)
+            if inner is not None and getattr(inner, "is_closed", False):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _ensure_client(self):
+        if self.client is None or self._is_client_closed():
             lock = getattr(self, "_client_lock", None)
             if lock is None:
                 self.client = self._build_client()
             else:
                 with lock:
-                    if self.client is None:
+                    if self.client is None or self._is_client_closed():
                         self.client = self._build_client()
         return self.client
 
@@ -608,12 +636,18 @@ class ChatAPI:
                 self._cached_token_count = None
         self._trim_history_if_needed()
 
-    def add_assistant_message(self, content: str, reasoning_content: str | None = None):
-        """Add assistant message and sync reasoning_content to session for persistence."""
+    def add_assistant_message(self, content: str, reasoning_content: str | None = None, *, force_record: bool = False):
+        """Add assistant message and sync reasoning_content to session for persistence.
+
+        ``force_record=True`` records the message even when both content and
+        reasoning are empty — required for native-FC turns that carry only
+        ``tool_calls`` (the tool-call anchor must exist for the API to accept
+        the following ``role=tool`` continuation).
+        """
         msg = {"role": "assistant", "content": content}
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
-        if content or reasoning_content:
+        if content or reasoning_content or force_record:
             self.req.append(msg)
             # Incremental token count update
             if self._cached_token_count is not None:
@@ -889,7 +923,25 @@ class ChatAPI:
         # be compacted at 128k just because that is the common card default.
         threshold_tokens = int(self.token_max * threshold)
 
-        if current_tokens <= threshold_tokens:
+        # PERF-3 (400-token hard guard): the local tiktoken/cl100k estimate
+        # systematically undercounts (~2.6-3x) versus the provider's real
+        # accounting (DeepSeek uses ~1.35 chars/token; relay wrappers inflate
+        # further).  If the *scaled* estimate would exceed a high watermark
+        # (85% of max), force compression so the request never hits a 400.
+        # This is a safety net on top of the normal threshold-based path.
+        _scaled_estimate = current_tokens * 3
+        _hard_watermark = int(self.token_max * 0.85)
+        if _scaled_estimate > _hard_watermark and current_tokens <= threshold_tokens:
+            logger.warning(
+                "[CompressTrace] HARD GUARD triggered: local estimate %d tokens, scaled x3 = %d > 85%% of max %d. "
+                "Forcing compression to avoid 400.",
+                current_tokens,
+                _scaled_estimate,
+                self.token_max,
+            )
+            self._emit_with_sid("status", "Context near limit, compacting (hard guard)...")
+
+        if current_tokens <= threshold_tokens and _scaled_estimate <= _hard_watermark:
             logger.info("[CompressTrace] below threshold, no compression needed")
             return self.req
 
@@ -1664,14 +1716,18 @@ class ChatAPI:
                 try:
                     import httpx
 
-                    async with httpx.AsyncClient(timeout=60.0) as http:
-                        resp = await http.get(url)
-                        resp.raise_for_status()
-                        ctype = resp.headers.get("content-type", "image/png").split(";")[0].strip()
-                        saved = await self._save_generated_image_bytes(resp.content, ctype or "image/png")
-                        if saved:
-                            output_media.append(saved)
-                            continue
+                    # PERF-11: reuse a module-level client instead of opening a
+                    # fresh connection per image download.
+                    global _image_download_client
+                    if _image_download_client is None or _image_download_client.is_closed:
+                        _image_download_client = httpx.AsyncClient(timeout=60.0)
+                    resp = await _image_download_client.get(url)
+                    resp.raise_for_status()
+                    ctype = resp.headers.get("content-type", "image/png").split(";")[0].strip()
+                    saved = await self._save_generated_image_bytes(resp.content, ctype or "image/png")
+                    if saved:
+                        output_media.append(saved)
+                        continue
                 except Exception as e:
                     logger.warning(f"[ChatAPI] Failed to download image url, falling back to remote url: {e}")
                 output_media.append({"type": "image", "url": url, "mime": "image/png"})
@@ -2299,7 +2355,15 @@ class ChatAPI:
             self.total_input_tokens += self._count_tokens(messages, self._last_tools)
             self.total_output_tokens += len(self.encoding.encode(res_text)) if res_text else 0
 
-        self.add_assistant_message(api_content, reasoning_content=api_reasoning)
+        self.add_assistant_message(
+            api_content,
+            reasoning_content=api_reasoning,
+            # Bugfix: a native-FC turn may return ONLY tool_calls with empty
+            # content. The assistant message MUST still be recorded (req +
+            # session) so the tool-result continuation has a valid anchor and
+            # the UI workflow does not show a dangling tool step after refresh.
+            force_record=bool(parsed_tool_data) or finish_reason == "tool_calls",
+        )
 
         # CRITICAL FIX: Remove the premature tool_calls injection into self.req.
         # The fix previously added tool_calls to self.req BEFORE the runner called

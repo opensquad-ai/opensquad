@@ -43,17 +43,25 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=opensquad
 
-# ── Security hardening (optional) ────────────────────────────────────
+# ── Security hardening ────────────────────────────────────────────
 NoNewPrivileges=yes
 PrivateTmp=yes
-# ProtectSystem=strict  # uncomment after verifying all paths
-# ProtectHome=yes       # uncomment if workspace is outside /home
-# ReadWritePaths=/var/lib/opensquad  # uncomment with ProtectSystem=strict
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+PrivateDevices=yes
+# ReadWritePaths must cover the workspace/data dirs with ProtectSystem=full.
+ReadWritePaths=/var/lib/opensquad /opt/opensquad
 
-# ── Resource limits (optional, uncomment and adjust) ─────────────────
-# MemoryHigh=2G
-# MemoryMax=4G
-# CPUQuota=200%
+# ── Resource limits ───────────────────────────────────────────────
+MemoryHigh=4G
+MemoryMax=8G
+CPUQuota=300%
 
 [Install]
 WantedBy=multi-user.target

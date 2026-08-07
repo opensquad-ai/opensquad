@@ -874,7 +874,7 @@ def create_management_handler(
                     "api_key": "",
                     "base_url": "",
                     "model_name": "",
-                    "tool_call_mode": "auto",
+                    "tool_call_mode": "native",
                     "tool_filter": "high",
                 },
                 "tools": [

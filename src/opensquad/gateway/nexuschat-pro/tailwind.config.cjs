@@ -36,6 +36,9 @@ module.exports = {
       colors: {
         primary: 'var(--color-primary)',
         bgLight: 'var(--color-bg)',
+        /** One step darker than the page background — used for tooltips,
+         *  progress-bar tracks, badges and embedded panels. */
+        bgDark: 'color-mix(in srgb, var(--color-text-main) 6%, var(--color-bg))',
         bgPage: 'var(--color-bg)',
         /** Side rails: session list + workspace files (deeper) */
         rail: 'var(--color-rail)',

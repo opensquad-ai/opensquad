@@ -298,6 +298,11 @@ class AgentRunner:
         self._current_tools = None
         self._current_tool_choice = "auto"
 
+        # Set by _handle_turn_result when a tool executed this turn (tool-loop
+        # continuation signal for _parallel_session_turn). See the fix at the
+        # `if not current_input and not _tool_ran_this_turn` guard.
+        self._tool_result_generated = False
+
         # Repeated-action guard state: sid -> {"count", "last", "guarded"}
         # Breaks runaway identical tool loops (see turn-loop guard below).
         self._tool_repeat_state: dict[str, dict] = {}
@@ -817,6 +822,35 @@ class AgentRunner:
         except Exception:
             pass
 
+    async def _release_busy_state(self, sid: str, reason: str = "") -> None:
+        """Proactively drop a session from the parallel-scheduler busy set
+        and broadcast the updated busy_sessions snapshot.
+
+        Used by early-exit error paths (LLM API failure, plugin errors, etc.)
+        so the front-end composer releases "executing" the moment the error
+        frame is delivered, instead of waiting for the parallel-turn finally
+        block to run (which can lag by tens of seconds when the LLM call
+        itself was what hung).
+        """
+        sched = getattr(self, "_parallel_scheduler", None)
+        if not sched:
+            return
+        try:
+            sched.finish(sid)
+        except Exception as e:
+            logger.debug("[Runner] _release_busy_state finish(sid=%s) raised: %s", sid, e)
+        try:
+            await self._emit_busy_sessions(sched.busy_sessions)
+            if reason:
+                logger.info(
+                    "[Runner] released busy sid=%s reason=%s remaining=%s",
+                    sid,
+                    reason,
+                    sorted(sched.busy_sessions),
+                )
+        except Exception as e:
+            logger.debug("[Runner] _release_busy_state emit failed sid=%s: %s", sid, e)
+
     async def _dispatcher_idle_tick(self) -> None:
         """Periodic idle work while waiting for parallel-session input."""
         if self._plugin_manager and self._plugin_manager.check_reload_needed():
@@ -941,6 +975,94 @@ class AgentRunner:
                 except Exception:
                     logger.warning(
                         "[Runner] Failed to requeue drained chat after new session",
+                        exc_info=True,
+                    )
+            if replay_user:
+                logger.info(
+                    "[Runner] Requeued %d user message(s) onto new sid=%s",
+                    len(replay_user),
+                    new_sid,
+                )
+            return
+        if content == "__ABANDON_CURRENT_DRAFT__":
+            # Sidebar delete-on-current: the user clicked the trash icon on the
+            # agent's currently-focused session. Unlike __NEW_SESSION__ (which
+            # reuses an empty draft and therefore never changes the sid), this
+            # path always mints a fresh sid via SessionManager.abandon_current_draft
+            # so the frontend's waitForRotation poll can observe the change and
+            # proceed to delete the abandoned sid from history.
+            input_hub.clear_stop_request()
+            try:
+                for sid in list(getattr(input_hub, "_stop_sessions", set()) or set()):
+                    input_hub.clear_session_stop(sid)
+            except Exception:
+                pass
+            try:
+                from opensquad.goal_mode import clear_goal_memory
+
+                clear_goal_memory()
+            except Exception:
+                pass
+            self._reset_session_stats()
+            drained = input_hub.get_all_pending()
+            replay_user: list[dict] = []
+            for item in drained or []:
+                raw = str(item.get("content") or "")
+                if not raw or raw.startswith("__"):
+                    continue
+                replay_user.append(item)
+            if drained and not replay_user:
+                logger.info(
+                    "[Runner] Abandon-draft drained %d system/empty pending item(s)",
+                    len(drained),
+                )
+            old_sid, new_sid = _get_session_manager().abandon_current_draft()
+            try:
+                from opensquad.utils.path_utils import get_workspace_root
+                from opensquad.utils.session_changeset import clear_for_new_session
+
+                clear_for_new_session(get_workspace_root())
+            except Exception:
+                logger.debug("[Runner] session changeset clear skipped (abandon)", exc_info=True)
+            self._turn_sid = new_sid
+            self._load_history()
+            logger.info(
+                "[Runner] Current session abandoned (parallel): old=%s new=%s",
+                old_sid or "-",
+                new_sid or "-",
+            )
+            await self._emit("turn_start", 0)
+            await bus.emit_async("session_list", _get_session_manager().get_session_list())
+            await bus.emit_async(
+                "current_session",
+                {"id": new_sid, "title": "Current Session"},
+            )
+            try:
+                await self._broadcast_token_stats()
+            except Exception:
+                pass
+            await self._emit("info", "Current session abandoned")
+            now_ms = int(datetime.now().timestamp() * 1000)
+            await self._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
+            # Re-queue any real user messages onto the new session inbox.
+            for item in replay_user:
+                try:
+                    input_hub.push(
+                        content=str(item.get("content") or ""),
+                        source=item.get("source", "web"),
+                        images=item.get("images"),
+                        attachments=item.get("attachments"),
+                        channel=item.get("channel", ""),
+                        sender_name=item.get("sender_name", ""),
+                        chat_name=item.get("chat_name", ""),
+                        source_chat_id=item.get("source_chat_id", ""),
+                        user_id=item.get("user_id", ""),
+                        client_id=item.get("client_id", ""),
+                        session_id=new_sid,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[Runner] Failed to requeue drained chat after abandon",
                         exc_info=True,
                     )
             if replay_user:
@@ -1131,6 +1253,11 @@ class AgentRunner:
                 except Exception as e:
                     logger.error("[Runner] parallel chat() failed sid=%s: %s", sid, e)
                     await self._emit("error", {"message": str(e)[:300]})
+                    # Release busy state immediately so the front-end composer
+                    # drops "executing" without waiting for the turn finally
+                    # block (the LLM call may have been the hang and the
+                    # finally block can lag by tens of seconds).
+                    await self._release_busy_state(sid, reason=f"llm_error:{type(e).__name__}")
                     turn_failed = True
                     break
 
@@ -1171,7 +1298,22 @@ class AgentRunner:
                 if went_to_sleep or stop:
                     break
                 current_input = next_input or ""
-                if not current_input and not tool_data:
+
+                # P1-: Tool-loop continuation fix.
+                #
+                # When the model issues tools via DSML/XML (ark-code / Claude-style
+                # `<tool_call>` tags) rather than native function-calling, the
+                # streaming layer does NOT populate chat_api `tool_data` (it stays
+                # None). `_handle_turn_result` still parses the XML tool calls and
+                # executes them, then returns `(False, "", False)` — meaning "keep
+                # looping". The old guard below used `not tool_data` and therefore
+                # broke out of the loop right after the tool executed, skipping the
+                # follow-up LLM turn that must turn the tool result into a final
+                # reply. Replace the fragile `tool_data` check with a real
+                # "tool result was produced this turn" signal from the turn handler.
+                _tool_ran_this_turn = getattr(self, "_tool_result_generated", False)
+                self._tool_result_generated = False
+                if not current_input and not _tool_ran_this_turn:
                     break
 
             _wf_ended_ms = int(datetime.now().timestamp() * 1000)
@@ -1688,6 +1830,51 @@ class AgentRunner:
                     # Re-send turn_elapsed to close any workflow timer block that may exist in the frontend
                     _now_ms = int(datetime.now().timestamp() * 1000)
                     await self._emit("turn_elapsed", {"started_ms": _now_ms, "ended_ms": _now_ms})
+                    initial_query = None
+                    continue
+
+                if initial_query == "__ABANDON_CURRENT_DRAFT__":
+                    # Serial-mode mirror of the parallel handler above. Used by
+                    # the sidebar delete-on-current flow when the user has the
+                    # agent in legacy serial mode. The new sid is always
+                    # different from the old so the frontend's rotation poll
+                    # can detect the change.
+                    logger.info("[Runner] Command: Abandon current session (serial)")
+                    self._reset_session_stats()
+                    _drain_before = input_hub.get_all_pending()
+                    if _drain_before:
+                        self._pending_buffer.extend(
+                            [
+                                {
+                                    "content": _d["content"],
+                                    "source": _d.get("source", "web"),
+                                    "images": _d.get("images"),
+                                    "attachments": _d.get("attachments"),
+                                    "channel": _d.get("channel", ""),
+                                }
+                                for _d in _drain_before
+                            ]
+                        )
+                    _old_sid, _new_sid = _get_session_manager().abandon_current_draft()
+                    self._turn_sid = _new_sid
+                    self._load_history()  # Reload (now empty)
+                    try:
+                        from opensquad.goal_mode import clear_goal_memory, notify_goal_changed
+
+                        clear_goal_memory()
+                        await notify_goal_changed(None, text="Goal cleared (abandoned session)")
+                    except Exception:
+                        pass
+                    await self._emit("turn_start", 0)
+                    await bus.emit_async("session_list", _get_session_manager().get_session_list())
+                    await bus.emit_async(
+                        "current_session",
+                        {"id": _new_sid, "title": "Current Session"},
+                    )
+                    await self._broadcast_token_stats()
+                    await self._emit("info", "Current session abandoned")
+                    _now_ms2 = int(datetime.now().timestamp() * 1000)
+                    await self._emit("turn_elapsed", {"started_ms": _now_ms2, "ended_ms": _now_ms2})
                     initial_query = None
                     continue
 
@@ -3107,8 +3294,24 @@ class AgentRunner:
                                 f"[Runner] Message queue pushed to pipeline: {len(pending_msgs)} messages (flow through role=tool)"
                             )
 
-                        # Sleep before next poll
-                        await asyncio.sleep(_wait_poll_interval)
+                        # Sleep before next poll — PERF-7: instead of a pure
+                        # busy-poll sleep, wait on the input/message events with
+                        # a timeout equal to the old poll interval.  New input
+                        # wakes us immediately; idle behaves exactly as before.
+                        try:
+                            _events = [
+                                input_hub.get_input_event(),
+                                message_queue.get_message_event(),
+                            ]
+                            _done, _pending = await asyncio.wait(
+                                [asyncio.create_task(ev.wait()) for ev in _events],
+                                timeout=_wait_poll_interval,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for _t in _pending:
+                                _t.cancel()
+                        except Exception:
+                            await asyncio.sleep(_wait_poll_interval)
 
                     if task_finished:
                         break
@@ -3432,8 +3635,10 @@ class AgentRunner:
 
         # Pattern 3: Cross-turn repetition (detecting if model repeats exactly what it said last turn)
         current_clean = text.strip()
-        # Find the last assistant message in session history
-        history = _get_session_manager().get_messages()
+        # PERF-6: limit the history slice — we only compare against the most
+        # recent assistant message, so pulling the whole history (and deep
+        # copying it) is unnecessary on long-running sessions.
+        history = _get_session_manager().get_messages(limit=200)
         last_asst = None
         for msg in reversed(history):
             if msg.get("role") == "assistant":
@@ -3532,11 +3737,25 @@ class AgentRunner:
         res_str = AgentRunner._truncate_result_text(res_str, max_len)
         return f"[{now}] Tool '{name}' executed. Result: {res_str}"
 
+    # PERF-1: cache tool_output_max_chars with an mtime key so the hot path
+    # (every tool execution) stops re-reading + re-parsing the whole config.json.
+    _tool_output_max_cache: int | None = None
+    _tool_output_max_cache_mtime: float = 0.0
+
     def _get_tool_output_max_chars(self) -> int:
         """
         Read tool_output_max_chars from agent config.json.
         Returns 0 for no limit; defaults to 50000 chars if not configured.
         """
+        mtime = 0.0
+        if self._config_path and _os.path.isfile(self._config_path):
+            try:
+                mtime = _os.path.getmtime(self._config_path)
+            except OSError:
+                mtime = 0.0
+        if self._tool_output_max_cache is not None and mtime == self._tool_output_max_cache_mtime:
+            return self._tool_output_max_cache
+        value = 50000
         try:
             if self._config_path and _os.path.isfile(self._config_path):
                 with open(self._config_path, encoding="utf-8") as _f:
@@ -3545,11 +3764,14 @@ class AgentRunner:
                 if val is not None:
                     v = int(val)
                     if v < 0:
-                        return 0  # negative also means no limit
-                    return v
+                        value = 0  # negative also means no limit
+                    else:
+                        value = v
         except Exception:
             pass
-        return 50000
+        self._tool_output_max_cache = value
+        self._tool_output_max_cache_mtime = mtime
+        return value
 
     def _prepare_task(self, query: str) -> tuple[str, str]:
         task_id, cleaned = extract_and_remove_first_tag(query[:30])
@@ -3930,7 +4152,10 @@ class AgentRunner:
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
             encoding = getattr(chat_api, "encoding", None)
-            stats = compute_token_breakdown(
+            # PERF-5: token re-encoding (tiktoken, 200-800ms on long sessions)
+            # must not block the event loop — offload to a worker thread.
+            stats = await asyncio.to_thread(
+                compute_token_breakdown,
                 req,
                 tools,
                 encoding=encoding,

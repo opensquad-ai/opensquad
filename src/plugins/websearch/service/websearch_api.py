@@ -222,31 +222,99 @@ def resolve_browser_profile_dir() -> str:
     return path
 
 
-def _launch_kwargs(headless: bool) -> dict:
-    chrome_path = os.environ.get("OPENSQUAD_CHROME_PATH", "").strip()
-    launch_kwargs: dict = {"headless": headless}
-    if chrome_path:
-        launch_kwargs["executable_path"] = chrome_path
+# ── Browser selection ─────────────────────────────────────────────────
+# Which browser engine + channel drives Bing. Persisted cookies
+# (``context.storage_state()``) work for every option below, so the fast
+# http-direct path (``bing_http``) keeps working regardless of the browser.
+BROWSER_OPTIONS: dict[str, dict[str, str | None]] = {
+    "chrome": {"engine": "chromium", "channel": "chrome", "label": "Chrome"},
+    "msedge": {"engine": "chromium", "channel": "msedge", "label": "Microsoft Edge"},
+    "chromium": {"engine": "chromium", "channel": None, "label": "Bundled Chromium"},
+    "firefox": {"engine": "firefox", "channel": "firefox", "label": "Firefox"},
+}
+
+
+def _read_browser_config_file() -> str:
+    """Read the persisted browser choice from the plugin config.json.
+
+    Mirrors whisper's ``_read_selected_model``: the service and the launcher
+    share the plugin data dir, so a browser picked in the UI is honored on the
+    next service start.
+    """
+    try:
+        from plugins._service_runtime import workspace_data_dir
+    except ImportError:
+        try:
+            from _service_runtime import workspace_data_dir
+        except ImportError:
+            workspace_data_dir = None  # type: ignore[assignment]
+    if workspace_data_dir is not None:
+        cfg_path = os.path.join(workspace_data_dir("plugins", "websearch"), "config.json")
     else:
-        launch_kwargs["channel"] = "chrome"
+        cfg_path = os.path.join(os.path.expanduser("~"), ".opensquad", "websearch", "config.json")
+    try:
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+            return str(cfg.get("browser", "")).strip().lower()
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def resolve_browser() -> dict[str, str | None]:
+    """Resolve which browser to drive.
+
+    Priority: ``OPENSQUAD_CHROME_PATH`` (custom path) > ``WEBSEARCH_BROWSER``
+    env > persisted config.json > default (system Chrome). Returns a spec with
+    ``key``, ``engine`` (chromium|firefox), ``channel``, ``executable_path``
+    and ``label``.
+    """
+    custom = os.environ.get("OPENSQUAD_CHROME_PATH", "").strip()
+    if custom:
+        return {
+            "key": "custom",
+            "engine": "chromium",
+            "channel": None,
+            "executable_path": custom,
+            "label": os.path.basename(custom),
+        }
+    key = os.environ.get("WEBSEARCH_BROWSER", "").strip().lower() or _read_browser_config_file() or "chrome"
+    if key in BROWSER_OPTIONS:
+        return {**BROWSER_OPTIONS[key], "key": key, "executable_path": ""}
+    # Unknown value → treat it as a path to a Chromium-family executable.
+    return {
+        "key": "custom",
+        "engine": "chromium",
+        "channel": None,
+        "executable_path": key,
+        "label": os.path.basename(key),
+    }
+
+
+def _launch_kwargs(headless: bool) -> dict:
+    spec = resolve_browser()
+    launch_kwargs: dict = {"headless": headless}
+    if spec.get("executable_path"):
+        launch_kwargs["executable_path"] = spec["executable_path"]
+    elif spec.get("channel"):
+        launch_kwargs["channel"] = spec["channel"]
     return launch_kwargs
 
 
-async def _launch_chromium(playwright, launch_kwargs: dict):
-    try:
-        return await playwright.chromium.launch(**launch_kwargs)
-    except Exception as chrome_exc:
-        if "channel" in launch_kwargs:
-            print(f"[WebSearch] Chrome channel unavailable ({chrome_exc}); falling back to bundled Chromium")
-            launch_kwargs = dict(launch_kwargs)
-            launch_kwargs.pop("channel", None)
-            return await playwright.chromium.launch(**launch_kwargs)
-        raise
+def _browser_launcher(playwright, engine: str):
+    """Return the Playwright browser-type object for the chosen engine."""
+    return playwright.chromium if engine == "chromium" else playwright.firefox
 
 
 async def _launch_persistent_context(playwright, headless: bool) -> BrowserContext:
-    """Launch Chrome/Chromium with an on-disk profile (cookies survive restarts)."""
+    """Launch the chosen browser with an on-disk profile (cookies survive restarts).
+
+    Any Chromium/Firefox system channel that is unavailable falls back to the
+    bundled binary of the same engine, so a missing Chrome never hard-fails.
+    """
     profile_dir = resolve_browser_profile_dir()
+    spec = resolve_browser()
     launch_kwargs = _launch_kwargs(headless)
     geo = _parse_geolocation()
     context_kwargs: dict = {
@@ -262,19 +330,20 @@ async def _launch_persistent_context(playwright, headless: bool) -> BrowserConte
         context_kwargs["geolocation"] = geo
         context_kwargs["permissions"] = ["geolocation"]
 
+    launcher = _browser_launcher(playwright, spec["engine"])
     try:
-        ctx = await playwright.chromium.launch_persistent_context(profile_dir, **context_kwargs)
+        ctx = await launcher.launch_persistent_context(profile_dir, **context_kwargs)
     except Exception as chrome_exc:
         if "channel" in context_kwargs:
             print(
-                f"[WebSearch] Persistent Chrome channel unavailable ({chrome_exc}); "
-                "falling back to bundled Chromium profile"
+                f"[WebSearch] Persistent {spec['engine']} channel ({spec.get('channel')}) "
+                f"unavailable ({chrome_exc}); falling back to bundled {spec['engine']}"
             )
             context_kwargs.pop("channel", None)
-            ctx = await playwright.chromium.launch_persistent_context(profile_dir, **context_kwargs)
+            ctx = await launcher.launch_persistent_context(profile_dir, **context_kwargs)
         else:
             raise
-    print(f"[WebSearch] Persistent browser profile: {profile_dir}")
+    print(f"[WebSearch] Persistent browser profile: {profile_dir} (engine={spec['engine']})")
     return ctx
 
 
@@ -286,16 +355,18 @@ async def _get_browser(headless: bool = True):
             return _browser
         if _playwright is None:
             _playwright = await async_playwright().start()
+        spec = resolve_browser()
+        launcher = _browser_launcher(_playwright, spec["engine"])
         try:
-            _browser = await _launch_chromium(_playwright, _launch_kwargs(headless))
+            _browser = await launcher.launch(**_launch_kwargs(headless))
         except Exception as e:
             if "Executable doesn't exist" in str(e):
                 print(
-                    "[WebSearch] Chromium binary not found. "
-                    "Fix: run `python -m playwright install chromium` to download it."
+                    f"[WebSearch] {spec['engine']} binary not found. "
+                    f"Fix: run `python -m playwright install {spec['engine']}` to download it."
                 )
                 raise
-            _browser = await _playwright.chromium.launch(headless=headless)
+            _browser = await launcher.launch(headless=headless)
         print("[WebSearch] Browser launched (singleton)")
         return _browser
 
@@ -398,10 +469,12 @@ async def run_login_setup() -> None:
     await shutdown_browser()
     os.environ["WEBSEARCH_HEADLESS"] = "0"
     os.environ.setdefault("WEBSEARCH_PERSIST_PROFILE", "1")
+    spec = resolve_browser()
     profile = resolve_browser_profile_dir()
+    browser_label = spec.get("label") or spec.get("key") or "Chrome"
     print("[WebSearch] Login setup")
     print(f"[WebSearch] Profile dir: {profile}")
-    print("[WebSearch] Opening headed Chrome → https://cn.bing.com/ …")
+    print(f"[WebSearch] Opening headed {browser_label} → https://cn.bing.com/ …")
     print("[WebSearch] Log into Bing / Microsoft Account in that window if needed.")
     print("[WebSearch] Then return here and press Enter to save cookies and exit.")
 

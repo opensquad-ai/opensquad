@@ -211,6 +211,22 @@ scripts/check_completion.py
 scripts/test_new_session_ws.py
 scripts/manual_tests/
 
+# ── Local daily reports / personal scratch documents (not source) ──
+daily_reports/
+*.excalidraw
+/a\股*报告*.md
+/docs/*_test_report_*.md
+/新建文档.md
+
+# ── One-off debug / repair / test-automation scripts (contain local creds) ──
+scripts/fix_workspace_target.py
+scripts/fix_desktop_workspace_target.py
+scripts/list_agents_quick.py
+scripts/test_full_chat_e2e.py
+scripts/test_multi_turn_ws.py
+# pnpm lock accidentally generated alongside the tracked npm lockfile
+src/plugins/task_watch/ui/pnpm-lock.yaml
+
 # ── Root-level local dev / debug artifacts (open-source hygiene) ──
 /_old_*.py
 # Screenshots & UI captures (tracked assets live under src/ or doc_*/)
@@ -267,3 +283,26 @@ src/plugins/*/ui/package-lock.json
 .zcode/
 _ws_run.log.err
 src/plugins/websearch/service/reranker/models/
+
+# ── Local optimization audit docs (generated reports, not source) ──
+优化doc/
+
+# ── WorkBuddy local agent state / memory (per-instance, not source) ──
+.workbuddy/
+
+# HYG-2: mypy cache dir
+.mypy_cache/
+
+# ── Local authored skills (source of skill dirs, published copies live in build/) ──
+# Keep authored skill sources out of the tracked tree; published skill content
+# is generated under build/backend-*/run/_internal/skills/ (already ignored by build/).
+/docs/方案讨论最终轮/skill/
+docs/方案讨论*/skill/
+
+# ── Local private report / proposal docs (per-instance analysis, not source) ──
+# Optimization reports, plan-discussion rounds, fix-plan drafts and execution
+# summaries are generated locally for review and are NOT part of the source tree.
+docs/report_*.md
+docs/方案讨论*/
+docs/优化修复方案_*.md
+plan_fix_*.md

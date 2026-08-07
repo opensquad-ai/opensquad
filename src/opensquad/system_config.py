@@ -167,12 +167,14 @@ def init_workspace(workspace_path: str, copy_config: bool = True):
 
 
 def is_service_enabled(plugin_name: str) -> bool:
-    """Check if a plugin service is enabled via services.{plugin_name}.enabled in system_config.json."""
-    try:
-        cfg = raw()
-        return cfg.get("services", {}).get(plugin_name, {}).get("enabled", True)
-    except Exception:
-        return False  # disable only if cache is unavailable (safety)
+    """Check if a plugin service is enabled via services.{plugin_name}.enabled in system_config.json.
+
+    Q-2: single source of truth — delegate to ``_syscfg._config`` so the four
+    near-duplicate implementations cannot drift again.
+    """
+    from opensquad._syscfg._config import is_service_enabled as _impl
+
+    return _impl(plugin_name)
 
 
 # ---------------------------------------------------------------------------

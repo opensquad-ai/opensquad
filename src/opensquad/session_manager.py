@@ -1094,6 +1094,73 @@ class SessionManager:
         with self._lock:
             self._archive_snapshot(self.session_data)
 
+    def abandon_current_draft(self) -> tuple[str | None, str | None]:
+        """Abandon the current session for delete-from-sidebar flow.
+
+        Unlike :meth:`start_new_session` (which always reuses an empty draft and
+        therefore keeps the same sid), this method is designed for the case
+        where the user has just clicked the delete (trash) icon on the agent's
+        current session in the sidebar.  It always mints a fresh sid so the
+        frontend's rotation poll observes a change, then it returns the
+        *old* sid so the caller can clean it up.
+
+        Returns:
+            (old_sid, new_sid) — both populated when the abandon succeeded.
+            For a non-empty current, the old session is also archived to
+            history/ so the follow-up ``delete_session`` call removes the
+            snapshot.  For an empty draft, no history copy is written —
+            the file is dropped in place to keep the history dir free of
+            never-sent shells.  The caller must handle both cases
+            (idempotent delete on the backend already tolerates "missing
+            file" as a successful no-op).
+
+        Caller contract:
+            Must be invoked from the runner's urgent-queue handler so
+            ``_mutation_gen`` and the ``_live_sessions`` index stay
+            consistent with the disk write order below.
+        """
+        with self._lock:
+            self._drain_pending_mutations_sync()
+            self._mutation_gen += 1
+            old_sid = str(self.session_data.get("id") or "").strip() or None
+            old_data = copy.deepcopy(self.session_data) if old_sid else None
+            was_reusable_draft = bool(old_sid) and self._is_reusable_draft(old_data or {})
+
+            # 1. Write a brand-new empty draft to current_session.json FIRST,
+            #    so a crash mid-cleanup leaves a valid current on disk.
+            self._init_new_session()
+            self._register_live(self.session_data)
+            new_sid = self.session_data.get("id")
+
+            # 2. Tidy up the old sid AFTER the new draft is durable.
+            if old_sid and old_sid != new_sid:
+                if was_reusable_draft:
+                    # Never keep never-sent shells in history/ or the live index.
+                    self._live_sessions.pop(old_sid, None)
+                    try:
+                        self._cache_remove(old_sid)
+                    except Exception:
+                        pass
+                    history_path = os.path.join(self.history_dir, f"{old_sid}.json")
+                    log_path = self._log_path_for(old_sid)
+                    try:
+                        if os.path.isfile(history_path):
+                            os.remove(history_path)
+                        if os.path.isfile(log_path):
+                            os.remove(log_path)
+                    except Exception as e:
+                        logger.debug(
+                            "[SessionManager] Failed to drop empty draft %s on abandon: %s",
+                            old_sid,
+                            e,
+                        )
+                else:
+                    # Non-empty: archive the snapshot so the follow-up
+                    # delete_session call from the frontend can remove it.
+                    self._live_sessions[old_sid] = old_data or {"id": old_sid}
+                    self._archive_snapshot(old_data or {"id": old_sid})
+            return (old_sid, new_sid)
+
     def start_new_session(self) -> bool:
         """Start a new session (automatically archives the old one).
 

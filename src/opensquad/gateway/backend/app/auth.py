@@ -35,13 +35,27 @@ jwt_config = config.get("backend", {}).get("jwt", {})
 
 # JWT configuration
 SECRET_KEY = jwt_config.get("secret_key", "")
-if not SECRET_KEY:
+
+
+def _is_jwt_placeholder(value: str) -> bool:
+    """True when the configured JWT secret is an unrotated placeholder.
+
+    SEC-2: a non-empty 'CHANGE_ME' style placeholder was previously accepted
+    as a real secret, letting anyone forge gateway JWTs on non-Docker deploys.
+    """
+    if not value:
+        return True
+    lowered = value.lower()
+    return "change_me" in lowered or lowered.startswith("your_jwt")
+
+
+if not SECRET_KEY or _is_jwt_placeholder(SECRET_KEY):
     import secrets
 
     SECRET_KEY = secrets.token_hex(32)
     _log.warning(
-        "[AUTH] No JWT secret_key configured in system_config.json jwt.secret_key. "
-        "A random key has been generated and will be persisted to config. "
+        "[AUTH] No valid JWT secret_key configured in system_config.json jwt.secret_key "
+        "(empty or placeholder). A random key has been generated and persisted to config. "
     )
     # Persist the generated key so Gateway restarts don't invalidate tokens
     try:

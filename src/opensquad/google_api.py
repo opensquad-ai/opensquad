@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+from collections import OrderedDict
 
 try:
     import tiktoken
@@ -161,7 +162,7 @@ class GoogleAPI:
         # record the previous value and only accumulate the delta each time to avoid triangular inflation.
         self._last_prompt_token_count = 0
         # ── Per-message token cache (P3 perf optimization) ──
-        self._msg_token_cache: dict[int, int] = {}
+        self._msg_token_cache: dict[int, int] = OrderedDict()  # PERF-10: LRU eviction
         self._msg_token_cache_max_size = 5000
 
         if tiktoken:
@@ -515,6 +516,7 @@ class GoogleAPI:
         try:
             msg_key = hash(json.dumps(message, sort_keys=True, ensure_ascii=False))
             if msg_key in self._msg_token_cache:
+                self._msg_token_cache.move_to_end(msg_key)  # PERF-10: LRU touch
                 return self._msg_token_cache[msg_key]
         except (TypeError, ValueError):
             msg_key = None
@@ -552,8 +554,9 @@ class GoogleAPI:
         if msg_key is not None:
             self._msg_token_cache[msg_key] = num_tokens
             if len(self._msg_token_cache) > self._msg_token_cache_max_size:
-                keep = self._msg_token_cache_max_size * 2 // 3
-                self._msg_token_cache = dict(list(self._msg_token_cache.items())[-keep:])
+                # PERF-10: true LRU — pop least-recently-used while over budget.
+                while len(self._msg_token_cache) > self._msg_token_cache_max_size:
+                    self._msg_token_cache.popitem(last=False)
         return num_tokens
 
     # -- Context compression (aligned with ClaudeAPI) --

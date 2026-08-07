@@ -27,6 +27,12 @@
   4. `git commit` then `git push` (use the repo's current branch; never force-push unless the user explicitly asks).
   5. Reply briefly with the commit summary and push result. Do not ask for confirmation — the button click **is** the confirmation.
 
+- **No repeated apologies**: When results are unexpected or the user reports an issue, do **not** keep apologizing ("Sorry...", "Apologies for...", "My mistake..."). State the situation once, then either continue working or explain the next step. Apology loops waste tokens and erode trust.
+- **Time-box single task phase**: Don't over-spend on a single phase (e.g. reading 10+ files before any edit, or running endless retries). Practical limits:
+  - Reading context: after ~3-5 file reads, switch to action or ask the user to narrow scope.
+  - Retry loops: cap at 2 retries (see §2.23). If still failing, surface to user.
+  - When task is done, end the turn. Do NOT add filler like "Let me know if you need anything else."
+
 **Comparison Example**:
 
 Bad reply:

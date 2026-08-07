@@ -280,9 +280,7 @@ class PluginManager:
                 plugin_class = await _asyncio.to_thread(self._import_plugin_class, plugin_dir, entry)
                 if plugin_class is None:
                     continue
-                prepared = await _asyncio.to_thread(
-                    self._prepare_new_style, plugin_class, plugin_dir, entry
-                )
+                prepared = await _asyncio.to_thread(self._prepare_new_style, plugin_class, plugin_dir, entry)
                 if prepared is None:
                     continue
                 name = self._finalize_new_style(prepared)
@@ -554,7 +552,6 @@ class PluginManager:
             "agent_id": self.agent_id,
             "project_root": project_root,
         }
-
 
         # Split boundary: everything above runs off the event loop
         # (import/IO/scan); on_load + registration stay on the loop because

@@ -58,11 +58,9 @@ def _check_node_secret(received: str) -> bool:
     """
     Validate node_secret using a constant-time comparison.
 
-    - If Gateway has not configured auth.node_secret (empty string), the
-      comparison falls back to permitting the connection for local dev
-      convenience, but logs a prominent warning so production deployments
-      are not silently left open.
-    - If configured, use ``hmac.compare_digest`` to prevent timing side-channels.
+    SEC-12: an unset node_secret must NOT fall back to permitting the
+    connection.  Failing closed here ensures a misconfigured deployment
+    cannot silently run with authentication disabled.
     """
     from opensquad.system_config import syscfg
 
@@ -70,9 +68,9 @@ def _check_node_secret(received: str) -> bool:
     if not expected:
         logging.warning(
             "[WS] auth.node_secret is NOT configured — /ai-ws/register and "
-            "/ai-ws/launcher are open. Set auth.node_secret in production!"
+            "/ai-ws/launcher connections are REJECTED. Set auth.node_secret!"
         )
-        return True  # local dev fallback
+        return False
     if not isinstance(received, str):
         received = received or ""
     return hmac.compare_digest(received, expected)
@@ -177,16 +175,34 @@ class AgentWebSocketHandler:
                     # outbound heartbeats which only prove the writer works).
                     registry.note_pong(agent_id)
 
-                elif action == "status":
-                    # Status update (optional per-session)
-                    status = message.get("status", "online")
-                    session_id = str(message.get("session_id") or "").strip()
-                    if session_id:
-                        registry.set_session_busy(agent_id, session_id, status == "busy")
-                    elif status == "busy":
-                        registry.set_busy(agent_id, True)
+                elif action == "status" or msg_type == "status":
+                    # Status update (optional per-session).
+                    #
+                    # AgentRunner emits status via `type=status` + `content`
+                    # (busy/online) + `sid` (the turn's disk session id). The
+                    # legacy `action=status` + `status`/`session_id` form is
+                    # also accepted. Without matching `msg_type == "status"`,
+                    # the busy set by send-to-agent below is never cleared and
+                    # the agent stays stuck at "busy" forever.
+                    status_raw = message.get("status")
+                    if status_raw is None:
+                        status_raw = message.get("content")
+                    status = str(status_raw or "online").strip() or "online"
+                    session_id = str(message.get("session_id") or message.get("sid") or "").strip()
+                    if status == "busy":
+                        # Agent (or a session) reports busy.
+                        if session_id:
+                            registry.set_session_busy(agent_id, session_id, True)
+                        else:
+                            registry.set_busy(agent_id, True)
                     else:
-                        registry.set_busy(agent_id, False)
+                        # Agent reports idle. status="online" is emitted by the
+                        # runner only when its busy-session set is empty, so it
+                        # represents a fully idle agent. Force-clear EVERY
+                        # per-session busy marker (they cannot all be matched by
+                        # the single sid carried on this event), otherwise a
+                        # stale marker keeps the agent stuck at "busy" forever.
+                        registry.clear_busy(agent_id)
 
                 elif msg_type in [
                     "message",
@@ -358,7 +374,14 @@ class AgentWebSocketHandler:
                             _csid = str(_cs.get("id") or _cs.get("session_id") or "").strip()
                         else:
                             _csid = str(_cs or "").strip()
-                        if _csid:
+                        # Only a real user-facing current_session may become the
+                        # agent's canonical current session. A scheduled-task
+                        # parallel-session spawn announces current_session merely
+                        # to bind exec.session_id — recording it here would
+                        # overwrite the user's latest session id and cross-wire
+                        # the user's next connect into the scheduled pane ("串线").
+                        _cs_is_scheduled = isinstance(user_id, str) and user_id.startswith("scheduled-task:")
+                        if _csid and not _cs_is_scheduled:
                             _agent_current_session_id[agent_id] = _csid
                         # Also invalidate Gateway in-memory cache so stale
                         # user messages from previous session aren't served
@@ -632,6 +655,19 @@ class UserWebSocketHandler:
                             agent_id,
                             "user",
                             "__NEW_SESSION__",
+                            msg_type="system",
+                        )
+
+                    if command == "abandon_current_draft":
+                        # Same gateway-side cache reset as new_session — we are about
+                        # to switch focus to a fresh sid, so any cached fallback history
+                        # for the abandoned session must not survive a refresh.
+                        await gateway_session_cache.async_clear_session(user_id, agent_id)
+                        await gateway_session_cache.async_add_message(
+                            user_id,
+                            agent_id,
+                            "user",
+                            "__ABANDON_CURRENT_DRAFT__",
                             msg_type="system",
                         )
 

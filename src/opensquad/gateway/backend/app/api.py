@@ -523,7 +523,15 @@ async def reset_password(
         payload = decode_token(authorization[7:])
         if payload and "sub" in payload:
             token_valid = True
-    node_secret_valid = (not expected_node_secret) or (node_secret == expected_node_secret)
+    # SEC-11a: an unset node_secret must NOT short-circuit auth (previously
+    # "not expected_node_secret" let anyone reset arbitrary passwords). Compare
+    # in constant time so a timing side channel cannot leak the secret.
+    if not expected_node_secret:
+        node_secret_valid = False
+    else:
+        import hmac
+
+        node_secret_valid = hmac.compare_digest(node_secret or "", expected_node_secret)
 
     if not token_valid and not node_secret_valid:
         raise HTTPException(
@@ -543,7 +551,9 @@ async def reset_password(
 
 
 @router.get("/users/{user_id}", response_model=UserResponse)
-async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
+async def get_user(
+    user_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user_dep)
+):
     """Get user info"""
     user = await get_user_by_id(db, user_id)
     if not user:
@@ -573,7 +583,11 @@ async def update_user(
 
 
 @router.get("/users/search", response_model=list[UserResponse])
-async def search_users(query: str = Query(..., min_length=1), db: AsyncSession = Depends(get_db)):
+async def search_users(
+    query: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_dep),
+):
     """Search users"""
     result = await db.execute(
         select(User).where(or_(User.name.ilike(f"%{query}%"), User.email.ilike(f"%{query}%"))).limit(20)
@@ -1208,7 +1222,13 @@ def format_message_response(msg: Message, *, sender_name: str | None = None) -> 
 
 
 @router.get("/groups/{group_id}/messages", response_model=list[MessageResponse])
-async def get_messages(group_id: str, before: str | None = None, limit: int = 20, db: AsyncSession = Depends(get_db)):
+async def get_messages(
+    group_id: str,
+    before: str | None = None,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_dep),
+):
     """Get group message history"""
     query = select(Message).where(Message.group_id == group_id)
     if before:
@@ -1271,9 +1291,13 @@ async def get_messages_around(
 
 
 @router.get("/groups/{group_id}/pinned-messages", response_model=list[MessageResponse])
-async def get_pinned_messages(group_id: str, db: AsyncSession = Depends(get_db)):
+async def get_pinned_messages(
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_dep),
+):
     """Get pinned messages in a group"""
-    query = select(Message).where(and_(Message.group_id == group_id, Message.is_pinned is True))
+    query = select(Message).where(and_(Message.group_id == group_id, Message.is_pinned.is_(True)))
     result = await db.execute(query.options(selectinload(Message.attachments), selectinload(Message.sender)))
     return [format_message_response(msg) for msg in result.scalars().all()]
 
@@ -1287,6 +1311,7 @@ async def search_messages_in_group(
     date_to: str | None = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_dep),
 ):
     """Search messages within a specific group"""
     query = select(Message).where(and_(Message.group_id == group_id, Message.content.ilike(f"%{q}%")))
@@ -2151,9 +2176,38 @@ async def upload_file(
 ):
     import hashlib
 
+    # SEC-7: enforce a size cap and a content-type whitelist so the upload
+    # endpoint cannot be used as a DoS vector or an HTML/XSS hosting point.
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+    ALLOWED_UPLOAD_TYPES = {
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/svg+xml",
+        "video/mp4",
+        "video/webm",
+        "audio/mpeg",
+        "audio/wav",
+        "application/pdf",
+        "text/plain",
+        "application/zip",
+        "application/json",
+        "text/markdown",
+    }
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+    c_type = (file.content_type or "").lower()
+    if c_type and c_type not in ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(status_code=415, detail=f"File type not allowed: {c_type}")
+
     upload_dir = Path(UPLOAD_DIR)
     file_hash = hashlib.md5(f"{file.filename}{datetime.now()}".encode(), usedforsecurity=False).hexdigest()[:16]
     ext = os.path.splitext(file.filename)[1]
+    # SEC-7: sanitise the extension to a safe alphanumeric subset.
+    if ext:
+        ext = "".join(ch for ch in ext if ch.isalnum() or ch in (".", "_", "-"))[:16]
     new_filename = f"{file_hash}{ext}"
     if folder_path:
         safe_folder = Path(folder_path).name
@@ -2162,7 +2216,6 @@ async def upload_file(
         file_path, file_url = target_dir / new_filename, f"/uploads/{safe_folder}/{new_filename}"
     else:
         file_path, file_url = upload_dir / new_filename, f"/uploads/{new_filename}"
-    content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
     size_bytes = len(content)
@@ -2173,7 +2226,6 @@ async def upload_file(
         if size_bytes < 1024 * 1024
         else f"{size_bytes / (1024 * 1024):.1f}MB"
     )
-    c_type = file.content_type or ""
     f_type = "image" if c_type.startswith("image/") else "video" if c_type.startswith("video/") else "file"
     return {"url": file_url, "name": file.filename, "size": size_str, "type": f_type}
 
@@ -2188,14 +2240,23 @@ async def upload_folder_as_zip(files: list[UploadFile] = File(...), current_user
     zip_filename = f"{folder_name}_{hashlib.md5(f'{folder_name}{datetime.now()}'.encode(), usedforsecurity=False).hexdigest()[:16]}.zip"
     zip_path = upload_dir / zip_filename
     file_list = []
+    # SEC-7: cap total uploaded bytes per request and sanitise arcnames
+    # (basename only) to prevent zip traversal / archive abuse.
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+    total_bytes = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         for file in files:
-            content = await file.read()
-            arcname = (
-                file.filename[len(folder_name) + 1 :] if file.filename.startswith(folder_name + "/") else file.filename
-            )
+            content = await file.read(MAX_UPLOAD_BYTES + 1)
+            if len(content) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="File too large (max 50MB per file)")
+            total_bytes += len(content)
+            if total_bytes > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Upload batch too large (max 50MB)")
+            arcname = os.path.basename(file.filename.replace("\\", "/"))
+            if not arcname:
+                arcname = f"file_{len(file_list)}"
             zipf.writestr(arcname, content)
-            file_list.append({"name": file.filename.split("/")[-1], "size": f"{len(content) / 1024:.1f}KB"})
+            file_list.append({"name": arcname, "size": f"{len(content) / 1024:.1f}KB"})
     zip_size = zip_path.stat().st_size
     size_str = (
         f"{zip_size}B"
@@ -2289,17 +2350,17 @@ async def get_direct_messages(
     # Build query
     if filter_type == "sent":
         query = select(DirectMessage).where(
-            and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender is False)
+            and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender.is_(False))
         )
     elif filter_type == "received":
         query = select(DirectMessage).where(
-            and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient is False)
+            and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient.is_(False))
         )
     else:
         query = select(DirectMessage).where(
             or_(
-                and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender is False),
-                and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient is False),
+                and_(DirectMessage.sender_id == current_user.id, DirectMessage.is_deleted_by_sender.is_(False)),
+                and_(DirectMessage.recipient_id == current_user.id, DirectMessage.is_deleted_by_recipient.is_(False)),
             )
         )
 

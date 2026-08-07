@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import time
+from collections import OrderedDict
 
 from .events import bus
 from .input_hub import input_hub
@@ -162,7 +163,7 @@ class ClaudeAPI:
         self.total_cache_read_tokens = 0
         self.total_cache_creation_tokens = 0
         # ── Per-message token cache (P3 perf optimization) ──
-        self._msg_token_cache: dict[int, int] = {}
+        self._msg_token_cache: dict[int, int] = OrderedDict()  # PERF-10: LRU eviction
         self._msg_token_cache_max_size = 5000
 
         try:
@@ -615,6 +616,7 @@ class ClaudeAPI:
         try:
             msg_key = hash(json.dumps(message, sort_keys=True, ensure_ascii=False))
             if msg_key in self._msg_token_cache:
+                self._msg_token_cache.move_to_end(msg_key)  # PERF-10: LRU touch
                 return self._msg_token_cache[msg_key]
         except (TypeError, ValueError):
             msg_key = None
@@ -651,8 +653,9 @@ class ClaudeAPI:
         if msg_key is not None:
             self._msg_token_cache[msg_key] = num_tokens
             if len(self._msg_token_cache) > self._msg_token_cache_max_size:
-                keep = self._msg_token_cache_max_size * 2 // 3
-                self._msg_token_cache = dict(list(self._msg_token_cache.items())[-keep:])
+                # PERF-10: true LRU — pop least-recently-used while over budget.
+                while len(self._msg_token_cache) > self._msg_token_cache_max_size:
+                    self._msg_token_cache.popitem(last=False)
         return num_tokens
 
     def _prepare_messages(self) -> list[dict]:

@@ -40,13 +40,10 @@ async def reset_password(email: str, new_password: str) -> bool:
         True on success, False on failure
     """
     # Import required modules
-    from passlib.context import CryptContext
+    import bcrypt
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
-
-    # Create password hashing context
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     # Database file path (use workspace-aware path)
     from opensquad.system_config import syscfg
@@ -75,8 +72,11 @@ async def reset_password(email: str, new_password: str) -> bool:
 
             user_id, user_name, user_email = user_row
 
-            # Generate new password hash
-            new_hashed_password = pwd_context.hash(new_password)
+            # Generate new password hash (native bcrypt, SEC-4: passlib 1.7.4
+            # is incompatible with bcrypt 5.x — use the same implementation as
+            # gateway/backend/app/auth.py)
+            _pw = new_password.encode("utf-8")[:72]
+            new_hashed_password = bcrypt.hashpw(_pw, bcrypt.gensalt()).decode("utf-8")
 
             # Update password
             update_query = text("""

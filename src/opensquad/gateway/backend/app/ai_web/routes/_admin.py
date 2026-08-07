@@ -27,6 +27,29 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = syscfg.project_root()
 _SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
 
+# PERF-9: one shared AsyncClient instead of a fresh one per proxy request so
+# keep-alive connections are reused.  Created lazily (an event loop must be
+# running); closed via ``close_shared_http_client`` on application shutdown.
+_shared_http_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_client(timeout: float = 5.0) -> httpx.AsyncClient:
+    global _shared_http_client
+    if _shared_http_client is None or _shared_http_client.is_closed:
+        _shared_http_client = httpx.AsyncClient(timeout=timeout)
+    return _shared_http_client
+
+
+async def close_shared_http_client() -> None:
+    """Close the module-level HTTP client (call from FastAPI lifespan shutdown)."""
+    global _shared_http_client
+    if _shared_http_client is not None:
+        try:
+            await _shared_http_client.aclose()
+        except Exception:
+            logger.warning("[admin_routes] error closing shared http client", exc_info=True)
+        _shared_http_client = None
+
 
 def _launcher_url() -> str:
     """Lazy access to launcher URL (not evaluated at import time)."""
@@ -129,21 +152,21 @@ async def _proxy_get(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.get(f"{base}{path}", params=params)
-            if resp.status_code >= 400:
-                err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-                raise HTTPException(resp.status_code, err)
-            result = resp.json()
-            _proxy_cache_set(path, params, result)
-            return result
-        except httpx.ConnectError:
-            raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(502, f"Launcher proxy error: {e}")
+    client = _get_shared_client(timeout=timeout)
+    try:
+        resp = await client.get(f"{base}{path}", params=params)
+        if resp.status_code >= 400:
+            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
+            raise HTTPException(resp.status_code, err)
+        result = resp.json()
+        _proxy_cache_set(path, params, result)
+        return result
+    except httpx.ConnectError:
+        raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
 async def _proxy_post(
@@ -162,19 +185,19 @@ async def _proxy_post(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(f"{base}{path}", json=json)
-            if resp.status_code >= 400:
-                err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-                raise HTTPException(resp.status_code, err)
-            return resp.json()
-        except httpx.ConnectError:
-            raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(502, f"Launcher proxy error: {e}")
+    client = _get_shared_client(timeout=timeout)
+    try:
+        resp = await client.post(f"{base}{path}", json=json)
+        if resp.status_code >= 400:
+            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
+            raise HTTPException(resp.status_code, err)
+        return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
 async def _proxy_put(
@@ -193,19 +216,19 @@ async def _proxy_put(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            resp = await client.put(f"{base}{path}", json=json_body)
-            if resp.status_code >= 400:
-                err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-                raise HTTPException(resp.status_code, err)
-            return resp.json()
-        except httpx.ConnectError:
-            raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(502, f"Launcher proxy error: {e}")
+    client = _get_shared_client(timeout=5.0)
+    try:
+        resp = await client.put(f"{base}{path}", json=json_body)
+        if resp.status_code >= 400:
+            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
+            raise HTTPException(resp.status_code, err)
+        return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
 async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
@@ -222,19 +245,19 @@ async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            resp = await client.delete(f"{base}{path}")
-            if resp.status_code >= 400:
-                err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-                raise HTTPException(resp.status_code, err)
-            return resp.json()
-        except httpx.ConnectError:
-            raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(502, f"Launcher proxy error: {e}")
+    client = _get_shared_client(timeout=5.0)
+    try:
+        resp = await client.delete(f"{base}{path}")
+        if resp.status_code >= 400:
+            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
+            raise HTTPException(resp.status_code, err)
+        return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Launcher proxy error: {e}")
 
 
 @admin_router.get("/admin/agents")

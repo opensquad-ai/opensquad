@@ -609,7 +609,6 @@ class TurnLoop:
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
                         img_paths = evt.metadata.get("image_paths", [])
                         if img_paths:
-                            self.runner._current_images.extend(img_paths)
                             already = set(self.runner._current_images)
                             new_img_paths = [p for p in img_paths if p not in already]
                             if new_img_paths:
@@ -885,6 +884,10 @@ class TurnLoop:
             tc_log.info(
                 "[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results)
             )
+            # Signal the parallel turn loop that a tool executed this turn, so it
+            # keeps looping (instead of relying on chat_api tool_data, which is
+            # None for DSML/XML tool calls) to produce the follow-up final reply.
+            self.runner._tool_result_generated = True
             if _saved_msg:
                 # Update elapsed_ms on the assistant message that ChatAPI already saved
                 _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)

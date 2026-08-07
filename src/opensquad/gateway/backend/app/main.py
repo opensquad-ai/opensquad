@@ -490,6 +490,13 @@ async def lifespan(app: FastAPI):
         model_preset_service.shutdown()
     except Exception:
         pass
+    # PERF-9: close the shared httpx client used by the admin proxy routes.
+    try:
+        from app.ai_web.routes._admin import close_shared_http_client
+
+        await close_shared_http_client()
+    except Exception:
+        pass
 
 
 # Create FastAPI application

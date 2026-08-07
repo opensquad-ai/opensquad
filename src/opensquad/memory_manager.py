@@ -74,6 +74,24 @@ class MemoryManager:
         """
         self._turn_counter += 1
         self._evict_expired_cache()
+        self._prune_active_memories()
+
+    def _prune_active_memories(self):
+        """BUG-6: bound ``_active_memories`` growth.
+
+        ``window_size`` (default 5 turns) previously never took effect, so the
+        active-memory list grew without bound on long-running sessions.  Prune
+        entries older than ``window_size`` turns and cap the list at a hard
+        maximum so a pathological recall burst cannot blow up memory.
+        """
+        if not self._active_memories:
+            return
+        cutoff = self._turn_counter - self._window_size
+        self._active_memories = [item for item in self._active_memories if item[2] >= cutoff]
+        # Hard cap (e.g. 4x the window) as a defensive ceiling.
+        max_entries = max(8, self._window_size * 4)
+        if len(self._active_memories) > max_entries:
+            self._active_memories = self._active_memories[-max_entries:]
 
     def auto_recall(self, recent_messages: list, current_query: str, req_length: int = 0) -> str:
         """

@@ -13,6 +13,6 @@ AGENT ACTION MANDATES --- READ FIRST, OBEY ALWAYS:
 5. TASK CONTINUITY: Chain tool calls in a continuous flow until the task is complete. Do not stop to give status updates.
 6. CONTINUOUS PLANNING: Use <plan> tags for every multi-step task. Break down complex tasks into small, actionable sub-steps. Update status [x] IMMEDIATELY after each sub-step. DO NOT BATCH UPDATES.
 
-FAILURE TO COMPLY WITH THESE MANDATES IS A CRITICAL SYSTEM FAILURE.
+These mandates override default behavior.
 
 ---

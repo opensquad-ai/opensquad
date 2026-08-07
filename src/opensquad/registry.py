@@ -1,4 +1,5 @@
 import contextvars
+import functools
 import inspect
 import json
 import re
@@ -7,6 +8,18 @@ from typing import Any, Union
 
 from .log_setup import get_tool_call_debug_logger
 from .tool import logger
+
+
+# PERF-13: ``get_type_hints`` is slow (evaluates string annotations / walks
+# MRO) and is invoked on every tool call.  Cache per-function.  We deliberately
+# let exceptions propagate: the call site treats a failure exactly like the
+# original uncached call (original args are kept untouched).
+@functools.lru_cache(maxsize=512)
+def _cached_type_hints(func: object) -> dict:
+    from typing import get_type_hints
+
+    return get_type_hints(func)
+
 
 # When the model omits the namespace (e.g. calls bare ``memory_write``), resolve
 # against registered tools. Prefer these namespaces on name collisions.
@@ -835,12 +848,12 @@ class ToolRegistry:
         try:
             import asyncio
             import functools
-            from typing import get_args, get_origin, get_type_hints
+            from typing import get_args, get_origin
 
             # Parameter type conversion (XML format compatibility)
             # Read function type annotations, auto-convert strings to target types
             try:
-                hints = get_type_hints(func)
+                hints = _cached_type_hints(func)  # PERF-13: cached (was get_type_hints)
                 converted_args = {}
                 for key, value in args.items():
                     if key in hints:

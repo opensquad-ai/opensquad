@@ -9,7 +9,6 @@ import {
   Server, Play, StopCircle, RotateCw, Terminal, ChevronDown, ChevronUp,
   Plus, Trash2, FolderOpen, Menu, Upload, LayoutGrid, List,
 } from 'lucide-react';
-import * as LucideIcons from 'lucide-react';
 import { pluginAPI, pluginServiceAPI, PluginInfo, PluginConfigField, PluginServiceStatus, adminAPI, AdminAgent } from '../services/api';
 import { hasPluginViewAdapter } from './plugin-views/registry';
 import { PluginViewContainer } from './plugin-views/PluginViewContainer';
@@ -50,6 +49,41 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
   hook:     <Activity size={16} />,
 };
 
+// FE-4: icons plugins may request via `contributes.navigation.icon`.
+// Keep this list explicit so lucide-react can be tree-shaken.
+const NAV_ICON_WHITELIST: Record<string, React.FC<{ size?: number; className?: string }>> = {
+  puzzle: Puzzle,
+  globe: Globe,
+  wrench: Wrench,
+  activity: Activity,
+  server: Server,
+  settings: Settings,
+  bot: Bot,
+  message: MessageSquare,
+  chart: BarChart3,
+  sparkles: Sparkles,
+  film: Film,
+  languages: Languages,
+  link: Link2,
+  layout: LayoutTemplate,
+  more: MoreHorizontal,
+  play: Play,
+  stop: StopCircle,
+  refresh: RefreshCw,
+  terminal: Terminal,
+  folder: FolderOpen,
+  menu: Menu,
+  upload: Upload,
+  grid: LayoutGrid,
+  list: List,
+  search: Search,
+  eye: Eye,
+  eyeOff: EyeOff,
+  star: Star,
+  code: Code2,
+  briefcase: Briefcase,
+};
+
 const AVATAR_COLORS = [
   'bg-violet-500', 'bg-blue-500', 'bg-emerald-500', 'bg-rose-500',
   'bg-amber-500',  'bg-cyan-500',  'bg-pink-500',   'bg-indigo-500',
@@ -87,7 +121,12 @@ function getPluginIcon(plugin: PluginInfo, compact = false): React.ReactNode {
     );
   }
   if (nav?.icon) {
-    const Icon = (LucideIcons as any)[nav.icon] as React.FC<{ size?: number; className?: string }> | undefined;
+    // FE-4: whitelist lookup instead of `import * as LucideIcons` + dynamic
+    // index, so tree-shaking can eliminate unused icons (was ~780KB in the
+    // bundle). Unknown icon names fall through to the letter avatar.
+    const Icon = NAV_ICON_WHITELIST[nav.icon] as
+      | React.FC<{ size?: number; className?: string }>
+      | undefined;
     if (Icon) {
       return (
         <div className={`${box} bg-primary/15 flex items-center justify-center shrink-0`}>

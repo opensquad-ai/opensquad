@@ -223,6 +223,17 @@ class AIWebSocketService {
     this._sendCommand('new_session');
   }
 
+  /**
+   * Abandon the agent's current session so it can be deleted from the sidebar.
+   * Unlike {@link newSession}, this always mints a fresh sid (empty draft
+   * reuse logic does not apply) and drops the old current shell so the
+   * follow-up deleteSession call removes it cleanly. Use this for the
+   * sidebar trash-icon flow on the focused session.
+   */
+  abandonCurrent() {
+    this._sendCommand('abandon_current_draft');
+  }
+
   /** Stop current task (optionally a single session, or all). */
   stopTask(opts?: { session_id?: string; all?: boolean }) {
     const data: Record<string, unknown> = {};

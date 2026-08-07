@@ -50,6 +50,57 @@ def _status_path() -> str:
     return os.path.join(_plugin_data_dir(), "status.json")
 
 
+def _config_path() -> str:
+    return os.path.join(_plugin_data_dir(), "config.json")
+
+
+# Browsers the service can drive (mirrors websearch_api.BROWSER_OPTIONS keys).
+BROWSER_OPTIONS: list[str] = ["chrome", "msedge", "chromium", "firefox", "custom"]
+
+
+def _read_browser_setting() -> str:
+    """Browser chosen via UI (config.json) or env override. Defaults to chrome."""
+    env = os.environ.get("WEBSEARCH_BROWSER", "").strip().lower()
+    if env:
+        return env
+    try:
+        if os.path.isfile(_config_path()):
+            with open(_config_path(), encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+            return str(cfg.get("browser", "")).strip().lower() or "chrome"
+    except (OSError, ValueError):
+        pass
+    return "chrome"
+
+
+def get_browser_config() -> dict[str, Any]:
+    return {"browser": _read_browser_setting(), "options": list(BROWSER_OPTIONS)}
+
+
+def set_browser(browser: str) -> dict[str, Any]:
+    """Persist the browser choice to config.json so the service honors it."""
+    browser = (browser or "").strip().lower()
+    if browser not in BROWSER_OPTIONS:
+        return {
+            "ok": False,
+            "error": f"Unsupported browser: {browser!r}. Options: {', '.join(BROWSER_OPTIONS)}",
+        }
+    os.makedirs(_plugin_data_dir(), exist_ok=True)
+    cfg: dict[str, Any] = {}
+    if os.path.isfile(_config_path()):
+        try:
+            with open(_config_path(), encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+        except (OSError, ValueError):
+            cfg = {}
+    cfg["browser"] = browser
+    tmp = _config_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _config_path())
+    return {"ok": True, "browser": browser}
+
+
 def _profile_has_cookies(profile_dir: str) -> bool:
     """Heuristic: Chromium wrote a non-trivial Cookies DB after a real session."""
     candidates = (
@@ -135,6 +186,7 @@ def get_setup_status() -> dict[str, Any]:
         "banner_dismissed": dismissed,
         "profile_dir": profile,
         "setup_command": cmd,
+        "browser_config": get_browser_config(),
         "message_zh": (
             "WebSearch 已就绪（Bing 浏览器档案可用）。"
             if ready

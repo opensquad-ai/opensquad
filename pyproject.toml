@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opensquad"
-version = "0.8.10"
+version = "0.8.20"
 description = "OpenSquad - Local-first Multi-Agent Collaboration Framework"
 readme = "README.md"
 license = "MIT"
@@ -172,7 +172,10 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=opensquad --cov-report=term-missing --cov-report=html"
+# CI-5: coverage was previously forced for every local pytest run via global
+# addopts, slowing local feedback by 20-40%. It is now enabled explicitly in
+# CI (ci.yml full gate) via `pytest --cov=opensquad --cov-report=...`.
+# Local runs stay fast: `pytest -q`.
 
 # ── Coverage gate ─────────────────────────────────────────
 # OpenSquad targets a floor of 80% line coverage on the core

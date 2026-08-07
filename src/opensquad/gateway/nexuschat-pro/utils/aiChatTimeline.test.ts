@@ -230,6 +230,22 @@ describe('composeAssistantDisplayContent', () => {
     expect(out).toContain('Above is the full report');
     expect(out).not.toContain('<to_user>');
   });
+
+  it('strips DSML tool-call markup leaked into the assistant body', () => {
+    const raw =
+      '<\uFF5C\uFF5Ctool_calls>\n' +
+      '<\uFF5C\uFF5Cinvoke name="anysearch">\n' +
+      '<\uFF5C\uFF5Cparameter name="query">\u798F\u5DDE\u4ECA\u5929\u5929\u6C14</\uFF5C\uFF5Cparameter>\n' +
+      '</\uFF5C\uFF5Cinvoke>\n' +
+      '</\uFF5C\uFF5Ctool_calls>\n\n' +
+      '<to_user>\u62B1\u6B49\uFF0C\u67E5\u4E0D\u5230\u5929\u6C14\u3002</to_user>';
+    const out = composeAssistantDisplayContent(raw);
+    expect(out).not.toContain('tool_calls');
+    expect(out).not.toContain('invoke');
+    expect(out).not.toContain('parameter');
+    expect(out).not.toContain('anysearch');
+    expect(out).toContain('\u62B1\u6B49');
+  });
 });
 
 describe('buildTimelineFromSession', () => {

@@ -351,6 +351,15 @@ def read_file(path: str, start_line: int = 1, end_line: int = -1, max_lines: int
             content = "\n".join(numbered_lines)
             truncated = end_idx < total_lines
 
+        # PERF-3: cap the tool output size at the source so a single
+        # read_file result cannot blow the context window on the provider side
+        # (local token estimates undercount ~2.6-3x). 8K chars is generous for
+        # paginated reads; the model can request further pages via start_line.
+        _MAX_READ_CHARS = 8000
+        if len(content) > _MAX_READ_CHARS:
+            content = content[:_MAX_READ_CHARS] + "\n... [truncated by read_file output cap]"
+            truncated = True
+
         result = {
             "status": "success",
             "content": content,

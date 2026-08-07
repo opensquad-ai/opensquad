@@ -2,6 +2,7 @@
  * New-session hero: soft tip + time-of-day greeting above the centered composer.
  */
 import React, { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Lightbulb } from 'lucide-react';
 import { getDayPeriod, pickGreeting, pickTip } from '../../utils/newChatGreetings';
 
@@ -12,9 +13,12 @@ export interface NewChatLandingProps {
 }
 
 export const NewChatLanding: React.FC<NewChatLandingProps> = ({ seedKey, className = '' }) => {
-  const period = useMemo(() => getDayPeriod(), [seedKey]);
-  const tip = useMemo(() => pickTip(seedKey), [seedKey]);
-  const title = useMemo(() => pickGreeting(period, seedKey), [period, seedKey]);
+  const { i18n } = useTranslation();
+  // Re-pick greeting/tip when language switches so Chinese ↔ English swap immediately.
+  const langKey = i18n.language || 'zh';
+  const period = useMemo(() => getDayPeriod(), [seedKey, langKey]);
+  const tip = useMemo(() => pickTip(seedKey), [seedKey, langKey]);
+  const title = useMemo(() => pickGreeting(period, seedKey), [period, seedKey, langKey]);
 
   return (
     <div

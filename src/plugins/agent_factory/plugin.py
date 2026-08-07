@@ -144,7 +144,7 @@ class AgentFactoryPlugin(Plugin):
             "model_name": "deepseek-chat",
             "token_max": 128000,
             "temperature": 0.3,
-            "tool_call_mode": "auto",  # recommended: auto (auto-detect) | native (force Native FC) | xml (force XML)
+            "tool_call_mode": "native",  # recommended: native (force Native FC) | auto (auto-detect) | xml (force XML)
             "tool_filter": "high"      # recommended: high (97 tools) | all (124) | baseline (57)
           },
           "tools": ["system", "filesystem", "im", "agent_setup"],

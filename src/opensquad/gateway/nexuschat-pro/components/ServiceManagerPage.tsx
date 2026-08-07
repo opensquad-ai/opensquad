@@ -3,10 +3,12 @@ import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
   Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
-  LayoutGrid, List, AlertTriangle, Copy,
+  LayoutGrid, List, AlertTriangle, Copy, Download, Database, HardDrive, CheckCircle2,
+  Trash2, Folder, Cpu, X,
 } from 'lucide-react';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
+import { HoverTooltip } from './HoverTooltip';
 import {
   adminHeaderBar,
   adminHeaderGhostBtn,
@@ -98,6 +100,307 @@ function SetupHintBanner({ svc }: { svc: ServiceStatus }) {
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ── Service model deploy strip ───────────────────────────────────────
+// Per-service model download / uninstall card modeled on the SenseVoice
+// "本地" design: clean title row, single line status, one primary
+// button. Specifics (model name, size hint, install / uninstall action,
+// status selectors) are wired up below in MODEL_SERVICES.
+const MODEL_SERVICES: Record<string, {
+  action: string;
+  uninstallAction: string;
+  /** Human-readable model name (e.g. "SenseVoice Small", "Whisper base"). */
+  modelName: (d: any) => string;
+  /** Localized model name (English). */
+  modelNameEn: string;
+  /** Badge next to the title, e.g. "本地" (local). */
+  badgeZh?: string;
+  badgeEn?: string;
+  readySel: (d: any) => boolean;
+  missingSel: (d: any) => string[];
+  dirSel: (d: any) => string;
+  /** Where the persisted download state lives in the plugin data payload. */
+  downloadStateSel: (d: any) => any;
+}> = {
+  websearch: {
+    action: 'download_reranker',
+    uninstallAction: 'uninstall_reranker',
+    modelName: (d) => 'Qwen3-Reranker 0.6B',
+    modelNameEn: 'Qwen3-Reranker 0.6B',
+    badgeZh: '本地',
+    badgeEn: 'Local',
+    readySel: (d) => !!(d?.reranker?.ready),
+    missingSel: (d) => d?.reranker?.missing || [],
+    dirSel: (d) => (d?.reranker?.snapshot_dir) || (d?.reranker?.model_dir) || '',
+    downloadStateSel: (d) => d?.reranker?.download || {},
+  },
+  whisper: {
+    action: 'download_model',
+    uninstallAction: 'uninstall_model',
+    modelName: (d) => `Whisper ${d?.model || 'base'}`,
+    modelNameEn: 'Whisper',
+    badgeZh: '本地',
+    badgeEn: 'Local',
+    readySel: (d) => !!d?.ready,
+    missingSel: () => [],
+    dirSel: (d) => d?.model_dir || '',
+    downloadStateSel: (d) => d?.download || {},
+  },
+  sensevoice: {
+    action: 'download_model',
+    uninstallAction: 'uninstall_model',
+    modelName: () => 'SenseVoice Small',
+    modelNameEn: 'SenseVoice Small',
+    badgeZh: '本地',
+    badgeEn: 'Local',
+    readySel: (d) => !!d?.ready,
+    missingSel: (d) => d?.missing || [],
+    dirSel: (d) => d?.model_dir || '',
+    downloadStateSel: (d) => d?.download || {},
+  },
+};
+
+function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
+  const { i18n } = useTranslation();
+  const zh = (i18n.language || '').startsWith('zh');
+  const spec = MODEL_SERVICES[pluginId];
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [copiedDir, setCopiedDir] = useState(false);
+
+  const refresh = useCallback(async () => {
+    // Only plugins registered in MODEL_SERVICES expose a model query module;
+    // skip the rest to avoid 404 noise for e.g. telegram / external_api.
+    if (!MODEL_SERVICES[pluginId]) return;
+    try {
+      setError(null);
+      const d = await pluginAPI.getPluginData(pluginId);
+      setData(d);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [pluginId]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  if (!spec) return null;
+  const ready = spec.readySel(data);
+  const dir = spec.dirSel(data);
+  const downloadState = spec.downloadStateSel(data) || {};
+  const downloading = downloadState.state === 'downloading';
+  const progress = Number(downloadState.progress || 0);
+  const downloadStateKey = downloadState.state;
+
+  // Poll while downloading
+  useEffect(() => {
+    if (downloadStateKey !== 'downloading') return;
+    const t = window.setInterval(() => { void refresh(); }, 1500);
+    return () => window.clearInterval(t);
+  }, [downloadStateKey, refresh]);
+
+  const onDownload = async () => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction(pluginId, spec.action, { force: false });
+      // show immediate "started" feedback even if the response is just
+      // an idempotent "already present" message
+      setInfo(res?.message || (zh ? '已开始下载' : 'Download started'));
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const onUninstall = async () => {
+    if (!window.confirm(
+      zh
+        ? `确定要卸载 ${spec.modelName(data)} 吗？\n\n模型文件将从磁盘删除并释放空间。`
+        : `Uninstall ${spec.modelNameEn}?\n\nThe model files will be removed from disk to free space.`,
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction(pluginId, spec.uninstallAction, {});
+      setInfo(res?.message || (zh ? '已卸载' : 'Uninstalled'));
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const onCancel = async () => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction(pluginId, 'cancel_download', {});
+      setInfo(res?.message || (zh ? '已取消下载' : 'Download cancelled'));
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+      void refresh();
+    }
+  };
+
+  const modelName = zh ? spec.modelName(data) : spec.modelNameEn;
+  const badge = zh ? spec.badgeZh : spec.badgeEn;
+
+  const onCopyDir = async () => {
+    if (!dir) return;
+    try {
+      await navigator.clipboard.writeText(dir);
+      setCopiedDir(true);
+      window.setTimeout(() => setCopiedDir(false), 1500);
+    } catch {
+      /* clipboard unavailable — ignore */
+    }
+  };
+
+  return (
+    <div className={`mt-2 rounded-lg border ${
+      ready ? 'border-emerald-500/25 bg-emerald-500/[0.04]' : 'border-border bg-bgLight/30'
+    } px-3 py-2.5`}>
+      {/* Title row: model name + status badge */}
+      <div className="flex items-center gap-2 min-w-0">
+        <Cpu size={13} className={ready ? 'text-emerald-400 shrink-0' : 'text-textMuted shrink-0'} />
+        <span className="text-[12px] font-semibold text-textMain truncate">{modelName}</span>
+        {badge ? (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${
+            ready
+              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+              : 'bg-bgDark/60 text-textMuted border border-border'
+          }`}>
+            {badge}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Status row: path tooltip */}
+      <div className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-textMuted min-w-0">
+        {ready
+          ? <CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
+          : <Download size={11} className="text-textMuted shrink-0" />}
+        {ready && dir ? (
+          <HoverTooltip text={dir} maxWidth="24rem">
+            <button
+              type="button"
+              tabIndex={0}
+              onClick={() => void onCopyDir()}
+              title={zh ? '点击复制地址' : 'Click to copy path'}
+              className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-textMuted/80 hover:text-primary hover:bg-bgLight/60 border border-dashed border-border transition-colors shrink-0"
+            >
+              {copiedDir
+                ? <Check size={9} className="text-emerald-400 shrink-0" />
+                : <Folder size={9} className="shrink-0" />}
+              <span className="whitespace-nowrap">
+                {copiedDir ? (zh ? '已复制' : 'Copied') : (zh ? '地址' : 'Path')}
+              </span>
+            </button>
+          </HoverTooltip>
+        ) : null}
+      </div>
+
+      {/* Progress bar (only when actively downloading or errored) */}
+      {(downloading || downloadState.state === 'error') ? (
+        <div className="mt-2 space-y-1">
+          <div className="flex justify-between gap-2 text-[10px] text-textMuted min-w-0">
+            <span className="truncate min-w-0">
+              {downloadState.message || downloadState.state}
+              {downloadState.source ? (
+                <span className="text-textMuted/70">
+                  {' '}({downloadState.mirror_index || 1}/{downloadState.mirror_total || 1} {zh ? '镜像' : 'mirror'}: {downloadState.source})
+                </span>
+              ) : null}
+            </span>
+            <span className="shrink-0">{progress.toFixed(0)}%</span>
+          </div>
+          <div className="h-1 rounded-full bg-bgDark overflow-hidden">
+            <div
+              className="h-full bg-primary transition-all"
+              style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+            />
+          </div>
+          {downloadState.file ? (
+            <p className="text-[10px] text-textMuted break-all">
+              {zh ? '当前文件：' : 'Current file: '}
+              {downloadState.file}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Inline feedback (info / error) — clearly visible, doesn't get clipped */}
+      {error ? (
+        <p className="mt-2 text-[10.5px] text-red-400 break-all">{error}</p>
+      ) : null}
+      {info && !error ? (
+        <p className="mt-2 text-[10.5px] text-textMuted break-all">{info}</p>
+      ) : null}
+
+      {/* Single primary action button */}
+      <div className="mt-2.5 flex items-center gap-1.5">
+        {!ready ? (
+          <>
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onCancel()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-[11px] font-medium text-textMuted hover:border-red-500/40 disabled:opacity-50 transition-colors"
+              title={zh ? '取消当前下载' : 'Cancel current download'}
+            >
+              <X size={11} />
+              {zh ? '取消' : 'Cancel'}
+            </button>
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onDownload()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-[11px] font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            >
+              {busy || downloading
+                ? <Loader2 size={11} className="animate-spin" />
+                : <Download size={11} />}
+              {zh ? '下载模型' : 'Download model'}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => void onUninstall()}
+              disabled={busy || downloading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[11px] font-medium disabled:opacity-50 transition-colors"
+              title={zh ? '卸载模型文件并释放磁盘空间' : 'Remove model files from disk'}
+            >
+              {busy
+                ? <Loader2 size={11} className="animate-spin" />
+                : <Trash2 size={11} />}
+              {zh ? '卸载模型' : 'Uninstall'}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -748,6 +1051,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           </div>
         </div>
         <SetupHintBanner svc={svc} />
+        <ServiceModelDeploy pluginId={svc.plugin_id} />
         {configPanel}
         {logsPanel}
       </div>
@@ -786,6 +1090,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
       </div>
 
       <SetupHintBanner svc={svc} />
+      <ServiceModelDeploy pluginId={svc.plugin_id} />
 
       {configPanel}
 

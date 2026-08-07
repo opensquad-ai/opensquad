@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, Download, Mic, CheckCircle2, HardDrive,
+  ArrowLeft, RefreshCw, Loader2, AlertCircle, Download, Mic, CheckCircle2,
+  Trash2, MapPin, Cpu,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
+import { HoverTooltip } from '../../HoverTooltip';
 
 type DownloadState = {
   state?: string;
@@ -90,6 +92,26 @@ const SenseVoicePanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     }
   };
 
+  const onUninstall = async () => {
+    if (!window.confirm(
+      '确定要卸载 SenseVoice 模型吗？\n\n模型文件将从磁盘删除并释放空间。',
+    )) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const res = await pluginAPI.pluginAction('sensevoice', 'uninstall_model', {});
+      applyPayload(res);
+      setInfo(res.message || '模型已卸载');
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onStartService = async () => {
     setBusy(true);
     setError(null);
@@ -152,18 +174,48 @@ const SenseVoicePanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </div>
         ) : null}
 
-        <div className="rounded-lg border border-border bg-bgLight/40 p-3 space-y-2">
-          <div className="flex items-center gap-2 text-sm">
-            {ready ? (
-              <CheckCircle2 size={16} className="text-emerald-500" />
-            ) : (
-              <HardDrive size={16} className="text-amber-500" />
-            )}
-            <span className="font-medium">{ready ? '模型已就绪' : '模型未下载'}</span>
+        <div className={`rounded-lg border ${
+          ready ? 'border-emerald-500/25 bg-emerald-500/[0.04]' : 'border-border bg-bgLight/30'
+        } p-3 space-y-2`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Cpu size={14} className={ready ? 'text-emerald-400 shrink-0' : 'text-textMuted shrink-0'} />
+            <span className="text-[12px] font-semibold text-textMain truncate">SenseVoice Small</span>
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium shrink-0 ${
+              ready
+                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
+                : 'bg-bgDark/60 text-textMuted border border-border'
+            }`}>
+              本地
+            </span>
           </div>
-          <p className="text-[11px] text-textMuted break-all">目录：{modelDir || '—'}</p>
-          {missing.length > 0 ? (
-            <p className="text-[11px] text-amber-500">缺失文件：{missing.join(', ')}</p>
+          <p className="text-[11px] text-textMuted leading-relaxed line-clamp-2">
+            阿里 FunASR 开源语音转录模型，支持中英日韩等 50+ 语种。速度比 Whisper-Large 快 15 倍。
+          </p>
+          <div className="flex items-center gap-1.5 text-[10.5px] text-textMuted min-w-0">
+            {ready
+              ? <CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
+              : <Download size={11} className="text-textMuted shrink-0" />}
+            <span className="truncate min-w-0">
+              {ready
+                ? '模型已就绪'
+                : '未安装 (ONNX Int8 量化，约 229 MB)'}
+            </span>
+            {ready && modelDir ? (
+              <HoverTooltip text={modelDir} maxWidth="24rem">
+                <button
+                  type="button"
+                  tabIndex={0}
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-textMuted/80 hover:text-primary hover:bg-bgLight/60 border border-dashed border-border transition-colors shrink-0"
+                  title={modelDir}
+                >
+                  <MapPin size={9} className="shrink-0" />
+                  <span className="whitespace-nowrap">目录</span>
+                </button>
+              </HoverTooltip>
+            ) : null}
+          </div>
+          {!ready && missing.length > 0 && download.state ? (
+            <p className="text-[11px] text-amber-500 break-all">缺失文件：{missing.join(', ')}</p>
           ) : null}
           {Object.keys(files).length > 0 ? (
             <ul className="text-[11px] text-textMuted space-y-0.5">
@@ -212,6 +264,17 @@ const SenseVoicePanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-xs disabled:opacity-50"
             >
               重新下载
+            </button>
+          ) : null}
+          {ready ? (
+            <button
+              type="button"
+              disabled={busy || downloading}
+              onClick={() => void onUninstall()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-500/15 text-red-400 text-xs hover:bg-red-500/25 disabled:opacity-50"
+            >
+              <Trash2 size={12} />
+              卸载模型
             </button>
           ) : null}
           <button

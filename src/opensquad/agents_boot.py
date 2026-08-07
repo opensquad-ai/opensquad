@@ -423,7 +423,7 @@ def _resolve_tool_format(config: dict) -> str:
         "xml" -- Use XML tool calls (corresponds to *_xml.md template)
     """
     model_cfg = config.get("model", {})
-    mode = model_cfg.get("tool_call_mode", "auto")
+    mode = model_cfg.get("tool_call_mode", "native")
     if mode == "native":
         return "fc"
     elif mode == "xml":
