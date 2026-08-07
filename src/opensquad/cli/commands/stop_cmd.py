@@ -92,9 +92,10 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
 
     Performance strategy (ordered by speed):
       1. Parallel socket probe — ~0.15s total (vs 0.3s per-port sequential)
-      2. Get-NetTCPConnection — ~1s, precise PID↔port mapping on Win8+
-      3. WMIC cmdline heuristic — ~1-2s, indirect (match port in command line)
-      4. netstat -ano — last resort, capped at 5s (was 30s)
+      2. netstat -ano — ~0.07s, exact PID↔port mapping, works everywhere
+      3. Get-NetTCPConnection — precise PID↔port on Win8+, but slow (~5.5s)
+         on some machines and returns rc=1 when no match → kept as fallback
+      4. WMIC cmdline heuristic — ~1.3s, indirect (match port in command line)
     """
     port_set = {int(port) for port in ports if isinstance(port, int) and port > 0}
     listeners: dict[int, list[str]] = {}
@@ -112,7 +113,44 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
     if not active_ports:
         return listeners
 
-    # Step 2: Get-NetTCPConnection (modern Windows, ~1s, exact PID↔port)
+    # Step 2: netstat -ano — fast (~0.07s) and reliable on all Windows versions.
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        result = None
+    if result is not None:
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0].upper() != "TCP":
+                continue
+            local_addr = parts[1]
+            state = parts[3].upper()
+            pid = parts[4]
+            if state != "LISTENING" or not pid.isdigit() or pid == "0":
+                continue
+            host, sep, port_str = local_addr.rpartition(":")
+            if not sep:
+                continue
+            try:
+                p = int(port_str)
+            except ValueError:
+                continue
+            if p not in active_ports:
+                continue
+            pid_list = listeners.setdefault(p, [])
+            if pid not in pid_list:
+                pid_list.append(pid)
+    if listeners:
+        return listeners
+
+    # Step 3: Get-NetTCPConnection (precise PID↔port on Win8+, but slow on some
+    # systems and returns rc=1 when no match — kept as fallback only).
     try:
         port_csv = ",".join(str(p) for p in sorted(active_ports))
         result = subprocess.run(
@@ -126,7 +164,7 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
             ],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=4,
             check=False,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -149,7 +187,7 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
 
-    # Step 3: WMIC cmdline heuristic (~1-2s, indirect match)
+    # Step 4: WMIC cmdline heuristic (~1.3s, indirect match)
     try:
         result = subprocess.run(
             ["wmic", "process", "get", "ProcessId,CommandLine", "/format:csv"],
@@ -175,40 +213,6 @@ def _collect_listening_pids_windows(ports: tuple[int, ...]) -> dict[int, list[st
                             pid_list.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-
-    # Step 4: netstat fallback (last resort, capped at 5s — was 30s)
-    if not listeners and active_ports:
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) < 5 or parts[0].upper() != "TCP":
-                    continue
-                local_addr = parts[1]
-                state = parts[3].upper()
-                pid = parts[4]
-                if state != "LISTENING" or not pid.isdigit() or pid == "0":
-                    continue
-                host, sep, port_str = local_addr.rpartition(":")
-                if not sep:
-                    continue
-                try:
-                    port = int(port_str)
-                except ValueError:
-                    continue
-                if port not in active_ports:
-                    continue
-                pid_list = listeners.setdefault(port, [])
-                if pid not in pid_list:
-                    pid_list.append(pid)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
 
     return listeners
 
