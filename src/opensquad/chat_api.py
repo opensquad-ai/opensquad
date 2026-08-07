@@ -262,14 +262,37 @@ class ChatAPI:
             max_retries=0,
         )
 
-    def _ensure_client(self):
+    def _is_client_closed(self) -> bool:
+        """True when the lazily-built client can no longer send requests.
+
+        The AsyncOpenAI client wraps an ``httpx.AsyncClient`` that owns the
+        connection pool. ``reload_model`` / ``update_model`` close the *old*
+        pool asynchronously (``_close_old``), and session clones share the
+        same client via ``_clone_chat_api``. If that shared pool is closed
+        while ``self.client`` still references it, the next LLM streaming call
+        fails with ``APIConnectionError: Cannot send a request, as the client
+        has been closed`` — which is what silently aborts a turn right after a
+        tool call. Detect the closed underlying httpx client so ``_ensure_client``
+        can rebuild it.
+        """
         if self.client is None:
+            return False
+        try:
+            inner = getattr(self.client, "client", None)
+            if inner is not None and getattr(inner, "is_closed", False):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _ensure_client(self):
+        if self.client is None or self._is_client_closed():
             lock = getattr(self, "_client_lock", None)
             if lock is None:
                 self.client = self._build_client()
             else:
                 with lock:
-                    if self.client is None:
+                    if self.client is None or self._is_client_closed():
                         self.client = self._build_client()
         return self.client
 

@@ -266,7 +266,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
               </div>
             ) : null}
             <div className="os-chat-session-messages relative min-h-0 flex-1">
-              {openSessionTabs.map((tab) => {
+              {sessionLoading ? null : openSessionTabs.map((tab) => {
                 const isActive = showSessions && active.id === tab.id;
                 const useLiveSlot = !!chatSlot && !!liveSessionId && tab.id === liveSessionId;
                 return (
@@ -290,7 +290,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                   </div>
                 );
               })}
-              {showSessions && openSessionTabs.length === 0 ? (
+              {!sessionLoading && showSessions && openSessionTabs.length === 0 ? (
                 <div
                   className="flex-1 flex items-center justify-center text-[12px] text-textMuted px-4 text-center"
                   onClick={handlers.onFocus}

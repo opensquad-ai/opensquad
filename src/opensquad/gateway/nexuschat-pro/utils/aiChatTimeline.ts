@@ -22,24 +22,30 @@ export function genTimelineUID(): string {
  */
 export function composeAssistantDisplayContent(content: string): string {
   if (!content || typeof content !== 'string') return content;
+  // Strip DSML / native tool-call blocks that some models echo into the
+  // assistant body (e.g. `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="...">`).
+  // These are LLM tool-call markup, not user-facing text — on refresh they
+  // would otherwise leak as raw XML into the chat bubble.
+  const stripped = stripToolCallMarkup(content);
+  const body = stripped;
   const tagNames = ['to_user_end_task', 'to_user_reply', 'to_user'] as const;
   let chosen: { tag: string; inner: string; index: number; full: string } | null = null;
   for (const tag of tagNames) {
     const re = new RegExp(`<(${tag})\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
-    const m = content.match(re);
+    const m = body.match(re);
     if (m && typeof m.index === 'number') {
       chosen = { tag, inner: m[2] || '', index: m.index, full: m[0] };
       break;
     }
   }
   if (!chosen) {
-    return content
+    return body
       .replace(/<\/?(?:thought|think|plan|tool_call|tool_result|to_system|state|wake|sleep|title|option|arguments|func)\b[^>]*>/gi, '')
       .replace(/\n{4,}/g, '\n\n\n')
       .trim();
   }
 
-  let preamble = content;
+  let preamble = body;
   for (const tag of tagNames) {
     preamble = preamble.replace(
       new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi'),
@@ -60,6 +66,37 @@ export function composeAssistantDisplayContent(content: string): string {
   if (preamble.length >= 40) parts.push(preamble);
   if (inner) parts.push(inner);
   return (parts.join('\n\n').trim() || inner || preamble || content);
+}
+
+/**
+ * Remove DSML / native tool-call markup blocks that leak into the assistant
+ * body. Supports both the fullwidth `｜｜` and halfwidth `||` DSML delimiters
+ * plus plain `<tool_calls>` / `<invoke>` / `<parameter>` wrappers.
+ */
+function stripToolCallMarkup(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  // DSML delimiters: fullwidth `｜｜` (U+FF5C) or halfwidth `||`.
+  const pipe = '\uFF5C\uFF5C';
+  const dsml = `(?:${pipe}|\\|\\|)`;
+  let out = content;
+  // Whole DSML tool_calls wrapper + invoke/parameter bodies.
+  out = out.replace(
+    new RegExp(`<${dsml}tool_calls>[\\s\\S]*?</${dsml}tool_calls>`, 'gi'),
+    '',
+  );
+  out = out.replace(
+    new RegExp(`<${dsml}invoke\\b[^>]*>[\\s\\S]*?</${dsml}invoke>`, 'gi'),
+    '',
+  );
+  out = out.replace(
+    new RegExp(`<${dsml}parameter\\b[^>]*>[\\s\\S]*?</${dsml}parameter>`, 'gi'),
+    '',
+  );
+  // Plain (halfwidth) tool-call wrappers.
+  out = out.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, '');
+  out = out.replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, '');
+  out = out.replace(/<(?:func|function|parameter)\b[^>]*>[\s\S]*?<\/(?:func|function|parameter)>/gi, '');
+  return out;
 }
 
 /**

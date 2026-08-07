@@ -884,6 +884,10 @@ class TurnLoop:
             tc_log.info(
                 "[runner] [tool] Batch commit complete: %d result(s), returning False,'',False", len(_tool_results)
             )
+            # Signal the parallel turn loop that a tool executed this turn, so it
+            # keeps looping (instead of relying on chat_api tool_data, which is
+            # None for DSML/XML tool calls) to produce the follow-up final reply.
+            self.runner._tool_result_generated = True
             if _saved_msg:
                 # Update elapsed_ms on the assistant message that ChatAPI already saved
                 _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)

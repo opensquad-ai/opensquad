@@ -175,16 +175,34 @@ class AgentWebSocketHandler:
                     # outbound heartbeats which only prove the writer works).
                     registry.note_pong(agent_id)
 
-                elif action == "status":
-                    # Status update (optional per-session)
-                    status = message.get("status", "online")
-                    session_id = str(message.get("session_id") or "").strip()
-                    if session_id:
-                        registry.set_session_busy(agent_id, session_id, status == "busy")
-                    elif status == "busy":
-                        registry.set_busy(agent_id, True)
+                elif action == "status" or msg_type == "status":
+                    # Status update (optional per-session).
+                    #
+                    # AgentRunner emits status via `type=status` + `content`
+                    # (busy/online) + `sid` (the turn's disk session id). The
+                    # legacy `action=status` + `status`/`session_id` form is
+                    # also accepted. Without matching `msg_type == "status"`,
+                    # the busy set by send-to-agent below is never cleared and
+                    # the agent stays stuck at "busy" forever.
+                    status_raw = message.get("status")
+                    if status_raw is None:
+                        status_raw = message.get("content")
+                    status = str(status_raw or "online").strip() or "online"
+                    session_id = str(message.get("session_id") or message.get("sid") or "").strip()
+                    if status == "busy":
+                        # Agent (or a session) reports busy.
+                        if session_id:
+                            registry.set_session_busy(agent_id, session_id, True)
+                        else:
+                            registry.set_busy(agent_id, True)
                     else:
-                        registry.set_busy(agent_id, False)
+                        # Agent reports idle. status="online" is emitted by the
+                        # runner only when its busy-session set is empty, so it
+                        # represents a fully idle agent. Force-clear EVERY
+                        # per-session busy marker (they cannot all be matched by
+                        # the single sid carried on this event), otherwise a
+                        # stale marker keeps the agent stuck at "busy" forever.
+                        registry.clear_busy(agent_id)
 
                 elif msg_type in [
                     "message",

@@ -72,3 +72,39 @@ def test_trim_invalidates_token_cache():
     api._cached_token_count = 42
     api._trim_history_if_needed()
     assert api._cached_token_count is None
+
+
+class _FakeHttpx:
+    """httpx.AsyncClient stand-in with a mutable is_closed flag."""
+
+    def __init__(self, closed=False):
+        self.is_closed = closed
+
+
+class _FakeClient:
+    """AsyncOpenAI stand-in wrapping an httpx client at `.client`."""
+
+    def __init__(self, closed=False):
+        self.client = _FakeHttpx(closed=closed)
+
+
+def test_is_client_closed_detects_closed_underlying_httpx():
+    """A closed underlying httpx pool must be reported so _ensure_client rebuilds.
+
+    This is the regression guard for the "task stops after a tool call" bug:
+    ``reload_model`` async-closes the old shared client, but ``self.client``
+    still references it, so the next LLM streaming call fails with
+    ``APIConnectionError ... client has been closed``.
+    """
+    api = _make_api()
+    api.client = _FakeClient(closed=True)
+    assert api._is_client_closed() is True
+
+    api.client = _FakeClient(closed=False)
+    assert api._is_client_closed() is False
+
+
+def test_without_client_not_closed():
+    api = _make_api()
+    api.client = None
+    assert api._is_client_closed() is False

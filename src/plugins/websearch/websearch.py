@@ -95,15 +95,27 @@ def _make_request(endpoint: str, params: dict) -> dict:
     logger.info(f"Sending GET request to: {url}")
     logger.debug(f"Request params: {params}")
 
-    # SEC-8: SSRF guard — never fetch internal/loopback addresses, even if the
-    # endpoint string is influenced by LLM output.
+    # SEC-8: SSRF guard — never fetch internal/loopback addresses.
+    #
+    # NOTE: this plugin's own service URL is *always* a trusted local/loopback
+    # endpoint (e.g. http://127.0.0.1:9001) that the launcher spawns. It is NOT
+    # user/LLM-controlled, so it must be exempt from the guard. The SSRF guard
+    # exists to prevent LLM-influenced *fetch targets* (the URLs passed to
+    # fetch()/fetch_html()) from pointing at internal addresses — those are
+    # validated server-side inside the websearch service itself. Blocking the
+    # service's own loopback URL here makes every search fail with
+    # "Blocked internal URL", so skip the guard for the service endpoint.
     try:
-        from opensquad.utils.ssrf import assert_public_http_url
+        from opensquad.utils.ssrf import is_public_http_url
 
-        assert_public_http_url(url)
-    except ValueError as e:
-        logger.error(f"SSRF guard rejected URL {url}: {e}")
-        return {"error": f"Blocked internal URL: {e}"}
+        if not is_public_http_url(url):
+            logger.warning(
+                "[websearch] Service URL is a loopback/local endpoint (normal for the "
+                "local websearch service); skipping SSRF guard for trusted service URL: %s",
+                url,
+            )
+    except Exception as _ssrf_err:
+        logger.debug("[websearch] SSRF guard check skipped: %s", _ssrf_err)
 
     try:
         response = requests.get(url, params=params, timeout=TIMEOUT)
@@ -216,6 +228,18 @@ def fetch(urls: list[str], max_token=100000) -> dict[str, str]:
     """
     max_token = int(max_token)
     logger.info(f"Executing 'fetch' tool for {len(urls)} URLs.")
+    # SEC-8: validate the *actual fetch targets* (user/LLM-controlled) against
+    # the SSRF guard. The service URL itself is trusted/local and is exempt.
+    for _u in urls:
+        if not _u.strip():
+            continue
+        try:
+            from opensquad.utils.ssrf import assert_public_http_url
+
+            assert_public_http_url(_u)
+        except ValueError as _e:
+            logger.error(f"SSRF guard rejected fetch target {_u}: {_e}")
+            return {"error": f"Blocked internal URL: {_e}"}
     params = {"urls": ",".join(urls)}
     res_dict = _make_request("fetch", params)
     if not isinstance(res_dict, dict):
@@ -258,6 +282,16 @@ def fetch_html(url: str | None = None) -> dict:
       or use snippets; do not loop fetch_html on the blocked URL.
     """
     logger.info(f"Executing 'fetch_html' tool for {url} URL.")
+    # SEC-8: validate the actual fetch target (user/LLM-controlled) against the
+    # SSRF guard. The service URL itself is trusted/local and is exempt.
+    if url and url.strip():
+        try:
+            from opensquad.utils.ssrf import assert_public_http_url
+
+            assert_public_http_url(url)
+        except ValueError as _e:
+            logger.error(f"SSRF guard rejected fetch_html target {url}: {_e}")
+            return {"error": f"Blocked internal URL: {_e}"}
     params = {"url": url}
     return _make_request("fetch_html", params)
 

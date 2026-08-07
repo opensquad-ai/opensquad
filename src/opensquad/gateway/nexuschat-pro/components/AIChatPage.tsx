@@ -8322,6 +8322,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       <div className="flex-1 flex flex-col h-full min-w-0">
         {/* Messages Area */}
         <div className="flex-1 relative min-h-0" style={{ minHeight: 0 }}>
+        {/* Session loading overlay — panel-level (outside the scroll container)
+            so it never overlaps/overlays timeline messages while loading a
+            legacy full-pane history. z-40 > jump rail (z-30) and messages. */}
+        {isLoadingSession && (
+          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-panel/95 backdrop-blur-[1px] text-textMuted pointer-events-none">
+            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
+            <p className="text-sm">{sessionLoadingLabel}</p>
+          </div>
+        )}
         {/* User-turn jump rail on panel far-right (outside padded scroll / max-w column) */}
         {soloUserNavNodes.length > 0 && (
           <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-center justify-end pr-1 overflow-visible">
@@ -8364,14 +8373,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         )}
         <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
           <div className={soloColumnClass}>
-          {/* Session loading overlay — only for legacy full-pane history loads */}
-          {isLoadingSession && (
-            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-panel/70 backdrop-blur-[1px] text-textMuted pointer-events-none">
-              <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
-              <p className="text-sm">{sessionLoadingLabel}</p>
-            </div>
-          )}
-
           {/* Render timeline entries (messages + workflow blocks interleaved) */}
           {/* Lazy loading indicator at top */}
           {isLoadingMore && (

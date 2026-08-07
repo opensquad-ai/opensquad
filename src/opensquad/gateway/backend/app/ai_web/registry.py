@@ -145,7 +145,12 @@ class AgentRegistry:
         agent.last_heartbeat = datetime.now().isoformat()
         if stats and isinstance(stats, dict):
             try:
-                agent.load_percent = int(stats.get("load_percent") or agent.load_percent or 0)
+                # Use the reported load_percent even when it is 0 (a falsy value
+                # must not fall back to the previous load, otherwise an idling
+                # agent's load never returns to 0 and the UI stays "working").
+                _reported = stats.get("load_percent")
+                if _reported is not None:
+                    agent.load_percent = int(_reported)
             except (TypeError, ValueError):
                 pass
 
@@ -214,6 +219,22 @@ class AgentRegistry:
 
     def get_busy_sessions(self, agent_id: str) -> list[str]:
         return sorted(self._busy_sessions.get(agent_id) or set())
+
+    def clear_busy(self, agent_id: str) -> None:
+        """Force-clear ALL session busy markers and set the agent online.
+
+        Used when the agent reports fully idle via a status="online" event that
+        carries NO session id (e.g. the runner's ``_turn_sid`` is empty after a
+        turn). In that case the legacy per-session markers can not be matched by
+        sid, so we drop the whole set; otherwise the agent stays stuck at busy
+        forever.
+        """
+        existing = self._busy_sessions.pop(agent_id, None)
+        if existing is not None:
+            self._busy_sessions[agent_id] = set()
+        if agent_id in self.agents:
+            self.agents[agent_id].busy_sessions = []
+            self.agents[agent_id].status = "online"
 
     def get_agent(self, agent_id: str) -> AgentInfo | None:
         """Get Agent information"""

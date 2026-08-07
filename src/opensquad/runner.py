@@ -298,6 +298,11 @@ class AgentRunner:
         self._current_tools = None
         self._current_tool_choice = "auto"
 
+        # Set by _handle_turn_result when a tool executed this turn (tool-loop
+        # continuation signal for _parallel_session_turn). See the fix at the
+        # `if not current_input and not _tool_ran_this_turn` guard.
+        self._tool_result_generated = False
+
         # Repeated-action guard state: sid -> {"count", "last", "guarded"}
         # Breaks runaway identical tool loops (see turn-loop guard below).
         self._tool_repeat_state: dict[str, dict] = {}
@@ -1293,7 +1298,22 @@ class AgentRunner:
                 if went_to_sleep or stop:
                     break
                 current_input = next_input or ""
-                if not current_input and not tool_data:
+
+                # P1-: Tool-loop continuation fix.
+                #
+                # When the model issues tools via DSML/XML (ark-code / Claude-style
+                # `<tool_call>` tags) rather than native function-calling, the
+                # streaming layer does NOT populate chat_api `tool_data` (it stays
+                # None). `_handle_turn_result` still parses the XML tool calls and
+                # executes them, then returns `(False, "", False)` — meaning "keep
+                # looping". The old guard below used `not tool_data` and therefore
+                # broke out of the loop right after the tool executed, skipping the
+                # follow-up LLM turn that must turn the tool result into a final
+                # reply. Replace the fragile `tool_data` check with a real
+                # "tool result was produced this turn" signal from the turn handler.
+                _tool_ran_this_turn = getattr(self, "_tool_result_generated", False)
+                self._tool_result_generated = False
+                if not current_input and not _tool_ran_this_turn:
                     break
 
             _wf_ended_ms = int(datetime.now().timestamp() * 1000)

@@ -7,6 +7,7 @@
 - **Short/interactive shell commands** (e.g. `git status`, `pip install`, short Python scripts, `curl`, `ffmpeg` one-shot): use `system.run_session_job`.
 - **Long-running/background tasks** (e.g. dev server, watcher, long build/test): use `system.start_job` in non-blocking mode and follow with `system.check_job` polling.
 - Never use blocking mode for long-running services.
+- **Always bound potentially-long commands with an explicit `timeout`**: `system.run_session_job` accepts a `timeout` parameter (in **seconds**; default `120` = 2 minutes). For commands whose runtime is hard to predict — e.g. grepping a large directory tree, scanning many files, cold `pip install`/`npm install`, big builds — pass an explicit `timeout` (e.g. `120` for ~2 minutes) so the call fails fast with `Command timed out` instead of blocking the persistent shell session and stalling every later `run_session_job`. For tasks expected to exceed the cap, use `system.start_job` instead.
 
 **Format Rules**:
 1. **Must have <func> tag**: Specify tool name (full namespace, e.g., `filesystem.list_directory`)
