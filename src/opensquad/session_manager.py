@@ -871,8 +871,25 @@ class SessionManager:
                 self._log_records_since_snapshot = _replayed
 
                 if self._is_reusable_draft(self.session_data):
-                    # Keep the empty draft as the New Session cache — do not
-                    # bounce to latest history (that undoes New Session).
+                    # Empty New Session shell. On a fresh install there is no
+                    # history to restore, so keep it as the draft cache. But if
+                    # the service restarted and the previous conversation was
+                    # archived into history/ (e.g. user clicked New Session then
+                    # closed, or a restart happened mid-turn), restore the most
+                    # recent non-empty history session instead of leaving the
+                    # user staring at a blank shell — the "latest session" would
+                    # otherwise be silently lost while every older history entry
+                    # still loads.
+                    latest_sid = self._find_latest_history_session_with_input()
+                    if latest_sid:
+                        logger.info(
+                            "[SessionManager] Empty draft but history has content "
+                            "(%s) — restoring it after restart",
+                            latest_sid,
+                        )
+                        if self.load_history_session(latest_sid):
+                            self.session_data["draft"] = False
+                            return
                     self.session_data["draft"] = True
                     loaded = True
                     logger.info(
@@ -904,6 +921,49 @@ class SessionManager:
                         return
 
             self._init_new_session()
+
+    def _find_latest_history_session_with_input(self) -> str | None:
+        """Return the most recently modified history session that has user input.
+
+        Used after a restart to restore the last real conversation when the
+        current_session.json is only an empty New Session draft. Scans the
+        history directory (newest first) and returns the first sid whose
+        snapshot contains at least one user message — skipping empty shells,
+        scheduled-task sessions, and the draft itself.
+        """
+        try:
+            if not os.path.isdir(self.history_dir):
+                return None
+            files = [f for f in os.listdir(self.history_dir) if f.endswith(".json")]
+        except OSError:
+            return None
+        if not files:
+            return None
+        files.sort(key=lambda x: os.path.getmtime(os.path.join(self.history_dir, x)), reverse=True)
+        for fname in files:
+            sid = fname[:-5]
+            if sid == self.session_data.get("id"):
+                continue
+            try:
+                with open(os.path.join(self.history_dir, fname), encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, list):
+                user_input = any(
+                    isinstance(m, dict) and m.get("role") == "user" and str(m.get("content") or "").strip()
+                    for m in data
+                )
+                if user_input:
+                    return sid
+                continue
+            if not isinstance(data, dict):
+                continue
+            if str(data.get("origin") or "").strip() == "scheduled_task":
+                continue
+            if self._has_user_input(data):
+                return sid
+        return None
 
     def _generate_id(self):
         now = datetime.now(timezone.utc)
