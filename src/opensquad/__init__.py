@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "0.8.9.dev0"
+__version__ = "0.8.20"
 __author__ = "OpenSquad Contributors"
 
 # Shared runtime context dict - updated by Runner each turn.
