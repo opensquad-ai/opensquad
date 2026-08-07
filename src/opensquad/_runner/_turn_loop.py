@@ -839,6 +839,7 @@ class TurnLoop:
                     )
                     logger.warning(f"[Runner] {_abort_msg}")
                     await self.runner._emit("error", {"message": _abort_msg})
+                    await self.runner._emit("to_user_final", f"[Error] {_abort_msg}")
                     _get_session_manager().add_event(
                         "info",
                         {"event": "repeated_action_guard", "text": _abort_msg},

@@ -1252,7 +1252,10 @@ class AgentRunner:
                     await self._broadcast_token_stats()
                 except Exception as e:
                     logger.error("[Runner] parallel chat() failed sid=%s: %s", sid, e)
-                    await self._emit("error", {"message": str(e)[:300]})
+                    _par_err = f"LLM request failed: {str(e)[:300]}"
+                    await self._emit("error", {"message": _par_err})
+                    # Emit as a final user-visible message so the web always sees it.
+                    await self._emit("to_user_final", f"[Error] {_par_err}")
                     # Release busy state immediately so the front-end composer
                     # drops "executing" without waiting for the turn finally
                     # block (the LLM call may have been the hang and the
@@ -1366,7 +1369,10 @@ class AgentRunner:
         except Exception as e:
             logger.error("[Runner] Parallel turn error sid=%s: %s", sid, e, exc_info=True)
             try:
-                await self._emit("error", {"message": str(e)[:300]})
+                _turn_err = f"Task failed: {str(e)[:300]}"
+                await self._emit("error", {"message": _turn_err})
+                # Emit as a final user-visible message so the web always sees it.
+                await self._emit("to_user_final", f"[Error] {_turn_err}")
                 await self._emit("state", "idle")
                 _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
                 if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
@@ -2710,13 +2716,13 @@ class AgentRunner:
                     await self._broadcast_token_stats()
                 except asyncio.TimeoutError:
                     logger.error(f"[Runner] LLM API call timed out after {_asyncio_timeout}s, aborting turn")
+                    _timeout_msg = f"LLM API call timed out after {_asyncio_timeout}s. Please check your network or try again later."
                     await self._emit("status", "LLM API response timed out, please try again later")
-                    await self._emit(
-                        "error",
-                        {
-                            "message": f"LLM API call timed out after {_asyncio_timeout}s. Please check your network or try again later.",
-                        },
-                    )
+                    await self._emit("error", {"message": _timeout_msg})
+                    # Emit as a final user-visible message so the web always sees
+                    # the error even though `error` is not in the gateway forward
+                    # whitelist (to_user_final -> message is the full path).
+                    await self._emit("to_user_final", f"[Error] {_timeout_msg}")
                     task_finished = True
                     initial_query = None
                     break
@@ -2738,13 +2744,12 @@ class AgentRunner:
                     logger.warning(
                         f"[Runner] CancelledError during chat() (recovered via safety net): {_cancel_msg[:200]}"
                     )
-                    await self._emit("status", "LLM API call was interrupted, please retry")
-                    await self._emit(
-                        "error",
-                        {
-                            "message": "LLM API call was interrupted by an internal cancellation. Please retry your message.",
-                        },
+                    _cancel_friendly = (
+                        "LLM API call was interrupted by an internal cancellation. Please retry your message."
                     )
+                    await self._emit("status", "LLM API call was interrupted, please retry")
+                    await self._emit("error", {"message": _cancel_friendly})
+                    await self._emit("to_user_final", f"[Error] {_cancel_friendly}")
                     task_finished = True
                     initial_query = None
                     break
@@ -2774,12 +2779,10 @@ class AgentRunner:
                         friendly = f"LLM API call failed: {err_msg[:300]}"
                     logger.error(f"[Runner] LLM API call failed: {err_msg[:500]}")
                     await self._emit("status", "LLM API call failed")
-                    await self._emit(
-                        "error",
-                        {
-                            "message": friendly,
-                        },
-                    )
+                    await self._emit("error", {"message": friendly})
+                    # Emit the friendly error as a final user-visible message so the
+                    # web always sees it (to_user_final -> message full path).
+                    await self._emit("to_user_final", f"[Error] {friendly}")
                     task_finished = True
                     initial_query = None
                     break
