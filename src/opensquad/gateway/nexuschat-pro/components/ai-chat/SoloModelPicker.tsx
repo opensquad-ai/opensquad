@@ -116,12 +116,14 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Hide models the user disabled in the model-card manager.
+    const visible = cards.filter((c) => c.enabled !== false);
     const filtered = q
-      ? cards.filter((c) => {
+      ? visible.filter((c) => {
           const hay = `${c.title || ''} ${c.name} ${c.model_name} ${c.provider || ''}`.toLowerCase();
           return hay.includes(q);
         })
-      : cards;
+      : visible;
 
     const out: { vendor: string; items: ModelCardInfo[] }[] = [];
     const idx: Record<string, number> = {};

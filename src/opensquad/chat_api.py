@@ -1041,7 +1041,10 @@ class ChatAPI:
         # preceding assistant message with tool_calls, otherwise DeepSeek rejects
         # the request with "Messages with role 'tool' must be a response to a
         # preceding message with 'tool_calls'".
-        while recent_start > 0 and self.req[recent_start].get("role") == "tool":
+        # FIX: recent_start may equal len(self.req) when the newest message is too
+        # large to fit the retention budget (kept at its initial value). Guard the
+        # index to avoid IndexError that kills the whole tool flow mid-turn.
+        while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
             recent_start -= 1
             logger.warning(
                 "[CompressTrace] tool message at recent_start, extending to include "
@@ -1112,7 +1115,7 @@ class ChatAPI:
             if recent_start < min_scan:
                 recent_start = min_scan
             # Re-run tool-pair integrity fix on the forced boundary.
-            while recent_start > 0 and self.req[recent_start].get("role") == "tool":
+            while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
                 recent_start -= 1
             recent_msgs = self.req[recent_start:]
             end_scan = recent_start

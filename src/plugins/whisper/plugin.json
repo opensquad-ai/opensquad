@@ -56,21 +56,7 @@
       "description": "Automatically start the Whisper service when the launcher boots"
     }
   },
-  "contributes": {
-    "navigation": {
-      "label": "Whisper",
-      "label_en": "Whisper",
-      "icon": "Mic",
-      "view": "whisper_transcribe:panel"
-    },
-    "views": [
-      {
-        "name": "panel",
-        "title": "Whisper 语音转文本",
-        "title_en": "Whisper Speech-to-Text"
-      }
-    ]
-  },
+  "contributes": {},
   "service": {
     "entry": "service/service.py",
     "default_port": 5001,

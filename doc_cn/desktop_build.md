@@ -478,6 +478,127 @@ CI：`build-desktop.yml` 在 Windows backend job 的 PyInstaller 之后自动跑
 
 ---
 
+## 从源码打包到部署上线（完整流程与踩坑记录）
+
+> 本节记录一次真实的「打新包 → 替换 → 重启 → 端到端验证」全流程，
+> 重点标注了历代踩过的坑和处理方式，供后续发版/修复时照做。
+
+### 1. 环境准备（两个关键坑）
+
+**坑 A：打包必须用干净 venv，不要用 anaconda3 的 base 环境。**
+anaconda3 base 自带 PyQt5 等海量无关库，PyInstaller Analysis 会逐个扫描，
+导致 40+ 分钟卡死。应使用独立干净 venv（Python 3.11，只装 PyInstaller +
+运行依赖）。
+
+**坑 B：必须排除代理环境变量。**
+环境里若存在 `HTTPS_PROXY=127.0.0.1:<port>` 之类的代理，pip / PyInstaller
+联网会卡死。打包前先清掉：
+
+```powershell
+$env:HTTP_PROXY  = $null
+$env:HTTPS_PROXY = $null
+$env:ALL_PROXY   = $null
+```
+
+### 2. 打包命令
+
+```powershell
+# 用干净 venv 的 python 调 PyInstaller
+& C:\path\to\build_venv_311\Scripts\python.exe -u -m PyInstaller --log-level INFO `
+    src/opensquad/gateway/backend/opensquad_backend.spec `
+    --distpath build/backend-win `
+    --workpath build/.pyinstaller-work `
+    --noconfirm
+```
+
+### 3. 打包阶段的两个高发失败
+
+| 报错 | 根因 | 处理 |
+|------|------|------|
+| `PermissionError: [WinError 5] 拒绝访问`（清理 dist 时） | 目标 `run.exe` 正被运行中的 gateway/launcher/agent 进程占用，无法覆盖 | 先停掉所有 `run.exe` 服务进程（见第 4 步），再打包 |
+| `FileNotFoundError: [WinError 3]`（清理 dist 时递归 rmtree 中断） | 旧 dist 目录的 `_internal` 里残留损坏路径（如 huggingface 模型缓存的断链目录），`shutil.rmtree` 解不开 | **改用全新的 `--distpath` + 全新 `--workpath`**（如 `build/backend-win-new` + `.pyinstaller-work11`）绕开损坏目录，构建出干净产物 |
+
+> 注意：旧的 `build/backend-win/run/_internal` 可能达 1GB+（运行期把模型
+> 下载进了 `_internal`），这些应剔除——正确的写法是运行时把模型缓存落到
+> workspace，而不是打进 bundle。
+
+### 4. 部署替换（用「重命名」而非「删除」，避免触碰损坏目录）
+
+```powershell
+# 1) 先停跑中的服务，解锁 run.exe（否则覆盖会报 PermissionError）
+taskkill /F /T /PID <gateway_pid>; taskkill /F /T /PID <launcher_pid>
+# 2) 把旧 dist 改名留作备份，而不是直接用 rmtree 删除
+Rename-Item build\backend-win         backend-win-old-bak
+# 3) 把新构建产物改名为标准部署路径
+Rename-Item build\backend-win-new     backend-win
+# 4) 确认新 run.exe 就位
+Get-Item build\backend-win\run\run.exe | Select LastWriteTime, Length
+```
+
+用 `Rename-Item` 重命名目录**不会递归遍历**子目录，因此即使旧目录里有
+损坏的 junction/缓存，也能安全改名，不会触发 `shutil.rmtree` 的报错。
+
+### 5. 启动服务（frozen 模式）
+
+frozen `run.exe` 需要 `OPENSQUAD_WORKSPACE` / `OPENSQUAD_USER_DATA` 指向
+可写工作区（否则会在只读 `_internal/` 下写数据）。桌面端（Electron）会
+自动注入这些变量；手动启动时要显式设置：
+
+```powershell
+$env:OPENSQUAD_WORKSPACE = 'C:\path\to\opensquad_runtime_deploy'
+$env:OPENSQUAD_USER_DATA = 'C:\path\to\opensquad_runtime_deploy'
+
+# Gateway 后端（9555）
+& build\backend-win\run\run.exe --service gateway
+
+# Launcher（9600）——会自动拉起 ui.auto_start_on_boot=true 的 agent
+& build\backend-win\run\run.exe --service launcher --mgmt-port 9600
+```
+
+Launcher 会扫描 workspace 下 `agents/*/config.json`，凡配置
+`"ui": {"auto_start_on_boot": true}` 的 agent 都会被自动拉起（如 agent305
+跑在 8001）。验证：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:9600/api/agents | ConvertTo-Json -Depth 5
+# 目标 agent 应为 alive=true、health_ok=true
+```
+
+### 6. 端到端验证（WebSocket，触发工具调用）
+
+agent 的 Web 服务可能被禁用（`'server.py' not found`），聊天统一走 Gateway：
+路由 `ws://127.0.0.1:9555/ai-web/ws/{agent_id}`，token 可用
+`system_config.json` 的 `auth.gateway_token`（会以 `adapter-user` 身份连接）。
+
+```python
+import asyncio, json, websockets
+
+async def main():
+    url = "ws://127.0.0.1:9555/ai-web/ws/agent305-001?token=<gateway_token>"
+    async with websockets.connect(url, open_timeout=15) as ws:
+        await ws.recv()  # 等 "connected"
+        await ws.send(json.dumps({"type": "chat",
+            "content": "请用 system 工具获取当前日期时间并告诉我"}))
+        while True:
+            msg = json.loads(await ws.recv())
+            t = msg.get("type")
+            if t in ("tool_call", "tool_result"):
+                print(t, msg.get("name"), str(msg.get("args"))[:60])
+            elif t == "message":
+                print("回复:", msg.get("content")); break
+            elif t == "error":
+                print("错误:", msg); break
+
+asyncio.run(main())
+```
+
+**判定通过**：收到 `tool_call`（如 `system__get_time`）→ `tool_result` →
+最终 `message` 回复，工具流完整、不中断。若工具调用后流程戛然而止、无最终
+回复，多半是上下文压缩逻辑（`chat_api.py` 的 CompressTrace）在此处抛了
+`IndexError`——可先复现该路径再定位。
+
+---
+
 ## 本文没覆盖的内容
 
 ### `electron:dev` 第一次跑白屏

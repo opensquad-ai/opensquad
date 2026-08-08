@@ -69,10 +69,17 @@ def _terminate_registered_processes() -> tuple[int, int, set[int]]:
         if pid_int <= 0 or pid_int in seen_pids:
             continue
         seen_pids.add(pid_int)
-        touched_pids.add(pid_int)
         alive = _pid_exists(pid_int)
         if alive and _terminate_pid_tree(pid_int):
             killed += 1
+        # Only mark as handled once the process is actually gone, so a PID that
+        # survived termination is NOT skipped by the later port-based cleanup.
+        for _ in range(10):
+            if not _pid_exists(pid_int):
+                break
+            time.sleep(0.05)
+        if not _pid_exists(pid_int):
+            touched_pids.add(pid_int)
         with contextlib.suppress(OSError):
             _remove_runtime_registry(kind, identifier)
     return killed, len(entries), touched_pids
@@ -494,7 +501,14 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
                 if future.result():
                     killed += 1
 
-    return killed, to_kill
+    # Give TerminateProcess a moment to fully reap before verifying liveness.
+    if to_kill:
+        time.sleep(0.2)
+    # Only report PIDs confirmed dead. A PID that survived the kill attempts is
+    # deliberately NOT added to the skip set, so the later port-based cleanup
+    # (taskkill by port) can retry it instead of silently leaving it behind.
+    dead = {pid for pid in to_kill if not psutil.pid_exists(pid)}
+    return killed, dead
 
 
 def _kill_unix_tree_psutil(my_pid: int) -> int:
@@ -614,10 +628,13 @@ def run_stop(args):
                     data=json.dumps({"timeout": 5}).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                 )
-                urllib.request.urlopen(req, timeout=3)
+                # Short timeout: if the launcher is busy (e.g. slow plugin dep
+                # checks like lark_oapi's ~12s import) and can't answer quickly,
+                # fail fast and let the force-kill below do the cleanup.
+                urllib.request.urlopen(req, timeout=1)
                 print("[stop] Launcher acknowledged shutdown.")
                 # Brief wait for processes to exit gracefully, then verify
-                for _ in range(5):
+                for _ in range(2):
                     time.sleep(0.5)
                     if not _probe_port(launcher_port, timeout=0.3):
                         break

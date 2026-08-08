@@ -111,6 +111,11 @@ def _wait_gateway_full(gateway_url: str, timeout: float = 30.0) -> bool:
 
 def _frozen_backend_exe() -> str | None:
     """PyInstaller gateway/launcher binary when built locally (Phase 3 fast-path)."""
+    # OPENSQUAD_SOURCE_MODE=1 forces the source (non-frozen) launch path so
+    # backend Python edits take effect without repackaging. Desktop/CI keep
+    # this unset to use the packaged binary.
+    if os.environ.get("OPENSQUAD_SOURCE_MODE", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return None
     root = _repo_root()
     for rel in (
         os.path.join("build", "backend-win", "run", "run.exe"),
