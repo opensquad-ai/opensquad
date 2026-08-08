@@ -329,7 +329,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
   // drawer
   const [drawerCard, setDrawerCard]   = useState<string | null>(null);
-  const [drawerMode, setDrawerMode]   = useState<'edit' | 'addCustomProvider' | null>(null);
+  const [drawerMode, setDrawerMode]   = useState<'edit' | 'addCustomProvider' | 'addToExistingProvider' | null>(null);
   // 抽屉打开时正在编辑 customForm.models 中的第几个模型（null = 新增）
   const [editingModelIndex, setEditingModelIndex] = useState<number | null>(null);
   const [form, setForm]               = useState<ModelCardDetail>(EMPTY);
@@ -543,6 +543,40 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     setDrawerError(null);
   };
 
+  // 从「已配置供应商」的 group header 上的 "+" 按钮触发：
+  // 打开模型配置抽屉，从该 provider 任一现有模型卡继承 base_url / api_key /
+  // api_protocol，预填 provider。用户在抽屉里填好 model_name + 详细字段后，
+  // 直接 saveCard 落盘为新模型卡（不经过 customForm 中转）。
+  const openAddToExistingModel = async (providerName: string) => {
+    setShowKey(false);
+    // 找该 provider 下任一现成卡继承连接信息
+    const sample = cards.find(c => (c.provider || '').trim() === providerName);
+    let baseUrl = '';
+    let apiKey  = '';
+    let apiProtocol: ModelCardDetail['api_protocol'] = 'openai_compat';
+    if (sample) {
+      try {
+        const res = await modelCardAPI.getCard(sample.name);
+        const card = (res.card || {}) as ModelCardDetail;
+        baseUrl = (card.base_url || '').trim();
+        apiKey  = (card.api_key  || '').trim();
+        const proto = (card.api_protocol || '').trim();
+        if (proto) apiProtocol = proto as ModelCardDetail['api_protocol'];
+      } catch { /* ignore — fallback to EMPTY */ }
+    }
+    setForm({
+      ...EMPTY,
+      provider: providerName,
+      base_url: baseUrl,
+      api_key: apiKey,
+      api_protocol: apiProtocol,
+    });
+    setDrawerCard(null);
+    setDrawerMode('addToExistingProvider');
+    setEditingModelIndex(null);
+    setDrawerError(null);
+  };
+
   const closeDrawer = () => {
     setDrawerCard(null);
     setDrawerMode(null);
@@ -580,6 +614,39 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         });
         showToast(t('modelsPage.modelAdded', { defaultValue: '已添加模型' }));
         closeDrawer();
+      } else if (drawerMode === 'addToExistingProvider') {
+        // ── 模式：为「已配置供应商」添加一个新模型卡（直接落盘） ──
+        const provider = (form.provider || '').trim();
+        const modelId  = (form.model_name || '').trim();
+        if (!provider) {
+          setDrawerError(t('modelsPage.customDisplayNameRequired'));
+          return;
+        }
+        if (!modelId) {
+          setDrawerError(t('modelsPage.customModelRequired'));
+          return;
+        }
+        // 命名规则：{providerSlug}__{modelSlug}（与 submitCustomProvider 保持一致）
+        const providerSlug = provider.toLowerCase()
+          .replace(/[^a-z0-9_\-\.]/g, '_').replace(/^_+|_+$/g, '');
+        const modelSlug = modelId.toLowerCase()
+          .replace(/[^a-z0-9_\-\.]/g, '_').replace(/^_+|_+$/g, '');
+        const saveName = `${providerSlug}__${modelSlug}`;
+        // 已存在同名 model_id 卡片 → 拒绝（避免覆盖用户已配模型）
+        const clash = cards.find(c => c.name === saveName);
+        if (clash) {
+          setDrawerError(t('modelsPage.modelAlreadyExists', { name: saveName }));
+          return;
+        }
+        const payload: ModelCardDetail = {
+          ...form,
+          name: saveName,
+          provider: provider,
+        };
+        await modelCardAPI.saveCard(saveName, payload);
+        showToast(t('modelsPage.modelAdded', { defaultValue: '已添加模型' }));
+        await loadCards();
+        closeDrawer();
       } else {
         // ── 模式：编辑已存在的模型卡 ──
         if (!drawerCard) return;
@@ -607,6 +674,12 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   };
 
   const handleDelete = async () => {
+    if (drawerMode === 'addToExistingProvider') {
+      // ── 模式：为已配置供应商新增模型（尚未落盘）──
+      // 抽屉里的删除按钮 = 放弃新增，直接关闭
+      closeDrawer();
+      return;
+    }
     if (drawerMode === 'addCustomProvider') {
       // ── 模式：从 customForm.models 中删除当前编辑的模型 ──
       if (editingModelIndex === null) return;
@@ -1155,14 +1228,24 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                       <span className="text-xs text-textMuted flex-shrink-0">({list.length})</span>
                     </button>
                     {provider !== '__none__' && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteProvider(provider, list.map(c => c.name))}
-                        title={t('modelsPage.deleteProvider')}
-                        className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); void openAddToExistingModel(provider); }}
+                          title={t('modelsPage.addModelToExistingProvider', { defaultValue: '为该供应商添加模型' })}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
+                        >
+                          <Plus size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProvider(provider, list.map(c => c.name))}
+                          title={t('modelsPage.deleteProvider')}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
                     )}
                   </div>
                   {/* Cards → compact model list with enable toggles */}
@@ -1201,22 +1284,27 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         )}
       </div>
 
-      {/* Right Drawer — supports two modes:
-          1) drawerMode === 'edit'              → 编辑已存在模型卡（z-40 / z-50）
-          2) drawerMode === 'addCustomProvider' → 从「自定义供应商」添加/编辑模型（z-55 / z-60，盖在模态之上） */}
+      {/* Right Drawer — supports three modes:
+          1) drawerMode === 'edit'                 → 编辑已存在模型卡（z-40 / z-50）
+          2) drawerMode === 'addCustomProvider'    → 从「自定义供应商」添加/编辑模型（z-55 / z-60，盖在模态之上）
+          3) drawerMode === 'addToExistingProvider'→ 为「已配置供应商」新增模型（z-40 / z-50，盖在页面上） */}
       {drawerMode !== null && (
         <>
           {/* Backdrop */}
           <div
-            className={`fixed inset-0 bg-black/30 backdrop-blur-sm ${drawerMode === 'addCustomProvider' ? 'z-[55]' : 'z-40'}`}
+            className={`fixed inset-0 bg-black/30 backdrop-blur-sm ${
+              drawerMode === 'addCustomProvider' ? 'z-[55]' : 'z-40'
+            }`}
             onClick={closeDrawer}
           />
           {/* Panel */}
-          <div className={`fixed inset-0 md:left-auto md:right-0 md:w-[440px] bg-panel border-l border-border flex flex-col shadow-2xl ${drawerMode === 'addCustomProvider' ? 'z-[60]' : 'z-50'}`}>
+          <div className={`fixed inset-0 md:left-auto md:right-0 md:w-[440px] bg-panel border-l border-border flex flex-col shadow-2xl ${
+            drawerMode === 'addCustomProvider' ? 'z-[60]' : 'z-50'
+          }`}>
             {/* Drawer header */}
             <div className="flex items-center gap-3 px-4 md:px-5 py-3 md:py-4 border-b border-border shrink-0">
               <div className="flex-1 min-w-0">
-                {drawerMode === 'addCustomProvider' ? (
+                {(drawerMode === 'addCustomProvider' || drawerMode === 'addToExistingProvider') ? (
                   <>
                     <h2 className="text-base font-semibold text-textMain truncate">
                       {editingModelIndex !== null
@@ -1224,7 +1312,11 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                         : t('modelsPage.addModelDetail', { defaultValue: '添加模型详细配置' })}
                     </h2>
                     <p className="text-[11px] text-textMuted truncate mt-0.5">
-                      {t('modelsPage.modelDetailProvider', { name: customForm.display_name || customForm.provider_id || '—' })}
+                      {t('modelsPage.modelDetailProvider', {
+                        name: drawerMode === 'addToExistingProvider'
+                          ? (form.provider || '—')
+                          : (customForm.display_name || customForm.provider_id || '—'),
+                      })}
                     </p>
                   </>
                 ) : (
@@ -1287,7 +1379,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                       <span className="text-textMuted">Provider · </span>
                       <span className="text-textMain truncate">{form.provider || '—'}</span>
                     </div>
-                    {drawerMode === 'addCustomProvider' ? (
+                    {(drawerMode === 'addCustomProvider' || drawerMode === 'addToExistingProvider') ? (
                       /* 新增/编辑模式下，model_name 必须可编辑（用户首次指定 API model id） */
                       <div className="min-w-0 col-span-2 sm:col-span-1">
                         <label className="text-textMuted text-[11px] flex items-center justify-center gap-1">

@@ -702,7 +702,9 @@
     "providerReadonlyFromCustom": "Inherited from the Custom Provider form, not editable here",
     "openModelDetail": "Open model detail",
     "deleteModelFromListConfirm": "Remove this model from the list?",
-    "modelAdded": "Model added"
+    "modelAdded": "Model added",
+    "addModelToExistingProvider": "Add model to this provider",
+    "modelAlreadyExists": "Model card already exists: {{name}}"
   },
   "logsManager": {
     "title": "Log Viewer",

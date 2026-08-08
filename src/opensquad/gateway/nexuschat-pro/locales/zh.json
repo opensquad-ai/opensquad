@@ -702,7 +702,9 @@
     "providerReadonlyFromCustom": "继承自「自定义供应商」表单，不可在此修改",
     "openModelDetail": "打开模型详细配置",
     "deleteModelFromListConfirm": "确认从列表中删除该模型？",
-    "modelAdded": "已添加模型"
+    "modelAdded": "已添加模型",
+    "addModelToExistingProvider": "为该供应商添加模型",
+    "modelAlreadyExists": "模型卡已存在：{{name}}"
   },
   "logsManager": {
     "title": "日志查看",
