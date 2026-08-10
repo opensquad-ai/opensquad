@@ -99,7 +99,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
           <div
             ref={menuRef}
             role="menu"
-            className="fixed z-[9999] min-w-[280px] max-w-[360px] w-[320px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/10 dark:border-white/10 shadow-xl text-[12px]"
+            className="fixed z-[9999] min-w-[280px] max-w-[360px] w-[320px] py-1 rounded-lg bg-bgLight border border-border shadow-xl text-[12px]"
             style={{ top: menuPos.top, left: menuPos.left }}
           >
             {menuWorkspaces.length > 0 ? (

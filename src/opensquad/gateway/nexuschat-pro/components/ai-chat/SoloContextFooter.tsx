@@ -383,7 +383,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
           </button>
 
           {cwdOpen && canPick && (
-            <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+            <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
               <div className="px-3 py-2.5 border-b border-border/60">
                 <div className="text-[12px] text-textMain font-medium truncate">{displayName}</div>
                 {cwd ? (

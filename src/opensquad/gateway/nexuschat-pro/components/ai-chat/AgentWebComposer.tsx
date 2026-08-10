@@ -715,11 +715,11 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             ) : null}
 
             <div
-              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-border/30 dark:border-white/5 focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-border/40 focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 landing
                   ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
-              } ${disabled ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'}`}
+              } ${disabled ? 'bg-border/40' : 'bg-bgLight'}`}
             >
             {slashMode?.kind === 'commands' ? (
               <SlashMenu
@@ -956,25 +956,14 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   </button>
                 ) : null}
                 {busy ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void submit()}
-                      disabled={!canSend}
-                      className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                      title="排队发送"
-                    >
-                      <Send size={14} className="text-white" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onStop}
-                      className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
-                      title="Stop"
-                    >
-                      <Square size={14} className="text-white" />
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={onStop}
+                    className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
+                    title="Stop"
+                  >
+                    <Square size={14} className="text-white" />
+                  </button>
                 ) : (
                   <button
                     type="button"

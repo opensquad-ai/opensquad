@@ -603,8 +603,8 @@ const NextPlanningPlaceholder: React.FC<{
   }
   const faint =
     depth === 0
-      ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
-      : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+      ? 'color-mix(in srgb, rgb(var(--color-text-muted)) 72%, transparent)'
+      : 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
   return (
     <div className="w-full select-none py-0.5">
       <ShimmerLabel color={faint} className="text-[13px] leading-relaxed font-normal">
@@ -642,8 +642,8 @@ const TextChevronToggle: React.FC<{
   const faint = errored
     ? 'color-mix(in srgb, #dc2626 78%, transparent)'
     : depth === 0
-      ? 'color-mix(in srgb, var(--color-text-muted) 72%, transparent)'
-      : 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+      ? 'color-mix(in srgb, rgb(var(--color-text-muted)) 72%, transparent)'
+      : 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
 
   const fileIdx = fileLabel && onFileClick ? primary.indexOf(fileLabel) : -1;
   const primaryNode =
@@ -761,8 +761,8 @@ const SoloToolExpandPanel: React.FC<{
   }, [hasResult, result]);
 
   return (
-    <div className="mt-1 mb-1.5 rounded-md border border-border/50 bg-black/[0.035] dark:bg-white/[0.05] overflow-hidden">
-      <div className="px-2.5 py-1.5 border-b border-border/40 bg-black/[0.02] dark:bg-white/[0.03]">
+    <div className="mt-1 mb-1.5 rounded-md border border-border/50 bg-bgLight overflow-hidden">
+      <div className="px-2.5 py-1.5 border-b border-border/40 bg-bgLight">
         <span className="text-[11px] font-mono text-textMuted/80 truncate block">{toolName}</span>
       </div>
       {hasArgs && (
@@ -820,7 +820,7 @@ const SoloPlanFold: React.FC<{
     <PlanBlock
       steps={steps}
       defaultOpen={defaultOpen || !!running}
-      className="mb-0 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]"
+      className="mb-0 border border-border/55 rounded-lg overflow-hidden bg-bgLight"
     />
   </div>
 );
@@ -900,7 +900,7 @@ const SoloEventLine: React.FC<{
     return (
       <div
         className="w-full select-text py-0.5 text-[12px] leading-relaxed"
-        style={{ color: 'color-mix(in srgb, var(--color-text-muted) 62%, transparent)' }}
+        style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 62%, transparent)' }}
       >
         {line.running ? <span className="opacity-80">… </span> : null}
         <span className="whitespace-pre-wrap break-words">{line.detail || line.primary}</span>
@@ -936,7 +936,7 @@ const SoloEventLine: React.FC<{
 
       {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
       {open && isThought && line.detail && (
-        <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+        <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
           <MarkdownScrollBody
             text={line.detail}
             follow={!!line.running}
@@ -958,7 +958,7 @@ const SoloEventLine: React.FC<{
           {line.summaryPending && !line.detail ? (
             <div
               className="text-[12px] animate-pulse"
-              style={{ color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)' }}
+              style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
             >
               Waiting for context compression…
             </div>
@@ -968,7 +968,7 @@ const SoloEventLine: React.FC<{
               contentKey={(line.detail || '').length}
               follow={!!line.running}
               className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
-              style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
+              style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
             >
               {line.detail || 'Summarizing…'}
               {line.running && !line.summaryPending ? (
@@ -1018,10 +1018,10 @@ const SoloEventLine: React.FC<{
       )}
 
       {open && line.kind === 'info' && line.detail && (
-        <div className="mt-1 mb-1.5 pl-4 rounded-md border border-border/40 bg-black/[0.03] px-2.5 py-2">
+        <div className="mt-1 mb-1.5 pl-4 rounded-md border border-border/40 bg-bgLight px-2.5 py-2">
           <pre
             className="text-[12px] whitespace-pre-wrap break-words font-sans m-0"
-            style={{ color: 'color-mix(in srgb, var(--color-text-muted) 42%, transparent)' }}
+            style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 42%, transparent)' }}
           >
             {line.detail}
           </pre>
@@ -1276,7 +1276,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
       <div ref={rootRef} className="my-1.5 w-full select-text">
         {renderOuterToggle({ running: isLiveTurn, shimmer: thinkingActive })}
         {outerOpen && thoughtBodies.length > 0 && (
-          <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+          <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
             {thoughtBodies.map((text, i) => (
               <MarkdownScrollBody
                 key={i}
@@ -1321,7 +1321,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
             {summaryLine.summaryPending && !summaryLine.detail ? (
               <div
                 className="text-[12px] animate-pulse"
-                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)' }}
+                style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)' }}
               >
                 Waiting for context compression…
               </div>
@@ -1331,7 +1331,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
                 contentKey={(summaryLine.detail || '').length}
                 follow={!!summaryLine.running}
                 className="text-[12px] leading-relaxed whitespace-pre-wrap break-words font-sans m-0 bg-transparent border-0 p-0 max-h-[360px] overflow-y-auto"
-                style={{ color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }}
+                style={{ color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }}
               >
                 {summaryLine.detail || 'Summarizing…'}
                 {summaryLine.running && !summaryLine.summaryPending ? (
@@ -1363,7 +1363,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
           <div className="mb-1">
             {renderOuterToggle({ running: thinkingActive, shimmer: thinkingActive })}
             {outerOpen && (
-              <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-black/[0.025] dark:bg-white/[0.035] py-1">
+              <div className="mt-0.5 pl-4 pr-1 rounded-sm bg-bgLight py-1">
                 {thoughtBodies.map((text, i) => (
                   <MarkdownScrollBody
                     key={i}
@@ -1413,7 +1413,7 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
           !outerOpen
             ? 'hidden'
             : useStepsScrollBox
-              ? `mt-0.5 space-y-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-black/[0.02] dark:bg-white/[0.03]`
+              ? `mt-0.5 space-y-0.5 pl-3 pr-1 py-1 ${SOLO_STEPS_SCROLL_MAX_CLASS} overflow-y-auto overscroll-contain rounded-md border border-border/45 bg-bgLight`
               : 'mt-0.5 space-y-0.5 pl-4'
         }
         aria-hidden={!outerOpen}

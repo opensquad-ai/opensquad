@@ -39,7 +39,7 @@ export const TaskFoldBlock: React.FC<TaskFoldBlockProps> = ({
         <span>{label}</span>
       </button>
       {open && (
-        <div className="mt-1 pl-4 border-l border-black/10 dark:border-white/10">
+        <div className="mt-1 pl-4 border-l border-border/60">
           {children}
         </div>
       )}

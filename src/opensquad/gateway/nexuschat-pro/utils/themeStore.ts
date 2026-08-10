@@ -18,6 +18,7 @@ import {
   clamp,
   getPresetPrimary,
   getPresetSurfaceHue,
+  hexToRgb,
   normalizeHex,
   resolveAppearance,
 } from './themeEngine';
@@ -26,6 +27,21 @@ export const THEME_STORAGE_KEY = 'opensquad_theme_v2';
 export const LEGACY_THEME_KEY = 'chat_theme';
 export const THEME_PREFS_EVENT = 'themePrefsChanged';
 export const OPEN_THEME_SETTINGS_EVENT = 'openThemeSettings';
+
+/**
+ * Convert a hex color to a space-separated RGB triplet (e.g. `#3D3428` → `61 52 40`).
+ * Tailwind's color-opacity modifiers compile `border-border/40` to
+ * `rgb(var(--color-border) / 0.4)`, which is only valid when the variable
+ * is an RGB triplet. Storing the raw hex there makes the declaration
+ * invalid and the browser falls back to `currentColor` (the body text),
+ * which in dark mode is light — producing the "white border" effect.
+ * The same triplet also works inside `rgb(var(--x) / α)` or
+ * `color-mix(in srgb, rgb(var(--x)) …)`, so consumers stay simple.
+ */
+function hexToRgbTriplet(hex: string): string {
+  const { r, g, b } = hexToRgb(hex);
+  return `${r} ${g} ${b}`;
+}
 
 const LEGACY_THEME_CLASSES = [
   'default',
@@ -242,18 +258,23 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.dataset.appearance = appearance;
   root.dataset.themePreset = next.preset;
 
-  root.style.setProperty('--color-primary', palette.primary);
-  root.style.setProperty('--color-on-primary', palette.onPrimary);
-  root.style.setProperty('--color-bg', palette.bg);
-  root.style.setProperty('--color-rail', palette.rail);
-  root.style.setProperty('--color-nest', palette.nest);
-  root.style.setProperty('--color-stage', palette.stage);
-  root.style.setProperty('--color-panel', palette.panel);
-  root.style.setProperty('--color-border', palette.border);
-  root.style.setProperty('--color-bubble-self', palette.bubbleSelf);
-  root.style.setProperty('--color-bubble-other', palette.bubbleOther);
-  root.style.setProperty('--color-text-main', palette.textMain);
-  root.style.setProperty('--color-text-muted', palette.textMuted);
+  // Tailwind opacity modifiers (e.g. `border-border/40`) compile to
+  // `rgb(var(--color-border) / 0.4)`, which only works when the variable
+  // is a space-separated RGB triplet — not a hex string. Storing the
+  // triplet here lets every theme-coloured border/opacity utility work
+  // in both light and dark mode without falling back to `currentColor`.
+  root.style.setProperty('--color-primary', hexToRgbTriplet(palette.primary));
+  root.style.setProperty('--color-on-primary', hexToRgbTriplet(palette.onPrimary));
+  root.style.setProperty('--color-bg', hexToRgbTriplet(palette.bg));
+  root.style.setProperty('--color-rail', hexToRgbTriplet(palette.rail));
+  root.style.setProperty('--color-nest', hexToRgbTriplet(palette.nest));
+  root.style.setProperty('--color-stage', hexToRgbTriplet(palette.stage));
+  root.style.setProperty('--color-panel', hexToRgbTriplet(palette.panel));
+  root.style.setProperty('--color-border', hexToRgbTriplet(palette.border));
+  root.style.setProperty('--color-bubble-self', hexToRgbTriplet(palette.bubbleSelf));
+  root.style.setProperty('--color-bubble-other', hexToRgbTriplet(palette.bubbleOther));
+  root.style.setProperty('--color-text-main', hexToRgbTriplet(palette.textMain));
+  root.style.setProperty('--color-text-muted', hexToRgbTriplet(palette.textMuted));
   root.style.setProperty('--chat-font-size', String(next.fontSize));
   root.style.setProperty(
     '--font-chat',

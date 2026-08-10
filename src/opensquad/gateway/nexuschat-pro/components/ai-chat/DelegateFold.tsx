@@ -48,7 +48,7 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
   );
 
   if (variant === 'solo') {
-    const faint = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+    const faint = 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
     return (
       <>
         <button

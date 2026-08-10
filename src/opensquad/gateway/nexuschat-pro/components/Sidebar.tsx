@@ -239,8 +239,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                 <svg viewBox="0 0 100 100" className="w-full h-full">
                     <defs>
                         <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stopColor="var(--color-primary)" stopOpacity="0.92" />
-                            <stop offset="100%" stopColor="var(--color-primary)" stopOpacity="0.72" />
+                            <stop offset="0%" stopColor="rgb(var(--color-primary))" stopOpacity="0.92" />
+                            <stop offset="100%" stopColor="rgb(var(--color-primary))" stopOpacity="0.72" />
                         </linearGradient>
                     </defs>
                     <rect width="100" height="100" rx="18" ry="18" fill={`url(#${gradientId})`} />

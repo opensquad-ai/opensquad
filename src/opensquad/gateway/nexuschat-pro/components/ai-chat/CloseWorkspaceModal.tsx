@@ -21,7 +21,7 @@ export const CloseWorkspaceModal: React.FC<CloseWorkspaceModalProps> = ({
   <SoftOverlay
     open={open}
     onBackdrop={onCancel}
-    panelClassName="w-[min(420px,92vw)] rounded-xl bg-white dark:bg-[#252526] border border-black/10 dark:border-white/10 shadow-2xl"
+    panelClassName="w-[min(420px,92vw)] rounded-xl bg-bgLight border border-border shadow-2xl"
   >
     <div role="dialog" aria-modal="true">
       <div className="flex items-center justify-between px-4 pt-4 pb-2">

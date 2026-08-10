@@ -128,16 +128,17 @@ export const PRESET_METAS: PresetMeta[] = [
     i18nDescKey: 'themeSettings.presets.rose.desc',
   },
   {
-    // True white — both light and dark modes keep the page on a true white
-    // surface (dark mode just nudges the page wash to an almost-imperceptible
-    // off-white so the user can still tell which side of system mode they're
-    // on). Primary stays a deep neutral in both modes because the button
-    // background is white, so no `darkPrimary` override is needed.
+    // True white in light mode; true black in dark mode. Both keep the
+    // surface on the same monochromatic family so the only visual
+    // change between modes is the inversion of bg / text. No `darkPrimary`
+    // override needed — the primary stays a deep neutral in both modes
+    // because the button background only ever shows on the matching
+    // surface (white in light, black in dark).
     id: 'pure-white',
     primary: '#1F1F1F',
     surfaceHue: 0,
     light: { bg: '#FFFFFF', panel: '#FFFFFF', border: '#F0F0F0' },
-    dark: { bg: '#F7F7F7', panel: '#FFFFFF', border: '#E8E8E8' },
+    dark: { bg: '#0A0A0B', panel: '#131316', border: '#26262B' },
     i18nNameKey: 'themeSettings.presets.pureWhite.name',
     i18nDescKey: 'themeSettings.presets.pureWhite.desc',
   },
@@ -379,6 +380,42 @@ export function buildPalette(opts: {
 
   const surfaces = getPresetSurfaces(opts.preset || 'custom', opts.primary);
   const base = opts.appearance === 'light' ? surfaces.light : surfaces.dark;
+
+  // pure-white must stay truly neutral: mixing white with a near-black
+  // primary turns the result into a gray whose HSL hue defaults to 0
+  // (rose), and the rail/nest/stage derivation then forces a minimum
+  // saturation that paints the whole palette pink. Skip the primary
+  // tint for this preset and derive every surface from `base` directly.
+  //
+  // pure-white inverts surface AND text together between light and dark
+  // modes: light mode is white bg + dark text, dark mode is near-black
+  // bg + light text. Text colours must therefore follow the appearance
+  // — fixing them to dark text (the previous behaviour) made body copy
+  // disappear against the dark-mode near-black surface.
+  if (opts.preset === 'pure-white') {
+    const onPrimary = contrastRatioHex('#FFFFFF', primary) >= 4.5
+      ? '#FFFFFF'
+      : (contrastRatioHex('#0B0B0C', primary) >= 4.5 ? '#0B0B0C' : primary);
+    // Light mode → dark text on white surface. Dark mode → light text
+    // on near-black surface. Both pairs are well above the WCAG 4.5:1
+    // body-text threshold against the matching panel colour.
+    const textMain = opts.appearance === 'dark' ? '#F2F2F2' : '#1F1F1F';
+    const textMuted = opts.appearance === 'dark' ? '#9A9A9E' : '#6B6B6E';
+    return {
+      primary,
+      onPrimary,
+      bg: base.bg,
+      rail: base.bg,
+      nest: base.bg,
+      stage: base.bg,
+      panel: base.panel,
+      border: base.border,
+      bubbleSelf: base.panel,
+      bubbleOther: base.panel,
+      textMain,
+      textMuted,
+    };
+  }
 
   // Tint surfaces toward primary — purity raises liveliness
   const tintAmount = opts.appearance === 'light' ? 0.035 + tint * 0.14 : 0.05 + tint * 0.16;

@@ -296,7 +296,7 @@ export const ThemeSettingsPanel: React.FC = () => {
               style={
                 {
                   '--slider-pct': `${purityPct}%`,
-                  '--slider-fill': 'var(--color-primary)',
+                  '--slider-fill': 'rgb(var(--color-primary))',
                 } as React.CSSProperties
               }
             />
@@ -323,7 +323,7 @@ export const ThemeSettingsPanel: React.FC = () => {
               style={
                 {
                   '--slider-pct': `${contrastPct}%`,
-                  '--slider-fill': 'var(--color-primary)',
+                  '--slider-fill': 'rgb(var(--color-primary))',
                 } as React.CSSProperties
               }
             />
@@ -369,7 +369,7 @@ export const ThemeSettingsPanel: React.FC = () => {
             style={
               {
                 '--slider-pct': `${fontPct}%`,
-                '--slider-fill': 'var(--color-primary)',
+                '--slider-fill': 'rgb(var(--color-primary))',
               } as React.CSSProperties
             }
           />

@@ -118,7 +118,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           className="absolute bottom-[calc(100%+8px)] left-0 z-50 flex items-end gap-1"
           onMouseLeave={() => setSkillsOpen(false)}
         >
-          <div className="min-w-[200px] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden py-1">
+          <div className="min-w-[200px] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden py-1">
             <div className="px-3 py-1.5 text-[11px] text-textMuted/70 truncate">
               Add agents, context, tools…
             </div>
@@ -180,7 +180,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
           </div>
 
           {skillsOpen && (
-            <div className="min-w-[260px] max-w-[320px] max-h-[320px] overflow-y-auto rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] py-1">
+            <div className="min-w-[260px] max-w-[320px] max-h-[320px] overflow-y-auto rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] py-1">
               {skillsLoading && skills.length === 0 ? (
                 <div className="px-3 py-3 text-[12px] text-textMuted">Loading skills…</div>
               ) : skills.length === 0 ? (

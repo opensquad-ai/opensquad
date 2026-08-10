@@ -434,7 +434,7 @@ export const SessionSearchModal: React.FC<SessionSearchModalProps> = ({
     <SoftOverlay
       open={open}
       onBackdrop={onCancel}
-      panelClassName="w-[min(560px,94vw)] max-h-[80vh] flex flex-col rounded-2xl bg-white dark:bg-[#252526] border border-black/10 dark:border-white/10 shadow-2xl overflow-hidden"
+      panelClassName="w-[min(560px,94vw)] max-h-[80vh] flex flex-col rounded-2xl bg-bgLight border border-border shadow-2xl overflow-hidden"
       durationMs={150}
     >
       <div className="flex items-center gap-2 px-4 h-12 border-b border-border/60 shrink-0">

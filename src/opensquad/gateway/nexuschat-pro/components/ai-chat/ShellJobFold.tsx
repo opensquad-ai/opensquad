@@ -71,9 +71,9 @@ export const ShellJobFold: React.FC<ShellJobFoldProps> = ({
   );
 
   if (variant === 'solo') {
-    const faint = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+    const faint = 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
     const accent = bundle.errored && !bundle.running
-      ? 'color-mix(in srgb, var(--color-danger, #ef4444) 75%, transparent)'
+      ? 'color-mix(in srgb, rgb(var(--color-danger, #ef4444)) 75%, transparent)'
       : faint;
     return (
       <>

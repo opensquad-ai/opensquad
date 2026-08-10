@@ -34,30 +34,40 @@ module.exports = {
         soft: '160ms',
       },
       colors: {
-        primary: 'var(--color-primary)',
+        // The theme CSS vars are space-separated RGB triplets (e.g. "61 52 40"),
+        // so they have to be wrapped in `rgb()` to become a real colour value.
+        // Using the `rgb(var(--x) / <alpha-value>)` form lets Tailwind's
+        // opacity modifiers like `bg-primary/40` resolve to
+        // `rgb(var(--color-primary) / 0.4)` without falling back to
+        // `currentColor` (which in dark mode is light — the original
+        // source of the "white border" bug).
+        primary: 'rgb(var(--color-primary) / <alpha-value>)',
         /** Text colour that contrasts with `primary` — use on filled buttons
          *  so labels stay legible regardless of whether the current theme
          *  gives us a dark or a light primary (e.g. the rose preset in
          *  dark mode inverts primary to a light grey). */
-        onPrimary: 'var(--color-on-primary)',
-        bgLight: 'var(--color-bg)',
+        onPrimary: 'rgb(var(--color-on-primary) / <alpha-value>)',
+        bgLight: 'rgb(var(--color-bg) / <alpha-value>)',
         /** One step darker than the page background — used for tooltips,
          *  progress-bar tracks, badges and embedded panels. */
-        bgDark: 'color-mix(in srgb, var(--color-text-main) 6%, var(--color-bg))',
-        bgPage: 'var(--color-bg)',
+        bgDark: 'color-mix(in srgb, rgb(var(--color-text-main)) 6%, rgb(var(--color-bg)))',
+        bgPage: 'rgb(var(--color-bg) / <alpha-value>)',
         /** Side rails: session list + workspace files (deeper) */
-        rail: 'var(--color-rail)',
+        rail: 'rgb(var(--color-rail) / <alpha-value>)',
         /** Nested wells inside rails (deeper still) */
-        nest: 'var(--color-nest)',
+        nest: 'rgb(var(--color-nest) / <alpha-value>)',
         /** Center stage / page wash behind cards */
-        stage: 'var(--color-stage)',
-        chatBubbleSelf: 'var(--color-bubble-self)',
-        chatBubbleOther: 'var(--color-bubble-other)',
-        panel: 'var(--color-panel)',
+        stage: 'rgb(var(--color-stage) / <alpha-value>)',
+        chatBubbleSelf: 'rgb(var(--color-bubble-self) / <alpha-value>)',
+        chatBubbleOther: 'rgb(var(--color-bubble-other) / <alpha-value>)',
+        panel: 'rgb(var(--color-panel) / <alpha-value>)',
+        // The theme CSS vars are space-separated RGB triplets (so Tailwind's
+        // `<alpha-value>` modifier can compose them in `rgb(...)` correctly).
+        // We wrap them in `rgb()` here so `color-mix` sees a real colour.
         // Use color-mix so opacity modifiers like border-border/60 actually apply
-        border: 'color-mix(in srgb, var(--color-border) calc(<alpha-value> * 100%), transparent)',
-        textMain: 'var(--color-text-main)',
-        textMuted: 'var(--color-text-muted)',
+        border: 'color-mix(in srgb, rgb(var(--color-border)) calc(<alpha-value> * 100%), transparent)',
+        textMain: 'rgb(var(--color-text-main) / <alpha-value>)',
+        textMuted: 'rgb(var(--color-text-muted) / <alpha-value>)',
       },
     },
   },

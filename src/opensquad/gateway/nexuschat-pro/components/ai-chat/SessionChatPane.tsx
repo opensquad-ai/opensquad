@@ -417,20 +417,20 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                 <button
                   type="button"
                   onClick={scrollToTop}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
+                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
                   title="滚动到顶部"
                 >
-                  <ChevronUp size={18} className="text-gray-500" />
+                  <ChevronUp size={18} />
                 </button>
               )}
               {showScrollBottom && (
                 <button
                   type="button"
                   onClick={scrollToBottom}
-                  className="w-8 h-8 bg-white border border-gray-200 rounded-full shadow-md flex items-center justify-center hover:bg-primary/10 transition-colors"
+                  className="w-8 h-8 bg-panel border border-border/70 rounded-full shadow-md flex items-center justify-center text-textMuted hover:text-primary hover:bg-primary/10 transition-colors"
                   title="滚动到底部"
                 >
-                  <ChevronDown size={18} className="text-gray-500" />
+                  <ChevronDown size={18} />
                 </button>
               )}
             </div>
@@ -526,11 +526,11 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             <button
               type="button"
               onClick={scrollToBottom}
-              className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-white/95 dark:bg-[#2a2a2c]/95 border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
+              className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -top-10 w-8 h-8 rounded-full bg-bgLight border border-border/70 shadow-[0_2px_10px_rgba(0,0,0,0.08)] flex items-center justify-center hover:bg-primary/10 transition-opacity duration-300 cursor-pointer"
               style={{ opacity: scrollActive ? 1 : 0.55 }}
               title="滚动到底部"
             >
-              <ChevronDown size={18} className="text-gray-500" />
+              <ChevronDown size={18} className="text-textMuted" />
             </button>
           </div>
         </div>

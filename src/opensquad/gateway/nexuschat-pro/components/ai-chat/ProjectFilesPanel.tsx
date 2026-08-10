@@ -2051,7 +2051,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
     return (
       <div
         ref={ctxMenuRef}
-        className="fixed z-[80] min-w-[168px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] text-textMain os-soft-pop is-open"
+        className="fixed z-[80] min-w-[168px] py-1 rounded-lg bg-bgLight border border-border shadow-lg text-[12px] text-textMain os-soft-pop is-open"
         style={{ left: ctxMenu.x, top: ctxMenu.y }}
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -2607,7 +2607,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 <Plus size={13} className="text-textMuted" />
               </button>
               {newMenuOpen ? (
-                <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-white dark:bg-[#252526] border border-black/8 dark:border-white/10 shadow-lg text-[12px] os-soft-pop is-open">
+                <div className="absolute right-0 top-full mt-0.5 z-[70] min-w-[140px] py-1 rounded-lg bg-bgLight border border-border shadow-lg text-[12px] os-soft-pop is-open">
                   <button
                     type="button"
                     className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-primary/10"

@@ -50,7 +50,7 @@ export const SlashMenu: React.FC<SlashMenuProps> = (props) => {
 
   const shell = (title: string, body: React.ReactNode) => (
     <div
-      className="absolute left-2 right-2 bottom-[calc(100%+6px)] z-50 max-h-[280px] overflow-y-auto rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] py-1"
+      className="absolute left-2 right-2 bottom-[calc(100%+6px)] z-50 max-h-[280px] overflow-y-auto rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] py-1"
       role="listbox"
       aria-label={title}
     >

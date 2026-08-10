@@ -336,7 +336,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       {activeGroup && (
         <div
           ref={flyoutRef}
-          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden ${
+          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden ${
             flyoutRight ? 'left-full ml-1.5' : 'right-full mr-1.5'
           }`}
           style={{ top: flyoutTop }}
@@ -380,7 +380,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       )}
 
       {/* Level 1: providers */}
-      <div className="w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+      <div className="w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
         <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/70">
           <Search size={14} className="text-textMuted shrink-0" />
           <input
