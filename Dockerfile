@@ -59,11 +59,13 @@ RUN mkdir -p /data/workspaces /data/logs /data/plugins /data/sessions
 # Switch to non-root user for security
 RUN groupadd -r opensquad && useradd -r -g opensquad -d /app -s /sbin/nologin opensquad
 RUN chown -R opensquad:opensquad /app /data
-USER opensquad
 
-# Entrypoint script
+# Entrypoint script — copy + chmod must run as root (before USER opensquad)
+# because non-root can't chmod files it doesn't own. The chown above then
+# gives the opensquad user executable access to the entrypoint.
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh && chown opensquad:opensquad ./docker-entrypoint.sh
+USER opensquad
 
 # Expose ports:
 #   9555 - Gateway Backend (FastAPI)
