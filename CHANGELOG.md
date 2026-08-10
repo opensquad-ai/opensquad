@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.40]                                                               | 2026-08-10 | [0.8.30 → 0.8.40](https://github.com/opensquad-ai/opensquad/compare/v0.8.30...v0.8.40) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.40) |
 | [0.8.8]                                                                | 2026-08-04 | [0.8.7 → 0.8.8](https://github.com/opensquad-ai/opensquad/compare/v0.8.7...v0.8.8)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.8)  |
 | [0.8.7]                                                                | 2026-08-03 | [0.8.6 → 0.8.7](https://github.com/opensquad-ai/opensquad/compare/v0.8.6...v0.8.7)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.7)  |
 | [0.8.6]                                                                | 2026-08-03 | [0.8.5 → 0.8.6](https://github.com/opensquad-ai/opensquad/compare/v0.8.5...v0.8.6)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.6)  |
@@ -32,6 +33,70 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.40] — 2026-08-10
+
+> Theme overhaul (pure-white hue drift, dark-mode white borders), models
+> page: add-more-models + detail drawer, OpenSquad pulse-dot / boot SVG /
+> session search, dispatcher __STOP__ session scope.
+
+### Added
+
+- **web: OpenSquad pulse-dot indicator.** Replaces the previous plain
+  status dot with the four-quadrant OpenSquad loader so the agent's
+  working / idle / sleeping states read at a glance, and matches the
+  boot loader visual language.
+- **web: redesigned boot loader SVG.** Static purple gradient + four
+  pulsing quadrants with constant halo layer (no more "shrinking" when
+  a quadrant lights up). Background switches with a 260ms transition
+  so the logo doesn't visibly resize on theme apply.
+- **web: in-app session search modal.** ⌘/Ctrl-K opens a search modal
+  over the active workspace, lets you fuzzy-search session titles and
+  jump straight to a session without scrolling the sidebar. Also
+  exposes a "new session in this workspace" affordance.
+- **web (models): add more models to an existing provider.** Provider
+  detail drawer now exposes an "add model" flow (id, label, capabilities,
+  context window) that appends to the same provider instead of forcing
+  a new provider card.
+
+### Fixed
+
+- **theme: pure-white preset no longer renders rose/pink.** The
+  HSL-derived rail/nest wash of a deep neutral primary was forcing
+  the surface hue to 0, which painted the whole palette pink on a true
+  white background. The `pure-white` preset now skips the primary tint
+  and uses a fixed white/black monochromatic pair; the dark variant is
+  a true near-black with light text.
+- **theme: dark mode no longer paints white frames around borders,
+  code blocks, slider tracks, and active rails.** The theme CSS
+  variables were stored as raw hex, so Tailwind opacity modifiers like
+  `bg-primary/40` produced invalid CSS and fell back to `currentColor`
+  (which is the light text color in dark mode — that's the "white
+  border" the user kept seeing). All theme vars are now space-separated
+  RGB triplets; `tailwind.config.cjs` and the `color-mix` calls in
+  `index.css` were migrated to `rgb(var(--color-x) / <alpha-value>)`.
+- **theme: every popover / modal / panel that used to hardcode
+  `bg-white` / `bg-gray-*` now follows the active appearance.** The
+  AI chat composer, slash menu, attach / model / context pickers, plan
+  / diff / thought / task / shell folds, modals (close-workspace,
+  create-workspace, session-search), workspace-tab dropdown, content
+  tab dropdown, and the scroll-to-bottom button all switched to
+  `bg-bgLight` / `bg-panel` / `border-border` theme tokens.
+- **dispatcher: `__STOP__` is now scoped to its own session.** Sending
+  stop in one parallel session no longer cancels the other two. The
+  stop signal is routed per-session instead of broadcast across the
+  dispatcher's shared channel.
+- **web (models): models page header is centered and model names
+  left-aligned.** Polishes the detail drawer layout so the table reads
+  consistently with the rest of the page chrome.
+
+### Maintenance
+
+- Absorbed `main` back into `dev` (the v0.8.30 release had been
+  tagged without the post-release dev sync, so the next release
+  branch would have started on a stale base).
 
 ---
 
