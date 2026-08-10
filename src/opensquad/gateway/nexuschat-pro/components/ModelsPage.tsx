@@ -1189,7 +1189,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
       {/* Vendor tag filter */}
       {allVendors.length > 0 && (
-        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center gap-2 shrink-0 flex-wrap">
+        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center justify-center gap-2 shrink-0 flex-wrap">
           <span className="text-xs text-textMuted shrink-0">供应商 (Provider):</span>
           {allVendors.map(v => (
             <button
@@ -1238,7 +1238,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
               return (
                 <div key={provider}>
                   {/* Group header */}
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 mx-auto max-w-2xl">
                     <button
                       type="button"
                       onClick={() => toggleVendor(provider)}
@@ -1305,9 +1305,9 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                             onClick={() => openCard(card.name)}
                             className="flex items-center gap-3 pl-5 pr-3 py-2 bg-panel/40 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer transition-colors"
                           >
-                            <div className="min-w-0 flex-1 text-center">
+                            <div className="min-w-0 flex-1 text-left">
                               <p className={`text-sm truncate ${on ? 'text-textMain' : 'text-textMuted/70'}`}>{card.title || card.name}</p>
-                              <p className="text-[11px] text-textMuted font-mono truncate inline-flex items-center justify-center gap-1 max-w-full">
+                              <p className="text-[11px] text-textMuted font-mono truncate inline-flex items-center gap-1 max-w-full">
                                 <span className="truncate">{card.model_name}</span>
                                 {card.provider && card.provider !== '__none__' && (
                                   <>

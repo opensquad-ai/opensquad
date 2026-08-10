@@ -715,7 +715,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             ) : null}
 
             <div
-              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-border/40 focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 landing
                   ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'

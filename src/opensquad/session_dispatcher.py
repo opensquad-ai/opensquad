@@ -224,7 +224,12 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
 
         _AGENT_LEVEL = (
             "__NEW_SESSION__",
-            "__STOP__",
+            # __STOP__ is deliberately NOT agent-level. request_stop_session(sid)
+            # pushes __STOP__ onto THAT session's own urgent queue; routing it
+            # here (as if global) made _handle_agent_level_command cancel every
+            # busy-session turn — stopping one parallel session killed all three.
+            # Global stops (request_stop) arrive with sid=None and are still
+            # caught by the "sid is None" clause below.
             "__REQUEST_TOKEN_STATS__",
             "__COMPRESS_CONTEXT__",
         )
