@@ -3,7 +3,7 @@
  * Composer is provided by WorkspacePaneShell (AgentWebComposer) so every pane matches.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { agentSessionAPI } from '../../services/api';
 
 interface SessionHistoryPreviewProps {
@@ -78,7 +78,7 @@ export const SessionHistoryPreview: React.FC<SessionHistoryPreviewProps> = ({
       >
         {loading ? (
           <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-8">
-            <Loader2 size={14} className="animate-spin" /> 加载中…
+            <OpenSquadLoader size={14} /> 加载中…
           </div>
         ) : error ? (
           <div className="px-1 py-4 text-[12px] text-rose-400">{error}</div>

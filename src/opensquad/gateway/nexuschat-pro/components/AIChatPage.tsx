@@ -20,12 +20,13 @@ import {
   Send, Square,
   PanelLeftOpen, PanelLeftClose, PanelRightOpen, PanelRightClose, X, FileIcon, FileText, Upload,
   ChevronUp, ChevronDown, Moon, Zap, Bell,
-  Loader2, Clock,
+  Clock,
 } from 'lucide-react';
 
 import { useTranslation } from 'react-i18next';
 import { getAiWsService, releaseAiWsService, AIWSMessage, AIWebSocketStatus } from '../services/aiWebSocket';
 import { agentSessionAPI, authAPI, adminAPI, AdminAgent, modelCardAPI, ModelCardInfo, skillAPI, SkillInfo, SERVER_BASE_URL } from '../services/api';
+import type { AgentSession } from '../services/api';
 import {
   cancelPendingVoiceHangup,
   clearVoiceCallPersist,
@@ -34,6 +35,8 @@ import {
   writeVoiceCallPersist,
 } from '../utils/voiceCallPersist';
 import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
+import { playGentleNotificationSound } from '../utils/sounds';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   appendWorkflowEvent,
   buildTimelineFromSession,
@@ -166,6 +169,7 @@ import { ShellJobFold } from './ai-chat/ShellJobFold';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
+import { SessionSearchModal } from './ai-chat/SessionSearchModal';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
 import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
 
@@ -626,6 +630,26 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const timelineRef = useRef<TimelineEntry[]>([]);
   /** Sid of the WS event currently being handled (routes setTimeline into the right bucket). */
   const eventSidRef = useRef<string>('');
+  /** Whether the Agent Web page is currently in the foreground (visible + window focused). */
+  const pageActiveRef = useRef<boolean>(
+    typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus(),
+  );
+  // 实时跟踪页面是否处于前台：切走/最小化/失焦 → false，回来 → true。
+  // 供结束提示音判断"后台才响铃"使用。
+  useEffect(() => {
+    const update = () => {
+      pageActiveRef.current =
+        document.visibilityState === 'visible' && document.hasFocus();
+    };
+    document.addEventListener('visibilitychange', update);
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', update);
+    return () => {
+      document.removeEventListener('visibilitychange', update);
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', update);
+    };
+  }, []);
   const [streamingText, setStreamingText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   /** Per-session streaming preview (split panes must not share one global buffer). */
@@ -633,6 +657,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   const [streamingTextBySession, setStreamingTextBySession] = useState<Record<string, string>>({});
   const isStreamingBySessionRef = useRef<Record<string, boolean>>({});
   const [isStreamingBySession, setIsStreamingBySession] = useState<Record<string, boolean>>({});
+  /**
+   * 流式 chunk 节流：WS 的 stream 事件每秒可达几十~上百个（多会话并行时更甚）。
+   * 每次 chunk 直接 setState 会让整个 AIChatPage（含所有 pane/tab/workflow 行）
+   * 每 chunk 全量重渲染。这里把 chunk 先累积进 ref，再以 ~66ms 窗口批量刷新
+   * 一次 UI，把渲染频率从"事件频率"降为"~15fps 上限"。
+   */
+  const streamUiFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushStreamingUi = useCallback(() => {
+    setStreamingTextBySession({ ...streamingTextBySessionRef.current });
+    setIsStreamingBySession({ ...isStreamingBySessionRef.current });
+    setStreamingText(streamingTextRef.current);
+    setIsStreaming(true);
+    setAgentStatus('thinking');
+    feedAutoTtsFromStreamRef.current?.(streamingTextRef.current);
+  }, []);
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamUiFlushTimerRef.current) return;
+    streamUiFlushTimerRef.current = setTimeout(() => {
+      streamUiFlushTimerRef.current = null;
+      flushStreamingUi();
+    }, 66);
+  }, [flushStreamingUi]);
+  const cancelStreamFlush = useCallback(() => {
+    if (streamUiFlushTimerRef.current) {
+      clearTimeout(streamUiFlushTimerRef.current);
+      streamUiFlushTimerRef.current = null;
+    }
+  }, []);
   const summaryStreamCacheRef = useRef<Record<string, string>>({});
   const SUMMARY_STREAM_DEBUG = true;
   const [wsStatus, setWsStatus] = useState<AIWebSocketStatus>('disconnected');
@@ -640,6 +692,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
   /** Ready-stage from agent: '' (unknown) -> 'loading' (extensions done, MCP loading) -> 'ready'. */
   const [toolsStage, setToolsStage] = useState<'loading' | 'ready' | ''>('');
   const [inputText, setInputText] = useState('');
+  /** Per-session composer drafts (未发送草稿，切换会话后切回仍保留)。 */
+  const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   /** Skill selected from the + menu or /skill; shown as /name chip until send/clear. */
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
   /** Active /goal from server (sticky across turns). */
@@ -1085,6 +1139,38 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
     return true;
   });
+  /** Session search modal — Ctrl/Cmd+K or "搜索" sidebar button. */
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
+  /** Mirrored from SessionSidebar — used by the search modal for title lookup. */
+  const [sidebarSessions, setSidebarSessions] = useState<AgentSession[]>([]);
+  const openSessionSearch = useCallback(() => {
+    if (!agentId) return;
+    setSessionSearchOpen(true);
+    // Refresh the title mirror in the background so the modal can show
+    // human-friendly titles without an extra round-trip on the search call.
+    void (async () => {
+      try {
+        const resp = await agentSessionAPI.getSessionList(agentId, 0, 100);
+        const list = (resp.sessions || []).filter((s) => s.origin !== 'scheduled_task');
+        setSidebarSessions((prev) => {
+          if (prev.length === list.length) {
+            let same = true;
+            for (let i = 0; i < prev.length; i++) {
+              if (prev[i].id !== list[i].id || prev[i].title !== list[i].title) {
+                same = false;
+                break;
+              }
+            }
+            if (same) return prev;
+          }
+          return list;
+        });
+      } catch {
+        /* non-fatal — search will still work, only display titles may be stale */
+      }
+    })();
+  }, [agentId]);
+  const closeSessionSearch = useCallback(() => setSessionSearchOpen(false), []);
   /** In-chat Skill 库 / 插件：keep SessionSidebar, replace center + files. */
   const [libraryView, setLibraryView] = useState<null | 'skills' | 'plugins' | 'roles'>(null);
   const [filesPanelOpen, setFilesPanelOpen] = useState(() => {
@@ -1271,6 +1357,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
     // Mirror into the focused solo timeline when this mutation is for the
     // focused session (or has no explicit event sid — local UI ops).
+    // 主聊天区（chatSlot）始终渲染 solo timeline state，即使分屏时 focused
+    // 会话的 pane 也在用它——因此这里不能按 splitModeRef 跳过镜像。
     if (!eventSidRef.current || eventSidRef.current === (currentSessionIdRef.current || '')) {
       setTimelineState(updater);
     }
@@ -1833,13 +1921,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           if (mn) setModelName(mn);
           if (ap) setAgentApiProtocol(ap);
           if (pv) setAgentProvider(pv);
-          // Prefer last UI pick (localStorage) over stale config when both exist;
-          // otherwise seed from config.json (also updated on each UI switch).
+          // config.json is the authoritative persisted model state (updated by
+          // both Web and TUI switches via switch_to_card). Seed from it first;
+          // localStorage is only a same-browser fallback for the pre-config
+          // window, never allowed to shadow a cross-client (e.g. TUI) switch.
           const lastPick = loadLastModelPick(agentId);
-          if (lastPick.card) {
-            setCurrentCardName(lastPick.card);
-          } else if (card) {
+          if (card) {
             setCurrentCardName(card);
+          } else if (lastPick.card) {
+            setCurrentCardName(lastPick.card);
           }
           if (lastPick.effort) {
             setReasoningEffort(lastPick.effort);
@@ -2248,20 +2338,15 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         streamSeqRef.current += 1;
         const sid = eventSidRef.current || currentSessionIdRef.current || '';
         if (sid) {
-          const next = (streamingTextBySessionRef.current[sid] || '') + text;
-          streamingTextBySessionRef.current = { ...streamingTextBySessionRef.current, [sid]: next };
-          setStreamingTextBySession({ ...streamingTextBySessionRef.current });
+          // 只累积到 ref；UI 刷新由 scheduleStreamFlush 节流合并。
+          streamingTextBySessionRef.current = { ...streamingTextBySessionRef.current, [sid]: (streamingTextBySessionRef.current[sid] || '') + text };
           isStreamingBySessionRef.current = { ...isStreamingBySessionRef.current, [sid]: true };
-          setIsStreamingBySession({ ...isStreamingBySessionRef.current });
         }
         // Solo / focused pane still uses the global streaming fields.
         if (!sid || sid === (currentSessionIdRef.current || '')) {
           streamingTextRef.current += text;
-          setStreamingText(streamingTextRef.current);
-          setIsStreaming(true);
-          setAgentStatus('thinking');
-          feedAutoTtsFromStreamRef.current(streamingTextRef.current);
         }
+        scheduleStreamFlush();
       }
     });
 
@@ -2347,10 +2432,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         // Dedup is handled inside speakFinalReply via lastAutoSpokenRef.
         if (role === 'assistant') {
           void speakFinalReplyRef.current(finalText);
+          // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
+          if (!pageActiveRef.current) playGentleNotificationSound();
         }
       }
 
       // Clear streaming (global + per-session bucket for this event's sid)
+      cancelStreamFlush();
       const clearSid = eventSidRef.current || currentSessionIdRef.current || '';
       if (clearSid) {
         const st = { ...streamingTextBySessionRef.current };
@@ -2482,6 +2570,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           return foldTaskProcessSinceLastUser(next);
         });
         void speakFinalReplyRef.current(finalText);
+        // 温和结束提示：仅在页面处于后台时才响铃（不打扰正在使用的用户）
+        if (!pageActiveRef.current) playGentleNotificationSound();
       }
 
       streamingTextRef.current = '';
@@ -2991,7 +3081,25 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             }
             setSwitchingModelBySession((prev) => ({ ...prev, [sid]: false }));
           } else {
+            // Agent-default switch (e.g. from TUI): it takes effect for every
+            // session without its own override, so roll all panes onto the new
+            // card instead of letting stale per-session picks keep showing the
+            // old model.
             setSwitchingModel(false);
+            if (typeof switchedCard === 'string' && switchedCard) {
+              setCardNameBySession((prev) => {
+                const next: Record<string, string> = {};
+                for (const k of Object.keys(prev)) next[k] = switchedCard;
+                return next;
+              });
+            }
+            if (typeof switchedModel === 'string' && switchedModel) {
+              setModelNameBySession((prev) => {
+                const next: Record<string, string> = {};
+                for (const k of Object.keys(prev)) next[k] = switchedModel;
+                return next;
+              });
+            }
           }
         }
 
@@ -3277,6 +3385,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
       }
       if (turnSid) {
+        cancelStreamFlush();
         const st = { ...streamingTextBySessionRef.current };
         delete st[turnSid];
         streamingTextBySessionRef.current = st;
@@ -3905,6 +4014,14 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               // are not yet on disk (first send on a brand-new session).
               // Write into the disk response's sid — not whatever UI focus was
               // (parallel/scheduled current_session must not redirect hydrate).
+              // IMPORTANT: mirror currentSid into currentSessionIdRef BEFORE
+              // setTimeline. When the agent never announced current_session
+              // (startup load) the `connected` event carries only the gateway
+              // session key and currentSessionIdRef stays null; setTimeline's
+              // solo-mirror condition (eventSidRef === currentSessionIdRef)
+              // then fails and the hydrated timeline never reaches the chat
+              // pane -> blank chat after service restart.
+              currentSessionIdRef.current = currentSid || currentSessionIdRef.current;
               eventSidRef.current = currentSid || '';
               setTimeline((prev) => {
                 let merged = withBuffered;
@@ -4734,6 +4851,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     });
 
     return () => {
+      cancelStreamFlush();
       window.clearTimeout(bootstrapFailsafeTimer);
       unsubAuthExpired();
       unsubStatus();
@@ -6621,6 +6739,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         setShellStreams({});
       }
     }
+    // 删除会话时清理其 composer 草稿
+    setDraftsBySession((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, sessionId)) return prev;
+      const out = { ...prev };
+      delete out[sessionId];
+      return out;
+    });
     requestSessionListRefresh(agentId, agentCurrentSessionIdRef.current);
   };
 
@@ -6796,6 +6921,20 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     if (!activeWorkspace) return null;
     return wsSnap.chrome.layoutByWorkspace?.[activeWorkspace.id] || null;
   }, [wsSnap, activeWorkspace]);
+
+  // 防御性兜底：切换聚焦会话 / 布局变化时，把对应 bucket 同步为 solo
+  // timeline 的数据源（主聊天区始终渲染 timeline state）。正常路径下
+  // setTimeline 的 mirror 已保持同步，这里只处理极端的跨路径切换。
+  useEffect(() => {
+    if (activeWorkspace && workspaceLayout) return; // 分屏中 pane 各自消费 bucket
+    const sid = currentSessionIdRef.current || '';
+    const bucket = sid ? liveTimelinesBySessionRef.current[sid] : timelineRef.current;
+    if (Array.isArray(bucket)) {
+      setTimelineState(bucket);
+      setShellStreams(rebuildShellStreamsFromTimeline(bucket));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceLayout, activeWorkspace, currentSessionId]);
 
   const focusedPaneId = wsSnap.chrome.focusedPaneId;
   focusedPaneIdRef.current = focusedPaneId;
@@ -7557,6 +7696,13 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }}
         agentId={agentId}
         columnClass={soloColumnClass}
+        draftText={draftsBySession[sessionId] ?? ''}
+        onDraftChange={(t) => {
+          setDraftsBySession((prev) => {
+            if ((prev[sessionId] ?? '') === t) return prev;
+            return { ...prev, [sessionId]: t };
+          });
+        }}
         landing={isSessionComposerLanding(sessionId)}
         disabled={isLoadingSession || (!sessionBootstrapped && !composerLandingSessionsRef.current.has(sessionId))}
         busy={isSessionBusy(sessionId)}
@@ -8098,7 +8244,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       {(agentStatus === 'agent-starting' || wsStatus === 'agent-starting') && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-stage/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-3 p-6 bg-panel border border-border rounded-2xl shadow-xl">
-            <Loader2 size={40} className="text-yellow-500 animate-spin" />
+            <OpenSquadLoader size={56} />
             <p className="text-base font-medium text-textMain">{t('chat.agentStarting')}</p>
             <p className="text-xs text-textMuted">{t('chat.agentStartingHint')}</p>
           </div>
@@ -8108,7 +8254,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       {/* Tools still warming up after chat-ready: agent is usable, MCP/plugins loading */}
       {toolsStage === 'loading' && (
         <div className="flex items-center justify-center gap-2 px-3 py-1.5 text-xs text-yellow-600 bg-yellow-500/10 border-b border-yellow-500/20">
-          <Loader2 size={12} className="animate-spin" />
+          <OpenSquadLoader size={14} />
           <span>工具加载中，可先开始对话（部分扩展工具就绪后自动启用）</span>
         </div>
       )}
@@ -8148,6 +8294,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         onOpenPlugins={handleOpenPlugins}
         onOpenRoles={handleOpenRoles}
         onOpenScheduledTasks={handleOpenScheduledTasks}
+        onOpenSearch={openSessionSearch}
         skillsActive={libraryView === 'skills'}
         pluginsActive={libraryView === 'plugins'}
         rolesActive={libraryView === 'roles'}
@@ -8177,6 +8324,21 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       />
       </div>
 
+      <SessionSearchModal
+        open={sessionSearchOpen && !!activeWorkspace}
+        agentId={agentId}
+        sessions={sidebarSessions}
+        workspaceRootPath={activeWorkspace?.rootPath || null}
+        onCancel={closeSessionSearch}
+        onPick={(sid) => {
+          closeSessionSearch();
+          handleSidebarViewSession(sid);
+        }}
+        onNewSession={() => {
+          if (activeWorkspace?.rootPath) handleNewSessionInWorkspace(activeWorkspace.rootPath);
+        }}
+      />
+
       {showContextViewer && (
         <ContextViewer
           agentId={agentId}
@@ -8197,8 +8359,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           <Suspense
             fallback={
               <div className="flex-1 flex items-center justify-center text-[12px] text-textMuted">
-                <Loader2 size={20} className="animate-spin mr-2" />
-                Loading…
+                <OpenSquadLoader size={32} />
               </div>
             }
           >
@@ -8327,7 +8488,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             legacy full-pane history. z-40 > jump rail (z-30) and messages. */}
         {isLoadingSession && (
           <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-panel/95 backdrop-blur-[1px] text-textMuted pointer-events-none">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mb-3" />
+            <OpenSquadLoader size={44} className="mb-3" />
             <p className="text-sm">{sessionLoadingLabel}</p>
           </div>
         )}
@@ -8377,7 +8538,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           {/* Lazy loading indicator at top */}
           {isLoadingMore && (
             <div className="flex items-center justify-center py-3">
-              <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin mr-2" />
+              <OpenSquadLoader size={18} className="mr-2" />
               <span className="text-xs text-textMuted">Loading earlier messages...</span>
             </div>
           )}
@@ -8478,6 +8639,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   shellStreams={shellStreams}
                   onOpenFile={openProjectFile}
                   embedVisualizations={false}
+                  uiMode={uiMode}
                 />
               );
             }
@@ -8573,6 +8735,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                           shellStreams={shellStreams}
                           onOpenFile={openProjectFile}
                           embedVisualizations={false}
+                          uiMode={uiMode}
                         />
                       );
                     }
@@ -8695,7 +8858,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             {/* Upload progress indicator */}
             {isUploading && (
               <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bgLight">
-                <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <OpenSquadLoader size={16} />
                 <span className="text-xs text-textMuted">Uploading...</span>
               </div>
             )}

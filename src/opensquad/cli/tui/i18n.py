@@ -234,6 +234,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Enter password for {email} (Esc to cancel)",
         "zh": "请输入 {email} 的密码（Esc 取消）",
     },
+    "login_ask_name": {
+        "en": "No web account yet — enter a display name for {email} (Esc to cancel)",
+        "zh": "首次使用需注册 — 请输入 {email} 的显示名称（Esc 取消）",
+    },
     "login_email_required": {
         "en": "Email required",
         "zh": "邮箱不能为空",

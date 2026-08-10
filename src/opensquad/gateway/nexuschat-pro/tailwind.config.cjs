@@ -35,6 +35,11 @@ module.exports = {
       },
       colors: {
         primary: 'var(--color-primary)',
+        /** Text colour that contrasts with `primary` — use on filled buttons
+         *  so labels stay legible regardless of whether the current theme
+         *  gives us a dark or a light primary (e.g. the rose preset in
+         *  dark mode inverts primary to a light grey). */
+        onPrimary: 'var(--color-on-primary)',
         bgLight: 'var(--color-bg)',
         /** One step darker than the page background — used for tooltips,
          *  progress-bar tracks, badges and embedded panels. */
@@ -49,7 +54,8 @@ module.exports = {
         chatBubbleSelf: 'var(--color-bubble-self)',
         chatBubbleOther: 'var(--color-bubble-other)',
         panel: 'var(--color-panel)',
-        border: 'var(--color-border)',
+        // Use color-mix so opacity modifiers like border-border/60 actually apply
+        border: 'color-mix(in srgb, var(--color-border) calc(<alpha-value> * 100%), transparent)',
         textMain: 'var(--color-text-main)',
         textMuted: 'var(--color-text-muted)',
       },

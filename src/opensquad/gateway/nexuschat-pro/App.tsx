@@ -15,6 +15,7 @@ import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, direct
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
 import { AvatarImg } from './components/AvatarImg';
+import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
 import { isSettingsAppView } from './utils/appNavItems';
 
@@ -902,7 +903,9 @@ const App: React.FC = () => {
   if (isLoading || registrationStatus === 'unknown') {
     return (
       <ElectronShell className="bg-bgLight text-textMuted">
-        <div className="h-full w-full flex items-center justify-center">{t('common.loading')}</div>
+        <div className="h-full w-full flex items-center justify-center">
+          <OpenSquadLoader size={96} />
+        </div>
       </ElectronShell>
     );
   }
@@ -1221,11 +1224,12 @@ const App: React.FC = () => {
       {/* === Agent Manager View（业务全屏；设置「应用」项改为弹窗） === */}
       {mountedViews.has('admin') && (
         <div style={{ display: currentView === 'admin' ? 'contents' : 'none' }}>
-          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>}>
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center bg-bgLight text-textMuted"><OpenSquadLoader size={72} /></div>}>
             <AgentManagerPage
               onBack={() => setCurrentView('chat')}
               onChat={openAgentChat}
               onOpenGroupChat={() => setCurrentView('chat')}
+              onOpenSettings={() => setIsSettingsOpen(true)}
             />
           </Suspense>
         </div>
@@ -1239,7 +1243,7 @@ const App: React.FC = () => {
             style={{ display: currentView === 'ai-chat' && selectedAgentId === agentId ? 'flex' : 'none', flexDirection: 'column' }}
           >
             <Suspense fallback={
-              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted">{t('common.loading')}</div>
+              <div className="w-full h-full flex items-center justify-center bg-bgLight text-textMuted"><OpenSquadLoader size={72} /></div>
             }>
             <AIChatPage
               agentId={agentId}
@@ -1342,7 +1346,7 @@ const App: React.FC = () => {
         <div className="os-modal-shell flex h-full w-full flex-col overflow-hidden">
           <Suspense
             fallback={
-              <div className="flex flex-1 items-center justify-center text-textMuted">{t('common.loading')}</div>
+              <div className="flex flex-1 items-center justify-center text-textMuted"><OpenSquadLoader size={72} /></div>
             }
           >
             <CollabBoardPage onBack={() => setIsCollabBoardOpen(false)} />

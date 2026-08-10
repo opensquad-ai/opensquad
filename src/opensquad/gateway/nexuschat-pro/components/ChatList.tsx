@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Search, Plus, AtSign, Volume2, VolumeX, X, Camera, Save, LogOut, Palette, Mail, Bell, Send, User as UserIcon, Paperclip, Image as ImageIcon, FileText, XCircle, Download, ZoomIn, ChevronLeft, ChevronRight, BotMessageSquare, Menu, LayoutGrid, KanbanSquare } from 'lucide-react';
 import { Group, User } from '../types';
 import { uploadAPI, directMessageAPI } from '../services/api';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { formatTime } from '../utils/time';
 import { parse } from 'marked';
@@ -1095,7 +1096,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                                 title={t('chatList.attachFiles')}
                             >
                                 {isUploading ? (
-                                    <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                                    <OpenSquadLoader size={16} label="上传中" />
                                 ) : (
                                     <Paperclip size={18} />
                                 )}
@@ -1188,7 +1189,7 @@ export const ChatList: React.FC<ChatListProps> = ({
                             >
                                 {isSending ? (
                                     <>
-                                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                        <OpenSquadLoader size={16} label="发送中" />
                                         <span>{t('chatList.sending')}</span>
                                     </>
                                 ) : sendSuccess ? (

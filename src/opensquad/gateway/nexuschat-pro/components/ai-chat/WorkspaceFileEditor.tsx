@@ -8,7 +8,6 @@ import {
   Eye,
   FileCode2,
   FileText,
-  Loader2,
   Pencil,
   Save,
 } from 'lucide-react';
@@ -17,6 +16,7 @@ import i18n from '../../i18n';
 import type { FileDocMode } from './FileDocumentEditor';
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 // TipTap/ProseMirror is heavy. The editor is only needed when a file tab is
 // actually opened — loading it lazily keeps it out of the first-paint bundle
@@ -349,7 +349,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
                 onClick={() => void save()}
                 className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium bg-emerald-700 text-white hover:bg-emerald-600 disabled:opacity-50"
               >
-                {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                {saving ? <OpenSquadLoader size={12} /> : <Save size={11} />}
                 {t('workspaceEditor.save')}
               </button>
             ) : null}
@@ -358,7 +358,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
       </div>
       {showSpinner ? (
         <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-          <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
+          <OpenSquadLoader size={20} />
         </div>
       ) : error ? (
         <div className="px-3 py-4 text-[12px] text-red-400">{error}</div>
@@ -380,7 +380,7 @@ export const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
         <Suspense
           fallback={
             <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-              <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
+              <OpenSquadLoader size={20} />
             </div>
           }
         >

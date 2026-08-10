@@ -559,6 +559,10 @@ class ResponseParser:
             downstream schema matching forgiving (e.g. startLine -> start_line).
         """
         tc_log = get_tool_call_debug_logger()
+        # Coerce the model's `<|mcp|...>` DSML delimiter (single bar + "mcp" +
+        # bar, used by some coding models) into the parser's expected
+        # `<||DSML||...>` form so their tool calls parse correctly.
+        text = re.sub(r"\|mcp\|", "||DSML||", text)
         delim = ResponseParser._DSML_DELIM
         # Wrapper accepts BOTH <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
         # and <tool_calls>...</tool_calls> as outer container. The opening tag

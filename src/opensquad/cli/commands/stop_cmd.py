@@ -47,14 +47,77 @@ def _read_runtime_registry_entries() -> list[dict]:
         return []
 
 
-def _terminate_registered_processes() -> tuple[int, int, set[int]]:
-    """Terminate agent/plugin processes recorded by launcher runtime registry."""
+def _pid_exists(pid: int) -> bool:
+    """Quick liveness check for a PID (psutil in-memory, no subprocess)."""
+    if not pid or pid <= 0:
+        return False
     try:
-        from opensquad.launcher.process_manager import _pid_exists, _remove_runtime_registry, _terminate_pid_tree
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except ImportError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _psutil_kill(pid: int) -> bool:
+    """Kill a single PID via psutil (TerminateProcess, ~5ms); taskkill fallback.
+
+    taskkill /T costs ~2s per invocation even when it succeeds, so it is only
+    a fallback for AccessDenied / missing-psutil cases.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return _taskkill_pid(pid)
+    try:
+        psutil.Process(pid).kill()
+        return True
+    except psutil.AccessDenied:
+        return _taskkill_pid(pid)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+
+
+def _collect_descendants(children_of: dict[int, list[int]], roots: set[int]) -> set[int]:
+    """Expand root PIDs to include all descendants (pure in-memory walk)."""
+    out = set(roots)
+    stack = list(roots)
+    while stack:
+        pid = stack.pop()
+        for child in children_of.get(pid, []):
+            if child not in out:
+                out.add(child)
+                stack.append(child)
+    return out
+
+
+def _terminate_registered_processes() -> tuple[int, int, set[int]]:
+    """Terminate agent/plugin processes recorded by launcher runtime registry.
+
+    Fast path: one native Toolhelp32 snapshot (pid/ppid/name, ~150-250ms) +
+    psutil.kill (TerminateProcess, ~5ms each). Avoids taskkill /T (~2s per
+    invocation) and per-process psutil scans (30s+ on AV-heavy machines).
+    """
+    try:
+        from opensquad.launcher.process_manager import _remove_runtime_registry
     except ImportError:
         return 0, 0, set()
 
     entries = _read_runtime_registry_entries()
+    if not entries:
+        return 0, 0, set()
+
+    children_of: dict[int, list[int]] = {}
+    snapshot = _snapshot_windows_procs_fast() if sys.platform == "win32" else {}
+    for pid, (ppid, _name) in snapshot.items():
+        if ppid:
+            children_of.setdefault(ppid, []).append(pid)
+
     killed = 0
     seen_pids: set[int] = set()
     touched_pids: set[int] = set()
@@ -69,16 +132,19 @@ def _terminate_registered_processes() -> tuple[int, int, set[int]]:
         if pid_int <= 0 or pid_int in seen_pids:
             continue
         seen_pids.add(pid_int)
-        alive = _pid_exists(pid_int)
-        if alive and _terminate_pid_tree(pid_int):
+
+        # Kill the root AND its whole descendant tree (agents' MCP/node
+        # children, plugin service children) from the in-memory snapshot.
+        root_killed = False
+        for target in sorted(_collect_descendants(children_of, {pid_int})):
+            if not _pid_exists(target):
+                continue
+            if _psutil_kill(target) and target == pid_int:
+                root_killed = True
+        if root_killed:
             killed += 1
-        # Only mark as handled once the process is actually gone, so a PID that
-        # survived termination is NOT skipped by the later port-based cleanup.
-        for _ in range(10):
-            if not _pid_exists(pid_int):
-                break
-            time.sleep(0.05)
-        if not _pid_exists(pid_int):
+            # TerminateProcess succeeded → the PID is going away; treat as
+            # handled so the port phase does not waste a retry on it.
             touched_pids.add(pid_int)
         with contextlib.suppress(OSError):
             _remove_runtime_registry(kind, identifier)
@@ -309,30 +375,82 @@ def _kill_port_pids(
         for pid in listeners.get(port, []):
             if pid in skip or pid in killed_seen:
                 continue
-            try:
-                if sys.platform == "win32":
-                    result = subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", pid],
-                        capture_output=True,
-                        check=False,
-                        timeout=5,
-                    )
-                else:
+            if sys.platform == "win32":
+                # psutil TerminateProcess is ~5ms; taskkill /T is the slow path
+                # (~2s/invocation) and only used as an AccessDenied fallback.
+                if not _psutil_kill(int(pid)):
+                    continue
+            else:
+                try:
                     result = subprocess.run(
                         ["kill", "-9", pid],
                         capture_output=True,
                         check=False,
                         timeout=10,
                     )
-            except Exception:
-                continue
-            if result.returncode == 0:
-                killed_seen.add(pid)
-                killed_pids.append(pid)
-                total += 1
+                except Exception:
+                    continue
+                if result.returncode != 0:
+                    continue
+            killed_seen.add(pid)
+            killed_pids.append(pid)
+            total += 1
         if killed_pids:
             details.append((port, killed_pids))
     return total, details
+
+
+def _snapshot_windows_procs_fast() -> dict[int, tuple[int | None, str]]:
+    """Snapshot all Windows processes as {pid: (ppid, name_lower)} in ONE native
+    Toolhelp32 snapshot (~150-250ms).
+
+    wmic takes ~2-3s and per-process psutil queries (name/ppid) 30s+ on
+    AV-heavy machines, so this native snapshot is the fast path used by both
+    the registry and tree phases.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _PROCESSENTRY32W(ctypes.Structure):  # noqa: N801
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        h = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    except Exception:
+        return {}
+    if not h or h == ctypes.c_void_p(-1).value:
+        return {}
+
+    procs: dict[int, tuple[int | None, str]] = {}
+    try:
+        pe = _PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        if not kernel32.Process32FirstW(h, ctypes.byref(pe)):
+            return {}
+        while True:
+            pid = int(pe.th32ProcessID)
+            ppid = int(pe.th32ParentProcessID)
+            procs[pid] = (ppid if ppid > 0 else None, pe.szExeFile.lower())
+            if not kernel32.Process32NextW(h, ctypes.byref(pe)):
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            kernel32.CloseHandle(h)
+    return procs
 
 
 def _snapshot_windows_procs() -> dict[int, tuple[int | None, str]]:
@@ -422,8 +540,8 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
     except ImportError:
         return 0, set()
 
-    # ── Phase 1: bulk snapshot via WMIC (<2s, vs psutil 30s+) ──
-    procs_info = _snapshot_windows_procs()
+    # ── Phase 1: bulk snapshot — native Toolhelp32 (~150ms), fallback wmic ──
+    procs_info = _snapshot_windows_procs_fast() or _snapshot_windows_procs()
     if not procs_info:
         return 0, set()
 
@@ -503,7 +621,7 @@ def _kill_windows_tree_psutil(my_pid: int) -> tuple[int, set[int]]:
 
     # Give TerminateProcess a moment to fully reap before verifying liveness.
     if to_kill:
-        time.sleep(0.2)
+        time.sleep(0.05)
     # Only report PIDs confirmed dead. A PID that survived the kill attempts is
     # deliberately NOT added to the skip set, so the later port-based cleanup
     # (taskkill by port) can retry it instead of silently leaving it behind.
@@ -654,8 +772,6 @@ def run_stop(args):
     print(
         f"[stop] Runtime registry: {registry_entries} entrie(s), killed {registry_killed} in {registry_elapsed:.2f}s."
     )
-    if registry_entries > 0:
-        time.sleep(0.5)
 
     # ── Step 2: Tree-kill all opensquad processes (children included) ──
     tree_start = time.perf_counter()
@@ -670,7 +786,6 @@ def run_stop(args):
 
     if parent_killed > 0:
         print(f"[stop] Killed {parent_killed} OpenSQuad process(es) (incl. children) in {tree_elapsed:.2f}s")
-        time.sleep(0.5)
     else:
         print(f"[stop] Process tree scan finished in {tree_elapsed:.2f}s")
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio, Loader2 } from 'lucide-react';
+import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { User } from '../types';
 import { getAvatarUrl, getLocalAvatarFallback, resolveChatAvatar, resolveChatName } from '../utils/image';
@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { setLanguage } from '../i18n';
 import { pluginAPI, PluginInfo, adminAPI, AdminAgent } from '../services/api';
 import { hasPluginViewAdapter } from './plugin-views/registry';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface SidebarProps {
   currentUser: User | null;
@@ -48,7 +49,7 @@ const PLUGIN_NAV_ICONS: Record<string, React.FC<{ size?: number; className?: str
   layers: Layers,
   board: KanbanSquare,
   radio: Radio,
-  loader: Loader2,
+  loader: OpenSquadLoader,
 };
 
 function loadAgentShortcutsCache(): AgentShortcutItem[] {

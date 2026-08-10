@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ArrowLeft, RefreshCw, Puzzle, Globe, Wrench, Activity, Shield, ShieldCheck,
-  ToggleLeft, ToggleRight, Loader2, AlertCircle, Settings,
+  ToggleLeft, ToggleRight, AlertCircle, Settings,
   Package, Save, Check, BarChart3,
   Search, ArrowUpAZ, ArrowDownAZ, Star, Bot, Eye, EyeOff,
   Briefcase, Code2, MessageSquare, Sparkles, Film, SearchIcon,
@@ -9,6 +9,7 @@ import {
   Server, Play, StopCircle, RotateCw, Terminal, ChevronDown, ChevronUp,
   Plus, Trash2, FolderOpen, Menu, Upload, LayoutGrid, List,
 } from 'lucide-react';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { pluginAPI, pluginServiceAPI, PluginInfo, PluginConfigField, PluginServiceStatus, adminAPI, AdminAgent } from '../services/api';
 import { hasPluginViewAdapter } from './plugin-views/registry';
 import { PluginViewContainer } from './plugin-views/PluginViewContainer';
@@ -611,7 +612,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
           disabled={uploading}
         >
           {uploading ? (
-            <Loader2 size={16} className="animate-spin md:w-[18px] md:h-[18px]" />
+            <OpenSquadLoader size={16} className="md:w-[18px] md:h-[18px]" />
           ) : (
             <Upload size={16} className="md:w-[18px] md:h-[18px]" />
           )}
@@ -621,7 +622,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
           className="p-1.5 md:p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors shrink-0"
           title="Refresh"
         >
-          <RefreshCw size={16} className={`md:w-[18px] md:h-[18px] ${loading ? 'animate-spin' : ''}`} />
+          {loading ? <OpenSquadLoader size={16} className="md:w-[18px] md:h-[18px]" /> : <RefreshCw size={16} className="md:w-[18px] md:h-[18px]" />}
         </button>
       </div>
 
@@ -743,7 +744,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
                 saveToolsOk ? 'bg-emerald-500/15 text-emerald-400' : 'bg-primary text-white'
               }`}
             >
-              {savingTools ? <Loader2 size={11} className="animate-spin" /> : saveToolsOk ? <Check size={11} /> : <Save size={11} />}
+              {savingTools ? <OpenSquadLoader size={12} /> : saveToolsOk ? <Check size={11} /> : <Save size={11} />}
               <span className="hidden sm:inline">{saveToolsOk ? tr('pluginManager.saved') : tr('pluginManager.save')}</span>
             </button>
           )}
@@ -757,7 +758,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
         <div className="w-44 shrink-0 border-r border-border bg-panel flex-col overflow-y-auto hidden md:flex">
           {loadingAgents ? (
             <div className="flex items-center justify-center py-6 text-textMuted">
-              <Loader2 size={16} className="animate-spin" />
+              <OpenSquadLoader size={16} />
             </div>
           ) : (
             agents.map(agent => (
@@ -787,7 +788,7 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
           <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 w-full">
             {loading ? (
               <div className="flex flex-col items-center justify-center h-64 gap-3">
-                <Loader2 className="animate-spin text-primary" size={32} />
+                <OpenSquadLoader size={32} />
                 <p className="text-textMuted text-sm">Loading plugins...</p>
               </div>
             ) : error ? (
@@ -988,7 +989,7 @@ const PluginCard: React.FC<PluginCardProps> = ({
           title={plugin.service_only ? tr('pluginManager.serviceOnlyTitle') : plugin.enabled ? 'Disable' : 'Enable'}
         >
           {toggling ? (
-            <Loader2 size={isList ? 18 : 24} className="animate-spin text-textMuted" />
+            <OpenSquadLoader size={isList ? 18 : 24} />
           ) : plugin.enabled ? (
             <ToggleRight size={isList ? 22 : 28} className={plugin.service_only ? 'text-textMuted opacity-30' : 'text-primary'} />
           ) : (
@@ -1284,7 +1285,7 @@ const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
   if (loading) {
     return (
       <div className="flex items-center justify-center py-4">
-        <Loader2 size={16} className="animate-spin text-textMuted" />
+        <OpenSquadLoader size={16} />
       </div>
     );
   }
@@ -1421,7 +1422,7 @@ const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
                   : 'bg-primary/15 text-primary hover:bg-primary/25'
               }`}
             >
-              {saving && !restarting ? <Loader2 size={12} className="animate-spin" />
+              {saving && !restarting ? <OpenSquadLoader size={12} />
                : saved ? <Check size={12} />
                : <Save size={12} />}
               {saved ? tr('pluginManager.saveConfig') + ' ✓' : tr('pluginManager.saveConfig')}
@@ -1432,7 +1433,7 @@ const PluginConfigPanel: React.FC<PluginConfigPanelProps> = ({
                 disabled={saving || restarting}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
               >
-                {restarting ? <Loader2 size={12} className="animate-spin" />
+                {restarting ? <OpenSquadLoader size={12} />
                  : <RotateCw size={12} />}
                 {tr('pluginManager.saveAndRestart')}
               </button>
@@ -1532,7 +1533,7 @@ const ServiceStatusCard: React.FC<{ pluginId: string }> = ({ pluginId }) => {
         <Server size={13} className="text-textMuted shrink-0" />
         <span className="text-xs font-semibold text-textMain flex-1">{tr('pluginManager.httpService')}</span>
         {loading ? (
-          <Loader2 size={12} className="animate-spin text-textMuted" />
+          <OpenSquadLoader size={12} />
         ) : (
           <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
             alive
@@ -1587,7 +1588,7 @@ const ServiceStatusCard: React.FC<{ pluginId: string }> = ({ pluginId }) => {
                 disabled={acting}
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
               >
-                {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
+                {acting ? <OpenSquadLoader size={12} /> : <StopCircle size={11} />}
                 {tr('pluginManager.stop')}
               </button>
               <button
@@ -1595,7 +1596,7 @@ const ServiceStatusCard: React.FC<{ pluginId: string }> = ({ pluginId }) => {
                 disabled={acting}
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
               >
-                {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
+                {acting ? <OpenSquadLoader size={12} /> : <RotateCw size={11} />}
                 {tr('pluginManager.restart')}
               </button>
             </>
@@ -1605,7 +1606,7 @@ const ServiceStatusCard: React.FC<{ pluginId: string }> = ({ pluginId }) => {
               disabled={acting}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
             >
-              {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              {acting ? <OpenSquadLoader size={12} /> : <Play size={11} />}
               {tr('pluginManager.start')}
             </button>
           )}
@@ -1633,7 +1634,7 @@ const ServiceStatusCard: React.FC<{ pluginId: string }> = ({ pluginId }) => {
         <div className="border-t border-border/40 bg-black/30 px-3 py-2 max-h-48 overflow-y-auto">
           {logsLoading ? (
             <div className="flex justify-center py-2">
-              <Loader2 size={13} className="animate-spin text-textMuted" />
+              <OpenSquadLoader size={14} />
             </div>
           ) : logs.length === 0 ? (
             <p className="text-[10px] text-textMuted">{tr('pluginManager.noLogs')}</p>
@@ -2003,7 +2004,7 @@ const UninstallConfirmDialog: React.FC<UninstallConfirmDialogProps> = ({
             className="px-4 py-1.5 rounded-lg text-sm font-medium bg-red-500 hover:bg-red-600 text-white transition-colors disabled:opacity-60 flex items-center gap-1.5"
           >
             {uninstalling ? (
-              <><Loader2 size={13} className="animate-spin" />{tr('pluginManager.uninstalling')}</>
+              <><OpenSquadLoader size={14} />{tr('pluginManager.uninstalling')}</>
             ) : (
               <><Trash2 size={13} />{tr('pluginManager.confirmUninstall')}</>
             )}

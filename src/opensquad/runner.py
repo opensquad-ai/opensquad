@@ -45,6 +45,40 @@ from .tool import logger
 from .tool_call_strategy import ToolCallStrategySelector
 from .utils import extract_and_remove_first_tag
 
+# Scheduled-task guard: a plan/announcement-only reply (no tool calls) must not
+# end the turn. We inject a continuation prompt (bounded) so the agent actually
+# executes the task instead of stopping right after saying "I'll start…".
+_SCHED_CONTINUE_MAX = 5
+_SCHED_CONTINUE_PROMPT = (
+    "[System Prompt] You are executing a Scheduled Task and again produced only a "
+    "plan / announcement without calling any tool. That is NOT acceptable and your "
+    "previous reply was NOT delivered as the result. IMMEDIATELY, as your very next "
+    "action, call the tool `task_watch.start(description=..., check_interval=120)` "
+    "(use the parameter name `description`). After it succeeds, call the "
+    "data-gathering / search / shell tools to actually do the work, then finish with "
+    "`task_watch.complete(summary)` and the concrete deliverable. Do not write "
+    "another '<plan>' or any prose sentence — emit a real tool call now."
+)
+# Prompt for a truncated/unclosed `<tool_call>` that leaked as text (no closing
+# tag, no arguments) and was therefore NOT executed.
+_SCHED_TRUNCATED_TC_PROMPT = (
+    "[System Prompt] Your previous reply contained an unfinished/truncated "
+    "`<tool_call>` block (opening tag but no arguments and no closing "
+    "`</tool_call>`). It was NOT executed. Re-emit the tool call COMPLETELY in the "
+    "correct format, e.g.:\n"
+    '<tool_call name="task_watch.start">\n'
+    '<arguments>{"description": "...", "check_interval": 120}</arguments>\n'
+    "</tool_call>\n"
+    "then continue the task. Do not end the turn with a dangling `<tool_call>`."
+)
+
+
+def _has_unclosed_tool_call(text: str) -> bool:
+    """True if a `<tool_call ...>` open tag appears without a closing tag."""
+    if not text or "<tool_call" not in text:
+        return False
+    return bool(re.search(r"<tool_call\b[^>]*>", text)) and "</tool_call>" not in text
+
 
 # Dynamic accessor: always gets the latest instance after reinit
 def _get_session_manager():
@@ -302,6 +336,11 @@ class AgentRunner:
         # continuation signal for _parallel_session_turn). See the fix at the
         # `if not current_input and not _tool_ran_this_turn` guard.
         self._tool_result_generated = False
+
+        # Scheduled-task continuation guard state (reset per parallel turn).
+        self._parallel_scheduled_mode = False
+        self._sched_any_tool = False
+        self._sched_continue_count = 0
 
         # Repeated-action guard state: sid -> {"count", "last", "guarded"}
         # Breaks runaway identical tool loops (see turn-loop guard below).
@@ -733,6 +772,27 @@ class AgentRunner:
 
                 prev = req[i - 1]
                 if prev.get("role") != "assistant" or not prev.get("tool_calls"):
+                    # 该 tool 响应的 tool_call_id 若已被更早的 assistant 声明
+                    # （并行/乱序工具结果：上一轮发起的调用，结果在本轮才返回），
+                    # 它属于那个 assistant，不应注入 synthetic assistant——
+                    # 否则会破坏 tool_calls 配对并污染后续 assistant 消息。
+                    tid = msg.get("tool_call_id")
+                    claimed_by_earlier = False
+                    if tid:
+                        for _lookback in reversed(req[:i]):
+                            if _lookback.get("role") != "assistant":
+                                continue
+                            _tc_list = _lookback.get("tool_calls") or []
+                            if any(isinstance(_t, dict) and _t.get("id") == tid for _t in _tc_list):
+                                claimed_by_earlier = True
+                                break
+                    if claimed_by_earlier:
+                        logger.info(
+                            "[Runner] Tool response already claimed by earlier assistant "
+                            f"tool_call_id={tid} (skipping synthetic injection)"
+                        )
+                        i += 1
+                        continue
                     # Previous message doesn't have tool_calls - inject synthetic assistant
                     synth_id = f"synth_{uuid.uuid4().hex[:8]}"
                     logger.info(f"[Runner] Injecting synthetic assistant before role=tool (index={i})")
@@ -765,7 +825,8 @@ class AgentRunner:
                         )
                     req.insert(i, synth_msg)
                     # Update tool_call_id on the actual tool message (now at i+2 after insert)
-                    if i + 2 < len(req):
+                    # 防御：只改写真正的 role=tool 消息，避免把 tool_call_id 加到 assistant 上
+                    if i + 2 < len(req) and req[i + 2].get("role") == "tool":
                         if not req[i + 2].get("tool_call_id") or req[i + 2].get("tool_call_id", "").startswith(
                             "pipeline_events_"
                         ):
@@ -1119,6 +1180,9 @@ class AgentRunner:
 
             modes = getattr(self, "_session_agent_modes", None)
             uid = str(item.get("user_id") or "").strip()
+            self._parallel_scheduled_mode = uid.startswith("scheduled-task:")
+            self._sched_any_tool = False
+            self._sched_continue_count = 0
             # Unattended scheduled-task fires always run in Build (no Plan gate).
             if uid.startswith("scheduled-task:"):
                 set_session_mode(sid, MODE_BUILD)
@@ -1148,11 +1212,18 @@ class AgentRunner:
             # lossless, but when this session already has a bound ChatAPI with
             # history in memory (same process, same sid) rebuilding is pure
             # overhead and previously dropped live state mid-loop.
+            # NOTE: _clone_chat_api() builds a fresh per-session ChatAPI whose
+            # req is exactly [system] — never treat that as "has history" or the
+            # session's disk history stays unloaded and every follow-up turn
+            # runs with no context ("我不知道之前发生了什么").
             try:
                 from opensquad.session_model import session_api_map
 
                 _existing_api = session_api_map(self).get(sid)
-                _has_mem_history = bool(_existing_api is not None and getattr(_existing_api, "req", None))
+                _req = getattr(_existing_api, "req", None) or []
+                _has_mem_history = bool(
+                    _existing_api is not None and len(_req) > 1 and any(m.get("role") != "system" for m in _req)
+                )
             except Exception:
                 _has_mem_history = False
             if not _has_mem_history:
@@ -1246,7 +1317,13 @@ class AgentRunner:
                         image_b64_list=_b64_images,
                         tools=self._current_tools,
                         tool_choice=self._current_tool_choice,
-                        tool_call_strategy=self.tool_call_strategy,
+                        # Per-turn fork: parallel sessions must not share the
+                        # Native FC streaming buffer / delta callback.
+                        tool_call_strategy=(
+                            self.tool_call_strategy.fork()
+                            if hasattr(self.tool_call_strategy, "fork")
+                            else self.tool_call_strategy
+                        ),
                         skip_add_user=not _is_first_turn,
                     )
                     await self._broadcast_token_stats()
@@ -1293,12 +1370,41 @@ class AgentRunner:
                     stream_error=stream_error,
                 )
 
+                if getattr(self, "_tool_result_generated", False):
+                    self._sched_any_tool = True
+
                 if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
                     logger.info("[Runner] Stop after tools (parallel) sid=%s", sid)
                     stopped = True
                     break
 
                 if went_to_sleep or stop:
+                    # Scheduled-task guard: a plan/announcement-only reply that
+                    # never called a tool must not silently end the run. Inject a
+                    # bounded continuation so the agent actually executes instead
+                    # of stopping right after "我先启动任务监控…". Also catches a
+                    # truncated/unclosed <tool_call> that leaked as text.
+                    _truncated_tc = _has_unclosed_tool_call(full_response)
+                    if (
+                        stop
+                        and not went_to_sleep
+                        and self._parallel_scheduled_mode
+                        and (not self._sched_any_tool or _truncated_tc)
+                        and self._sched_continue_count < _SCHED_CONTINUE_MAX
+                    ):
+                        self._sched_continue_count += 1
+                        self._tool_result_generated = False
+                        logger.info(
+                            "[Runner] Scheduled turn ended with %s (no tools=%s, truncated_tc=%s) — "
+                            "continuing (attempt %d/%d)",
+                            "announcement-only" if not self._sched_any_tool else "truncated tool_call",
+                            not self._sched_any_tool,
+                            _truncated_tc,
+                            self._sched_continue_count,
+                            _SCHED_CONTINUE_MAX,
+                        )
+                        current_input = _SCHED_TRUNCATED_TC_PROMPT if _truncated_tc else _SCHED_CONTINUE_PROMPT
+                        continue
                     break
                 current_input = next_input or ""
 
@@ -2705,7 +2811,13 @@ class AgentRunner:
                             video_path=_video_paths if getattr(self.chat_api, "is_video_model", False) else None,
                             tools=self._current_tools,
                             tool_choice=self._current_tool_choice,
-                            tool_call_strategy=self.tool_call_strategy,
+                            # Per-turn fork: parallel sessions must not share the
+                            # Native FC streaming buffer / delta callback.
+                            tool_call_strategy=(
+                                self.tool_call_strategy.fork()
+                                if hasattr(self.tool_call_strategy, "fork")
+                                else self.tool_call_strategy
+                            ),
                             skip_add_user=not _is_first_turn,
                         ),
                         timeout=_asyncio_timeout,
@@ -3796,6 +3908,10 @@ class AgentRunner:
         anti-repetition reminder. This method only wires the result back into
         the runner's state (tools, dynamic prefix, prompt snapshot).
         """
+        # Capture the OLD prompt BEFORE build() writes the new one, so the diff
+        # below compares old vs new instead of new vs new (which is always empty).
+        prev_prompt = self.chat_api.get_system_prompt()
+
         final, dynamic_prefix, llm_params, is_changed = await self._context_builder.build(
             last_user_input=self._last_user_input,
             current_input_source=self._current_input_source,
@@ -3814,17 +3930,13 @@ class AgentRunner:
             try:
                 import difflib
 
-                prev_prompt = self.chat_api.get_system_prompt()
-                if prev_prompt:
-                    old_lines = prev_prompt.splitlines(keepends=True)
-                    new_lines = final.splitlines(keepends=True)
-                    diff_lines = list(
-                        difflib.unified_diff(
-                            old_lines, new_lines, fromfile="old prompt", tofile="new prompt", lineterm=""
-                        )
-                    )
+                old_lines = (prev_prompt or "").splitlines(keepends=True)
+                new_lines = final.splitlines(keepends=True)
+                diff_lines = list(
+                    difflib.unified_diff(old_lines, new_lines, fromfile="old prompt", tofile="new prompt", lineterm="")
+                )
             except Exception:
-                pass
+                logger.warning("[Runner] failed to compute system_prompt diff", exc_info=True)
 
         # --- Send/persist prompt snapshot only for first load or actual changes ---
         should_emit_prompt = (not self._context_builder.has_prompt_snapshot) or is_changed

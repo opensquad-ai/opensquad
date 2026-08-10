@@ -15,11 +15,12 @@
 import React, { useState, useMemo } from 'react';
 import {
   ChevronDown, ChevronRight,
-  CheckCircle, XCircle, Loader2,
+  CheckCircle, XCircle,
   Code2, AlignLeft, List,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { FileDiffBlock, extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
 
 // ---- Markdown renderer (reuses the app-wide prose styles) ----
@@ -239,7 +240,7 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
     ? <CheckCircle size={12} className="text-emerald-500 flex-shrink-0" />
     : status === 'error'
     ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
-    : <Loader2 size={12} className={`${subAgent ? 'text-violet-400' : 'text-amber-500'} animate-spin flex-shrink-0`} />;
+    : <OpenSquadLoader size={12} className="flex-shrink-0" />;
 
   const hasDetails = !!(argsStr || resultStr);
 

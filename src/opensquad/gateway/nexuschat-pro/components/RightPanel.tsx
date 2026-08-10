@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Search, Calendar, User as UserIcon, FileText, Image as ImageIcon, Video, File, LogOut, ArrowRight, Bell, BellOff, Copy, Check, MessageSquare, Edit2, Check as CheckIcon, Camera, Loader2, UserPlus } from 'lucide-react';
+import { X, Search, Calendar, User as UserIcon, FileText, Image as ImageIcon, Video, File, LogOut, ArrowRight, Bell, BellOff, Copy, Check, MessageSquare, Edit2, Check as CheckIcon, Camera, UserPlus } from 'lucide-react';
 import { Group, User, ChatState, Message, MessageType } from '../types';
 import { getAvatarUrl, getLocalAvatarFallback } from '../utils/image';
 import { AvatarImg } from './AvatarImg';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { uploadAPI, messageAPI, groupAPI } from '../services/api';
 
 interface RightPanelProps {
@@ -261,7 +262,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
               )}
               {isUploadingAvatar && (
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+                  <OpenSquadLoader size={24} />
                 </div>
               )}
             </div>
@@ -457,7 +458,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                   <span className="text-xs font-semibold text-textMuted">
                     {isSearching ? (
                       <span className="flex items-center gap-1">
-                        <Loader2 size={12} className="animate-spin" />
+                        <OpenSquadLoader size={12} />
                         {t('rightPanel.searching')}
                       </span>
                     ) : (
@@ -482,7 +483,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
                   {/* Loading State */}
                   {isSearching && searchResults.length === 0 && (
                     <div className="p-4 text-center text-gray-400 text-sm">
-                      <Loader2 size={20} className="animate-spin mx-auto mb-2" />
+                      <OpenSquadLoader size={20} className="mx-auto mb-2" />
                       {t('rightPanel.searchingDb')}
                     </div>
                   )}
@@ -595,7 +596,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({ isOpen, onClose, group, 
               </div>
               {loadingAgents ? (
                 <div className="flex-1 flex items-center justify-center py-8">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
+                  <OpenSquadLoader size={24} />
                 </div>
               ) : availableAgents.length === 0 ? (
                 <div className="flex-1 flex items-center justify-center py-8 text-sm text-textMuted">

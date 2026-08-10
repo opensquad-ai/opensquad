@@ -12,6 +12,8 @@ export type ThemePresetId =
   | 'minimal'
   | 'violet'
   | 'luxury'
+  | 'rose'
+  | 'pure-white'
   | 'custom';
 
 export interface ThemePrefs {
@@ -26,6 +28,12 @@ export interface ThemePrefs {
 
 export interface ThemePalette {
   primary: string;
+  /** Foreground colour that contrasts with `primary` for filled buttons,
+   *  badges, and other "primary on primary" surfaces. In light mode this is
+   *  near-white (text on a dark accent). In dark mode, presets whose primary
+   *  is a light neutral (rose's `#E6E6E6`) flip this to a near-black so the
+   *  label stays legible. */
+  onPrimary: string;
   bg: string;
   /** Side rails (session list, workspace files) — slightly deeper */
   rail: string;
@@ -50,6 +58,12 @@ export interface SurfacePair {
 export interface PresetMeta {
   id: Exclude<ThemePresetId, 'custom'>;
   primary: string;
+  /** Optional primary override for dark mode. Use this for presets whose
+   *  light-mode primary is illegible on a dark surface (e.g. the rose
+   *  preset is intentionally a near-black charcoal on white surfaces) so
+   *  primary-coloured text in dark mode (button labels, focus rings, etc.)
+   *  doesn't disappear. Light mode is unaffected. */
+  darkPrimary?: string;
   /** Soft warm / cool bias for surface generation */
   surfaceHue: number;
   /** Distinct light/dark page surfaces — not just accent color */
@@ -96,6 +110,36 @@ export const PRESET_METAS: PresetMeta[] = [
     dark: { bg: '#0F141B', panel: '#171D27', border: '#273041' },
     i18nNameKey: 'themeSettings.presets.minimal.name',
     i18nDescKey: 'themeSettings.presets.minimal.desc',
+  },
+  {
+    // Renamed from "paper" — what was sold as "pure paper white" actually
+    // reads as a faint rose / warm tint once the purity slider tints the
+    // surfaces, so we now call it what it looks like.
+    id: 'rose',
+    primary: '#1F1F1F',
+    // In dark mode, invert to a light neutral so primary-coloured text
+    // (e.g. "Connect Provider" button label, "AI" badges) stays legible
+    // on the near-black surface. The hue/feel is preserved.
+    darkPrimary: '#E6E6E6',
+    surfaceHue: 0,
+    light: { bg: '#FFFFFF', panel: '#FFFFFF', border: '#ECEEF1' },
+    dark: { bg: '#0A0B0D', panel: '#121316', border: '#1E2025' },
+    i18nNameKey: 'themeSettings.presets.rose.name',
+    i18nDescKey: 'themeSettings.presets.rose.desc',
+  },
+  {
+    // True white — both light and dark modes keep the page on a true white
+    // surface (dark mode just nudges the page wash to an almost-imperceptible
+    // off-white so the user can still tell which side of system mode they're
+    // on). Primary stays a deep neutral in both modes because the button
+    // background is white, so no `darkPrimary` override is needed.
+    id: 'pure-white',
+    primary: '#1F1F1F',
+    surfaceHue: 0,
+    light: { bg: '#FFFFFF', panel: '#FFFFFF', border: '#F0F0F0' },
+    dark: { bg: '#F7F7F7', panel: '#FFFFFF', border: '#E8E8E8' },
+    i18nNameKey: 'themeSettings.presets.pureWhite.name',
+    i18nDescKey: 'themeSettings.presets.pureWhite.desc',
   },
   {
     id: 'violet',
@@ -340,7 +384,15 @@ export function buildPalette(opts: {
   const tintAmount = opts.appearance === 'light' ? 0.035 + tint * 0.14 : 0.05 + tint * 0.16;
   let bg = mixHex(base.bg, primary, tintAmount);
   let panel = mixHex(base.panel, primary, tintAmount * 0.4);
-  const border = mixHex(base.border, primary, tintAmount * 0.55);
+  let border = mixHex(base.border, primary, tintAmount * 0.55);
+
+  // Pick a foreground that contrasts with the primary fill. We don't reuse
+  // `textMain` because the page text colour is derived against the *page*
+  // surface, not the primary fill. Use the standard WCAG-ish threshold of
+  // ~4.5:1 for body text so labels stay legible on filled buttons.
+  const onPrimary = contrastRatioHex('#FFFFFF', primary) >= 4.5
+    ? '#FFFFFF'
+    : (contrastRatioHex('#0B0B0C', primary) >= 4.5 ? '#0B0B0C' : primary);
 
   if (opts.appearance === 'light') {
     const c = hexToRgb(bg);
@@ -380,6 +432,7 @@ export function buildPalette(opts: {
     const textMuted = mixHex(textMain, rail, 0.45);
     return {
       primary,
+      onPrimary,
       bg: stage,
       rail,
       nest,
@@ -405,8 +458,13 @@ export function buildPalette(opts: {
   const stage = mixHex(bg, panel, 0.4);
   const textMain = adjustTextForContrast(hslToHex(sh, 6, 90), rail, cTarget, 'lighten');
   const textMuted = mixHex(textMain, rail, 0.5);
+  // Pull dark-mode borders much closer to the panel so they don't read as
+  // "white lines" against the dark surface (user feedback on the rose
+  // preset in dark mode, but applies broadly). 0.7 = 70% panel + 30% original.
+  border = mixHex(border, panel, 0.7);
   return {
     primary,
+    onPrimary,
     bg: stage,
     rail,
     nest,
@@ -420,10 +478,12 @@ export function buildPalette(opts: {
   };
 }
 
-export function getPresetPrimary(id: ThemePresetId): string {
+export function getPresetPrimary(id: ThemePresetId, appearance?: 'light' | 'dark'): string {
   if (id === 'custom' || id === 'random') return DEFAULT_THEME_PREFS.primary;
   const meta = PRESET_METAS.find((p) => p.id === id);
-  return meta?.primary ?? DEFAULT_THEME_PREFS.primary;
+  if (!meta) return DEFAULT_THEME_PREFS.primary;
+  if (appearance === 'dark' && meta.darkPrimary) return meta.darkPrimary;
+  return meta.primary;
 }
 
 export function getPresetSurfaceHue(id: ThemePresetId): number {

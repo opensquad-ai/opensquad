@@ -19,10 +19,10 @@ class DummySessionManager:
     def add_message(self, role, content, **extra):
         self.messages.append((role, content, extra))
 
-    def update_last_message_elapsed_ms(self, elapsed_ms):
+    def update_last_message_elapsed_ms(self, elapsed_ms, *, sid=None):
         self.elapsed_ms = elapsed_ms
 
-    def mark_last_assistant_end_task(self):
+    def mark_last_assistant_end_task(self, *, sid=None):
         self.end_task_marked = True
 
     def set_title(self, title):

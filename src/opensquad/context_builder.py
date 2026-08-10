@@ -281,8 +281,8 @@ class ContextBuilder:
 
             mode = get_current_mode()
             mode_section = mode_prompt_section(mode)
-            if mode_section and mode_section not in final:
-                final += "\n\n" + mode_section
+            if mode_section:
+                dynamic_parts["AGENT_MODE"] = mode_section
             apply_plan_gate_to_llm_params(llm_params, mode)
 
             # Plan-mode execution-intent nudge: when the user's request contains
@@ -319,12 +319,13 @@ class ContextBuilder:
             logger.warning(f"[ContextBuilder] agent_mode injection error: {e}")
 
         # Active /goal section (session-level completion contract)
+        # 目标状态每轮注入 user 消息前缀，进度/暂停等更新不再触发 system prompt 重建。
         try:
             from opensquad.goal_mode import get_goal, goal_prompt_section
 
             goal_section = goal_prompt_section(get_goal())
-            if goal_section and goal_section not in final:
-                final += "\n\n" + goal_section
+            if goal_section:
+                dynamic_parts["ACTIVE_GOAL"] = goal_section
         except Exception as e:
             logger.warning(f"[ContextBuilder] goal_mode injection error: {e}")
 

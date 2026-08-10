@@ -3,9 +3,10 @@
  * Stays "running" until the parent tool returns; click opens SubAgentPanel.
  */
 import React, { useState, useCallback } from 'react';
-import { Loader2, CheckCircle, XCircle, GitBranch } from 'lucide-react';
+import { CheckCircle, XCircle, GitBranch } from 'lucide-react';
 import type { DelegateBundle } from '../../utils/delegateGrouping';
 import { SubAgentPanel } from './SubAgentPanel';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 export interface DelegateFoldProps {
   bundle: DelegateBundle;
@@ -75,7 +76,7 @@ export const DelegateFold: React.FC<DelegateFoldProps> = ({
     ) : status === 'error' ? (
       <XCircle size={12} className="text-red-500 flex-shrink-0" />
     ) : (
-      <Loader2 size={12} className="text-violet-400 animate-spin flex-shrink-0" />
+      <OpenSquadLoader size={12} className="flex-shrink-0" />
     );
 
   return (

@@ -292,8 +292,8 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
 
 def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
     """
-    Validate saved JWT; optionally login via env or one-shot prompt.
-    Returns True if client.token is usable.
+    Validate saved JWT; optionally register (first web account) or login via
+    env or one-shot prompt. Returns True if client.token is usable.
     """
     from opensquad.cli.api_client import ApiError, load_credentials
 
@@ -316,9 +316,23 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
     if not email:
         email = (creds.get("email") or "").strip()
 
+    # Registration required when no web account exists yet (Web parity).
+    registration_required = False
+    try:
+        status = client.registration_status()
+        registration_required = bool(status.get("registration_required"))
+    except Exception:
+        pass
+
+    def _default_name() -> str:
+        return (os.environ.get("OPENSQUAD_NAME") or "").strip() or (email or "user").split("@")[0]
+
     if email and password:
         try:
-            client.login(email, password, language="zh")
+            if registration_required:
+                client.register(_default_name(), email, password, language="zh")
+            else:
+                client.login(email, password, language="zh")
             if interactive:
                 print(f"[code] Logged in as {email}")
             return True
@@ -327,6 +341,29 @@ def ensure_auth(client: Any, *, interactive: bool = True) -> bool:
 
     if not interactive:
         return False
+
+    if registration_required:
+        print("[code] First run: no web account yet — registering (Web parity)")
+        try:
+            name = input("Name: ").strip() or _default_name()
+            if not email:
+                email = input("Email: ").strip()
+            if not email:
+                print("[code] Email required", file=sys.stderr)
+                return False
+            import getpass
+
+            if not password:
+                password = getpass.getpass("Password: ")
+            client.register(name, email, password, language="zh")
+            print(f"[code] Registered — logged in as {email}")
+            return True
+        except (EOFError, KeyboardInterrupt):
+            print("\n[code] Registration cancelled", file=sys.stderr)
+            return False
+        except Exception as e:
+            print(f"[code] Registration failed: {e}", file=sys.stderr)
+            return False
 
     print("[code] Login required (saved after first success)")
     try:

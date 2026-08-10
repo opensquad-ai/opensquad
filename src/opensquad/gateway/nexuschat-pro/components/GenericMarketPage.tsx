@@ -11,13 +11,13 @@ import {
   Heart,
   Download,
   Tag,
-  Loader2,
   RefreshCw,
   CheckCircle,
   AlertCircle,
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { MarketItem, MarketItemListResponse } from '../services/api';
 
 export interface CategoryDef {
@@ -247,7 +247,7 @@ export default function GenericMarketPage({
                 disabled={loading}
                 className="p-1 rounded-lg text-textMuted hover:text-primary transition-colors disabled:opacity-50 shrink-0"
               >
-                <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+                {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={13} />}
               </button>
             </div>
           </div>
@@ -285,7 +285,7 @@ export default function GenericMarketPage({
 
         {loading ? (
           <div className="flex justify-center items-center h-40 text-gray-400">
-            <Loader2 size={24} className="animate-spin" />
+            <OpenSquadLoader size={40} />
           </div>
         ) : items.length === 0 ? (
           <div className="flex justify-center items-center h-40 text-gray-400 text-sm">{t('market.noData')}</div>
@@ -494,7 +494,7 @@ function ItemCard({
           } disabled:opacity-50`}
         >
           {installLoading ? (
-            <Loader2 size={12} className="animate-spin" />
+            <OpenSquadLoader size={16} />
           ) : installed ? (
             <><CheckCircle size={12} /> {installedLabel}</>
           ) : (
@@ -511,7 +511,7 @@ function ItemCard({
               : 'border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:border-pink-300 hover:text-pink-500'
           } disabled:opacity-50`}
         >
-          {likeLoading ? <Loader2 size={12} className="animate-spin" /> : <Heart size={12} fill={liked ? 'currentColor' : 'none'} />}
+          {likeLoading ? <OpenSquadLoader size={16} /> : <Heart size={12} fill={liked ? 'currentColor' : 'none'} />}
           {item.likes}
         </button>
       </div>

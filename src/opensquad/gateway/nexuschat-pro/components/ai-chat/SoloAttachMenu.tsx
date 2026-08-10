@@ -35,6 +35,21 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
   const [open, setOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  /**
+   * The menu opens upward (bottom-anchored), so the Skills row lands right
+   * under the cursor that just clicked "+" — without this, the hover handler
+   * immediately expands the L2 skill list. Suppress hover-expand briefly.
+   */
+  const suppressHoverRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    suppressHoverRef.current = true;
+    const t = window.setTimeout(() => {
+      suppressHoverRef.current = false;
+    }, 350);
+    return () => window.clearTimeout(t);
+  }, [open]);
 
   useEffect(() => {
     if (!open) {
@@ -53,10 +68,10 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
         setSkillsOpen(false);
       }
     };
-    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('mousedown', onDoc, true);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('mousedown', onDoc, true);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
@@ -99,7 +114,10 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
       </button>
 
       {open && (
-        <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 flex items-end gap-1">
+        <div
+          className="absolute bottom-[calc(100%+8px)] left-0 z-50 flex items-end gap-1"
+          onMouseLeave={() => setSkillsOpen(false)}
+        >
           <div className="min-w-[200px] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden py-1">
             <div className="px-3 py-1.5 text-[11px] text-textMuted/70 truncate">
               Add agents, context, tools…
@@ -111,7 +129,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                   key={item.key}
                   type="button"
                   onClick={() => run(item.onClick)}
-                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
                 >
                   <Icon size={15} className="text-textMuted" />
                   <span>{item.label}</span>
@@ -127,7 +145,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                   className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     autoSpeechEnabled
                       ? 'bg-primary/10 text-primary'
-                      : 'bg-transparent text-textMain hover:bg-primary/10'
+                      : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                   }`}
                   title="Automatically speak each final agent reply"
                 >
@@ -141,6 +159,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
             <button
               type="button"
               onMouseEnter={() => {
+                if (suppressHoverRef.current) return;
                 setSkillsOpen(true);
                 onOpenSkills?.();
               }}
@@ -151,7 +170,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
               className={`w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                 skillsOpen
                   ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                  : 'bg-transparent text-textMain hover:bg-primary/10'
+                  : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
               }`}
             >
               <BookOpen size={15} className="text-textMuted" />
@@ -176,7 +195,7 @@ export const SoloAttachMenu: React.FC<SoloAttachMenuProps> = ({
                       key={id}
                       type="button"
                       onClick={() => run(() => onSelectSkill(skill))}
-                      className="w-full text-left px-3 py-2 hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
+                      className="w-full text-left px-3 py-2 hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
                       title={desc || title}
                     >
                       <div className="text-[13px] font-medium text-textMain truncate">{title}</div>

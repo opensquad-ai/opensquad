@@ -8,6 +8,7 @@ import { uploadAPI, SERVER_BASE_URL, messageAPI, agentSessionAPI } from '../serv
 import { blobToWavFile } from '../utils/mediaDevices';
 import { parse } from 'marked';
 import { AvatarImg } from './AvatarImg';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { playGentleNotificationSound } from '../utils/sounds';
 import {
   CollabStepApprovalCard,
@@ -2292,7 +2293,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       {isLoadingHistory && (
         <div className="absolute top-16 md:top-20 left-0 right-0 flex justify-center py-2 z-20 pointer-events-none">
           <div className="bg-panel/80 backdrop-blur-sm rounded-full px-4 py-2 shadow-sm border border-border flex items-center gap-2">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+            <OpenSquadLoader size={16} />
             <span className="text-xs text-textMuted">{t('chat.loadingHistory')}</span>
           </div>
         </div>
@@ -2302,7 +2303,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       {isLoadingFuture && (
         <div className="absolute bottom-24 md:bottom-28 left-0 right-0 flex justify-center py-2 z-20 pointer-events-none">
           <div className="bg-panel/80 backdrop-blur-sm rounded-full px-4 py-2 shadow-sm border border-border flex items-center gap-2">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+            <OpenSquadLoader size={16} />
             <span className="text-xs text-textMuted">{t('chat.loadingRecentMessages')}</span>
           </div>
         </div>
@@ -2312,7 +2313,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
       {isAutoLoadingForJump && (
         <div className="absolute top-16 md:top-20 left-0 right-0 flex justify-center py-2 z-30 pointer-events-none">
           <div className="bg-primary/90 text-white rounded-full px-4 py-2 shadow-lg flex items-center gap-2">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+            <OpenSquadLoader size={16} label="定位中" />
             <span className="text-xs font-medium">
               {t('chat.locatingMessage', { progress: autoLoadingProgress })}
             </span>
@@ -2787,10 +2788,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                         <span className="text-[9px] text-gray-400 flex items-center gap-1">
                                             {msg.status === 'sending' && (
                                                 <>
-                                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                                    </svg>
+                                                    <OpenSquadLoader size={14} label="发送中" />
                                                     {t('chat.sending')}
                                                 </>
                                             )}

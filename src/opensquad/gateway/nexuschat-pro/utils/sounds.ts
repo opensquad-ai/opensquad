@@ -2,38 +2,37 @@
 // these are the lightweight ones used by the legacy ChatList page (and reused
 // by ChatWindow for the gentle chime, which was extracted here).
 
-/** 统一的缓和提示音 - 适用于@提及和私信（双音调风铃，极低音量） */
+/** 柔和的"叮咚"提示音 - 叮(高、稍重、短促) + 咚(低、更轻)，不拖尾 */
 export const playGentleNotificationSound = (): void => {
   try {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const now = audioContext.currentTime;
 
-    // 创建双音调缓和提示音
-    const oscillator1 = audioContext.createOscillator();
-    const oscillator2 = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
+    // 第一音"叮"：较高频、短促、稍重
+    const ding = audioContext.createOscillator();
+    const dingGain = audioContext.createGain();
+    ding.connect(dingGain);
+    dingGain.connect(audioContext.destination);
+    ding.type = 'sine';
+    ding.frequency.setValueAtTime(1046.5, now); // C6
+    dingGain.gain.setValueAtTime(0.0001, now);
+    dingGain.gain.exponentialRampToValueAtTime(0.06, now + 0.015); // 柔和淡入
+    dingGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24); // 快速收尾
+    ding.start(now);
+    ding.stop(now + 0.26);
 
-    oscillator1.connect(gainNode);
-    oscillator2.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-
-    // 缓和的双音调（类似风铃）
-    oscillator1.type = 'sine';
-    oscillator1.frequency.setValueAtTime(523.25, audioContext.currentTime); // C5 - 中音
-    oscillator1.frequency.exponentialRampToValueAtTime(659.25, audioContext.currentTime + 0.3); // E5
-
-    oscillator2.type = 'sine';
-    oscillator2.frequency.setValueAtTime(659.25, audioContext.currentTime); // E5
-    oscillator2.frequency.exponentialRampToValueAtTime(783.99, audioContext.currentTime + 0.3); // G5
-
-    // 极低的音量，缓和的淡入淡出
-    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-    gainNode.gain.linearRampToValueAtTime(0.03, audioContext.currentTime + 0.1); // 仅3%音量
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.8);
-
-    oscillator1.start(audioContext.currentTime);
-    oscillator2.start(audioContext.currentTime);
-    oscillator1.stop(audioContext.currentTime + 0.8);
-    oscillator2.stop(audioContext.currentTime + 0.8);
+    // 第二音"咚"：较低频、更轻，稍作停顿后起
+    const dong = audioContext.createOscillator();
+    const dongGain = audioContext.createGain();
+    dong.connect(dongGain);
+    dongGain.connect(audioContext.destination);
+    dong.type = 'sine';
+    dong.frequency.setValueAtTime(523.25, now + 0.2); // C5
+    dongGain.gain.setValueAtTime(0.0001, now + 0.2);
+    dongGain.gain.exponentialRampToValueAtTime(0.03, now + 0.215); // 比"叮"轻
+    dongGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.46); // 快速收尾
+    dong.start(now + 0.2);
+    dong.stop(now + 0.48);
   } catch (e) {
     // 静默失败
   }

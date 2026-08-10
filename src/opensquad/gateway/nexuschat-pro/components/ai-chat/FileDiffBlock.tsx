@@ -18,8 +18,9 @@
  */
 import React, { useState, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ChevronRight, CheckCircle, XCircle, Loader2, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle, XCircle, FilePen, FilePlus, FileText, MessageSquare, ChevronsUpDown } from 'lucide-react';
 import { marked } from 'marked';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { FollowScrollBox } from './FollowScrollBox';
 import { getLangForFile, highlightLine, escapeHtml, HLJS_THEME_CSS } from '../../utils/codeHighlight';
 
@@ -656,7 +657,7 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
     ? <CheckCircle size={12} className="text-emerald-500 flex-shrink-0" />
     : status === 'error'
     ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
-    : <Loader2 size={12} className="text-amber-500 animate-spin flex-shrink-0" />;
+    : <OpenSquadLoader size={12} className="flex-shrink-0" />;
 
   // Build raw diff lines — always call hooks unconditionally (Rules of Hooks)
   const rawDiffLines = useMemo<RawDiffLine[]>(() => {

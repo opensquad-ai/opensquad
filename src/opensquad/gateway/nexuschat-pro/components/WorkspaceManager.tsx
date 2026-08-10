@@ -1,6 +1,6 @@
 /**
  * 工作区管理组件
- * 
+ *
  * 功能：
  * - 显示当前工作区
  * - 列出最近使用的工作区
@@ -9,11 +9,11 @@
  * - 迁移数据向导
  */
 import React, { useState, useEffect } from 'react';
-import { 
-  FolderOpen, 
-  Plus, 
-  RefreshCw, 
-  Check, 
+import {
+  FolderOpen,
+  Plus,
+  RefreshCw,
+  Check,
   AlertTriangle,
   X,
   ChevronRight,
@@ -21,6 +21,7 @@ import {
   Folder
 } from 'lucide-react';
 import { useTranslation, Trans } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 // ── 迁移报告详情组件 ──────────────────────────────────────────
 interface ReportSection {
@@ -341,7 +342,7 @@ export default function WorkspaceManager() {
       try {
         const response = await fetch(`/api/workspace/migrate/status/${taskId}`);
         if (!response.ok) throw new Error(t('workspace.errors.getMigrationStatusFailed'));
-        
+
         const data = await response.json();
         setMigrationStatus(data);
 
@@ -387,10 +388,10 @@ export default function WorkspaceManager() {
             className="p-1.5 hover:bg-panel rounded-lg transition-colors text-textMuted hover:text-textMain"
             title={t('common.refresh')}
           >
-            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={16} /> : <RefreshCw size={16} />}
           </button>
         </div>
-        
+
         {currentWorkspace ? (
           <div className="flex items-start gap-3 p-3 rounded-lg bg-panel border border-border">
             <Check size={20} className="text-green-500 shrink-0 mt-0.5" />
@@ -476,7 +477,7 @@ export default function WorkspaceManager() {
 
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <RefreshCw size={20} className="animate-spin text-primary" />
+            <OpenSquadLoader size={28} />
           </div>
         ) : workspaces.length === 0 ? (
           <div className="text-center py-8 text-textMuted text-sm">
@@ -598,7 +599,7 @@ export default function WorkspaceManager() {
                 >
                   {creating ? (
                     <>
-                      <RefreshCw size={14} className="animate-spin" />
+                      <OpenSquadLoader size={16} />
                       {t('workspace.creating')}
                     </>
                   ) : (
@@ -713,8 +714,8 @@ export default function WorkspaceManager() {
                     <label className="block text-sm font-semibold text-textMain mb-2">{t('workspace.migration.modeLabel')}</label>
                     <div className="space-y-3">
                       <label className={`flex items-start gap-3 p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                        migrationMode === 'copy' 
-                          ? 'border-blue-500 bg-blue-50' 
+                        migrationMode === 'copy'
+                          ? 'border-blue-500 bg-blue-50'
                           : 'border-border bg-bgLight hover:border-blue-300'
                       }`}>
                         <input
@@ -734,8 +735,8 @@ export default function WorkspaceManager() {
                       </label>
 
                       <label className={`flex items-start gap-3 p-4 rounded-lg border-2 cursor-pointer transition-all ${
-                        migrationMode === 'move' 
-                          ? 'border-blue-500 bg-blue-50' 
+                        migrationMode === 'move'
+                          ? 'border-blue-500 bg-blue-50'
                           : 'border-border bg-bgLight hover:border-blue-300'
                       }`}>
                         <input
@@ -821,7 +822,7 @@ export default function WorkspaceManager() {
                         <span className="text-xs break-all">{migrationTarget}</span>
                       </p>
                        <p>
-                         <span className="font-medium text-textMain">{t('workspace.migration.mode')}</span> 
+                         <span className="font-medium text-textMain">{t('workspace.migration.mode')}</span>
                          {migrationMode === 'copy' ? t('workspace.migration.copy') : t('workspace.migration.move')}
                        </p>
                        <p>
@@ -838,7 +839,7 @@ export default function WorkspaceManager() {
                 <div className="space-y-4">
                   {migrationStatus?.status === 'pending' && (
                     <div className="flex flex-col items-center justify-center py-8">
-                      <RefreshCw size={48} className="animate-spin text-blue-600 mb-4" />
+                      <OpenSquadLoader size={48} className="mb-4" />
                       <p className="text-sm text-textMain">{t('workspace.migration.preparing')}</p>
                     </div>
                   )}
@@ -846,13 +847,13 @@ export default function WorkspaceManager() {
                   {migrationStatus?.status === 'running' && (
                     <div className="space-y-4">
                       <div className="flex flex-col items-center justify-center py-8">
-                        <RefreshCw size={48} className="animate-spin text-blue-600 mb-4" />
+                        <OpenSquadLoader size={48} className="mb-4" />
                         <p className="text-sm text-textMain font-semibold mb-2">{t('workspace.migration.migrating')}</p>
                         <p className="text-xs text-textMuted">{migrationStatus.message}</p>
                       </div>
                       {migrationStatus.progress > 0 && (
                         <div className="w-full bg-gray-200 rounded-full h-2">
-                          <div 
+                          <div
                             className="bg-blue-600 h-2 rounded-full transition-all duration-300"
                             style={{ width: `${migrationStatus.progress * 100}%` }}
                           />

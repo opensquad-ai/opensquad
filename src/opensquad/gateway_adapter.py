@@ -213,12 +213,35 @@ class GatewayAdapter(BaseAgent):
     def on_generic_event(self, event_type):
         """Generic event forwarder."""
 
+        # Global model-state changes (agent-default scope, no session_id) must
+        # reach EVERY connected client — the switch may have been triggered by
+        # a TUI (CLI user) while the Web UI logs in as another account. A
+        # user-directed push would hide the update from all other clients.
+        _MODEL_SYNC_BROADCAST_EVENTS = frozenset(
+            {
+                "model_card_switched",
+                "model_card_switch_failed",
+                "reasoning_effort_changed",
+                "agent_mode_changed",
+            }
+        )
+
         async def handler(data):
             if self.connected:
                 sid = self._extract_sid(data)
                 content = self._unwrap(data)
                 logger.debug(f"[GatewayAdapter] Event {event_type}: {str(content)[:50]}...")
-                await self._send_event(content, event_type, sid=sid)
+                broadcast = bool(
+                    event_type == "info"
+                    and isinstance(content, dict)
+                    and content.get("event") in _MODEL_SYNC_BROADCAST_EVENTS
+                    and not content.get("session_id")
+                )
+                if broadcast:
+                    # No user_id -> Gateway broadcasts to every connection.
+                    await self.send_response(content, event_type, sid=sid)
+                else:
+                    await self._send_event(content, event_type, sid=sid)
 
         return handler
 

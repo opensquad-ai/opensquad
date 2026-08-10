@@ -8,6 +8,19 @@
  *   - other tools (websearch, etc.): expand → light box with Args + Result
  */
 import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
+import {
+  Globe,
+  Search,
+  FileText,
+  Pencil,
+  Terminal,
+  Sparkles,
+  CheckSquare,
+  Folder,
+  Wrench,
+} from 'lucide-react';
 import type { WorkflowBlock, WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { hasOpenAsyncDelegate } from '../../utils/aiChatTimeline';
@@ -52,6 +65,12 @@ interface SoloActivityRowProps {
    * Solo must leave this false.
    */
   embedVisualizations?: boolean;
+  /**
+   * Chat layout mode. Work (classic) shows a Chinese tool-summary headline on
+   * the completed outer fold ("已读取 3 个文件，搜索 2 次文件"); Solo keeps
+   * the Cursor-style "Worked" headline.
+   */
+  uiMode?: 'classic' | 'solo';
 }
 
 function toolNameOf(evt: WorkflowEvent): string {
@@ -137,7 +156,7 @@ interface ActivityLine {
   planSteps?: PlanStep[];
 }
 
-function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean): ActivityLine[] {
+function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, t: TFunction): ActivityLine[] {
   const lines: ActivityLine[] = [];
 
   if (evt.type === 'thought') {
@@ -217,7 +236,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
         ? 'error'
         : 'success';
 
-    let primary = name;
+    let primary = friendlyToolName(name, t);
     let secondary = '';
     if (fileEdit) {
       if (fileEdit.kind === 'read') {
@@ -240,9 +259,6 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
             ? `Failed edit ${fileEdit.fileName}`
             : `Edited ${fileEdit.fileName}`;
       }
-    } else if (running) {
-      primary = 'Running';
-      secondary = name;
     } else if (failed) {
       secondary = 'fail';
     }
@@ -271,7 +287,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
     lines.push({
       key,
       kind: 'tool',
-      primary: name,
+      primary: friendlyToolName(name, t),
       secondary: failed ? 'fail' : '',
       detail: '',
       toolName: name,
@@ -325,6 +341,7 @@ function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean):
 function buildLines(
   block: WorkflowBlock,
   shellStreams: Record<string, ShellStreamState> = {},
+  t: TFunction,
 ): ActivityLine[] {
   const lines: ActivityLine[] = [];
   const baseItems = buildDisplayWorkflowItems(block.events);
@@ -358,7 +375,7 @@ function buildLines(
     // Skip orphan sub-agent events that somehow weren't nested (still hide from main stream
     // when they carry the flag — they belong in a delegate window).
     if (item.event.subAgent) continue;
-    lines.push(...eventToLines(item.event, item.key, !!block.completed));
+    lines.push(...eventToLines(item.event, item.key, !!block.completed, t));
   }
 
   return lines;
@@ -384,10 +401,111 @@ function frozenElapsedMs(block: WorkflowBlock, turnStartedMs?: number): number |
   return Math.max(0, (end ?? start) - start);
 }
 
+/**
+ * Work-mode tool categories — each maps a tool name to a user-facing action so
+ * the outer fold can read like "已读取 3 个文件，搜索 2 次文件" in real time.
+ */
+type WorkToolCategory = 'read' | 'search' | 'edit' | 'terminal' | 'web' | 'skill' | 'task' | 'file' | 'other';
+
+/** Tool names arrive as `namespace__function` (e.g. websearch__search,
+ *  filesystem__read_file, system__run_session_job, mcp__server__tool). */
+function splitToolName(name: string): { ns: string; fn: string } {
+  const n = String(name || '').toLowerCase();
+  if (n.startsWith('mcp__')) {
+    const parts = n.split('__');
+    return { ns: 'mcp', fn: parts.slice(2).join('__') || (parts[1] || '') };
+  }
+  const idx = n.indexOf('__');
+  if (idx > 0) return { ns: n.slice(0, idx), fn: n.slice(idx + 2) };
+  return { ns: '', fn: n };
+}
+
+function classifyWorkTool(name: string): WorkToolCategory {
+  const { ns, fn } = splitToolName(name);
+  if (ns.startsWith('skill')) return 'skill';
+  if (ns === 'websearch' || ns === 'web' || ns === 'bocha') return 'web';
+  if (ns === 'filesystem') {
+    if (/\b(read|view|cat)\b/.test(fn) || fn.includes('list_director')) return 'read';
+    if (/\b(grep|search|find|glob)\b/.test(fn)) return 'search';
+    if (/\b(write|edit|replace|patch|str_replace|apply_diff|create|delete|rename)\b/.test(fn)) return 'edit';
+    return 'file';
+  }
+  if (ns === 'system') {
+    if (/\b(session|job|run|bash|shell|command|exec)\b/.test(fn)) return 'terminal';
+    if (/\b(write|binary)\b/.test(fn)) return 'edit';
+    return 'other';
+  }
+  if (/\b(read_file|read_multiple_files|view_file|read)\b/.test(fn)) return 'read';
+  if (/\b(grep|search_files|find_files|search|glob)\b/.test(fn)) return 'search';
+  if (/\b(write_file|edit_file|replace_in_file|str_replace|patch|apply_diff|write|edit|replace)\b/.test(fn)) return 'edit';
+  if (/\b(bash|run_command|run_session_job|start_job|terminal|exec)\b/.test(fn)) return 'terminal';
+  if (/\b(todo|update_task_progress|batch_update_tasks|add_task|update_todo|task)\b/.test(fn)) return 'task';
+  if (fn.includes('skill')) return 'skill';
+  return 'other';
+}
+
+/** Short, user-facing label for a tool name (websearch__search → 网络搜索 / Web search).
+ *  Labels live in i18n under aiChat.toolFlow.{ns,fn}; falls back to the raw fn. */
+function friendlyToolName(name: string, t: TFunction): string {
+  const { ns, fn } = splitToolName(name);
+  if (ns.startsWith('skill')) return t('aiChat.toolFlow.skill');
+  const nsLabel = t(`aiChat.toolFlow.ns.${ns}`, { defaultValue: '' });
+  if (nsLabel) return nsLabel;
+  const fnLabel = t(`aiChat.toolFlow.fn.${fn}`, { defaultValue: '' });
+  if (fnLabel) return fnLabel;
+  if (fn) return fn.replace(/_/g, ' ');
+  return String(name || 'Tool');
+}
+
+/** Category-matched leading icon for a tool line (Globe for web search,
+ *  magnifier for file search, etc.). */
+function toolIcon(name: string): React.ReactNode {
+  const cat = classifyWorkTool(name);
+  const size = 13;
+  const cls = 'shrink-0 opacity-70';
+  switch (cat) {
+    case 'web': return <Globe size={size} className={cls} />;
+    case 'search': return <Search size={size} className={cls} />;
+    case 'read': return <FileText size={size} className={cls} />;
+    case 'edit': return <Pencil size={size} className={cls} />;
+    case 'terminal': return <Terminal size={size} className={cls} />;
+    case 'skill': return <Sparkles size={size} className={cls} />;
+    case 'task': return <CheckSquare size={size} className={cls} />;
+    case 'file': return <Folder size={size} className={cls} />;
+    default: return <Wrench size={size} className={cls} />;
+  }
+}
+
+/**
+ * Count tool calls per category and render a localized summary for Work mode.
+ * Counts every tool_call (finished or still running) so the headline updates
+ * live while the agent works.
+ */
+function summarizeWorkTools(block: WorkflowBlock, t: TFunction): string {
+  const counts = new Map<WorkToolCategory, number>();
+  for (const e of block.events) {
+    if (e.type !== 'tool_call') continue;
+    if (e.subAgent) continue; // nested delegate tools stay inside the delegate fold
+    const data = typeof e.content === 'object' && e.content ? e.content : {};
+    const name = String(data.name || data.tool || 'Tool');
+    const cat = classifyWorkTool(name);
+    counts.set(cat, (counts.get(cat) || 0) + 1);
+  }
+  const parts: string[] = [];
+  for (const cat of ['read', 'search', 'edit', 'terminal', 'web', 'skill', 'task', 'file', 'other'] as WorkToolCategory[]) {
+    const n = counts.get(cat);
+    if (!n) continue;
+    parts.push(t(`aiChat.toolFlow.summary.${cat}`, { n }));
+  }
+  return parts.join('，');
+}
+
 function outerSummary(
   block: WorkflowBlock,
   lines: ActivityLine[],
-  turnStartedMs?: number,
+  turnStartedMs: number | undefined,
+  uiMode: 'classic' | 'solo',
+  t: TFunction,
 ): { primary: string; secondary: string } {
   const thoughts = lines.filter((l) => l.kind === 'thought').length;
   const tools = lines.filter((l) => l.kind === 'tool' || l.kind === 'delegation' || l.kind === 'shell_job').length;
@@ -422,6 +540,13 @@ function outerSummary(
   // Summary finished (even if workflow block not yet marked completed).
   if (summaries.length > 0 && summaries.every((l) => !l.running) && block.completed) {
     return { primary: 'Context compressed', secondary: '' };
+  }
+  // Work mode: live Chinese tool summary headline ("读取 3 个文件，搜索 2 次文件")
+  // updates in real time while the agent works — replaces both "Working for …"
+  // (active) and "Worked for …" (completed) generic headlines.
+  if (uiMode === 'classic' && tools > 0) {
+    const summary = summarizeWorkTools(block, t);
+    if (summary) return { primary: summary, secondary: '' };
   }
   if (liveTool || livePlan || (hasLiveLine && !block.completed)) {
     if (elapsedLabel != null) return { primary: `Working for ${elapsedLabel}`, secondary: '' };
@@ -509,7 +634,9 @@ const TextChevronToggle: React.FC<{
   onFileClick?: () => void;
   /** Dot-matrix orbit before the title (e.g. live “Working for”) */
   leadingPulse?: boolean;
-}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse }) => {
+  /** Category icon rendered before the title (tool lines only) */
+  leadingIcon?: React.ReactNode;
+}> = ({ primary, secondary, open, onToggle, running, shimmer, depth = 0, addedLines, removedLines, errored, fileLabel, onFileClick, leadingPulse, leadingIcon }) => {
   // Inline color-mix: Tailwind opacity utilities were not reliably fading
   // primary labels (inherited theme muted stayed too strong).
   const faint = errored
@@ -568,6 +695,9 @@ const TextChevronToggle: React.FC<{
     className="group inline-flex items-center gap-1.5 py-0.5 text-left max-w-full bg-transparent border-0 p-0 cursor-pointer"
   >
     {leadingPulse ? <PulseDotsOrbit size={depth === 0 ? 16 : 14} /> : null}
+    {leadingIcon ? (
+      <span className="shrink-0 flex items-center">{leadingIcon}</span>
+    ) : null}
     <span className="text-[13px] leading-relaxed min-w-0" style={{ color: faint }}>
       {shimmer ? <ShimmerLabel color={faint}>{title}</ShimmerLabel> : title}
     </span>
@@ -704,6 +834,7 @@ const SoloEventLine: React.FC<{
   embedVisualizations?: boolean;
 }> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile, embedVisualizations: _embedVisualizations = false }) => {
   void _embedVisualizations;
+  const { t } = useTranslation();
   const isSummary = line.kind === 'summary';
   const isProgress = line.kind === 'progress';
   // Keep compression summary open while streaming so text is visible live.
@@ -796,6 +927,11 @@ const SoloEventLine: React.FC<{
             ? () => onOpenFile(line.fileEdit!.filePath)
             : undefined
         }
+        leadingIcon={
+          line.kind === 'tool'
+            ? toolIcon(line.toolName || line.primary)
+            : undefined
+        }
       />
 
       {/* Thought body only — title stays outside the faded panel (same as thought-only fold). */}
@@ -872,7 +1008,7 @@ const SoloEventLine: React.FC<{
       {open && line.kind === 'tool' && !isFileEdit && !isFileRead && (
         <div className="pl-4">
           <SoloToolExpandPanel
-            toolName={line.toolName || line.primary}
+            toolName={friendlyToolName(line.toolName || line.primary, t)}
             args={line.toolArgs}
             result={line.toolResult || ''}
             running={line.running}
@@ -913,14 +1049,16 @@ export function mergeWorkflowBlocks(blocks: WorkflowBlock[]): WorkflowBlock {
   };
 }
 
-export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
+export const SoloActivityRow = React.memo(function SoloActivityRow({
   block,
   expandLevel = 'thoughts',
   turnStartedMs,
   shellStreams = {},
   onOpenFile,
   embedVisualizations = false,
-}) => {
+  uiMode = 'solo',
+}: SoloActivityRowProps) {
+  const { t } = useTranslation();
   const expand = workflowExpandFlags(expandLevel);
   const [tick, setTick] = useState(0);
   const hasOpenTools = block.events.some(
@@ -994,10 +1132,10 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
 
   // Do NOT put `tick` in buildLines deps — that remounted thought/tool text every
   // 400ms and cleared mouse selections in scheduled-task / live panes.
-  const lines = useMemo(() => buildLines(block, shellStreams), [block, shellStreams]);
+  const lines = useMemo(() => buildLines(block, shellStreams, t), [block, shellStreams, t]);
   const summary = useMemo(
-    () => outerSummary(block, lines, turnStartedMs),
-    [block, lines, turnStartedMs, tick],
+    () => outerSummary(block, lines, turnStartedMs, uiMode, t),
+    [block, lines, turnStartedMs, tick, uiMode, t],
   );
 
   // Active phase detection: while the latest step is still thought / plan /
@@ -1303,4 +1441,4 @@ export const SoloActivityRow: React.FC<SoloActivityRowProps> = ({
       </div>
     </div>
   );
-};
+});

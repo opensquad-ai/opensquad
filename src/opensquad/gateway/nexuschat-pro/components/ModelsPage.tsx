@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   RefreshCw, Plus, Cpu, Star, Search, Menu, ArrowLeft,
-  X, Save, Trash2, Users, Check, Loader2, AlertCircle,
+  X, Save, Trash2, Users, Check, AlertCircle,
   Eye, EyeOff, Zap, Thermometer, Hash, Image, Mic, ChevronDown, KeyRound, Sliders,
 } from 'lucide-react';
 import { adminAPI, modelCardAPI, ModelCardDetail, ModelCardInfo, AdminAgent } from '../services/api';
@@ -17,6 +17,7 @@ import {
   adminHeaderTitle,
 } from './admin/adminShellStyles';
 import { type VoiceRole } from '../utils/voiceCardRole';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 // ── Preset types ──────────────────────────────────────────────────────────────
 
@@ -163,6 +164,9 @@ const POPULAR_PROVIDER_IDS: string[] = [
 // ── Vendor Icon Cache Utils ───────────────────────────────────────────────────
 // localStorage key 前缀（版本化，方便将来清理旧缓存）
 const VENDOR_ICON_CACHE_PREFIX = 'vendor_icon_v1_';
+// 图标加载失败标记：写入 localStorage 后，后续渲染不再重试该图标（避免
+// 在无外网环境下反复触发 ERR_CONNECTION_TIMED_OUT 请求与刷屏）。
+const ICON_FAIL_MARK = '__fail__';
 
 function iconCacheKey(iconUrl: string): string {
   try {
@@ -175,9 +179,13 @@ function iconCacheKey(iconUrl: string): string {
   }
 }
 
-async function fetchIconAsDataUrl(iconUrl: string): Promise<string | null> {
+async function fetchIconAsDataUrl(iconUrl: string, timeoutMs = 4000): Promise<string | null> {
+  // 带超时的 fetch：无外网 / 目标域名不可达时，默认 TCP 超时要等很久，
+  // 多个并发图标请求会长时间挂起。4s 后主动 abort，避免堆积与刷屏。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const resp = await fetch(iconUrl, { mode: 'cors' });
+    const resp = await fetch(iconUrl, { mode: 'cors', signal: ctrl.signal });
     if (!resp.ok) return null;
     const blob = await resp.blob();
     return await new Promise<string>((resolve, reject) => {
@@ -188,6 +196,8 @@ async function fetchIconAsDataUrl(iconUrl: string): Promise<string | null> {
     });
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -336,7 +346,11 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const [showKey, setShowKey]         = useState(false);
   const [saving, setSaving]           = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
+  // 正在切换 enabled 状态的模型卡（保存期间禁用开关，防双击/重复触发）
+  const [togglingCard, setTogglingCard] = useState<string | null>(null);
   const [expandedVendors, setExpandedVendors] = useState<Set<string>>(() => new Set());
+  // 行内二次删除确认：正在等待确认删除的供应商名（null = 未在确认）
+  const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<string | null>(null);
 
   // Custom provider modal: "新建" 入口 + 连接厂商里的 "自定义" 入口都跳这里。
   const [customOpen, setCustomOpen]             = useState(false);
@@ -773,19 +787,30 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
   // Toggle a card's enabled flag (off = hidden from the Agent Web switcher).
   const handleToggleCardEnabled = async (name: string, enabled: boolean) => {
-    if (!name) return;
+    if (!name || togglingCard === name) return; // 保存中忽略重复点击
+    setTogglingCard(name);
+    // 乐观更新：先改本地状态，开关立即有视觉反馈（之前要等完整的
+    // getCard → saveCard → loadCards 往返，慢或失败时看起来"没反应"）。
+    setCards(prev => prev.map(c => c.name === name ? { ...c, enabled } : c));
     try {
       const full = await modelCardAPI.getCard(name);
       await modelCardAPI.saveCard(name, { ...full.card, enabled });
-      await loadCards();
-    } catch { showToast(t('modelsPage.saveFailed'), false); }
+      await loadCards(); // 以服务端为准刷新（含其他字段的变更）
+    } catch (err: any) {
+      // 失败回滚 + 提示（慢速/远程网络下保存超时会走这里，开关会弹回）
+      console.warn(`[ModelsPage] toggle ${name} → ${enabled} failed:`, err?.message || err);
+      setCards(prev => prev.map(c => c.name === name ? { ...c, enabled: !enabled } : c));
+      showToast(t('modelsPage.saveFailed'), false);
+    } finally {
+      setTogglingCard(null);
+    }
   };
 
   // Delete every model card of a provider (used to reconfigure its key: delete
-  // the provider, then re-connect with a new key).
+  // the provider, then re-connect with a new key). 删除前需在行内点 ✓ 二次确认。
   const handleDeleteProvider = async (providerName: string, names: string[]) => {
     if (!providerName || names.length === 0) return;
-    if (!confirm(t('modelsPage.deleteProviderConfirm', { name: providerName, count: names.length }))) return;
+    setConfirmingDeleteProvider(null);
     try {
       for (const n of names) {
         await modelCardAPI.deleteCard(n);
@@ -1126,7 +1151,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
             onClick={() => { setLoading(true); loadCards(); loadAgents(); }}
             className={adminHeaderGhostBtn}
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -1191,7 +1216,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <Loader2 className="animate-spin text-primary" size={32} />
+            <OpenSquadLoader size={40} />
             <p className="text-textMuted text-sm">Loading model cards...</p>
           </div>
         ) : error ? (
@@ -1237,14 +1262,35 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                         >
                           <Plus size={14} />
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteProvider(provider, list.map(c => c.name))}
-                          title={t('modelsPage.deleteProvider')}
-                          className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                        {confirmingDeleteProvider === provider ? (
+                          <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              title={t('common.confirm')}
+                              onClick={() => void handleDeleteProvider(provider, list.map(c => c.name))}
+                              className="w-6 h-6 rounded-md bg-rose-500 text-white flex items-center justify-center hover:bg-rose-600 transition-colors"
+                            >
+                              <Check size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              title={t('common.cancel')}
+                              onClick={() => setConfirmingDeleteProvider(null)}
+                              className="w-6 h-6 rounded-md text-textMuted flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors"
+                            >
+                              <X size={13} />
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingDeleteProvider(provider)}
+                            title={t('modelsPage.deleteProvider')}
+                            className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -1257,18 +1303,27 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                           <div
                             key={card.name}
                             onClick={() => openCard(card.name)}
-                            className="flex items-center gap-3 px-3 py-2 bg-panel/40 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer transition-colors"
+                            className="flex items-center gap-3 pl-5 pr-3 py-2 bg-panel/40 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer transition-colors"
                           >
-                            <div className="min-w-0 flex-1">
+                            <div className="min-w-0 flex-1 text-center">
                               <p className={`text-sm truncate ${on ? 'text-textMain' : 'text-textMuted/70'}`}>{card.title || card.name}</p>
-                              <p className="text-[11px] text-textMuted font-mono truncate">{card.model_name}</p>
+                              <p className="text-[11px] text-textMuted font-mono truncate inline-flex items-center justify-center gap-1 max-w-full">
+                                <span className="truncate">{card.model_name}</span>
+                                {card.provider && card.provider !== '__none__' && (
+                                  <>
+                                    <span className="opacity-60 flex-shrink-0">·</span>
+                                    <VendorIcon iconUrl={getCardIconUrl(card)} label={card.provider} size={11} />
+                                    <span className="truncate">{card.provider}</span>
+                                  </>
+                                )}
+                              </p>
                             </div>
-                            <VendorIcon iconUrl={getCardIconUrl(card)} label={card.provider || ''} size={14} />
                             <button
                               type="button"
+                              disabled={togglingCard === card.name}
                               onClick={(e) => { e.stopPropagation(); handleToggleCardEnabled(card.name, !on); }}
                               title={on ? t('modelsPage.enabled') : t('modelsPage.disabled')}
-                              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ml-2 ${on ? 'bg-primary' : 'bg-textMuted/30'}`}
+                              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ml-2 ${togglingCard === card.name ? 'opacity-50 cursor-wait' : ''} ${on ? 'bg-primary' : 'bg-textMuted/30'}`}
                             >
                               <span className={`absolute top-0.5 left-0.5 h-4 w-4 bg-white rounded-full shadow transition-transform ${on ? 'translate-x-4' : ''}`} />
                             </button>
@@ -1345,7 +1400,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                   disabled={saving}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
                 >
-                  {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
                   {t('common.save')}
                 </button>
                 <button onClick={closeDrawer} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors ml-1">
@@ -1837,7 +1892,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                       disabled={connecting || !connectKey.trim()}
                       className="w-full text-sm px-3 py-2 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
                     >
-                      {connecting ? <Loader2 size={14} className="animate-spin" /> : null}
+                      {connecting ? <OpenSquadLoader size={16} /> : null}
                       {t('modelsPage.connectSubmit')}
                     </button>
                   </div>
@@ -2120,7 +2175,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                   disabled={customSaving}
                   className="flex items-center gap-1.5 px-4 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
                 >
-                  {customSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {customSaving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
                   {t('modelsPage.customSubmit')}
                 </button>
               </div>
@@ -2152,7 +2207,11 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
   // 两种情况都直接用，由 <img> 的 onError 处理加载失败的情况
   const [imgSrc, setImgSrc] = React.useState<string | null>(() => {
     if (!iconUrl) return null;
-    try { return localStorage.getItem(iconCacheKey(iconUrl)); } catch { return null; }
+    try {
+      const v = localStorage.getItem(iconCacheKey(iconUrl));
+      // 失败标记（__fail__）跳过：无外网时不再渲染 <img>，避免反复超时
+      return v && v !== ICON_FAIL_MARK ? v : null;
+    } catch { return null; }
   });
   const [failed, setFailed] = React.useState(false);
   const initial = (label || '?')[0].toUpperCase();
@@ -2170,7 +2229,7 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
     // 再次确认（避免 React StrictMode 重复执行）
     try {
       const cached = localStorage.getItem(key);
-      if (cached) { setImgSrc(cached); return; }
+      if (cached && cached !== ICON_FAIL_MARK) { setImgSrc(cached); return; }
     } catch { /* ignore */ }
 
     fetchIconAsDataUrl(iconUrl).then(dataUrl => {
@@ -2191,7 +2250,13 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
         height={size}
         className="rounded-sm object-contain flex-shrink-0"
         style={{ width: size, height: size }}
-        onError={() => setFailed(true)}
+        onError={() => {
+          setFailed(true);
+          // 持久化失败标记：无外网环境下，下次挂载直接显示字母头像，
+          // 不再发起注定超时的请求（避免 ERR_CONNECTION_TIMED_OUT 刷屏）。
+          if (!iconUrl) return;
+          try { localStorage.setItem(iconCacheKey(iconUrl), ICON_FAIL_MARK); } catch { /* ignore */ }
+        }}
         loading="lazy"
       />
     );

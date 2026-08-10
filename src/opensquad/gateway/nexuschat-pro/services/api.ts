@@ -2272,6 +2272,26 @@ export const agentSessionAPI = {
     );
   },
 
+  /**
+   * Fuzzy search across the agent's session messages — matches user input
+   * and agent non-tool-flow text. Returns one entry per session with up
+   * to 3 short context snippets.
+   */
+  searchSessions: async (agentId: string, query: string, limit: number = 50) => {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    return apiRequest<{
+      agent_id: string;
+      query: string;
+      results: Array<{
+        id: string;
+        title: string;
+        matches: Array<{ role: 'user' | 'assistant'; snippet: string; timestamp?: string }>;
+        last_updated?: string | null;
+        created_at?: string | null;
+      }>;
+    }>(`/ai-web/agent-sessions/${agentId}/search?${params.toString()}`);
+  },
+
   /** Upload an image for chat */
   uploadImage: async (agentId: string, file: File) => {
     const formData = new FormData();

@@ -4,8 +4,9 @@
  * Replaces SessionHistoryPreview's plain "你/AGENT" list.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { agentSessionAPI } from '../../services/api';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
   buildTimelineFromSession,
   rebaseTimelineUids,
@@ -29,6 +30,10 @@ import {
   buildUserNavNodesFromTimeline,
   userNavAnchorDomId,
 } from './SoloUserNavRail';
+
+/** 稳定的空 shell 流引用：SoloActivityRow 无实时 shell 流时传入，
+ *  避免默认参数 `{}` 每次渲染新建对象导致 React.memo 浅比较失效。 */
+const EMPTY_SHELL_STREAMS: Record<string, never> = {};
 
 export interface SessionChatPaneProps {
   agentId: string;
@@ -440,7 +445,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             {loading && timeline.length === 0 ? (
               showSpinner ? (
                 <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
-                  <Loader2 size={14} className="animate-spin" /> 加载中…
+                  <OpenSquadLoader size={18} /> 加载中…
                 </div>
               ) : (
                 <div className="py-12" />
@@ -501,6 +506,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                       block={merged}
                       expandLevel={expandLevel}
                       embedVisualizations={false}
+                      uiMode={isSolo ? 'solo' : 'classic'}
+                      shellStreams={EMPTY_SHELL_STREAMS}
                     />
                   );
                 }

@@ -61,7 +61,7 @@ except Exception as e:
     raise
 ```
 
-8. **Result verification for programming tasks**: When completing programming tasks, before delivering results, you MUST verify that the changes meet requirements. Run the code or execute relevant tests to confirm the output matches expected requirements.
+8. **Result verification for programming tasks**: When completing programming tasks, before delivering results, you MUST verify that the changes meet requirements. Run the code or execute relevant tests to confirm the output matches expected requirements. If the engineering task can be interacted with or verified in a browser, immediately use browser testing tools such as Playwright to actually simulate and test the results for independent verification. For complex problems, break them down and independently verify and test each stage, each subsystem, and each local function.
 9. **Logging for bug fixing**: For bug fixing and complex debugging tasks, add diagnostic print/log statements at each key step to verify intermediate results align with expectations. Only remove these logs after confirming each step works correctly.
 10. **Root cause, not symptoms**: When debugging, do NOT just patch the visible symptom. Trace the failure back to its root cause and fix that. Examples:
     - Symptom: "API returns 500" → root cause may be: missing env var, race condition, wrong type passed in

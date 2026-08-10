@@ -944,13 +944,19 @@ class AgentBridge:
                     self._emit_stream("\n  · thought: ")
             # Servers may send deltas OR cumulative snapshots. Blind += causes
             # "LetLet me me" stutter when each event is the full text so far.
+            #
+            # A cumulative snapshot is a *strictly longer* prefix of the buffer;
+            # anything else (including a 1-char delta that happens to equal a
+            # prefix of prev, e.g. the second 'e' in "Let me" or "aa") is the
+            # next delta chunk and must be appended — dropping it would make the
+            # streamed thought progressively lose content.
             prev = self._thought_buf or ""
-            if not prev or text.startswith(prev):
+            if not prev:
                 self._thought_buf = text
-            elif prev.startswith(text):
-                pass  # stale shorter snapshot
-            elif text in prev:
-                pass
+            elif text.startswith(prev) and len(text) > len(prev):
+                self._thought_buf = text  # cumulative snapshot (strictly longer)
+            elif prev.startswith(text) and len(text) > 1:
+                pass  # stale shorter multi-char snapshot
             else:
                 self._thought_buf = prev + text
             if self.on_thinking:

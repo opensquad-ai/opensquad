@@ -802,6 +802,54 @@
     "uiModeSolo": "Code",
     "uiModeClassicHint": "Work: classic chat bubbles",
     "uiModeSoloHint": "Code: document stream (Codex / Cursor Agent style)",
+    "toolFlow": {
+      "skill": "Use skill",
+      "ns": {
+        "websearch": "Web search",
+        "web": "Web search",
+        "bocha": "Web search"
+      },
+      "fn": {
+        "search": "Search",
+        "read_file": "Read file",
+        "read_multiple_files": "Read files",
+        "view_file": "Read file",
+        "read": "Read file",
+        "grep": "Search files",
+        "search_files": "Search files",
+        "find_files": "Find files",
+        "glob": "Find files",
+        "write_file": "Write file",
+        "edit_file": "Edit file",
+        "replace_in_file": "Edit file",
+        "str_replace": "Edit file",
+        "apply_diff": "Apply diff",
+        "patch": "Patch",
+        "create_file": "Create file",
+        "delete_file": "Delete file",
+        "list_directory": "Browse folder",
+        "run_session_job": "Run command",
+        "start_job": "Run command",
+        "run_command": "Run command",
+        "bash": "Run command",
+        "create_shell_session": "Open terminal",
+        "get_shell_session_status": "Terminal status",
+        "update_task_progress": "Update todos",
+        "batch_update_tasks": "Update todos",
+        "add_task": "Update todos"
+      },
+      "summary": {
+        "read": "Read {{n}} files",
+        "search": "Searched {{n}} files",
+        "edit": "Edited {{n}} files",
+        "terminal": "Ran {{n}} commands",
+        "web": "Web search {{n}} times",
+        "skill": "Used {{n}} skills",
+        "task": "Updated {{n}} todos",
+        "file": "File operations {{n}}",
+        "other": "Tool calls {{n}}"
+      }
+    },
     "sessions": "Sessions",
     "sendMessage": "Send Message",
     "stopGenerating": "Stop",
@@ -859,6 +907,19 @@
     "pendingClearAll": "Clear all",
     "pendingQueuePosition": "#{{index}}",
     "pendingAttachments": "{{images}} image(s) · {{files}} file(s)",
+    "search": {
+      "title": "Search",
+      "placeholder": "Search this workspace's session titles or content",
+      "newChat": "New chat",
+      "navigateHint": "navigate",
+      "openHint": "open",
+      "emptyTitle": "No sessions yet",
+      "emptyBody": "Start a new conversation above to begin chatting.",
+      "noMatchesTitle": "No matching conversations",
+      "noMatchesBody": "Try a different keyword, or just start a new conversation.",
+      "moreResults": "{{count}} more results not shown",
+      "failed": "Search failed"
+    },
     "sessionSidebar": {
       "repositories": "Repositories",
       "pinned": "Pinned",
@@ -1416,6 +1477,18 @@
       "luxury": {
         "name": "Luxury",
         "desc": "Steady gold-brown, understated elegance"
+      },
+      "paper": {
+        "name": "Paper (deprecated)",
+        "desc": "Legacy 'Paper White' theme; renamed to 'Rose'."
+      },
+      "rose": {
+        "name": "Rose",
+        "desc": "Clean white surfaces with a barely-warm tint; dark mode keeps lines quiet"
+      },
+      "pureWhite": {
+        "name": "Pure White",
+        "desc": "True white surfaces in both light and dark mode"
       }
     }
   },

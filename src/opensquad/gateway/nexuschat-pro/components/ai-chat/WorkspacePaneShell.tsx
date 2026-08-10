@@ -3,7 +3,7 @@
  */
 import React, { useMemo, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2 } from 'lucide-react';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { ContentTabBar, type ContentTabLabel } from './ContentTabBar';
 import { WorkspaceFileEditor } from './WorkspaceFileEditor';
 import { ComposerLandingDock } from './ComposerLandingDock';
@@ -259,7 +259,7 @@ export const WorkspacePaneShell: React.FC<WorkspacePaneShellProps> = ({
                 role="status"
                 aria-live="polite"
               >
-                <Loader2 size={28} className="text-primary animate-spin" />
+                <OpenSquadLoader size={28} />
                 <p className="text-sm">
                   {handlers.sessionLoadingLabel || t('aiChat.loadingSession')}
                 </p>

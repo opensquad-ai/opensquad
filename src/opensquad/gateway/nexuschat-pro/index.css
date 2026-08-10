@@ -169,6 +169,21 @@
 .dark {
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-soft-lg: 0 8px 24px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.25);
+  /* Note: dark-mode border darkening is done in themeEngine.buildPalette
+     (mix toward panel) so the inline style set by applyThemePrefs already
+     carries the muted value. This class-level override is intentionally
+     NOT used — inline styles win specificity, so a CSS class here would
+     be silently ignored. */
+}
+
+/* Filled `bg-primary` buttons: in light mode, `text-white` reads fine on a
+   dark primary, but in dark mode the rose preset inverts primary to a light
+   grey and white text would disappear. Use the theme-derived
+   `--color-on-primary` token so labels stay legible without forcing every
+   component to opt in. `!important` is required to win against the
+   explicit `text-white` utility class (same specificity otherwise). */
+.dark .bg-primary {
+  color: var(--color-on-primary) !important;
 }
 
 .os-icon-btn {
@@ -337,7 +352,12 @@
   flex-shrink: 0;
   height: 100%;
   margin-inline-end: 0;
-  transition: none;
+  /* 常态启用 width/margin 过渡：收起时 width 从设定值渐变到 0，
+     而非瞬间跳变（此前仅 .is-toggling 存在 transition，收起瞬间
+     transition 属性才出现，浏览器不会为这次变化补插值动画）。 */
+  transition:
+    width var(--duration-panel) var(--ease-soft),
+    margin var(--duration-panel) var(--ease-soft);
 }
 .os-soft-rail--right {
   margin-inline-start: 0;
@@ -504,7 +524,11 @@
   }
 }
 
-/* ── Agent working: circular fade-pulse dots (no rotation) ─────────── */
+/* ── Agent working: dense purple dots with a clockwise gaussian sweep ──
+   Layout: 31 dots on concentric rings (PulseDotsStatus.tsx). A highlight
+   travels clockwise with random step jitter; JS drives opacity/scale so the
+   highlight fades through neighbors via gaussian falloff. Brand purple
+   #8257CC keeps it in the logo family. */
 .os-pulse-orbit {
   position: relative;
   width: 18px;
@@ -513,28 +537,14 @@
 }
 .os-pulse-orbit .os-pulse-cell {
   position: absolute;
-  width: 2.5px;
-  height: 2.5px;
   border-radius: 999px;
   transform: translate(-50%, -50%);
-  background: color-mix(in srgb, var(--color-text-muted) 82%, transparent);
-  opacity: var(--pulse-base, 0.55);
-  animation: os-pulse-fade 1.8s ease-in-out infinite;
-}
-@keyframes os-pulse-fade {
-  0%,
-  100% {
-    opacity: calc(var(--pulse-base, 0.55) * 0.28);
-  }
-  50% {
-    opacity: var(--pulse-base, 0.55);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .os-pulse-orbit .os-pulse-cell {
-    animation: none !important;
-    opacity: var(--pulse-base, 0.55);
-  }
+  background: #8257CC;
+  box-shadow: 0 0 4px rgba(130, 87, 204, 0.5);
+  /* JS 每步直接写 opacity/transform；此处 0.2 为初始暗态 */
+  opacity: 0.2;
+  /* 亮点逐点推进时平滑交叉淡化，避免跳跃 */
+  transition: opacity 400ms ease, transform 400ms ease;
 }
 
 /* ── Composer: Plan behind input with slight overlap ────────────────── */

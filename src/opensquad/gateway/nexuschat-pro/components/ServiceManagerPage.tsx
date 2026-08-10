@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ArrowLeft, RefreshCw, Server, Play, StopCircle, RotateCw,
-  Terminal, ChevronDown, ChevronUp, Loader2, Zap, Globe, Wrench,
+  Terminal, ChevronDown, ChevronUp, Zap, Globe, Wrench,
   Activity, Clock, Hash, Save, Check, Settings, ToggleLeft, ToggleRight,
   LayoutGrid, List, AlertTriangle, Copy, Download, Database, HardDrive, CheckCircle2,
   Trash2, Folder, Cpu, X,
 } from 'lucide-react';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { servicesAPI, pluginServiceAPI, pluginAPI, ServiceStatus } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import { HoverTooltip } from './HoverTooltip';
@@ -379,7 +380,7 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-[11px] font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
               {busy || downloading
-                ? <Loader2 size={11} className="animate-spin" />
+                ? <OpenSquadLoader size={12} />
                 : <Download size={11} />}
               {zh ? '下载模型' : 'Download model'}
             </button>
@@ -394,7 +395,7 @@ function ServiceModelDeploy({ pluginId }: { pluginId: string }) {
               title={zh ? '卸载模型文件并释放磁盘空间' : 'Remove model files from disk'}
             >
               {busy
-                ? <Loader2 size={11} className="animate-spin" />
+                ? <OpenSquadLoader size={12} />
                 : <Trash2 size={11} />}
               {zh ? '卸载模型' : 'Uninstall'}
             </button>
@@ -649,7 +650,7 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
     return (
       <div className="flex-1 h-full bg-bgLight flex flex-col w-full max-w-full overflow-hidden">
         <div className="flex-1 flex items-center justify-center">
-          <Loader2 className="animate-spin text-primary" size={32} />
+          <OpenSquadLoader size={32} />
         </div>
       </div>
     );
@@ -703,7 +704,7 @@ export const ServiceManagerPage: React.FC<ServiceManagerPageProps> = ({ onBack }
             className={adminHeaderGhostBtn}
             title="Refresh"
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -816,7 +817,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
     return (
       <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${b.cls}`}>
         {b.spin
-          ? <Loader2 size={9} className="animate-spin" />
+          ? <OpenSquadLoader size={12} />
           : <span className={`w-1.5 h-1.5 rounded-full ${b.dot}`} />}
         {b.label}
       </span>
@@ -830,7 +831,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           disabled
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/10 text-amber-400 cursor-not-allowed opacity-75"
         >
-          <Loader2 size={11} className="animate-spin" />
+          <OpenSquadLoader size={12} />
           Starting...
         </button>
       );
@@ -843,7 +844,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
             disabled={acting}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
           >
-            {acting ? <Loader2 size={11} className="animate-spin" /> : <StopCircle size={11} />}
+            {acting ? <OpenSquadLoader size={12} /> : <StopCircle size={11} />}
             Stop
           </button>
           <button
@@ -856,7 +857,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
             }`}
             title={needsRestart ? 'Restart to apply config changes' : 'Restart service'}
           >
-            {acting ? <Loader2 size={11} className="animate-spin" /> : <RotateCw size={11} />}
+            {acting ? <OpenSquadLoader size={12} /> : <RotateCw size={11} />}
             Restart{needsRestart ? ' *' : ''}
           </button>
         </>
@@ -873,7 +874,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
         }`}
         title={state === 'error' ? 'Retry start (previous attempt failed)' : 'Start service'}
       >
-        {acting ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+        {acting ? <OpenSquadLoader size={12} /> : <Play size={11} />}
         {state === 'error' ? 'Retry' : 'Start'}
       </button>
     );
@@ -911,7 +912,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
                   : 'bg-primary/15 text-primary hover:bg-primary/25'
               }`}
             >
-              {savingConfig && !acting ? <Loader2 size={10} className="animate-spin" />
+              {savingConfig && !acting ? <OpenSquadLoader size={12} />
                : configSaved ? <><Check size={10} /> Saved</>
                : <><Save size={10} /> Save</>}
             </button>
@@ -921,7 +922,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
                 disabled={savingConfig || acting}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
               >
-                {(savingConfig && acting) ? <Loader2 size={10} className="animate-spin" />
+                {(savingConfig && acting) ? <OpenSquadLoader size={12} />
                  : <><RotateCw size={10} /> {tr('pluginManager.saveAndRestart')}</>}
               </button>
             )}
@@ -974,7 +975,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
           title={editAutoStart ? 'Disable auto-start' : 'Enable auto-start'}
         >
           {togglingAutoStart ? (
-            <Loader2 size={18} className="animate-spin text-textMuted" />
+            <OpenSquadLoader size={18} />
           ) : editAutoStart ? (
             <ToggleRight size={22} className="text-primary" />
           ) : (
@@ -998,7 +999,7 @@ const ServiceCard: React.FC<ServiceCardProps> = ({
     }`}>
       {logsLoading ? (
         <div className="flex justify-center py-2">
-          <Loader2 size={13} className="animate-spin text-textMuted" />
+          <OpenSquadLoader size={14} />
         </div>
       ) : logs.length === 0 ? (
         <p className="text-[10px] text-textMuted">No logs</p>

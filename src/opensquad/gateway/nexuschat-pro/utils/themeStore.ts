@@ -16,6 +16,7 @@ import {
   ThemePresetId,
   buildPalette,
   clamp,
+  getPresetPrimary,
   getPresetSurfaceHue,
   normalizeHex,
   resolveAppearance,
@@ -95,6 +96,9 @@ function isPresetId(v: unknown): v is ThemePresetId {
     v === 'ink-green' ||
     v === 'lake-blue' ||
     v === 'minimal' ||
+    v === 'paper' ||
+    v === 'rose' ||
+    v === 'pure-white' ||
     v === 'violet' ||
     v === 'luxury' ||
     v === 'custom'
@@ -210,6 +214,14 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
 
   const root = document.documentElement;
   const appearance = resolveAppearance(next.mode);
+  // For built-in presets, resolve the *effective* primary against the
+  // current appearance so presets whose light-mode primary is illegible
+  // on dark surfaces (e.g. paper's near-black charcoal) get an explicit
+  // dark-mode override. Custom / random keep the user's saved colour.
+  const effectivePrimary =
+    next.preset === 'custom' || next.preset === 'random'
+      ? next.primary
+      : getPresetPrimary(next.preset, appearance);
   const surfaceHue =
     next.preset === 'custom' || next.preset === 'random'
       ? getPresetSurfaceHue('ink-green')
@@ -217,7 +229,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
 
   const palette = buildPalette({
     appearance,
-    primary: next.primary,
+    primary: effectivePrimary,
     purity: next.purity,
     contrast: next.contrast,
     surfaceHue,
@@ -231,6 +243,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.dataset.themePreset = next.preset;
 
   root.style.setProperty('--color-primary', palette.primary);
+  root.style.setProperty('--color-on-primary', palette.onPrimary);
   root.style.setProperty('--color-bg', palette.bg);
   root.style.setProperty('--color-rail', palette.rail);
   root.style.setProperty('--color-nest', palette.nest);

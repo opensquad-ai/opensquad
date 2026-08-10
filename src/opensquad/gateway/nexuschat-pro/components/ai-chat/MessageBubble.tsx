@@ -7,12 +7,13 @@
  * Supports file attachments displayed as cards (structured or parsed from text).
  */
 import React, { useMemo } from 'react';
-import { Copy, Check, FileText, Volume2, Loader2, Square, Undo2 } from 'lucide-react';
+import { Copy, Check, FileText, Volume2, Square, Undo2 } from 'lucide-react';
 import { SERVER_BASE_URL, agentSessionAPI } from '../../services/api';
 import { useTranslation } from 'react-i18next';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
 import { VoicePlayer } from './VoicePlayer';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 /** Structured file attachment on a ChatMessage */
 export interface FileAttachment {
@@ -611,7 +612,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
                   title={ttsState === 'playing' ? 'Stop' : 'Speak'}
                 >
                   {ttsState === 'loading' ? (
-                    <Loader2 size={12} className="animate-spin" />
+                    <OpenSquadLoader size={14} />
                   ) : ttsState === 'playing' ? (
                     <Square size={12} />
                   ) : (
@@ -624,7 +625,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         </div>
         {isUser ? (
           <div
-            className="w-full rounded-2xl bg-chatBubbleSelf border border-border/60 shadow-[0_1px_2px_rgba(0,0,0,0.04)] px-4 py-3 text-sm leading-relaxed text-textMain"
+            className="w-full rounded-2xl bg-chatBubbleSelf border border-border/30 dark:border-white/5 shadow-[0_1px_2px_rgba(0,0,0,0.04)] px-4 py-3 text-sm leading-relaxed text-textMain"
           >
             {mediaAndBody}
           </div>
@@ -678,7 +679,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
           title={ttsState === 'playing' ? 'Stop' : 'Speak'}
         >
           {ttsState === 'loading' ? (
-            <Loader2 size={13} className="animate-spin" />
+            <OpenSquadLoader size={14} />
           ) : ttsState === 'playing' ? (
             <Square size={13} />
           ) : (
@@ -707,7 +708,7 @@ const MessageBubbleInner: React.FC<MessageBubbleProps> = ({
         className={`mb-5 w-full flex justify-end group scroll-mt-4 ${isStreaming ? 'ai-streaming' : ''}`}
       >
         <div className="max-w-[min(85%,36rem)] min-w-0">
-          <div className="rounded-2xl rounded-br-md bg-black/[0.04] dark:bg-white/[0.08] border border-border/50 px-4 py-2.5 text-sm leading-relaxed text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+          <div className="rounded-2xl rounded-br-md bg-black/[0.04] dark:bg-white/[0.08] border border-border/30 dark:border-white/5 px-4 py-2.5 text-sm leading-relaxed text-textMain shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
             {mediaAndBody}
           </div>
           {actionRow}

@@ -242,10 +242,10 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
         setActiveVendor(null);
       }
     };
-    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('mousedown', onDoc, true);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('mousedown', onDoc, true);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
@@ -362,7 +362,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                     className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                       selected
                         ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                        : 'bg-transparent text-textMain hover:bg-primary/10'
+                        : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                     }`}
                   >
                     <span className="w-4 shrink-0 flex items-center justify-center">
@@ -413,7 +413,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                   className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     active
                       ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                      : 'bg-transparent text-textMain hover:bg-primary/10'
+                      : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                   }`}
                 >
                   <span className="w-4 shrink-0 flex items-center justify-center">
@@ -436,7 +436,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
               close();
               onAddModels();
             }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 text-[13px] text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
+            className="w-full flex items-center gap-2 px-3 py-2.5 text-[13px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
           >
             <Plus size={14} className="text-textMuted" />
             <span className="font-medium">Add Models</span>

@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, CheckCircle2, LogIn, Copy, Check, Ban,
+  ArrowLeft, RefreshCw, AlertCircle, CheckCircle2, LogIn, Copy, Check, Ban,
   Brain, Globe,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
 import type { PluginViewProps } from '../registry';
 import ModelDownloadCard from '../ModelDownloadCard';
+import { OpenSquadLoader } from '../../OpenSquadLoader';
 
 type SetupData = {
   needs_bing_login?: boolean;
@@ -206,14 +207,14 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
           disabled={loading || busy}
           className="p-1.5 rounded-lg hover:bg-bgLight text-textMuted disabled:opacity-50"
         >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {loading ? (
           <div className="flex items-center gap-2 text-textMuted text-sm">
-            <Loader2 size={16} className="animate-spin" />
+            <OpenSquadLoader size={16} />
             Loading…
           </div>
         ) : (
@@ -272,7 +273,7 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
                 onClick={() => void saveBrowser()}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-50"
               >
-                {browserSaving ? <Loader2 size={13} className="animate-spin" /> : <Globe size={13} />}
+                {browserSaving ? <OpenSquadLoader size={14} /> : <Globe size={13} />}
                 {zh ? '保存浏览器' : 'Save browser'}
               </button>
             </div>
@@ -322,7 +323,7 @@ const WebSearchSetupPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
                     onClick={() => void stopService()}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-red-500/15 text-red-300 hover:bg-red-500/25 disabled:opacity-50"
                   >
-                    {busy ? <Loader2 size={13} className="animate-spin" /> : null}
+                    {busy ? <OpenSquadLoader size={14} /> : null}
                     {zh ? '停止 WebSearch' : 'Stop WebSearch'}
                   </button>
                   <button

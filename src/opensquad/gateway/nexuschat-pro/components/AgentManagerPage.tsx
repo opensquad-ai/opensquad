@@ -3,13 +3,14 @@ import {
   LayoutGrid, List, ArrowLeft, RefreshCw, Plus, Power, PowerOff, RotateCcw,
   Settings, FileText, Terminal, X, Save, ChevronDown, ChevronUp,
   Monitor, Code, PenTool, BarChart3, Globe, Bot, Wrench,
-  Circle, Loader2, MessageSquare, Trash2, Pencil, Eye, EyeOff,
+  Circle, MessageSquare, Trash2, Pencil, Eye, EyeOff,
   FolderOpen, Menu, Shield,
 } from 'lucide-react';
 import { marked } from 'marked';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
 import { resolveChatAvatar, resolveChatName } from '../utils/image';
 import { useTranslation, Trans } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   adminHeaderBar,
   adminHeaderCta,
@@ -28,6 +29,8 @@ interface AgentManagerPageProps {
   onChat?: (agentId: string) => void;
   /** Jump to group chat (business switch outside settings). */
   onOpenGroupChat?: () => void;
+  /** Open the System Config (settings) overlay. */
+  onOpenSettings?: () => void;
 }
 
 const LAYOUT_KEY = 'agent_manager_layout';
@@ -148,7 +151,7 @@ function fmtTokens(n: number): string {
 
 // ---- 主组件 ----
 
-export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat }) => {
+export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat, onOpenSettings }) => {
   const { t, i18n } = useTranslation();
   const [agents, setAgents] = useState<AdminAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1007,7 +1010,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           }`}
         >
           {saving ? (
-            <><Loader2 size={14} className="animate-spin" /> Saving...</>
+            <><OpenSquadLoader size={16} /> Saving...</>
           ) : saveSuccess ? (
             <><span className="text-base leading-none">&#10003;</span> Saved!</>
           ) : (
@@ -1034,6 +1037,17 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           >
             <ArrowLeft size={16} />
           </button>
+          {onOpenSettings ? (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className={adminHeaderNavBtn}
+              title={t('nav.settings', { defaultValue: 'Settings' })}
+              aria-label={t('nav.settings', { defaultValue: 'Settings' })}
+            >
+              <Settings size={16} />
+            </button>
+          ) : null}
           <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}
@@ -1098,7 +1112,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             onClick={() => { setLoading(true); fetchAgents(); }}
             className={adminHeaderGhostBtn}
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -1115,7 +1129,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       <div className="flex-1 overflow-y-auto p-4">
         {loading && agents.length === 0 ? (
           <div className="flex items-center justify-center h-64 text-textMuted">
-            <Loader2 className="animate-spin mr-2" size={20} /> Loading agents...
+            <OpenSquadLoader size={48} />
           </div>
         ) : agents.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-textMuted">
@@ -1154,7 +1168,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                   {isRunning ? (
                     <>
                       <button onClick={() => doAction(agent, 'stop')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
-                        {isLoading ? <Loader2 size={11} className="animate-spin" /> : <PowerOff size={11} />} Stop
+                        {isLoading ? <OpenSquadLoader size={12} /> : <PowerOff size={11} />} Stop
                       </button>
                       <button onClick={() => doAction(agent, 'restart')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
                         <RotateCcw size={11} /> Restart
@@ -1162,7 +1176,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     </>
                   ) : agent.process_status !== 'external' ? (
                     <button onClick={() => doAction(agent, 'start')} disabled={isLoading} className="py-1 px-2 text-[11px] font-medium rounded-md bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50 flex items-center justify-center gap-1">
-                      {isLoading ? <Loader2 size={11} className="animate-spin" /> : <Power size={11} />} Start
+                      {isLoading ? <OpenSquadLoader size={12} /> : <Power size={11} />} Start
                     </button>
                   ) : (
                     <span className="py-1 px-2 text-[11px] text-textMuted">External</span>
@@ -1275,7 +1289,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     <div className="flex items-center gap-3 text-[10px] text-textMuted mb-3">
                       {starting ? (
                         <span className="text-yellow-500 flex items-center gap-1">
-                          <Loader2 size={10} className="animate-spin" /> {statusLabel}...
+                          <OpenSquadLoader size={14} /> {statusLabel}...
                         </span>
                       ) : (
                         <>
@@ -1362,7 +1376,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             <div className="flex-1 overflow-y-auto p-4">
               {detailLoading ? (
                 <div className="flex items-center justify-center h-32 text-textMuted">
-                  <Loader2 className="animate-spin mr-2" size={18} /> Loading...
+                  <OpenSquadLoader size={32} />
                 </div>
               ) : detailTab === 'config' ? (
                 renderConfigForm()
@@ -1392,7 +1406,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                         disabled={saving}
                         className="flex-1 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:opacity-90 transition-all disabled:opacity-50 flex items-center justify-center gap-1"
                       >
-                        {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save
+                        {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />} Save
                       </button>
                     </div>
                   </div>
@@ -1421,7 +1435,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                       onClick={() => setAutoRefresh(prev => !prev)}
                       className={`text-xs flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${autoRefresh ? 'bg-green-100 text-green-700' : 'bg-primary/10 text-textMuted hover:text-primary'}`}
                     >
-                      <RefreshCw size={12} className={autoRefresh ? 'animate-spin' : ''} />
+                      {autoRefresh ? <OpenSquadLoader size={12} /> : <RefreshCw size={12} />}
                       {autoRefresh ? 'Auto ON' : 'Auto OFF'}
                     </button>
                     <button onClick={refreshLogs} className="text-xs text-primary hover:underline flex items-center gap-1">
@@ -1483,7 +1497,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                   className="w-full px-3 py-2 bg-bgLight border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
                 />
                 {emailLookupLoading && (
-                  <p className="text-[10px] text-textMuted mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> {t('agentManager.searchingAccount')}</p>
+                  <p className="text-[10px] text-textMuted mt-1 flex items-center gap-1"><OpenSquadLoader size={14} /> {t('agentManager.searchingAccount')}</p>
                 )}
                 {!emailLookupLoading && newEmail && newEmailUser && (
                   <p className="text-[10px] text-green-500 mt-1">
@@ -1515,7 +1529,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                 disabled={creating || !newName.trim() || !newEmail.trim() || !newPassword.trim()}
                 className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:opacity-90 transition-all disabled:opacity-50 flex items-center gap-1"
               >
-                {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Create
+                {creating ? <OpenSquadLoader size={14} /> : <Plus size={14} />} Create
               </button>
             </div>
           </div>

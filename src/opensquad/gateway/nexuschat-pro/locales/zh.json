@@ -802,6 +802,54 @@
     "uiModeSolo": "Code",
     "uiModeClassicHint": "Work：经典聊天气泡布局",
     "uiModeSoloHint": "Code：文档流布局（Codex / Cursor Agent 风格）",
+    "toolFlow": {
+      "skill": "使用技能",
+      "ns": {
+        "websearch": "网络搜索",
+        "web": "网络搜索",
+        "bocha": "网络搜索"
+      },
+      "fn": {
+        "search": "搜索",
+        "read_file": "读取文件",
+        "read_multiple_files": "读取文件",
+        "view_file": "读取文件",
+        "read": "读取文件",
+        "grep": "文件搜索",
+        "search_files": "文件搜索",
+        "find_files": "文件搜索",
+        "glob": "文件搜索",
+        "write_file": "写入文件",
+        "edit_file": "编辑文件",
+        "replace_in_file": "编辑文件",
+        "str_replace": "编辑文件",
+        "apply_diff": "编辑文件",
+        "patch": "编辑文件",
+        "create_file": "创建文件",
+        "delete_file": "删除文件",
+        "list_directory": "浏览目录",
+        "run_session_job": "执行命令",
+        "start_job": "执行命令",
+        "run_command": "执行命令",
+        "bash": "执行命令",
+        "create_shell_session": "开启终端",
+        "get_shell_session_status": "终端状态",
+        "update_task_progress": "更新待办",
+        "batch_update_tasks": "更新待办",
+        "add_task": "更新待办"
+      },
+      "summary": {
+        "read": "读取 {{n}} 个文件",
+        "search": "搜索 {{n}} 次文件",
+        "edit": "编辑 {{n}} 个文件",
+        "terminal": "执行 {{n}} 条命令",
+        "web": "网络搜索 {{n}} 次",
+        "skill": "使用 {{n}} 个技能",
+        "task": "更新 {{n}} 项待办",
+        "file": "文件操作 {{n}} 次",
+        "other": "调用工具 {{n}} 次"
+      }
+    },
     "sessions": "会话列表",
     "sendMessage": "发送消息",
     "stopGenerating": "停止生成",
@@ -859,6 +907,19 @@
     "pendingClearAll": "全部清空",
     "pendingQueuePosition": "#{{index}}",
     "pendingAttachments": "{{images}} 张图片 · {{files}} 个文件",
+    "search": {
+      "title": "搜索",
+      "placeholder": "搜索当前工作区的会话标题或内容",
+      "newChat": "新建对话",
+      "navigateHint": "切换",
+      "openHint": "打开",
+      "emptyTitle": "还没有任何会话",
+      "emptyBody": "从上方新建一个对话，开始聊天吧。",
+      "noMatchesTitle": "没有找到匹配的对话",
+      "noMatchesBody": "换个关键词试试，或者直接新建一个对话开始聊天吧",
+      "moreResults": "还有 {{count}} 条结果未显示",
+      "failed": "搜索失败"
+    },
     "sessionSidebar": {
       "repositories": "会话仓库",
       "pinned": "置顶",
@@ -1416,6 +1477,18 @@
       "luxury": {
         "name": "奢华",
         "desc": "沉稳金棕，极简贵气"
+      },
+      "paper": {
+        "name": "纸白（已停用）",
+        "desc": "旧版「纸白」主题，已更名为「玫瑰」。"
+      },
+      "rose": {
+        "name": "玫瑰",
+        "desc": "纯净白底带一抹极淡暖调，深色下线条克制不抢眼"
+      },
+      "pureWhite": {
+        "name": "纯白",
+        "desc": "真正的纯白主题，浅色深色下都保持白底"
       }
     }
   },

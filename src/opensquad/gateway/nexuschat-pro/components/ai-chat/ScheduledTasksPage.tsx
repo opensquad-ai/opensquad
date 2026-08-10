@@ -8,12 +8,13 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, Clock, Plus, Pencil, Trash2, Zap, CheckCircle2, XCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, Check, Clock, Plus, Pencil, Trash2, X, Zap, CheckCircle2, XCircle } from 'lucide-react';
 import {
   scheduledTaskAPI,
   type ScheduledExecution,
   type ScheduledTask,
 } from '../../services/api';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { getAiWsService, type AIWSMessage } from '../../services/aiWebSocket';
 import { useIsMobileViewport } from '../../hooks/useMatchMedia';
 import {
@@ -202,8 +203,8 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
     reload();
   };
 
+  // 删除执行记录前需在行内点 ✓ 二次确认（由 ExecRow 内部状态控制）。
   const handleDeleteExec = async (exec: ScheduledExecution) => {
-    if (!confirm(t('scheduledTasks.confirmDeleteExec'))) return;
     try {
       await scheduledTaskAPI.removeExecution(agentName, exec.id);
       if (selExecId === exec.id) setSelExecId(null);
@@ -264,7 +265,7 @@ export const ScheduledTasksPage: React.FC<Props> = ({ agentName, rootPath, sessi
         <div className="flex-1 min-h-0 overflow-y-auto px-1.5 py-2 space-y-1">
           {loading && tasks.length === 0 && executions.length === 0 ? (
             <div className="px-2 py-3 text-[11px] text-textMuted flex items-center gap-1.5">
-              <Loader2 size={12} className="animate-spin" /> {t('scheduledTasks.loading')}
+              <OpenSquadLoader size={16} /> {t('scheduledTasks.loading')}
             </div>
           ) : sub === 'execution' ? (
             executions.length === 0 ? (
@@ -357,7 +358,7 @@ const EmptyHint: React.FC<{ text: string }> = ({ text }) => (
 
 const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const map: Record<string, { c: string; Icon: React.FC<any> }> = {
-    running: { c: 'bg-sky-500/15 text-sky-600', Icon: Loader2 },
+    running: { c: 'bg-sky-500/15 text-sky-600', Icon: OpenSquadLoader },
     success: { c: 'bg-emerald-500/15 text-emerald-600', Icon: CheckCircle2 },
     stopped: { c: 'bg-emerald-500/10 text-emerald-700', Icon: CheckCircle2 },
     failed: { c: 'bg-rose-500/15 text-rose-600', Icon: XCircle },
@@ -367,7 +368,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const Icon = m.Icon;
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium ${m.c}`}>
-      <Icon size={9} className={status === 'running' ? 'animate-spin' : ''} />
+      <Icon size={10} />
       {status}
     </span>
   );
@@ -408,26 +409,49 @@ const ExecRow: React.FC<{
   onDelete: () => void;
 }> = ({ exec, active, onClick, onDelete }) => {
   const { t } = useTranslation();
+  // 行内二次删除确认：点垃圾桶 → ✓/✗ → 点 ✓ 才真正删除。
+  const [confirming, setConfirming] = useState(false);
   return (
     <div
       role="button"
       tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onClick(); } }}
+      onClick={() => { if (confirming) return; onClick(); }}
+      onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); if (!confirming) onClick(); } }}
       className={`group w-full text-left px-2 py-1.5 rounded-lg transition-colors cursor-pointer ${active ? 'bg-sky-500/10' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.05]'}`}
     >
       <div className="flex items-center justify-between gap-1">
         <span className="text-[11px] font-medium truncate">{exec.task_name}</span>
         <div className="flex items-center gap-1 shrink-0">
           <span className="text-[10px] text-textMuted">{fmtDateTime(exec.started_at)}</span>
-          <button
-            type="button"
-            title={t('scheduledTasks.deleteExec')}
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-0.5 rounded text-textMuted hover:text-rose-600 hover:bg-rose-500/10 transition-opacity"
-          >
-            <Trash2 size={11} />
-          </button>
+          {confirming ? (
+            <span className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                title={t('common.confirm')}
+                onClick={() => onDelete()}
+                className="p-0.5 rounded bg-rose-500 text-white hover:bg-rose-600 transition-colors"
+              >
+                <Check size={11} />
+              </button>
+              <button
+                type="button"
+                title={t('common.cancel')}
+                onClick={() => setConfirming(false)}
+                className="p-0.5 rounded text-textMuted hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              title={t('scheduledTasks.deleteExec')}
+              onClick={(e) => { e.stopPropagation(); setConfirming(true); }}
+              className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-0.5 rounded text-textMuted hover:text-rose-600 hover:bg-rose-500/10 transition-opacity"
+            >
+              <Trash2 size={11} />
+            </button>
+          )}
         </div>
       </div>
       <div className="mt-0.5 flex items-center gap-1.5">

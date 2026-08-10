@@ -3,6 +3,7 @@
  * Red pill + animated waveform bars + M:SS timer (matches reference voice UI).
  */
 import React, { useEffect, useState } from 'react';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 export interface VoiceRecordPillProps {
   /** Elapsed recording seconds */
@@ -62,7 +63,7 @@ export const VoiceRecordPill: React.FC<VoiceRecordPillProps> = ({
         title={title || '正在转写…'}
         className={`inline-flex items-center gap-2 h-8 px-3 rounded-full bg-red-500/90 text-white text-[12px] font-medium border-0 cursor-default disabled:opacity-60 ${className}`}
       >
-        <span className="w-3.5 h-3.5 border-2 border-white/80 border-t-transparent rounded-full animate-spin shrink-0" />
+        <OpenSquadLoader size={14} className="shrink-0" />
         <span className="tabular-nums tracking-wide">转写中</span>
       </button>
     );

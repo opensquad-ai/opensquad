@@ -1698,16 +1698,24 @@ def _build_app_class():
             """Stream thought token-by-token into #live-think (fixed height)."""
             incoming = buf or ""
             prev = getattr(self, "_think_buf_latest", "") or ""
-            # New thought after a flush — allow the same text to be recorded again
-            if incoming and not prev and not getattr(self, "_think_pending", False):
+            # New thought after a flush — allow the same text to be recorded again.
+            # The bridge opens a fresh thought with an empty buffer while we are
+            # idle (_think_pending False); reset the dedup key there, otherwise
+            # a genuinely new thought whose text repeats the previous one would
+            # be silently dropped by _flush_thinking_to_log.
+            if not getattr(self, "_think_pending", False):
                 self._last_flushed_think = ""
             # Bridge sends full buffer after its own merge; still harden here.
+            # A cumulative snapshot is a *strictly longer* prefix of prev →
+            # replace; anything else is the next delta chunk and must be
+            # appended (a delta char that just happens to equal a prefix of
+            # prev is NOT a stale snapshot).
             if not incoming:
                 merged = prev
-            elif not prev or incoming.startswith(prev) or prev.startswith(incoming):
-                merged = incoming if len(incoming) >= len(prev) else prev
-            elif incoming in prev:
-                merged = prev
+            elif not prev or (incoming.startswith(prev) and len(incoming) > len(prev)):
+                merged = incoming
+            elif prev.startswith(incoming) and len(incoming) > 1:
+                merged = prev  # stale shorter multi-char snapshot
             else:
                 merged = prev + incoming
             # ↓ from first thinking token — only count newly appended text
@@ -3495,6 +3503,21 @@ def _build_app_class():
                 self._refresh_chrome()
                 self._focus_input()
                 return
+            if step == "name":
+                name = (line or "").strip()
+                email = str(pending.get("email") or "").strip()
+                password = str(pending.get("password") or "")
+                self._await_login = None
+                self._set_input_password(False)
+                self._placeholder_cache = None
+                if not email or not name:
+                    self.log_line(t("login_cancelled"), style="system")
+                    self._refresh_chrome()
+                    self._focus_input()
+                    return
+                self.begin_wait(t("login_working"))
+                self._do_login(email, password, name=name)
+                return
             email = str(pending.get("email") or "").strip()
             password = line if line is not None else ""
             self._await_login = None
@@ -3506,13 +3529,42 @@ def _build_app_class():
                 self._focus_input()
                 return
             self.begin_wait(t("login_working"))
-            self._do_login(email, password)
+            self._decide_login_flow(email, password)
 
         @work(thread=True, group="login")
-        def _do_login(self, email: str, password: str) -> None:
+        def _decide_login_flow(self, email: str, password: str) -> None:
+            """Check registration status off-thread; collect a display name when
+            the first web account does not exist yet, otherwise log in directly."""
+            try:
+                status = self.client.registration_status()
+                needs_register = bool(status.get("registration_required"))
+            except Exception:
+                needs_register = False
+
+            if not needs_register:
+                self._do_login(email, password)
+                return
+
+            def _ask_name() -> None:
+                self.end_wait()
+                self._await_login = {"step": "name", "email": email, "password": password}
+                self.log_line(t("login_ask_name", email=email), style="system")
+                self._refresh_chrome()
+                self._focus_input()
+
+            try:
+                self.call_from_thread(_ask_name)
+            except Exception:
+                _ask_name()
+
+        @work(thread=True, group="login")
+        def _do_login(self, email: str, password: str, name: str | None = None) -> None:
             try:
                 lang = str(getattr(self, "_locale", None) or get_locale() or "zh")
-                data = self.client.login(email, password, language=lang)
+                if name:
+                    data = self.client.register(name, email, password, language=lang)
+                else:
+                    data = self.client.login(email, password, language=lang)
                 user = (data or {}).get("user") or {}
                 name = str(user.get("name") or email)
                 mail = str(user.get("email") or email)

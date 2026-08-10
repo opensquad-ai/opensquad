@@ -2,13 +2,17 @@
 API route definitions
 """
 
+import enum
 import json
 import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+import uuid
+from datetime import date, datetime, timezone
+from datetime import time as _dt_time
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import and_, asc, desc, func, inspect, or_, select
@@ -37,6 +41,38 @@ def _utc_aware(dt: datetime) -> datetime:
     are timezone-naive so reads come back as naive datetimes. Promote them to
     UTC-aware for arithmetic with beijing_now() (which returns UTC-aware)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _cli_credentials_json_default(obj: Any) -> str:
+    """JSON fallback for values that pydantic ``model_dump()`` leaves as Python
+    objects (datetime/date/UUID/enum). Without it the best-effort CLI sync
+    drops the session whenever the user payload contains such a field."""
+    if isinstance(obj, (datetime, date, _dt_time)):
+        return obj.isoformat()
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    if isinstance(obj, enum.Enum):
+        return obj.value
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _is_node_secret_placeholder(value: str) -> bool:
+    """True when the configured node_secret is an unrotated placeholder.
+
+    Mirrors ``opensquad._syscfg._config._is_placeholder_secret`` so the
+    Gateway never trusts a shipped placeholder as a real shared secret.
+    """
+    if not value:
+        return True
+    lowered = value.lower()
+    if "change_me" in lowered or lowered.startswith("your_jwt"):
+        return True
+    return value in {
+        "YOUR_GATEWAY_TOKEN_HERE",
+        "YOUR_NODE_SECRET_HERE",
+        "YOUR_EXTERNAL_API_KEY_HERE",
+        "opensquad-gateway-simple-token",
+    }
 
 
 import contextlib
@@ -81,6 +117,48 @@ router = APIRouter()
 
 def _is_agent_email(email: str | None) -> bool:
     return bool(email) and str(email).endswith("@ai")
+
+
+def _sync_cli_credentials(access_token: str, email: str, user: Any) -> None:
+    """Best-effort: mirror a successful web login/register into the local CLI
+    credential file (~/.opensquad/cli_credentials.json) so `opensquad code`
+    / TUI can reuse the session without a second login (Web↔CLI parity).
+
+    Merges with any existing file (keeps last_agent etc.). Failures are
+    swallowed — auth must never be blocked by a best-effort write.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        path = _Path.home() / ".opensquad" / "cli_credentials.json"
+        data: dict[str, Any] = {}
+        try:
+            if path.is_file():
+                data.update(json.loads(path.read_text(encoding="utf-8")) or {})
+        except Exception:
+            data = {}
+        user_payload = user if isinstance(user, dict) else {}
+        data.update(
+            {
+                "gateway_url": syscfg.gateway_http().rstrip("/"),
+                "token": access_token,
+                "email": email,
+                "user": user_payload,
+            }
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, default=_cli_credentials_json_default),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception as e:
+        _log.debug("[auth] CLI credential sync skipped: %s", e)
 
 
 def _ensure_agent_user_avatar(user: User) -> str:
@@ -216,7 +294,12 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
 
     expected_node_secret = _syscfg.node_secret()
     header_secret = request.headers.get("X-Node-Secret", "")
-    internal_call = bool(expected_node_secret) and (header_secret == expected_node_secret)
+    # SEC: a placeholder/unset node_secret must never authorize internal calls.
+    internal_call = (
+        bool(expected_node_secret)
+        and not _is_node_secret_placeholder(expected_node_secret)
+        and (header_secret == expected_node_secret)
+    )
 
     # For web calls (no internal auth), enforce first-user-only.
     if not internal_call:
@@ -251,6 +334,7 @@ async def register(user_data: UserCreate, request: Request, db: AsyncSession = D
         _log.warning("[register] Default group bootstrap failed: %s", e)
 
     access_token = create_access_token(data={"sub": user.id})
+    _sync_cli_credentials(access_token, user_data.email, UserResponse.model_validate(user).model_dump())
     return Token(access_token=access_token, user=UserResponse.model_validate(user))
 
 
@@ -317,6 +401,7 @@ async def login(login_data: UserLogin, db: AsyncSession = Depends(get_db)):
 
     # Create access token
     access_token = create_access_token(data={"sub": user.id})
+    _sync_cli_credentials(access_token, login_data.email, UserResponse.model_validate(user).model_dump())
 
     return Token(access_token=access_token, user=UserResponse.model_validate(user))
 
@@ -526,7 +611,7 @@ async def reset_password(
     # SEC-11a: an unset node_secret must NOT short-circuit auth (previously
     # "not expected_node_secret" let anyone reset arbitrary passwords). Compare
     # in constant time so a timing side channel cannot leak the secret.
-    if not expected_node_secret:
+    if not expected_node_secret or _is_node_secret_placeholder(expected_node_secret):
         node_secret_valid = False
     else:
         import hmac

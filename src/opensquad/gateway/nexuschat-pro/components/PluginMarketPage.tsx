@@ -25,7 +25,6 @@ import {
   RefreshCw,
   Terminal,
   Cpu,
-  Loader2,
   ChevronDown,
   BadgeCheck,
   ShieldAlert,
@@ -49,6 +48,7 @@ import {
 
 import { pluginMarketAPI, MarketPlugin, PluginListResponse, InstalledPluginInfo } from '../services/api';
 import { useTranslation } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface PluginMarketPageProps {
   onBack?: () => void;
@@ -185,7 +185,7 @@ const PluginCard: React.FC<PluginCardProps> = ({ plugin, installed, liked, onLik
   let btnContent: React.ReactNode;
   let btnCls: string;
   if (installing) {
-    btnContent = <><Loader2 size={13} className="animate-spin" />{t('pluginMarket.installing')}</>;
+    btnContent = <><OpenSquadLoader size={16} />{t('pluginMarket.installing')}</>;
     btnCls = 'bg-primary/30 text-primary cursor-not-allowed';
   } else if (hasUpdate) {
     btnContent = <><ArrowUpCircle size={13} />{t('pluginMarket.update')} v{plugin.version}</>;
@@ -597,7 +597,7 @@ const GitInstallModal: React.FC<GitInstallModalProps> = ({ onClose, onSuccess })
             disabled={!!loading || !url.trim()}
             className="flex items-center gap-2 px-4 py-2 rounded-xl border border-border bg-bgLight text-textMain text-sm font-medium hover:bg-bgLight/80 transition-colors disabled:opacity-50"
           >
-            {loading === 'build' ? <Loader2 size={14} className="animate-spin" /> : <Hammer size={14} />}
+            {loading === 'build' ? <OpenSquadLoader size={16} /> : <Hammer size={14} />}
             {t('pluginMarket.installBuild')}
           </button>
           <button
@@ -605,7 +605,7 @@ const GitInstallModal: React.FC<GitInstallModalProps> = ({ onClose, onSuccess })
             disabled={!!loading || !url.trim()}
             className="flex items-center gap-2 px-5 py-2 rounded-xl bg-primary text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
           >
-            {loading === 'smart' ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+            {loading === 'smart' ? <OpenSquadLoader size={14} /> : <Zap size={14} />}
             {t('pluginMarket.installSmart')}
           </button>
         </div>
@@ -710,7 +710,7 @@ const InstallJobConsole: React.FC<InstallJobConsoleProps> = ({ jobId, pluginId, 
     const isFailed = status === 'failed' && step === 'done';
     if (isFailed) return <AlertCircle size={11} />;
     if (isPast || (isDone && !isFailed && idx <= currentStepIdx)) return <CheckCircle size={11} />;
-    if (isActive && !isDone) return <Loader2 size={11} className="animate-spin" />;
+    if (isActive && !isDone) return <OpenSquadLoader size={14} />;
     return null;
   };
 
@@ -800,7 +800,7 @@ const InstallJobConsole: React.FC<InstallJobConsoleProps> = ({ jobId, pluginId, 
     // 正在进行的步骤（还没日志）
     return (
       <div className="flex items-center justify-center h-full text-white/30 text-sm gap-2">
-        <Loader2 size={14} className="animate-spin" />
+        <OpenSquadLoader size={18} />
         {STEP_LABELS[displayStep] ? t(STEP_LABELS[displayStep]) : t('pluginMarket.waitingForLogs')}...
       </div>
     );
@@ -814,7 +814,7 @@ const InstallJobConsole: React.FC<InstallJobConsoleProps> = ({ jobId, pluginId, 
           <div className="flex items-center gap-3 text-white">
             <Terminal size={18} className="text-primary" />
             <span className="font-bold">{t('pluginMarket.installingPlugin', { id: pluginId })}</span>
-            {!isDone && <Loader2 size={14} className="animate-spin text-primary" />}
+            {!isDone && <OpenSquadLoader size={14} />}
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 text-white/50 transition-colors">
             <X size={20} />
@@ -1054,7 +1054,7 @@ const DetailModal: React.FC<DetailModalProps> = ({
               disabled={uninstalling || installing}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-red-200 text-red-600 text-sm font-medium hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {uninstalling ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              {uninstalling ? <OpenSquadLoader size={16} /> : <Trash2 size={14} />}
               {uninstalling ? t('pluginMarket.uninstalling') : t('pluginMarket.uninstall')}
             </button>
           )}
@@ -1069,7 +1069,7 @@ const DetailModal: React.FC<DetailModalProps> = ({
                 disabled={installing || uninstalling}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border bg-bgLight text-textMain text-sm font-medium hover:bg-bgLight/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {installing ? <Loader2 size={14} className="animate-spin" /> : <Hammer size={14} />}
+                {installing ? <OpenSquadLoader size={16} /> : <Hammer size={14} />}
                 {t('pluginMarket.installBuild')}
               </button>
               <button
@@ -1081,7 +1081,7 @@ const DetailModal: React.FC<DetailModalProps> = ({
                     : 'bg-primary text-white hover:opacity-90'
                 }`}
               >
-                {installing ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+                {installing ? <OpenSquadLoader size={14} /> : <Zap size={14} />}
                 {installing ? t('pluginMarket.installing') : hasUpdate ? t('pluginMarket.updateNow') : t('pluginMarket.installSmart')}
               </button>
             </div>
@@ -1440,7 +1440,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
                 {data ? `${data.total}` : ''}
               </span>
               <button onClick={fetchPlugins} disabled={loading} className="p-1 rounded-lg text-textMuted hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-50" title={t('common.refresh')}>
-                <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+                {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={13} />}
               </button>
             </div>
           </div>
@@ -1461,7 +1461,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
             <div className="flex sm:hidden items-center gap-1">
               <span className="text-[10px] font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded-md">{data?.total || 0}</span>
               <button onClick={fetchPlugins} disabled={loading} className="p-1 rounded-lg text-textMuted hover:text-primary transition-colors disabled:opacity-50">
-                <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                {loading ? <OpenSquadLoader size={12} /> : <RefreshCw size={12} />}
               </button>
             </div>
 
@@ -1557,7 +1557,7 @@ export const PluginMarketPage: React.FC<PluginMarketPageProps> = () => {
               <button onClick={fetchPlugins} className="px-4 py-2 bg-primary text-white rounded-lg text-sm hover:opacity-90">{t('common.retry')}</button>
             </div>
           ) : loading && !data ? (
-            <div className="flex items-center justify-center h-64"><Loader2 size={36} className="animate-spin text-primary" /></div>
+            <div className="flex items-center justify-center h-64"><OpenSquadLoader size={44} /></div>
           ) : data && data.plugins.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-64 gap-3">
               <Store size={48} className="text-textMuted opacity-40" />

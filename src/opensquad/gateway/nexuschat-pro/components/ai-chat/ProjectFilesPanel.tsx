@@ -21,7 +21,6 @@ import {
   Folder,
   FolderPlus,
   Image as ImageIcon,
-  Loader2,
   MoreHorizontal,
   Plus,
   RotateCcw,
@@ -36,6 +35,7 @@ import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkd
 import { UnifiedDiffView, type DiffLine } from './UnifiedDiffView';
 import { fillDiffCollapseHidden, flattenDiffCollapses } from './fillDiffCollapseHidden';
 import { SOFT_PRESENCE_MS, useSoftPresence } from '../../utils/useSoftPresence';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
   getWorkspaceFileCache,
   putWorkspaceFileCache,
@@ -2211,7 +2211,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
         ) : tab === 'changed' ? (
           changedLoading && filteredChanged.length === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-              <Loader2 size={12} className="animate-spin" /> {t('common.loading')}
+              <OpenSquadLoader size={18} />
             </div>
           ) : changedError && filteredChanged.length === 0 ? (
             <div className="px-3 py-3 text-[11px] text-textMuted">{changedError}</div>
@@ -2295,7 +2295,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         }}
                       >
                         {isKeeping ? (
-                          <Loader2 size={12} className="animate-spin text-emerald-500" />
+                          <OpenSquadLoader size={12} />
                         ) : (
                           <Check size={12} className="text-emerald-600 dark:text-emerald-400" />
                         )}
@@ -2311,7 +2311,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                         }}
                       >
                         {isReverting ? (
-                          <Loader2 size={12} className="animate-spin text-textMuted" />
+                          <OpenSquadLoader size={12} />
                         ) : (
                           <RotateCcw size={12} className="text-textMuted" />
                         )}
@@ -2343,7 +2343,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                           />
                         ) : isDiffLoading ? (
                           <div className="flex items-center gap-2 px-3 py-2 text-[10px] text-textMuted/70">
-                            <Loader2 size={11} className="animate-spin" /> {t('aiChat.preparing')}
+                            <OpenSquadLoader size={14} /> {t('aiChat.preparing')}
                           </div>
                         ) : (
                           <div className="px-3 py-2 text-[11px] text-textMuted">{t('aiChat.noDiff')}</div>
@@ -2357,7 +2357,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
           )
         ) : listLoading && treeEntries.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-3 text-[11px] text-textMuted">
-            <Loader2 size={12} className="animate-spin" /> {t('aiChat.loadingTree')}
+            <OpenSquadLoader size={16} /> {t('aiChat.loadingTree')}
           </div>
         ) : listError && treeEntries.length === 0 ? (
           <div className="px-3 py-3 text-[11px] text-red-400">{listError}</div>
@@ -2688,7 +2688,7 @@ export const ProjectFilesPanel: React.FC<ProjectFilesPanelProps> = ({
                 </div>
                 {fileLoading ? (
                   <div className="flex-1 flex items-center justify-center text-textMuted text-xs gap-2">
-                    <Loader2 size={14} className="animate-spin" /> {t('common.loading')}
+                    <OpenSquadLoader size={20} />
                   </div>
                 ) : fileError ? (
                   <div className="px-3 py-4 text-[11px] text-red-400">{fileError}</div>
