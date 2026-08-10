@@ -2,7 +2,7 @@
   "name": "nexuschat-pro",
   "productName": "OpenSquad",
   "private": true,
-  "version": "0.8.30",
+  "version": "0.8.40",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "description": "OpenSquad desktop app — local-first multi-agent collaboration gateway",
