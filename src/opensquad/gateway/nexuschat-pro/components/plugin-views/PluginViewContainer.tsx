@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, AlertCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { pluginAPI } from '../../services/api';
 import { getPluginViewAdapter, PluginViewAdapter } from './registry';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 interface PluginViewContainerProps {
   viewKey: string;
@@ -99,7 +100,7 @@ export const PluginViewContainer: React.FC<PluginViewContainerProps> = ({
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center h-full">
-        <Loader2 className="animate-spin text-primary" size={36} />
+        <OpenSquadLoader size={36} />
       </div>
     );
   }

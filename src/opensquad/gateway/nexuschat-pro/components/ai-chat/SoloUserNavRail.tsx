@@ -93,9 +93,9 @@ export function buildUserNavNodesFromTimeline(
   return nodes;
 }
 
-const mutedDash = "color-mix(in srgb, var(--color-text-muted) 42%, transparent)";
-const primaryDash = "color-mix(in srgb, var(--color-primary) 78%, transparent)";
-const primaryDashSoft = "color-mix(in srgb, var(--color-primary) 55%, transparent)";
+const mutedDash = "color-mix(in srgb, rgb(var(--color-text-muted)) 42%, transparent)";
+const primaryDash = "color-mix(in srgb, rgb(var(--color-primary)) 78%, transparent)";
+const primaryDashSoft = "color-mix(in srgb, rgb(var(--color-primary)) 55%, transparent)";
 
 type HoverState = {
   id: string;
@@ -181,9 +181,9 @@ export const SoloUserNavRail: React.FC<SoloUserNavRailProps> = ({
                 top: hovered.top,
                 right: hovered.right,
                 transform: "translateY(-50%)",
-                backgroundColor: "var(--color-bg-panel, var(--color-bg-light, #fff))",
+                backgroundColor: "rgb(var(--color-panel))",
                 border:
-                  "1px solid color-mix(in srgb, var(--color-border, #e5e7eb) 85%, transparent)",
+                  "1px solid color-mix(in srgb, rgb(var(--color-border)) 85%, transparent)",
                 boxShadow:
                   "0 8px 28px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.04)",
               }}

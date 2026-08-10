@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, Download, Mic, CheckCircle2,
+  ArrowLeft, RefreshCw, AlertCircle, Download, Mic, CheckCircle2,
   Trash2, MapPin, Cpu,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
 import { HoverTooltip } from '../../HoverTooltip';
+import { OpenSquadLoader } from '../../OpenSquadLoader';
 
 type DownloadState = {
   state?: string;
@@ -153,7 +154,7 @@ const SenseVoicePanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           className="p-1.5 rounded-md hover:bg-bgLight text-textMuted disabled:opacity-50"
           title="刷新"
         >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
         </button>
       </div>
 
@@ -253,7 +254,7 @@ const SenseVoicePanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             onClick={() => void onDownload(false)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-xs disabled:opacity-50"
           >
-            {busy || downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            {busy || downloading ? <OpenSquadLoader size={14} /> : <Download size={14} />}
             {ready ? '模型已下载' : '下载模型'}
           </button>
           {ready ? (

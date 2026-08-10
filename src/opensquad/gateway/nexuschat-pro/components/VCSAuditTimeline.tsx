@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { GitBranch, User, Clock, CheckCircle, AlertCircle, ChevronDown, ChevronUp, Github, Filter, RefreshCw, Search, ArrowLeft } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getAuthToken } from '../services/api';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface AuditLog {
   timestamp: string;
@@ -63,7 +64,7 @@ export const VCSAuditTimeline: React.FC<{ onBack?: () => void }> = ({ onBack }) 
     }
   }, [selectedRepo]);
 
-  const filteredLogs = logs.filter(log => 
+  const filteredLogs = logs.filter(log =>
     log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
     log.agent_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
     JSON.stringify(log.arguments).toLowerCase().includes(searchQuery.toLowerCase())
@@ -104,8 +105,8 @@ export const VCSAuditTimeline: React.FC<{ onBack?: () => void }> = ({ onBack }) 
                 key={repo}
                 onClick={() => setSelectedRepo(repo)}
                 className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all flex items-center gap-2 ${
-                  selectedRepo === repo 
-                    ? 'bg-primary text-white shadow-md' 
+                  selectedRepo === repo
+                    ? 'bg-primary text-white shadow-md'
                     : 'text-textMain hover:bg-primary/10'
                 }`}
               >
@@ -146,7 +147,7 @@ export const VCSAuditTimeline: React.FC<{ onBack?: () => void }> = ({ onBack }) 
         <div className="flex-1 overflow-y-auto p-6 bg-bgMain relative">
           {loading && (
             <div className="absolute inset-0 bg-bgMain/50 backdrop-blur-[1px] flex items-center justify-center z-20">
-               <RefreshCw className="animate-spin text-primary" size={24} />
+               <OpenSquadLoader size={24} />
             </div>
           )}
 
@@ -171,7 +172,7 @@ export const VCSAuditTimeline: React.FC<{ onBack?: () => void }> = ({ onBack }) 
                     <div className={`bg-panel border border-border rounded-xl shadow-sm overflow-hidden transition-all hover:shadow-md ${
                       expandedLog === index ? 'ring-1 ring-primary/30' : ''
                     }`}>
-                      <div 
+                      <div
                         className="p-4 cursor-pointer flex items-center justify-between"
                         onClick={() => setExpandedLog(expandedLog === index ? null : index)}
                       >

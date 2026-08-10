@@ -6,7 +6,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Pencil, Zap, Loader2, Square } from 'lucide-react';
+import { Clock, Pencil, Zap, Square } from 'lucide-react';
 import {
   adminAPI,
   modelCardAPI,
@@ -18,6 +18,7 @@ import {
   type SkillInfo,
 } from '../../services/api';
 import { getAiWsService } from '../../services/aiWebSocket';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { SessionChatPane } from './SessionChatPane';
 import { AgentWebComposer, type ComposerSendPayload } from './AgentWebComposer';
 import { type AgentMode } from './ModePicker';
@@ -47,7 +48,7 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const m = map[status] || map.success;
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${m.c}`}>
-      {status === 'running' ? <Loader2 size={10} className="animate-spin" /> : null}
+      {status === 'running' ? <OpenSquadLoader size={12} /> : null}
       {m.label}
     </span>
   );

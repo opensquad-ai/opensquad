@@ -22,6 +22,7 @@ import { SoloAttachMenu } from './SoloAttachMenu';
 import { SoloContextFooter, type SoloTokenStats } from './SoloContextFooter';
 import { SessionChangesBar, type SessionChangesSummary } from './SessionChangesBar';
 import { SlashMenu } from './SlashMenu';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import { VoicePanel, type VoiceCardBindings } from './VoicePanel';
 import { VoiceRecordPill } from './VoiceRecordPill';
 import {
@@ -118,6 +119,10 @@ export interface AgentWebComposerProps {
   ) => void;
   autoSpeechEnabled?: boolean;
   onToggleAutoSpeech?: (enabled: boolean) => void;
+  /** Per-session draft text: 初始化/恢复输入框内容（切换会话后重挂载时保留草稿）。 */
+  draftText?: string;
+  /** 输入内容变化时写回外部草稿存储（按 sessionId 隔离）。 */
+  onDraftChange?: (text: string) => void;
   onSend: (payload: ComposerSendPayload) => void | Promise<void>;
   onStop?: () => void;
   onActivate?: () => void;
@@ -177,6 +182,8 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
     onGoalAction,
     autoSpeechEnabled = false,
     onToggleAutoSpeech,
+    draftText,
+    onDraftChange,
     onSend,
     onStop,
     onActivate,
@@ -197,7 +204,25 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
   },
   ref,
 ) {
-  const [inputText, setInputText] = useState('');
+  const [inputText, setInputText] = useState<string>(() => draftText ?? '');
+  // 草稿双向同步：内部输入 → onDraftChange 写回外部（按 session 隔离）；
+  // 外部 draftText 变化（如切回会话后的恢复/外部 refill）→ 同步回内部。
+  // lastSyncedTextRef 记录"最近一次已同步的值"，避免 external↔internal 两个
+  // effect 互相回写形成渲染死循环（Maximum update depth exceeded）。
+  const lastSyncedTextRef = useRef<string>(inputText);
+  useEffect(() => {
+    const next = draftText ?? '';
+    if (next !== lastSyncedTextRef.current) {
+      lastSyncedTextRef.current = next;
+      setInputText(next);
+    }
+  }, [draftText]);
+  useEffect(() => {
+    if (inputText !== lastSyncedTextRef.current) {
+      lastSyncedTextRef.current = inputText;
+      onDraftChange?.(inputText);
+    }
+  }, [inputText, onDraftChange]);
   const [images, setImages] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<ComposerUploadedFile[]>([]);
   const [pendingSkill, setPendingSkill] = useState<{ dir: string; name: string } | null>(null);
@@ -670,7 +695,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             ))}
             {isUploading && (
               <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border bg-bgLight">
-                <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <OpenSquadLoader size={16} />
                 <span className="text-xs text-textMuted">Uploading...</span>
               </div>
             )}
@@ -690,11 +715,11 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
             ) : null}
 
             <div
-              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] border border-border/60 focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              className={`os-composer-input-layer w-full flex flex-col rounded-[22px] focus-within:ring-1 focus-within:ring-primary/40 relative transition-shadow duration-[420ms] ease-[cubic-bezier(0.22,1,0.36,1)] ${
                 landing
                   ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
-              } ${disabled ? 'bg-border/40' : 'bg-white dark:bg-[#1e1e20]'}`}
+              } ${disabled ? 'bg-border/40' : 'bg-bgLight'}`}
             >
             {slashMode?.kind === 'commands' ? (
               <SlashMenu
@@ -931,25 +956,14 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                   </button>
                 ) : null}
                 {busy ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void submit()}
-                      disabled={!canSend}
-                      className="w-8 h-8 rounded-full bg-amber-500 hover:bg-amber-600 transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed border-0 cursor-pointer"
-                      title="排队发送"
-                    >
-                      <Send size={14} className="text-white" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onStop}
-                      className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
-                      title="Stop"
-                    >
-                      <Square size={14} className="text-white" />
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={onStop}
+                    className="w-8 h-8 rounded-full bg-red-500 hover:bg-red-600 transition-colors flex items-center justify-center border-0 cursor-pointer"
+                    title="Stop"
+                  >
+                    <Square size={14} className="text-white" />
+                  </button>
                 ) : (
                   <button
                     type="button"

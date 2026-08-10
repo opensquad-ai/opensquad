@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   RefreshCw, Plus, Cpu, Star, Search, Menu, ArrowLeft,
-  X, Save, Trash2, Users, Check, Loader2, AlertCircle,
-  Eye, EyeOff, Zap, Thermometer, Hash, Image, Mic, ChevronDown,
+  X, Save, Trash2, Users, Check, AlertCircle,
+  Eye, EyeOff, Zap, Thermometer, Hash, Image, Mic, ChevronDown, KeyRound, Sliders,
 } from 'lucide-react';
 import { adminAPI, modelCardAPI, ModelCardDetail, ModelCardInfo, AdminAgent } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -16,7 +16,8 @@ import {
   adminHeaderSubtitle,
   adminHeaderTitle,
 } from './admin/adminShellStyles';
-import { voiceRoleOf, type VoiceRole } from '../utils/voiceCardRole';
+import { type VoiceRole } from '../utils/voiceCardRole';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 // ── Preset types ──────────────────────────────────────────────────────────────
 
@@ -115,9 +116,57 @@ const EMPTY: ModelCardDetail = {
   enable_repetition_check: false,
 };
 
+// ── Custom Provider (自定义供应商) ────────────────────────────────────────────
+// "新建" 入口不再打开一个单一模型卡的 drawer，而是进入「自定义供应商」模态：
+// 一次性配置 provider_id / display_name / base_url / api_key + N 个模型
+// （每个模型可设 model-id 与显示名称）+ 可选请求头列表。
+// 提交时按模型逐张保存为独立的模型卡 JSON 文件（沿用现有 model-card 体系）。
+interface CustomProviderModel {
+  model_id: string;       // API 用的 model id（后端 model_name 字段）
+  display_name: string;   // 前端展示用 title
+  // 完整模型卡配置（用户在「详细配置」抽屉里编辑后保存的）。
+  // 为空时，提交供应商时按基本字段生成模型卡（保留旧逻辑）。
+  detail: ModelCardDetail;
+}
+interface CustomProviderHeader {
+  name: string;           // 请求头 key
+  value: string;          // 请求头 value
+}
+interface CustomProviderForm {
+  provider_id: string;    // 供应商 id，slug 化（用于卡片文件名 / provider 字段）
+  display_name: string;   // 供应商显示名（也是 provider 字段的人类可读名）
+  base_url: string;
+  api_key: string;
+  models: CustomProviderModel[];
+  headers: CustomProviderHeader[];
+}
+const EMPTY_CUSTOM_PROVIDER: CustomProviderForm = {
+  provider_id: '',
+  display_name: '',
+  base_url: '',
+  api_key: '',
+  models: [{ model_id: '', display_name: '', detail: EMPTY }],
+  headers: [],
+};
+
+// "热门" 厂商的 id 列表（按用户期望的顺序展示）。列表中不存在的 id 会自动跳过。
+const POPULAR_PROVIDER_IDS: string[] = [
+  'opencode',         // OpenCode Zen
+  'opencode-go',      // OpenCode Go
+  'anthropic',        // Anthropic
+  'github-copilot',   // GitHub Copilot
+  'openai',           // OpenAI
+  'google',           // Google
+  'openrouter',       // OpenRouter
+  'vercel',           // Vercel AI Gateway
+];
+
 // ── Vendor Icon Cache Utils ───────────────────────────────────────────────────
 // localStorage key 前缀（版本化，方便将来清理旧缓存）
 const VENDOR_ICON_CACHE_PREFIX = 'vendor_icon_v1_';
+// 图标加载失败标记：写入 localStorage 后，后续渲染不再重试该图标（避免
+// 在无外网环境下反复触发 ERR_CONNECTION_TIMED_OUT 请求与刷屏）。
+const ICON_FAIL_MARK = '__fail__';
 
 function iconCacheKey(iconUrl: string): string {
   try {
@@ -130,9 +179,13 @@ function iconCacheKey(iconUrl: string): string {
   }
 }
 
-async function fetchIconAsDataUrl(iconUrl: string): Promise<string | null> {
+async function fetchIconAsDataUrl(iconUrl: string, timeoutMs = 4000): Promise<string | null> {
+  // 带超时的 fetch：无外网 / 目标域名不可达时，默认 TCP 超时要等很久，
+  // 多个并发图标请求会长时间挂起。4s 后主动 abort，避免堆积与刷屏。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const resp = await fetch(iconUrl, { mode: 'cors' });
+    const resp = await fetch(iconUrl, { mode: 'cors', signal: ctrl.signal });
     if (!resp.ok) return null;
     const blob = await resp.blob();
     return await new Promise<string>((resolve, reject) => {
@@ -143,6 +196,8 @@ async function fetchIconAsDataUrl(iconUrl: string): Promise<string | null> {
     });
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -274,11 +329,8 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const [error, setError]     = useState<string | null>(null);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites() as Set<string>);
 
-  // presets
+  // presets (used by the Connect Provider modal's vendor list)
   const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
-  const [presetVendorId, setPresetVendorId]   = useState('');
-  const [presetModelName, setPresetModelName] = useState('');
-  const [presetsRefreshing, setPresetsRefreshing] = useState(false);
 
   // filter / search
   const [filter, setFilter]   = useState<'all' | 'starred'>('all');
@@ -286,17 +338,39 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   const [activeVendor, setActiveVendor] = useState<string | null>(null);
 
   // drawer
-  const [drawerCard, setDrawerCard]   = useState<string | null>(null); // name or '__new__'
+  const [drawerCard, setDrawerCard]   = useState<string | null>(null);
+  const [drawerMode, setDrawerMode]   = useState<'edit' | 'addCustomProvider' | 'addToExistingProvider' | null>(null);
+  // 抽屉打开时正在编辑 customForm.models 中的第几个模型（null = 新增）
+  const [editingModelIndex, setEditingModelIndex] = useState<number | null>(null);
   const [form, setForm]               = useState<ModelCardDetail>(EMPTY);
-  const [newName, setNewName]         = useState('');
   const [showKey, setShowKey]         = useState(false);
   const [saving, setSaving]           = useState(false);
-  const [assigning, setAssigning]     = useState<string | null>(null);
+  const [drawerError, setDrawerError] = useState<string | null>(null);
+  // 正在切换 enabled 状态的模型卡（保存期间禁用开关，防双击/重复触发）
+  const [togglingCard, setTogglingCard] = useState<string | null>(null);
+  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(() => new Set());
+  // 行内二次删除确认：正在等待确认删除的供应商名（null = 未在确认）
+  const [confirmingDeleteProvider, setConfirmingDeleteProvider] = useState<string | null>(null);
+
+  // Custom provider modal: "新建" 入口 + 连接厂商里的 "自定义" 入口都跳这里。
+  const [customOpen, setCustomOpen]             = useState(false);
+  const [customForm, setCustomForm]             = useState<CustomProviderForm>(EMPTY_CUSTOM_PROVIDER);
+  const [customShowKey, setCustomShowKey]       = useState(false);
+  const [customSaving, setCustomSaving]         = useState(false);
+  const [customProviderError, setCustomProviderError] = useState<string | null>(null);
+
+  // Connect Provider: vendor decided by the quick-select (厂商快选); after
+  // pasting the key we can switch among all that vendor's models.
+  const [connectOpen, setConnectOpen]    = useState(false);
+  const [connectStep, setConnectStep]    = useState<'provider' | 'key'>('provider');
+  const [connectProviderId, setConnectProviderId] = useState('');
+  const [connectProvider, setConnectProvider] = useState<ProviderPreset | null>(null);
+  const [connectKey, setConnectKey]      = useState('');
+  const [connectShowKey, setConnectShowKey] = useState(false);
+  const [connectSearch, setConnectSearch] = useState('');
+  const [connecting, setConnecting]      = useState(false);
 
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
-
-  const isNew = drawerCard === '__new__';
-  const cardName = isNew ? newName.trim() : drawerCard;
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -390,108 +464,6 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       .catch(() => {});
   }, []);
 
-  const refreshPresets = useCallback(async () => {
-    setPresetsRefreshing(true);
-
-    // 手动刷新时先清除缓存
-    clearPresetsCache();
-
-    try {
-      const postRes = await fetch('/api/ai-web/model-presets/refresh', { method: 'POST' });
-      const postData = postRes.ok ? await postRes.json() : null;
-      const res = await fetch('/api/ai-web/model-presets');
-      const data = await res.json();
-      const presets = data.providers ?? [];
-      setProviderPresets(presets);
-
-      // 缓存新数据
-      savePresetsToCache(presets);
-
-      // 预加载新增/更新的厂商图标
-      if (presets.length > 0) {
-        preloadVendorIcons(presets).catch(e =>
-          console.warn('[VendorIcon] 刷新后预加载失败:', e)
-        );
-      }
-
-      if (postData) {
-        const src = postData.source === 'live' ? t('modelsPage.presetLive') : t('modelsPage.presetStatic');
-        const msg = postData.errors?.length
-          ? t('modelsPage.presetRefreshPartial', { source: src, providers: postData.providers, models: postData.models, errors: postData.errors.join('; ') })
-          : t('modelsPage.presetRefreshSuccess', { source: src, providers: postData.providers, models: postData.models });
-        showToast(msg, postData.ok);
-      } else {
-        showToast(t('modelsPage.presetRefreshFailed'), false);
-      }
-    } catch (e: any) {
-      showToast(t('modelsPage.presetRefreshError', { error: e?.message ?? e }), false);
-    } finally {
-      setPresetsRefreshing(false);
-    }
-  }, []);
-
-  // Derived: model list for currently selected vendor
-  const presetModels = useMemo<ModelPreset[]>(() => {
-    const vendor = providerPresets.find(p => p.id === presetVendorId);
-    return vendor ? vendor.models : [];
-  }, [providerPresets, presetVendorId]);
-
-  // Auto-fill when vendor changes
-  const handlePresetVendorChange = (vendorId: string) => {
-    setPresetVendorId(vendorId);
-    setPresetModelName('');
-    if (!vendorId) return;
-    const vendor = providerPresets.find(p => p.id === vendorId);
-    if (!vendor) return;
-    setForm(prev => ({
-      ...prev,
-      base_url: vendor.base_url,
-      api_protocol: vendor.api_protocol,
-      provider: vendor.provider ?? vendor.label,
-    }));
-  };
-
-  // Auto-fill when model changes
-  const handlePresetModelChange = (modelName: string) => {
-    setPresetModelName(modelName);
-    if (!modelName) return;
-    const model = presetModels.find(m => m.model_name === modelName);
-    if (!model) return;
-    setForm(prev => ({
-      ...prev,
-      model_name: model.model_name,
-      title:      model.title,
-      token_max:  model.token_max,
-      temperature: model.temperature,
-      is_think:   model.is_think,
-      is_image:   model.is_image,
-      is_video:   model.is_video,
-      is_audio_output: model.is_audio_output ?? false,
-      is_image_output: model.is_image_output ?? false,
-      audio_output_voice: model.audio_output_voice ?? 'alloy',
-      tool_call_mode: model.tool_call_mode as any,
-    }));
-    // 新建时顺带填入 name（文件标识符，用 model_name 的 slug 形式）
-    if (isNew && !newName.trim()) {
-      const slug = modelName.replace(/[^a-zA-Z0-9_\-\.]/g, '_').toLowerCase();
-      // Avoid a cross-vendor collision: if a card with this slug already
-      // exists for a DIFFERENT vendor, prefix the vendor so each vendor's
-      // same-named model gets its own file (e.g. "deepseek-v4-flash" vs
-      // "opencode__deepseek-v4-flash"). Same-vendor reuse is handled at save.
-      const vnd = (form.provider ?? '').trim();
-      const slugClash = cards.find(c =>
-        c.name === slug &&
-        (c.provider ?? '').trim() !== vnd
-      );
-      if (slugClash && vnd) {
-        const vslug = vnd.replace(/[^a-zA-Z0-9_\-]/g, '_').toLowerCase();
-        setNewName(`${vslug}__${slug}`);
-      } else {
-        setNewName(slug);
-      }
-    }
-  };
-
   /** Only toggle capability flags — url / model / key come from the model card itself. */
   const applyVoiceRoleFlags = (role: 'asr' | 'tts' | 'realtime') => {
     const flags = {
@@ -511,6 +483,17 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     }));
   };
 
+  // "全双工语音 (realtime双向)" 独立开关：开启 = is_audio + is_audio_output 双开；
+  // 关闭 = 关掉 is_audio_output（保留 is_audio 输入能力）。
+  const isRealtime = !!(form.is_audio && form.is_audio_output);
+  const toggleRealtime = () => {
+    if (isRealtime) {
+      setForm(prev => ({ ...prev, is_audio_output: false }));
+    } else {
+      applyVoiceRoleFlags('realtime');
+    }
+  };
+
   // ── Favorites ─────────────────────────────────────────────────────────────
 
   const toggleFav = useCallback((name: string, e: React.MouseEvent) => {
@@ -524,73 +507,210 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
   }, []);
 
   // ── Drawer ────────────────────────────────────────────────────────────────
-
-  const openNew = () => {
-    setNewName('');
-    setForm(EMPTY);
-    setShowKey(false);
-    setPresetVendorId('');
-    setPresetModelName('');
-    setDrawerCard('__new__');
-  };
+  // 「新建」入口已统一为「自定义供应商」模态（openCustomProvider），
+  // 这里只剩"打开已存在模型卡" + "在自定义供应商里添加/编辑单个模型"。
 
   const openCard = async (name: string) => {
     setShowKey(false);
-    setPresetVendorId('');
-    setPresetModelName('');
     setDrawerCard(name);
+    setDrawerMode('edit');
+    setEditingModelIndex(null);
+    setDrawerError(null);
     try {
       const res = await modelCardAPI.getCard(name);
       setForm({ ...EMPTY, ...(res.card ?? {}) });
     } catch { setForm(EMPTY); }
   };
 
-  const closeDrawer = () => setDrawerCard(null);
+  // 从「自定义供应商」模态里打开抽屉：新增（index = null）或编辑现有模型。
+  // form 预填：display_name / base_url / api_key / api_protocol 来自 customForm。
+  const openCpModelDrawer = (index: number | null) => {
+    setShowKey(false);
+    if (index !== null && customForm.models[index]?.detail?.model_name) {
+      // 编辑已有详细配置的模型：直接拷贝 detail
+      setForm({ ...customForm.models[index].detail });
+    } else if (index !== null) {
+      // 编辑一个还未配置 detail 的模型：用 list 中的 model_id / display_name 初始化
+      const m = customForm.models[index];
+      setForm({
+        ...EMPTY,
+        provider: customForm.display_name.trim(),
+        base_url: customForm.base_url.trim(),
+        api_key: customForm.api_key.trim(),
+        api_protocol: 'openai_compat',
+        model_name: m.model_id,
+        title: m.display_name,
+      });
+    } else {
+      // 新增：仅预填供应商信息，model_name / title 留空给用户填
+      setForm({
+        ...EMPTY,
+        provider: customForm.display_name.trim(),
+        base_url: customForm.base_url.trim(),
+        api_key: customForm.api_key.trim(),
+        api_protocol: 'openai_compat',
+      });
+    }
+    setDrawerCard(null);
+    setDrawerMode('addCustomProvider');
+    setEditingModelIndex(index);
+    setDrawerError(null);
+  };
+
+  // 从「已配置供应商」的 group header 上的 "+" 按钮触发：
+  // 打开模型配置抽屉，从该 provider 任一现有模型卡继承 base_url / api_key /
+  // api_protocol，预填 provider。用户在抽屉里填好 model_name + 详细字段后，
+  // 直接 saveCard 落盘为新模型卡（不经过 customForm 中转）。
+  const openAddToExistingModel = async (providerName: string) => {
+    setShowKey(false);
+    // 找该 provider 下任一现成卡继承连接信息
+    const sample = cards.find(c => (c.provider || '').trim() === providerName);
+    let baseUrl = '';
+    let apiKey  = '';
+    let apiProtocol: ModelCardDetail['api_protocol'] = 'openai_compat';
+    if (sample) {
+      try {
+        const res = await modelCardAPI.getCard(sample.name);
+        const card = (res.card || {}) as ModelCardDetail;
+        baseUrl = (card.base_url || '').trim();
+        apiKey  = (card.api_key  || '').trim();
+        const proto = (card.api_protocol || '').trim();
+        if (proto) apiProtocol = proto as ModelCardDetail['api_protocol'];
+      } catch { /* ignore — fallback to EMPTY */ }
+    }
+    setForm({
+      ...EMPTY,
+      provider: providerName,
+      base_url: baseUrl,
+      api_key: apiKey,
+      api_protocol: apiProtocol,
+    });
+    setDrawerCard(null);
+    setDrawerMode('addToExistingProvider');
+    setEditingModelIndex(null);
+    setDrawerError(null);
+  };
+
+  const closeDrawer = () => {
+    setDrawerCard(null);
+    setDrawerMode(null);
+    setEditingModelIndex(null);
+    setDrawerError(null);
+  };
 
   const setField = <K extends keyof ModelCardDetail>(k: K, v: ModelCardDetail[K]) =>
     setForm(prev => ({ ...prev, [k]: v }));
 
   const handleSave = async () => {
-    if (!cardName) return;
     setSaving(true);
     try {
-      // Resolve the effective filename so that the identity of a card is
-      // (provider, model_name), NOT the filename alone. When a card with
-      // the same provider+model_name already exists, reuse its filename so we
-      // overwrite the SAME vendor's card (intended) instead of clobbering a
-      // different vendor's card that happens to share the model_name. A
-      // cross-vendor same-model_name card gets its own file.
-      let saveName = cardName;
-      const vnd = (form.provider ?? '').trim();
-      const mn = (form.model_name ?? '').trim();
-      if (vnd && mn) {
-        const clash = cards.find(c =>
-          (c.provider ?? '').trim() === vnd &&
-          (c.model_name ?? '').trim() === mn &&
-          c.name !== cardName
-        );
-        if (clash) saveName = clash.name;
-      }
-      await modelCardAPI.saveCard(saveName, { ...form, name: saveName });
-      // Only one workspace card should be the group-chat ASR.
-      if (form.group_asr) {
-        for (const c of cards) {
-          if (c.name === saveName || !c.group_asr) continue;
-          try {
-            const full = await modelCardAPI.getCard(c.name);
-            await modelCardAPI.saveCard(c.name, { ...full.card, group_asr: false });
-          } catch { /* skip */ }
+      if (drawerMode === 'addCustomProvider') {
+        // ── 模式：从「自定义供应商」添加/编辑单个模型 ──
+        // 抽屉保存 = 把当前 form 写回到 customForm.models[index]，并不写盘。
+        // 等用户在供应商模态点"保存供应商"时统一生成模型卡文件。
+        if (!form.model_name?.trim()) {
+          setDrawerError(t('modelsPage.customModelRequired'));
+          return;
         }
+        const newModel: CustomProviderModel = {
+          model_id: form.model_name.trim(),
+          display_name: form.title?.trim() || form.model_name.trim(),
+          detail: { ...form },
+        };
+        setCustomForm(prev => {
+          const next = [...prev.models];
+          if (editingModelIndex !== null && editingModelIndex < next.length) {
+            next[editingModelIndex] = newModel;
+          } else {
+            next.push(newModel);
+          }
+          return { ...prev, models: next };
+        });
+        showToast(t('modelsPage.modelAdded', { defaultValue: '已添加模型' }));
+        closeDrawer();
+      } else if (drawerMode === 'addToExistingProvider') {
+        // ── 模式：为「已配置供应商」添加一个新模型卡（直接落盘） ──
+        const provider = (form.provider || '').trim();
+        const modelId  = (form.model_name || '').trim();
+        if (!provider) {
+          setDrawerError(t('modelsPage.customDisplayNameRequired'));
+          return;
+        }
+        if (!modelId) {
+          setDrawerError(t('modelsPage.customModelRequired'));
+          return;
+        }
+        // 命名规则：{providerSlug}__{modelSlug}（与 submitCustomProvider 保持一致）
+        const providerSlug = provider.toLowerCase()
+          .replace(/[^a-z0-9_\-\.]/g, '_').replace(/^_+|_+$/g, '');
+        const modelSlug = modelId.toLowerCase()
+          .replace(/[^a-z0-9_\-\.]/g, '_').replace(/^_+|_+$/g, '');
+        const saveName = `${providerSlug}__${modelSlug}`;
+        // 已存在同名 model_id 卡片 → 拒绝（避免覆盖用户已配模型）
+        const clash = cards.find(c => c.name === saveName);
+        if (clash) {
+          setDrawerError(t('modelsPage.modelAlreadyExists', { name: saveName }));
+          return;
+        }
+        const payload: ModelCardDetail = {
+          ...form,
+          name: saveName,
+          provider: provider,
+        };
+        await modelCardAPI.saveCard(saveName, payload);
+        showToast(t('modelsPage.modelAdded', { defaultValue: '已添加模型' }));
+        await loadCards();
+        closeDrawer();
+      } else {
+        // ── 模式：编辑已存在的模型卡 ──
+        if (!drawerCard) return;
+        // 抽屉里只能编辑"模型本身"的参数，供应商信息保持原样不动。
+        // 这里直接按原文件名 + 当前 form 写回（form 已经包含原 provider/base_url/api_key 等）。
+        await modelCardAPI.saveCard(drawerCard, { ...form, name: drawerCard });
+        // Only one workspace card should be the group-chat ASR.
+        if (form.group_asr) {
+          for (const c of cards) {
+            if (c.name === drawerCard || !c.group_asr) continue;
+            try {
+              const full = await modelCardAPI.getCard(c.name);
+              await modelCardAPI.saveCard(c.name, { ...full.card, group_asr: false });
+            } catch { /* skip */ }
+          }
+        }
+        showToast(t('modelsPage.saveSuccess'));
+        await loadCards();
       }
-      showToast(t('modelsPage.saveSuccess'));
-      await loadCards();
-      if (isNew) { setDrawerCard(saveName); setNewName(saveName); }
-    } catch { showToast(t('modelsPage.saveFailed'), false); }
-    finally { setSaving(false); }
+    } catch {
+      showToast(t('modelsPage.saveFailed'), false);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleDelete = async () => {
-    if (!drawerCard || isNew) return;
+    if (drawerMode === 'addToExistingProvider') {
+      // ── 模式：为已配置供应商新增模型（尚未落盘）──
+      // 抽屉里的删除按钮 = 放弃新增，直接关闭
+      closeDrawer();
+      return;
+    }
+    if (drawerMode === 'addCustomProvider') {
+      // ── 模式：从 customForm.models 中删除当前编辑的模型 ──
+      if (editingModelIndex === null) return;
+      if (!confirm(t('modelsPage.deleteModelFromListConfirm', { defaultValue: '确认从列表中删除该模型？' }))) return;
+      setCustomForm(prev => {
+        const next = prev.models.filter((_, i) => i !== editingModelIndex);
+        // 至少保留 1 行（空行），保证 UI 上始终有可填的输入
+        return {
+          ...prev,
+          models: next.length > 0 ? next : [{ model_id: '', display_name: '', detail: { ...EMPTY } }],
+        };
+      });
+      showToast(t('modelsPage.deleteSuccess'));
+      closeDrawer();
+      return;
+    }
+    if (!drawerCard) return;
     if (!confirm(t('modelsPage.deleteConfirm', { name: drawerCard }))) return;
     try {
       await modelCardAPI.deleteCard(drawerCard);
@@ -600,70 +720,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     } catch { showToast(t('modelsPage.deleteFailed'), false); }
   };
 
-  const drawerVoiceRole = useMemo(
-    () => (drawerCard && !isNew ? voiceRoleOf(form) : null),
-    [drawerCard, isNew, form.is_audio, form.is_audio_output, form.model_name],
-  );
-
-  const handleAssign = async (agentDir: string) => {
-    if (!drawerCard || isNew) return;
-    setAssigning(agentDir);
-    try {
-      const role = voiceRoleOf(form);
-      if (role) {
-        const cfg = await adminAPI.getConfig(agentDir);
-        const next = { ...(cfg.config || {}) };
-        if (!next.voice || typeof next.voice !== 'object') next.voice = {};
-        next.voice = { ...next.voice, [voiceCardKey(role)]: drawerCard };
-        // Prefer card credentials when agent has none yet (runtime resolve also reads the card).
-        try {
-          const cardRes = await modelCardAPI.getCard(drawerCard);
-          const c = cardRes.card;
-          if (c?.base_url && !next.voice.base_url) next.voice.base_url = c.base_url;
-          if (c?.api_key && !next.voice.api_key) next.voice.api_key = c.api_key;
-          if (role === 'asr' && c?.model_name) next.voice.asr_model = c.model_name;
-          if (role === 'tts' && c?.model_name) next.voice.tts_model = c.model_name;
-          if (role === 'realtime' && c?.model_name) next.voice.realtime_model = c.model_name;
-          if (c?.audio_output_voice && !next.voice.realtime_voice) {
-            next.voice.realtime_voice = c.audio_output_voice;
-          }
-        } catch { /* card optional */ }
-        await adminAPI.updateConfig(agentDir, next);
-      } else {
-        const res = await modelCardAPI.getCard(drawerCard);
-        await modelCardAPI.assignToAgent(agentDir, drawerCard, res.card);
-      }
-      showToast(`${t('modelsPage.assignedAgents')}: ${agentDir}`);
-      await loadAgents();
-    } catch { showToast(t('modelsPage.saveFailed'), false); }
-    finally { setAssigning(null); }
-  };
-
-  const handleUnassign = async (agentDir: string) => {
-    setAssigning(agentDir);
-    try {
-      const role = voiceRoleOf(form);
-      if (role) {
-        const cfg = await adminAPI.getConfig(agentDir);
-        const next = { ...(cfg.config || {}) };
-        if (!next.voice || typeof next.voice !== 'object') next.voice = {};
-        const key = voiceCardKey(role);
-        if ((next.voice[key] || '') === drawerCard) {
-          next.voice = { ...next.voice, [key]: '' };
-          await adminAPI.updateConfig(agentDir, next);
-        }
-      } else {
-        await modelCardAPI.unassignFromAgent(agentDir);
-      }
-      showToast(`${agentDir}`);
-      await loadAgents();
-    } catch { showToast(t('modelsPage.saveFailed'), false); }
-    finally { setAssigning(null); }
-  };
-
   // ── Filter ────────────────────────────────────────────────────────────────
-
-  const API_PROTOCOL_OPTIONS = ['openai', 'anthropic', 'google', 'openai_compat'];
 
   const allVendors = useMemo(() =>
     [...new Set(cards.map(c => c.provider).filter((p): p is string => !!p))].sort(),
@@ -687,6 +744,306 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       ...r.filter(c => !favorites.has(c.name)),
     ];
   }, [cards, filter, search, favorites, activeVendor]);
+
+  // Group the filtered list by provider so "one provider, many models" is visible.
+  const grouped = useMemo(() => {
+    const map = new Map<string, ModelCardInfo[]>();
+    for (const c of filtered) {
+      const key = (c.provider || '').trim() || '__none__';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(c);
+    }
+    return [...map.entries()];
+  }, [filtered]);
+
+  const toggleVendor = (key: string) => {
+    setExpandedVendors(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  // Selecting a vendor chip in the top filter also auto-expands that provider.
+  const selectVendor = (v: string) => {
+    if (activeVendor === v) {
+      setActiveVendor(null);
+    } else {
+      setActiveVendor(v);
+      setExpandedVendors(prev => new Set(prev).add(v));
+    }
+  };
+
+  // Delete a single model card.
+  const handleDeleteCard = async (name: string) => {
+    if (!name) return;
+    if (!confirm(t('modelsPage.deleteCardConfirm', { name }))) return;
+    try {
+      await modelCardAPI.deleteCard(name);
+      showToast(t('modelsPage.deleteCardDone', { name }));
+      await loadCards();
+    } catch { showToast(t('modelsPage.deleteFailed'), false); }
+  };
+
+  // Toggle a card's enabled flag (off = hidden from the Agent Web switcher).
+  const handleToggleCardEnabled = async (name: string, enabled: boolean) => {
+    if (!name || togglingCard === name) return; // 保存中忽略重复点击
+    setTogglingCard(name);
+    // 乐观更新：先改本地状态，开关立即有视觉反馈（之前要等完整的
+    // getCard → saveCard → loadCards 往返，慢或失败时看起来"没反应"）。
+    setCards(prev => prev.map(c => c.name === name ? { ...c, enabled } : c));
+    try {
+      const full = await modelCardAPI.getCard(name);
+      await modelCardAPI.saveCard(name, { ...full.card, enabled });
+      await loadCards(); // 以服务端为准刷新（含其他字段的变更）
+    } catch (err: any) {
+      // 失败回滚 + 提示（慢速/远程网络下保存超时会走这里，开关会弹回）
+      console.warn(`[ModelsPage] toggle ${name} → ${enabled} failed:`, err?.message || err);
+      setCards(prev => prev.map(c => c.name === name ? { ...c, enabled: !enabled } : c));
+      showToast(t('modelsPage.saveFailed'), false);
+    } finally {
+      setTogglingCard(null);
+    }
+  };
+
+  // Delete every model card of a provider (used to reconfigure its key: delete
+  // the provider, then re-connect with a new key). 删除前需在行内点 ✓ 二次确认。
+  const handleDeleteProvider = async (providerName: string, names: string[]) => {
+    if (!providerName || names.length === 0) return;
+    setConfirmingDeleteProvider(null);
+    try {
+      for (const n of names) {
+        await modelCardAPI.deleteCard(n);
+      }
+      showToast(t('modelsPage.deleteProviderDone', { name: providerName, count: names.length }));
+      await loadCards();
+    } catch { showToast(t('modelsPage.deleteFailed'), false); }
+  };
+
+  // ── Connect Provider ─────────────────────────────────────────────────────
+  // Mirrors TUI's "Connect a provider": pick a vendor, paste the key once, and
+  // every model under that vendor gets a card auto-generated.
+  // Build a full per-model card dict for a provider, reusing its credentials and
+  // the preset's model defaults (no manual editing needed).
+  const buildModelCardDict = (vendor: ProviderPreset, apiKey: string, model: ModelPreset) => {
+    const slug = model.model_name.replace(/[^a-zA-Z0-9_\-\.]/g, '_').toLowerCase();
+    const vnd = (vendor.provider ?? vendor.label ?? '').trim();
+    const clash = cards.find(c => c.name === slug && (c.provider ?? '').trim() !== vnd);
+    const name = clash && vnd ? `${vnd.replace(/[^a-zA-Z0-9_\-]/g, '_').toLowerCase()}__${slug}` : slug;
+    return {
+      name,
+      card: {
+        name,
+        title: model.title,
+        provider: vnd,
+        base_url: vendor.base_url,
+        api_protocol: vendor.api_protocol,
+        api_key: apiKey.trim(),
+        model_name: model.model_name,
+        token_max: model.token_max,
+        temperature: model.temperature,
+        tool_call_mode: model.tool_call_mode as ModelCardDetail['tool_call_mode'],
+        is_think: model.is_think,
+        is_image: model.is_image,
+        is_video: model.is_video,
+        is_audio: false,
+        is_audio_output: false,
+        is_image_output: false,
+        audio_output_voice: 'alloy',
+        enable_repetition_check: false,
+      },
+    };
+  };
+
+  // Create a card for EVERY model in the provider's model list (no aggregate
+  // `prov-{id}` card). If the provider already has cards, only their api_key is
+  // updated (the user's other settings are left untouched); cards for any newly
+  // appearing models are added. Returns how many NEW model cards were created.
+  const createAllProviderCards = async (vendor: ProviderPreset, apiKey: string) => {
+    const vnd = (vendor.provider ?? vendor.label ?? '').trim();
+    const vndLower = vnd.toLowerCase();
+    const existing = cards.filter(c => {
+      const p = (c.provider || '').trim().toLowerCase();
+      return p === vndLower;
+    });
+    const existingModels = new Set<string>();
+    for (const c of existing) {
+      existingModels.add(c.model_name);
+      try {
+        const full = await modelCardAPI.getCard(c.name);
+        if (full.card && full.card.api_key !== apiKey.trim()) {
+          await modelCardAPI.saveCard(c.name, { ...full.card, api_key: apiKey.trim() });
+        }
+      } catch { /* keep going */ }
+    }
+    let created = 0;
+    for (const m of vendor.models || []) {
+      if (existingModels.has(m.model_name)) continue;
+      const { name, card: mCard } = buildModelCardDict(vendor, apiKey, m);
+      await modelCardAPI.saveCard(name, mCard);
+      created++;
+    }
+    return created;
+  };
+
+  // Header "Connect Provider" dialog.
+  const openConnect = () => {
+    setConnectStep('provider');
+    setConnectProviderId('');
+    setConnectProvider(null);
+    setConnectKey('');
+    setConnectShowKey(false);
+    setConnectSearch('');
+    setConnectOpen(true);
+  };
+  const closeConnect = () => setConnectOpen(false);
+
+  // Click a vendor in the list → go to the API Key step with that vendor selected.
+  const handleConnectPick = (vendor: ProviderPreset) => {
+    setConnectProviderId(vendor.id);
+    setConnectProvider(vendor);
+    setConnectStep('key');
+  };
+
+  // Back arrow (top-left) → return to the vendor list, keep search/keystroke.
+  const handleConnectBack = () => {
+    setConnectStep('provider');
+  };
+
+  // "Custom" entry: close the connect modal and open the Custom Provider modal.
+  const handleConnectCustom = () => {
+    setConnectOpen(false);
+    openCustomProvider();
+  };
+
+  // ── Custom Provider Modal ─────────────────────────────────────────────────
+  const openCustomProvider = () => {
+    setCustomForm(EMPTY_CUSTOM_PROVIDER);
+    setCustomShowKey(false);
+    setCustomProviderError(null);
+    setCustomOpen(true);
+  };
+  const closeCustomProvider = () => setCustomOpen(false);
+
+  const setCustomField = <K extends keyof CustomProviderForm>(k: K, v: CustomProviderForm[K]) =>
+    setCustomForm(prev => ({ ...prev, [k]: v }));
+
+  // slug 化 provider_id（仅允许小写字母 / 数字 / 下划线 / 连字符 / 点）
+  const slugifyProviderId = (s: string) =>
+    s.trim().toLowerCase().replace(/[^a-z0-9_\-\.]+/g, '_').replace(/^_+|_+$/g, '');
+
+  // slug 化 model-id（用于卡片文件名后缀）
+  const slugifyModelId = (s: string) =>
+    s.trim().toLowerCase().replace(/[^a-z0-9_\-\.]+/g, '_').replace(/^_+|_+$/g, '');
+
+  const submitCustomProvider = async () => {
+    setCustomProviderError(null);
+    const pid = slugifyProviderId(customForm.provider_id);
+    if (!pid) {
+      setCustomProviderError(t('modelsPage.customProviderIdRequired'));
+      return;
+    }
+    if (!customForm.display_name.trim()) {
+      setCustomProviderError(t('modelsPage.customDisplayNameRequired'));
+      return;
+    }
+    if (!customForm.base_url.trim()) {
+      setCustomProviderError(t('modelsPage.customBaseUrlRequired'));
+      return;
+    }
+    // 过滤：模型至少 1 个；每个 model_id 必填；显示名允许空（回退到 model_id）
+    const validModels = customForm.models
+      .map(m => ({
+        model_id: (m.model_id || '').trim(),
+        display_name: (m.display_name || '').trim() || (m.model_id || '').trim(),
+        detail: m.detail,
+      }))
+      .filter(m => !!m.model_id);
+    if (validModels.length === 0) {
+      setCustomProviderError(t('modelsPage.customModelRequired'));
+      return;
+    }
+    // 过滤：请求头允许空，但 name 必填（value 可空）
+    const validHeaders = customForm.headers
+      .map(h => ({ name: (h.name || '').trim(), value: h.value ?? '' }))
+      .filter(h => !!h.name);
+    const headersObj: Record<string, string> = {};
+    for (const h of validHeaders) headersObj[h.name] = h.value;
+
+    setCustomSaving(true);
+    try {
+      const displayName = customForm.display_name.trim();
+      const baseUrl = customForm.base_url.trim();
+      const apiKey = customForm.api_key.trim();
+      // 命名规则：{provider_id}__{model_id}，避免跨 provider 冲突。
+      // 若同一 provider 已有同名 model-id 卡片，覆写其文件（沿用现有"同 vendor 复用"语义）。
+      let created = 0;
+      let updated = 0;
+      for (const m of validModels) {
+        const slug = slugifyModelId(m.model_id);
+        const fileName = `${pid}__${slug}`;
+        // 检查是否已存在同 provider+model 的卡片（覆写而非新增）
+        const existing = cards.find(c =>
+          (c.provider || '').trim().toLowerCase() === displayName.toLowerCase() &&
+          (c.model_name || '').trim() === m.model_id
+        );
+        const saveName = existing ? existing.name : fileName;
+        let payload: any;
+        if (m.detail && m.detail.model_name) {
+          // ── 用「详细配置」抽屉里编辑过的完整数据：覆盖该模型卡所有可调字段 ──
+          payload = {
+            ...m.detail,
+            name: saveName,
+            provider: displayName,
+            base_url: baseUrl,
+            api_key: apiKey,
+          };
+        } else {
+          // ── 旧逻辑：只在 list 里填了 model_id/display_name，按基本字段生成 ──
+          payload = {
+            name: saveName,
+            title: m.display_name || m.model_id,
+            provider: displayName,
+            api_protocol: 'openai_compat',
+            base_url: baseUrl,
+            api_key: apiKey,
+            model_name: m.model_id,
+          };
+        }
+        if (Object.keys(headersObj).length > 0) payload.extra_headers = headersObj;
+        await modelCardAPI.saveCard(saveName, payload);
+        if (existing) updated++; else created++;
+      }
+      const msg = created > 0 && updated > 0
+        ? t('modelsPage.customProviderMixed', { created, updated, name: displayName })
+        : created > 0
+        ? t('modelsPage.customProviderCreated', { created, name: displayName })
+        : t('modelsPage.customProviderUpdated', { updated, name: displayName });
+      showToast(msg);
+      await loadCards();
+      setCustomOpen(false);
+    } catch (e: any) {
+      setCustomProviderError(e?.message || t('modelsPage.saveFailed'));
+    } finally {
+      setCustomSaving(false);
+    }
+  };
+
+  const submitConnect = async () => {
+    if (!connectProvider || !connectKey.trim()) return;
+    setConnecting(true);
+    try {
+      const count = await createAllProviderCards(connectProvider, connectKey);
+      if (count > 0) {
+        showToast(t('modelsPage.providerCreatedCards', { name: connectProvider.label, count }));
+      } else {
+        showToast(t('modelsPage.providerNoModels', { name: connectProvider.label }), false);
+      }
+      await loadCards();
+      setConnectOpen(false);
+    } catch { showToast(t('modelsPage.saveFailed'), false); }
+    finally { setConnecting(false); }
+  };
 
   const inputCls = 'w-full px-3 py-1.5 text-sm rounded-lg bg-bgLight border border-border focus:outline-none focus:border-primary transition-colors';
   const labelCls = 'text-xs text-textMuted mb-1 block font-medium';
@@ -717,6 +1074,30 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
     }
     return undefined;
   }, [providerPresets]);
+
+  // Connect-modal vendor list: items in POPULAR_PROVIDER_IDS come first (in
+  // that order), the rest follow alphabetically. When the user types in the
+  // search box, the list collapses to a single flat filtered view.
+  const connectList = useMemo<ProviderPreset[]>(() => {
+    const q = connectSearch.trim().toLowerCase();
+    if (q) {
+      return providerPresets.filter(p => {
+        const hay = `${p.label} ${p.id} ${p.provider ?? ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    const out: ProviderPreset[] = [];
+    const seen = new Set<string>();
+    for (const id of POPULAR_PROVIDER_IDS) {
+      const p = providerPresets.find(x => x.id === id);
+      if (p) { out.push(p); seen.add(p.id); }
+    }
+    const rest = providerPresets
+      .filter(p => !seen.has(p.id))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    out.push(...rest);
+    return out;
+  }, [providerPresets, connectSearch]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -754,7 +1135,14 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           <button
-            onClick={openNew}
+            onClick={openConnect}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 transition-all"
+            title={t('modelsPage.providerConnect')}
+          >
+            <KeyRound size={13} /> <span className="hidden md:inline">{t('modelsPage.providerConnect')}</span>
+          </button>
+          <button
+            onClick={openCustomProvider}
             className={adminHeaderCta}
           >
             <Plus size={13} /> <span className="hidden md:inline">{t('modelsPage.newCard')}</span>
@@ -763,7 +1151,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
             onClick={() => { setLoading(true); loadCards(); loadAgents(); }}
             className={adminHeaderGhostBtn}
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -801,12 +1189,12 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
 
       {/* Vendor tag filter */}
       {allVendors.length > 0 && (
-        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center gap-2 shrink-0 flex-wrap">
+        <div className="px-6 py-2 border-b border-border bg-panel/30 flex items-center justify-center gap-2 shrink-0 flex-wrap">
           <span className="text-xs text-textMuted shrink-0">供应商 (Provider):</span>
           {allVendors.map(v => (
             <button
               key={v}
-              onClick={() => setActiveVendor(activeVendor === v ? null : v)}
+              onClick={() => selectVendor(v)}
               className={`px-2 py-0.5 rounded-md text-xs border transition-colors ${
                 activeVendor === v
                   ? 'bg-primary/15 text-primary border-primary/30'
@@ -828,7 +1216,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <Loader2 className="animate-spin text-primary" size={32} />
+            <OpenSquadLoader size={40} />
             <p className="text-textMuted text-sm">Loading model cards...</p>
           </div>
         ) : error ? (
@@ -842,44 +1230,150 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
             <p className="text-textMuted text-sm">{search ? `"${search}"` : t('modelsPage.noCards')}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filtered.map(card => (
-              <ModelCard
-                key={card.name}
-                card={card}
-                starred={favorites.has(card.name)}
-                onToggleStar={e => toggleFav(card.name, e)}
-                onClick={() => openCard(card.name)}
-                assignedAgents={agents.filter(a => agentUsesCard(a, card.name, voiceRoleOf(card)))}
-                iconUrl={getCardIconUrl(card)}
-              />
-            ))}
+          <div className="flex flex-col gap-5">
+            {grouped.map(([provider, list]) => {
+              const isCollapsed = !expandedVendors.has(provider);
+              const displayName = provider === '__none__' ? t('modelsPage.noProvider') : provider;
+              const iconUrl = list.length ? getCardIconUrl(list[0]) : undefined;
+              return (
+                <div key={provider}>
+                  {/* Group header */}
+                  <div className="flex items-center gap-1 mx-auto max-w-2xl">
+                    <button
+                      type="button"
+                      onClick={() => toggleVendor(provider)}
+                      className="flex-1 flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-panel/60 transition-colors min-w-0"
+                    >
+                      <ChevronDown
+                        size={14}
+                        className={`text-textMuted transition-transform flex-shrink-0 ${isCollapsed ? '-rotate-90' : ''}`}
+                      />
+                      {provider !== '__none__' && <VendorIcon iconUrl={iconUrl} label={displayName} size={16} />}
+                      <span className="text-sm font-semibold text-textMain truncate">{displayName}</span>
+                      <span className="text-xs text-textMuted flex-shrink-0">({list.length})</span>
+                    </button>
+                    {provider !== '__none__' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); void openAddToExistingModel(provider); }}
+                          title={t('modelsPage.addModelToExistingProvider', { defaultValue: '为该供应商添加模型' })}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
+                        >
+                          <Plus size={14} />
+                        </button>
+                        {confirmingDeleteProvider === provider ? (
+                          <span className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              title={t('common.confirm')}
+                              onClick={() => void handleDeleteProvider(provider, list.map(c => c.name))}
+                              className="w-6 h-6 rounded-md bg-rose-500 text-white flex items-center justify-center hover:bg-rose-600 transition-colors"
+                            >
+                              <Check size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              title={t('common.cancel')}
+                              onClick={() => setConfirmingDeleteProvider(null)}
+                              className="w-6 h-6 rounded-md text-textMuted flex items-center justify-center hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors"
+                            >
+                              <X size={13} />
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingDeleteProvider(provider)}
+                            title={t('modelsPage.deleteProvider')}
+                            className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {/* Cards → compact model list with enable toggles */}
+                  {!isCollapsed && (
+                    <div className="mt-2 mx-auto max-w-2xl divide-y divide-border border border-border/70 rounded-lg overflow-hidden">
+                      {list.map(card => {
+                        const on = card.enabled !== false;
+                        return (
+                          <div
+                            key={card.name}
+                            onClick={() => openCard(card.name)}
+                            className="flex items-center gap-3 pl-5 pr-3 py-2 bg-panel/40 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] cursor-pointer transition-colors"
+                          >
+                            <div className="min-w-0 flex-1 text-left">
+                              <p className={`text-sm truncate ${on ? 'text-textMain' : 'text-textMuted/70'}`}>{card.title || card.name}</p>
+                              <p className="text-[11px] text-textMuted font-mono truncate inline-flex items-center gap-1 max-w-full">
+                                <span className="truncate">{card.model_name}</span>
+                                {card.provider && card.provider !== '__none__' && (
+                                  <>
+                                    <span className="opacity-60 flex-shrink-0">·</span>
+                                    <VendorIcon iconUrl={getCardIconUrl(card)} label={card.provider} size={11} />
+                                    <span className="truncate">{card.provider}</span>
+                                  </>
+                                )}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={togglingCard === card.name}
+                              onClick={(e) => { e.stopPropagation(); handleToggleCardEnabled(card.name, !on); }}
+                              title={on ? t('modelsPage.enabled') : t('modelsPage.disabled')}
+                              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ml-2 ${togglingCard === card.name ? 'opacity-50 cursor-wait' : ''} ${on ? 'bg-primary' : 'bg-textMuted/30'}`}
+                            >
+                              <span className={`absolute top-0.5 left-0.5 h-4 w-4 bg-white rounded-full shadow transition-transform ${on ? 'translate-x-4' : ''}`} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Right Drawer */}
-      {drawerCard !== null && (
+      {/* Right Drawer — supports three modes:
+          1) drawerMode === 'edit'                 → 编辑已存在模型卡（z-40 / z-50）
+          2) drawerMode === 'addCustomProvider'    → 从「自定义供应商」添加/编辑模型（z-55 / z-60，盖在模态之上）
+          3) drawerMode === 'addToExistingProvider'→ 为「已配置供应商」新增模型（z-40 / z-50，盖在页面上） */}
+      {drawerMode !== null && (
         <>
           {/* Backdrop */}
           <div
-            className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm"
+            className={`fixed inset-0 bg-black/30 backdrop-blur-sm ${
+              drawerMode === 'addCustomProvider' ? 'z-[55]' : 'z-40'
+            }`}
             onClick={closeDrawer}
           />
           {/* Panel */}
-          <div className="fixed inset-0 md:left-auto md:right-0 md:w-[440px] bg-panel border-l border-border z-50 flex flex-col shadow-2xl">
+          <div className={`fixed inset-0 md:left-auto md:right-0 md:w-[440px] bg-panel border-l border-border flex flex-col shadow-2xl ${
+            drawerMode === 'addCustomProvider' ? 'z-[60]' : 'z-50'
+          }`}>
             {/* Drawer header */}
             <div className="flex items-center gap-3 px-4 md:px-5 py-3 md:py-4 border-b border-border shrink-0">
               <div className="flex-1 min-w-0">
-                {isNew ? (
-                  <input
-                    autoFocus
-                    type="text"
-                    placeholder={t('modelsPage.title_field')}
-                    value={newName}
-                    onChange={e => setNewName(e.target.value)}
-                    className="w-full text-base font-semibold bg-transparent border-b border-border focus:outline-none focus:border-primary pb-0.5"
-                  />
+                {(drawerMode === 'addCustomProvider' || drawerMode === 'addToExistingProvider') ? (
+                  <>
+                    <h2 className="text-base font-semibold text-textMain truncate">
+                      {editingModelIndex !== null
+                        ? t('modelsPage.editModelDetail', { defaultValue: '编辑模型详细配置' })
+                        : t('modelsPage.addModelDetail', { defaultValue: '添加模型详细配置' })}
+                    </h2>
+                    <p className="text-[11px] text-textMuted truncate mt-0.5">
+                      {t('modelsPage.modelDetailProvider', {
+                        name: drawerMode === 'addToExistingProvider'
+                          ? (form.provider || '—')
+                          : (customForm.display_name || customForm.provider_id || '—'),
+                      })}
+                    </p>
+                  </>
                 ) : (
                   <>
                     <h2 className="text-base font-semibold text-textMain truncate">
@@ -894,21 +1388,19 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
-                {!isNew && (
-                  <button
-                    onClick={handleDelete}
-                    className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors"
-                    title={t('common.delete')}
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                )}
+                <button
+                  onClick={handleDelete}
+                  className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                  title={t('common.delete')}
+                >
+                  <Trash2 size={16} />
+                </button>
                 <button
                   onClick={handleSave}
-                  disabled={saving || (isNew && !newName.trim())}
+                  disabled={saving}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
                 >
-                  {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
                   {t('common.save')}
                 </button>
                 <button onClick={closeDrawer} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors ml-1">
@@ -922,132 +1414,66 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
               {/* Form */}
               <div className="p-4 md:p-5 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 border-b border-border">
 
-                {/* ── Voice capability flags (no hardcoded vendor url/model) ── */}
-                <div className="col-span-2 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-3 py-3 flex flex-col gap-2">
-                  <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
-                    Voice card flags
-                  </span>
-                  <p className="text-[11px] text-textMuted leading-tight">
-                    仅标记能力类型。<b>base_url / api_key / model_name</b> 请在下方按模型卡填写（或从厂商预设选卡），不要写死在前端。
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {([
-                      { role: 'asr' as const, label: 'ASR 语音输入' },
-                      { role: 'tts' as const, label: 'TTS 语音输出' },
-                      { role: 'realtime' as const, label: 'Realtime 双向' },
-                    ]).map(({ role, label }) => (
-                      <button
-                        key={role}
-                        type="button"
-                        onClick={() => applyVoiceRoleFlags(role)}
-                        className="text-[11px] px-2.5 py-1 rounded-lg border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-500/15 transition-colors bg-transparent cursor-pointer"
-                      >
-                        {label}
-                      </button>
-                    ))}
+                {/* ── Inline error (用于 addCustomProvider 模式校验 model_name 等) ── */}
+                {drawerError && (
+                  <div className="col-span-2 flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs">
+                    <AlertCircle size={13} className="mt-0.5 flex-shrink-0" />
+                    <span>{drawerError}</span>
                   </div>
-                </div>
+                )}
 
-                {/* ── Preset Quick-Pick ── */}
-                <div className="col-span-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-3 flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-primary uppercase tracking-wider">{t('modelsPage.presetOptional')}</span>
-                      <button
-                        type="button"
-                        onClick={refreshPresets}
-                        disabled={presetsRefreshing}
-                        title={t('modelsPage.presetRefreshBtn')}
-                        className="flex items-center gap-1 text-[11px] text-primary/70 hover:text-primary disabled:opacity-40 transition-colors"
-                      >
-                        <RefreshCw size={11} className={presetsRefreshing ? 'animate-spin' : ''} />
-                        {presetsRefreshing ? t('modelsPage.refreshing') : t('common.refresh')}
-                      </button>
+                {/* ── Provider info (read-only; configured via the Custom Provider modal) ── */}
+                <div className="col-span-2 rounded-xl border border-border bg-bgLight/60 px-3 py-2.5 flex flex-col gap-1.5">
+                  <div className="flex items-center justify-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-textMuted uppercase tracking-wider">
+                      {t('modelsPage.providerReadonly')}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[12px] text-center">
+                    <div className="min-w-0">
+                      <span className="text-textMuted">Provider · </span>
+                      <span className="text-textMain truncate">{form.provider || '—'}</span>
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      {/* Vendor select */}
-                      <div className="relative">
-                        <VendorSelect
-                          presets={providerPresets}
-                          value={presetVendorId}
-                          onChange={handlePresetVendorChange}
+                    {(drawerMode === 'addCustomProvider' || drawerMode === 'addToExistingProvider') ? (
+                      /* 新增/编辑模式下，model_name 必须可编辑（用户首次指定 API model id） */
+                      <div className="min-w-0 col-span-2 sm:col-span-1">
+                        <label className="text-textMuted text-[11px] flex items-center justify-center gap-1">
+                          Model · <span className="text-textMuted/80 font-normal">model_name (API id)</span>
+                        </label>
+                        <input
+                          className={`${inputCls} font-mono mt-0.5 text-center`}
+                          value={form.model_name || ''}
+                          onChange={e => setField('model_name', e.target.value)}
+                          placeholder="gpt-4o-mini / deepseek-chat"
                         />
                       </div>
-                      {/* Model select */}
-                      <div className="relative">
-                        <select
-                          className={`${inputCls} appearance-none pr-7`}
-                          value={presetModelName}
-                          onChange={e => handlePresetModelChange(e.target.value)}
-                          disabled={!presetVendorId}
-                        >
-                          <option value="">{t('modelsPage.selectModel')}</option>
-                          {presetModels.map(m => (
-                            <option key={m.model_name} value={m.model_name}>{m.title}</option>
-                          ))}
-                        </select>
-                        <ChevronDown size={13} className="absolute right-2 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
+                    ) : (
+                      <div className="min-w-0">
+                        <span className="text-textMuted">Model · </span>
+                        <span className="text-textMain font-mono truncate">{form.model_name || '—'}</span>
                       </div>
+                    )}
+                    <div className="min-w-0">
+                      <span className="text-textMuted">{t('modelsPage.apiKey')} · </span>
+                      <span className="text-textMain font-mono truncate">
+                        {form.api_key ? '••••••' + (form.api_key.length > 4 ? form.api_key.slice(-4) : '') : '—'}
+                      </span>
                     </div>
-                    <p className="text-[11px] text-textMuted leading-tight">{t('modelsPage.presetHint')}</p>
+                    <div className="min-w-0">
+                      <span className="text-textMuted">API Protocol · </span>
+                      <span className="text-textMain">{API_PROTOCOL_LABELS[form.api_protocol] || form.api_protocol || '—'}</span>
+                    </div>
+                    <div className="min-w-0 col-span-2">
+                      <span className="text-textMuted">Base URL · </span>
+                      <span className="text-textMain font-mono truncate">{form.base_url || '—'}</span>
+                    </div>
                   </div>
+                </div>
 
                 {/* Title */}
                 <div className="col-span-2">
                   <label className={labelCls}>{t('modelsPage.title_field')}</label>
                   <input className={inputCls} value={form.title} onChange={e => setField('title', e.target.value)} placeholder={t('modelsPage.titlePlaceholder')} />
-                </div>
-                {/* API Protocol */}
-                <div>
-                  <label className={labelCls}>{t('modelsPage.interfaceProtocol')} <span className="text-textMuted font-normal">(api_protocol)</span></label>
-                  <select className={inputCls} value={form.api_protocol} onChange={e => setField('api_protocol', e.target.value)}>
-                    {API_PROTOCOL_OPTIONS.map(p => <option key={p} value={p}>{API_PROTOCOL_LABELS[p] || p}</option>)}
-                  </select>
-                </div>
-                {/* Provider (vendor) */}
-                <div>
-                  <label className={labelCls}>{t('modelsPage.providerLabel')} <span className="text-textMuted font-normal">(Provider)</span></label>
-                  <input className={inputCls} value={form.provider ?? ''} onChange={e => setField('provider', e.target.value)} placeholder={t('modelsPage.providerPlaceholder')} />
-                </div>
-                {/* Model Name */}
-                <div>
-                  <label className={labelCls}>Model Name</label>
-                  {presetModels.length > 0 ? (
-                    <input
-                      className={inputCls}
-                      list={`model-datalist-${presetVendorId}`}
-                      value={form.model_name}
-                      onChange={e => setField('model_name', e.target.value)}
-                      placeholder="deepseek-reasoner"
-                    />
-                  ) : (
-                    <input className={inputCls} value={form.model_name} onChange={e => setField('model_name', e.target.value)} placeholder="deepseek-reasoner" />
-                  )}
-                  {presetModels.length > 0 && (
-                    <datalist id={`model-datalist-${presetVendorId}`}>
-                      {presetModels.map(m => <option key={m.model_name} value={m.model_name} label={m.title} />)}
-                    </datalist>
-                  )}
-                </div>
-                {/* Base URL */}
-                <div className="col-span-2">
-                  <label className={labelCls}>Base URL</label>
-                  <input className={inputCls} value={form.base_url} onChange={e => setField('base_url', e.target.value)} placeholder="https://api.deepseek.com" />
-                </div>
-                {/* API Key */}
-                <div className="col-span-2">
-                  <label className={labelCls}>API Key</label>
-                  <div className="relative">
-                    <input
-                      className={`${inputCls} pr-9`}
-                      type={showKey ? 'text' : 'password'}
-                      value={form.api_key}
-                      onChange={e => setField('api_key', e.target.value)}
-                      placeholder="sk-..."
-                    />
-                    <button type="button" onClick={() => setShowKey(v => !v)} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-textMuted hover:text-textMain">
-                      {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
-                  </div>
                 </div>
                 {/* Token Max */}
                 <div>
@@ -1188,7 +1614,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 {/* Is Audio - Toggle Switch */}
                 <div className="col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-bgLight mt-1">
                   <span className="text-sm text-textMain">
-                    {t('modelsPage.audioInput')} <span className="text-textMuted text-xs">(is_audio)</span>
+                    {t('modelsPage.audioInput')} <span className="text-textMuted text-xs">(ASR)</span>
                   </span>
                   <button
                     type="button"
@@ -1253,7 +1679,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 {/* Is Audio Output - Toggle Switch */}
                 <div className="col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-bgLight mt-1">
                   <span className="text-sm text-textMain">
-                    {t('modelsPage.audioOutput')} <span className="text-textMuted text-xs">(is_audio_output)</span>
+                    {t('modelsPage.audioOutput')} <span className="text-textMuted text-xs">(TTS)</span>
                   </span>
                   <button
                     type="button"
@@ -1267,6 +1693,27 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                     <span
                       className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
                         form.is_audio_output ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+                {/* Is Realtime - 全双工语音 (realtime双向) Toggle Switch */}
+                <div className="col-span-2 flex items-center justify-between px-3 py-2 rounded-lg border border-border bg-bgLight mt-1">
+                  <span className="text-sm text-textMain">
+                    {t('modelsPage.realtime')}
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={isRealtime}
+                    onClick={toggleRealtime}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 ${
+                      isRealtime ? 'bg-primary' : 'bg-gray-400'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                        isRealtime ? 'translate-x-5' : 'translate-x-0'
                       }`}
                     />
                   </button>
@@ -1311,58 +1758,427 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
                 </div>
               </div>
 
-              {/* Assign section */}
-              {!isNew && (
-                <div>
-                  <div className="flex items-center gap-2 px-5 py-3 border-b border-border">
-                    <Users size={14} className="text-textMuted" />
-                    <span className="text-xs font-bold text-textMuted uppercase tracking-wider">{t('modelsPage.assignedAgents')}</span>
+              </div>
+          </div>
+        </>
+      )}
+
+      {/* Connect Provider dialog (centered modal) */}
+      {connectOpen && (
+        <>
+          <div className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm" onClick={closeConnect} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="w-full max-w-md bg-panel border border-border rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+              {connectStep === 'provider' && (
+                <>
+                  {/* Header */}
+                  <div className="flex items-center justify-between px-5 py-3.5 border-b border-border shrink-0">
+                    <h2 className="text-base font-semibold text-textMain">{t('modelsPage.providerConnect')}</h2>
+                    <button onClick={closeConnect} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors">
+                      <X size={18} />
+                    </button>
                   </div>
-                  {drawerVoiceRole && (
-                    <p className="px-5 py-2 text-[11px] text-textMuted border-b border-border/50 leading-relaxed">
-                      {t('modelsPage.voiceAssignHint', {
-                        role: drawerVoiceRole.toUpperCase(),
-                      })}
+                  {/* Search */}
+                  <div className="px-5 pt-3 pb-2 shrink-0">
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-textMuted pointer-events-none" />
+                      <input
+                        type="text"
+                        value={connectSearch}
+                        onChange={e => setConnectSearch(e.target.value)}
+                        placeholder={t('modelsPage.connectSearchPlaceholder')}
+                        className="w-full pl-9 pr-3 py-2 text-sm rounded-lg bg-bgLight border border-border text-textMain placeholder-textMuted focus:outline-none focus:border-primary/50"
+                      />
+                    </div>
+                  </div>
+                  {/* Vendor list */}
+                  <div className="flex-1 overflow-y-auto pb-3">
+                    {connectList.length === 0 && (
+                      <p className="text-xs text-textMuted text-center py-8 px-5">
+                        {t('modelsPage.noModelsForProvider')}
+                      </p>
+                    )}
+                    {connectList.length > 0 && (
+                      <div className="px-2">
+                        {connectList.map(p => (
+                          <ProviderListItem
+                            key={p.id}
+                            provider={p}
+                            onClick={() => handleConnectPick(p)}
+                            showRecommended={POPULAR_PROVIDER_IDS.slice(0, 2).includes(p.id)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* "Custom" entry — always at the very bottom of the list */}
+                    <div className="px-2 mt-1">
+                      <button
+                        type="button"
+                        onClick={handleConnectCustom}
+                        className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-hover transition-colors text-left"
+                      >
+                        <Plus size={14} className="text-textMuted shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm text-textMain truncate">
+                            {t('modelsPage.connectCustom')}
+                            <span className="ml-2 text-[10px] text-textMuted/80 font-normal">{t('modelsPage.connectCustomDesc')}</span>
+                          </p>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {connectStep === 'key' && connectProvider && (
+                <>
+                  {/* Header with back arrow (top-left) */}
+                  <div className="flex items-center justify-between px-3 py-3 border-b border-border shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleConnectBack}
+                      className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                      title={t('common.back', { defaultValue: 'Back' })}
+                      aria-label={t('common.back', { defaultValue: 'Back' })}
+                    >
+                      <ArrowLeft size={18} />
+                    </button>
+                    <h2 className="text-base font-semibold text-textMain flex-1 ml-1 truncate">
+                      {t('modelsPage.connectStepKey', { name: connectProvider.label })}
+                    </h2>
+                    <button
+                      onClick={closeConnect}
+                      className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                      title={t('common.close', { defaultValue: 'Close' })}
+                      aria-label={t('common.close', { defaultValue: 'Close' })}
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                  {/* Body */}
+                  <div className="px-6 py-5 flex flex-col gap-4 overflow-y-auto">
+                    <div className="flex items-start gap-3">
+                      <div className="shrink-0 mt-0.5">
+                        <VendorIcon iconUrl={connectProvider.icon_url} label={connectProvider.label} size={28} />
+                      </div>
+                      <p className="text-sm text-textMain leading-relaxed flex-1">
+                        {t('modelsPage.connectApiKeyHint', { name: connectProvider.label })}
+                      </p>
+                    </div>
+                    <div>
+                      <label className={labelCls}>
+                        {t('modelsPage.apiKey')} <span className="text-textMuted font-normal">({connectProvider.label})</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          className={`${inputCls} pr-9`}
+                          type={connectShowKey ? 'text' : 'password'}
+                          value={connectKey}
+                          onChange={e => setConnectKey(e.target.value)}
+                          placeholder={t('modelsPage.connectApiKeyPlaceholder')}
+                          autoFocus
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setConnectShowKey(v => !v)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-textMuted hover:text-textMain"
+                        >
+                          {connectShowKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
+                    </div>
+                    <button
+                      onClick={submitConnect}
+                      disabled={connecting || !connectKey.trim()}
+                      className="w-full text-sm px-3 py-2 bg-primary text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
+                    >
+                      {connecting ? <OpenSquadLoader size={16} /> : null}
+                      {t('modelsPage.connectSubmit')}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Custom Provider modal (新建 → 一次配置 N 个模型 + 可选请求头) */}
+      {customOpen && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/30 z-40 backdrop-blur-sm"
+            onClick={closeCustomProvider}
+          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="w-full max-w-2xl bg-panel border border-border rounded-2xl shadow-2xl flex flex-col max-h-[88vh] overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-border shrink-0">
+                <div>
+                  <h2 className="text-base font-semibold text-textMain">
+                    {t('modelsPage.customProviderTitle')}
+                  </h2>
+                  <p className="text-[11px] text-textMuted mt-0.5">
+                    {t('modelsPage.customProviderDesc')}
+                  </p>
+                </div>
+                <button
+                  onClick={closeCustomProvider}
+                  className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors"
+                  title={t('common.close', { defaultValue: 'Close' })}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4">
+                {/* Provider identity */}
+                <section className="rounded-xl border border-border bg-bgLight/40 p-3 flex flex-col gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-semibold text-textMuted uppercase tracking-wider">
+                      {t('modelsPage.customSectionProvider')}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelCls}>
+                        {t('modelsPage.customProviderIdLabel')}
+                      </label>
+                      <input
+                        className={inputCls}
+                        value={customForm.provider_id}
+                        onChange={e => setCustomField('provider_id', e.target.value)}
+                        placeholder="my-vendor"
+                      />
+                      <p className="text-[10px] text-textMuted mt-1">
+                        {t('modelsPage.customProviderIdHint')}
+                      </p>
+                    </div>
+                    <div>
+                      <label className={labelCls}>
+                        {t('modelsPage.customDisplayNameLabel')}
+                      </label>
+                      <input
+                        className={inputCls}
+                        value={customForm.display_name}
+                        onChange={e => setCustomField('display_name', e.target.value)}
+                        placeholder="My Vendor"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className={labelCls}>
+                        {t('modelsPage.customBaseUrlLabel')}
+                      </label>
+                      <input
+                        className={inputCls}
+                        value={customForm.base_url}
+                        onChange={e => setCustomField('base_url', e.target.value)}
+                        placeholder="https://api.example.com/v1"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className={labelCls}>
+                        {t('modelsPage.customApiKeyLabel')} <span className="text-textMuted font-normal">({t('common.optional')})</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          className={`${inputCls} pr-9`}
+                          type={customShowKey ? 'text' : 'password'}
+                          value={customForm.api_key}
+                          onChange={e => setCustomField('api_key', e.target.value)}
+                          placeholder="sk-..."
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setCustomShowKey(v => !v)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-textMuted hover:text-textMain"
+                        >
+                          {customShowKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Models list */}
+                <section className="rounded-xl border border-border bg-bgLight/40 p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold text-textMuted uppercase tracking-wider">
+                        {t('modelsPage.customSectionModels')}
+                      </span>
+                      <span className="text-[10px] text-textMuted">
+                        ({customForm.models.length})
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => openCpModelDrawer(null)}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-primary hover:bg-primary/10 transition-colors"
+                    >
+                      <Plus size={12} /> {t('modelsPage.customAddModel')}
+                    </button>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    {customForm.models.map((m, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-panel/50 border border-border/60"
+                      >
+                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-2 min-w-0">
+                          <input
+                            className={inputCls}
+                            value={m.model_id}
+                            onChange={e => {
+                              const next = [...customForm.models];
+                              next[idx] = { ...next[idx], model_id: e.target.value };
+                              setCustomField('models', next);
+                            }}
+                            placeholder={t('modelsPage.customModelIdPh')}
+                          />
+                          <input
+                            className={inputCls}
+                            value={m.display_name}
+                            onChange={e => {
+                              const next = [...customForm.models];
+                              next[idx] = { ...next[idx], display_name: e.target.value };
+                              setCustomField('models', next);
+                            }}
+                            placeholder={t('modelsPage.customModelNamePh')}
+                          />
+                        </div>
+                        {/* 详细配置入口：复用现有模型卡编辑抽屉（openCpModelDrawer） */}
+                        <button
+                          type="button"
+                          onClick={() => openCpModelDrawer(idx)}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors flex-shrink-0"
+                          title={t('modelsPage.openModelDetail', { defaultValue: '打开模型详细配置' })}
+                        >
+                          <Sliders size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (customForm.models.length === 1) {
+                              // 至少保留 1 行，只清空内容
+                              setCustomField('models', [{ model_id: '', display_name: '', detail: { ...EMPTY } }]);
+                              return;
+                            }
+                            setCustomField('models', customForm.models.filter((_, i) => i !== idx));
+                          }}
+                          className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
+                          title={t('common.delete')}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-textMuted">
+                    {t('modelsPage.customModelsHint')}
+                  </p>
+                </section>
+
+                {/* Optional request headers */}
+                <section className="rounded-xl border border-border bg-bgLight/40 p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold text-textMuted uppercase tracking-wider">
+                        {t('modelsPage.customSectionHeaders')}
+                      </span>
+                      <span className="text-[10px] text-textMuted">
+                        ({customForm.headers.length})
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCustomField('headers', [
+                        ...customForm.headers,
+                        { name: '', value: '' },
+                      ])}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-primary hover:bg-primary/10 transition-colors"
+                    >
+                      <Plus size={12} /> {t('modelsPage.customAddHeader')}
+                    </button>
+                  </div>
+                  {customForm.headers.length === 0 ? (
+                    <p className="text-[11px] text-textMuted/80 py-2 text-center">
+                      {t('modelsPage.customHeadersEmpty')}
                     </p>
-                  )}
-                  {agents.length === 0 ? (
-                    <div className="text-xs text-textMuted text-center py-6">{t('agentManager.noAgents')}</div>
                   ) : (
-                    agents.map(agent => {
-                      const assigned = agentUsesCard(agent, drawerCard!, drawerVoiceRole);
-                      const isLoading = assigning === agent.dir_name;
-                      const otherBinding = drawerVoiceRole
-                        ? (agent[voiceCardKey(drawerVoiceRole)] || '')
-                        : (agent.model_card || '');
-                      return (
-                        <div key={agent.dir_name} className="flex items-center justify-between px-5 py-2.5 border-b border-border/50 hover:bg-hover/50 transition-colors">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium truncate">{agent.agent_name}</div>
-                            {otherBinding && (
-                              <div className="text-xs text-textMuted truncate">
-                                {assigned
-                                  ? `✓ ${t('common.enabled')}`
-                                  : otherBinding}
-                              </div>
-                            )}
-                          </div>
+                    <div className="flex flex-col gap-1.5">
+                      {customForm.headers.map((h, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-panel/50 border border-border/60"
+                        >
+                          <input
+                            className={`${inputCls} flex-1 min-w-0`}
+                            value={h.name}
+                            onChange={e => {
+                              const next = [...customForm.headers];
+                              next[idx] = { ...next[idx], name: e.target.value };
+                              setCustomField('headers', next);
+                            }}
+                            placeholder="Header-Name"
+                          />
+                          <input
+                            className={`${inputCls} flex-1 min-w-0`}
+                            value={h.value}
+                            onChange={e => {
+                              const next = [...customForm.headers];
+                              next[idx] = { ...next[idx], value: e.target.value };
+                              setCustomField('headers', next);
+                            }}
+                            placeholder="value"
+                          />
                           <button
-                            onClick={() => assigned ? handleUnassign(agent.dir_name) : handleAssign(agent.dir_name)}
-                            disabled={isLoading}
-                            className={`shrink-0 ml-3 flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg transition-colors ${
-                              assigned
-                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-red-500/10 hover:text-red-400 hover:border-red-400/30'
-                                : 'bg-hover border border-border hover:bg-primary/15 hover:text-primary hover:border-primary/30'
-                            } disabled:opacity-50`}
+                            type="button"
+                            onClick={() => setCustomField('headers', customForm.headers.filter((_, i) => i !== idx))}
+                            className="p-1.5 rounded-lg text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors flex-shrink-0"
+                            title={t('common.delete')}
                           >
-                            {isLoading ? <Loader2 size={12} className="animate-spin" /> : assigned ? <><Check size={12} /> {t('modelsPage.assignedAgents')}</> : t('common.add')}
+                            <Trash2 size={13} />
                           </button>
                         </div>
-                      );
-                    })
+                      ))}
+                    </div>
                   )}
-                </div>
-              )}
+                  <p className="text-[10px] text-textMuted">
+                    {t('modelsPage.customHeadersHint')}
+                  </p>
+                </section>
+
+                {/* Error */}
+                {customProviderError && (
+                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs">
+                    <AlertCircle size={13} className="mt-0.5 flex-shrink-0" />
+                    <span>{customProviderError}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border bg-panel/50 shrink-0">
+                <button
+                  type="button"
+                  onClick={closeCustomProvider}
+                  disabled={customSaving}
+                  className="px-3 py-1.5 text-sm rounded-lg text-textMuted hover:bg-hover transition-colors"
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={submitCustomProvider}
+                  disabled={customSaving}
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
+                >
+                  {customSaving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
+                  {t('modelsPage.customSubmit')}
+                </button>
+              </div>
             </div>
           </div>
         </>
@@ -1391,7 +2207,11 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
   // 两种情况都直接用，由 <img> 的 onError 处理加载失败的情况
   const [imgSrc, setImgSrc] = React.useState<string | null>(() => {
     if (!iconUrl) return null;
-    try { return localStorage.getItem(iconCacheKey(iconUrl)); } catch { return null; }
+    try {
+      const v = localStorage.getItem(iconCacheKey(iconUrl));
+      // 失败标记（__fail__）跳过：无外网时不再渲染 <img>，避免反复超时
+      return v && v !== ICON_FAIL_MARK ? v : null;
+    } catch { return null; }
   });
   const [failed, setFailed] = React.useState(false);
   const initial = (label || '?')[0].toUpperCase();
@@ -1409,7 +2229,7 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
     // 再次确认（避免 React StrictMode 重复执行）
     try {
       const cached = localStorage.getItem(key);
-      if (cached) { setImgSrc(cached); return; }
+      if (cached && cached !== ICON_FAIL_MARK) { setImgSrc(cached); return; }
     } catch { /* ignore */ }
 
     fetchIconAsDataUrl(iconUrl).then(dataUrl => {
@@ -1430,7 +2250,13 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
         height={size}
         className="rounded-sm object-contain flex-shrink-0"
         style={{ width: size, height: size }}
-        onError={() => setFailed(true)}
+        onError={() => {
+          setFailed(true);
+          // 持久化失败标记：无外网环境下，下次挂载直接显示字母头像，
+          // 不再发起注定超时的请求（避免 ERR_CONNECTION_TIMED_OUT 刷屏）。
+          if (!iconUrl) return;
+          try { localStorage.setItem(iconCacheKey(iconUrl), ICON_FAIL_MARK); } catch { /* ignore */ }
+        }}
         loading="lazy"
       />
     );
@@ -1445,75 +2271,61 @@ const VendorIcon: React.FC<{ iconUrl?: string; label: string; size?: number }> =
   );
 };
 
-// ── Vendor Select (custom dropdown with icons) ────────────────────────────────
-
-interface VendorSelectProps {
-  presets: ProviderPreset[];
-  value: string;
-  onChange: (id: string) => void;
-  className?: string;
-}
-
-const VendorSelect: React.FC<VendorSelectProps> = ({ presets, value, onChange, className = '' }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = React.useState(false);
-  const ref = React.useRef<HTMLDivElement>(null);
-  const selected = presets.find(p => p.id === value);
-
-  // 点击外部关闭
-  React.useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
-
+// ── Provider List Item (Connect-modal vendor row) ────────────────────────────
+// Compact row used inside the "Connect Provider" centered modal: icon on the
+// left, vendor label + a one-liner description, and an optional "推荐" badge
+// for the first two popular entries. Whole row is clickable.
+const ProviderListItem: React.FC<{
+  provider: ProviderPreset;
+  onClick: () => void;
+  showRecommended?: boolean;
+}> = ({ provider, onClick, showRecommended }) => {
   return (
-    <div ref={ref} className={`relative ${className}`}>
-      {/* Trigger */}
-      <button
-        type="button"
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 bg-input border border-border rounded-lg text-sm text-textMain hover:border-primary/50 transition-colors"
-      >
-        {selected ? (
-          <>
-            <VendorIcon iconUrl={selected.icon_url} label={selected.label} size={16} />
-            <span className="flex-1 text-left truncate">{selected.label}</span>
-          </>
-        ) : (
-          <span className="flex-1 text-left text-textMuted">{t('modelsPage.selectVendor')}</span>
-        )}
-        <ChevronDown size={13} className={`text-textMuted transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-
-      {/* Dropdown */}
-      {open && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-panel border border-border rounded-xl shadow-xl overflow-y-auto max-h-64">
-          <div
-            className="flex items-center gap-2 px-3 py-2 text-sm text-textMuted hover:bg-hover cursor-pointer transition-colors"
-            onClick={() => { onChange(''); setOpen(false); }}
-          >
-            {t('modelsPage.selectVendor')}
-          </div>
-          {presets.map(p => (
-            <div
-              key={p.id}
-              className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors hover:bg-hover ${p.id === value ? 'bg-primary/10 text-primary' : 'text-textMain'}`}
-              onClick={() => { onChange(p.id); setOpen(false); }}
-            >
-              <VendorIcon iconUrl={p.icon_url} label={p.label} size={16} />
-              <span className="truncate">{p.label}</span>
-              {p.id === value && <Check size={13} className="ml-auto text-primary flex-shrink-0" />}
-            </div>
-          ))}
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-hover transition-colors text-left"
+    >
+      <VendorIcon iconUrl={provider.icon_url} label={provider.label} size={18} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm font-medium text-textMain truncate">{provider.label}</span>
+          {showRecommended && (
+            <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/15 text-primary border border-primary/30">
+              {t_default('推荐')}
+            </span>
+          )}
         </div>
-      )}
-    </div>
+        <p className="text-[11px] text-textMuted truncate">{describeProvider(provider)}</p>
+      </div>
+    </button>
   );
 };
+
+// Short, neutral description shown under each vendor in the connect-modal list.
+function describeProvider(p: ProviderPreset): string {
+  const id = (p.id || '').toLowerCase();
+  const label = (p.label || '').toLowerCase();
+  if (id === 'opencode' || label.includes('opencode zen')) return t_default('可靠的优化模型');
+  if (id === 'opencode-go' || label.includes('opencode go')) return t_default('适合所有人的低成本订阅');
+  if (id === 'anthropic') return t_default('使用 Claude Pro/Max 或 API 密钥连接');
+  if (id === 'github-copilot' || id === 'github_models' || id === 'github-models') return t_default('使用 Copilot 或 API 密钥连接');
+  if (id === 'openai') return t_default('使用 ChatGPT Pro/Plus 或 API 密钥连接');
+  if (id === 'google') return t_default('使用 Google AI 密钥连接');
+  if (id === 'openrouter') return t_default('聚合多家的模型路由服务');
+  if (id === 'vercel') return t_default('Vercel AI Gateway 路由服务');
+  if (p.base_url) {
+    try { return new URL(p.base_url).hostname.replace(/^www\./, ''); }
+    catch { return p.base_url; }
+  }
+  return p.id;
+}
+
+// Tiny i18n shim — ProviderListItem lives at module scope so it can't use the
+// `useTranslation` hook from the parent. These literals are short neutral
+// descriptors; if a translation key is needed in the future, hoist them into
+// the locale files and switch to a t() call.
+function t_default(_zh: string): string { return _zh; }
 
 // ── Model Card Component ──────────────────────────────────────────────────────
 
@@ -1522,11 +2334,12 @@ interface ModelCardProps {
   starred: boolean;
   onToggleStar: (e: React.MouseEvent) => void;
   onClick: () => void;
+  onDelete: () => void;
   assignedAgents: AgentWithVoice[];
   iconUrl?: string;
 }
 
-const ModelCard: React.FC<ModelCardProps> = ({ card, starred, onToggleStar, onClick, assignedAgents, iconUrl }) => {
+const ModelCard: React.FC<ModelCardProps> = ({ card, starred, onToggleStar, onClick, onDelete, assignedAgents, iconUrl }) => {
   const { t } = useTranslation();
   const protocolCls = API_PROTOCOL_COLORS[card.api_protocol] || 'bg-slate-500/15 text-slate-400 border-slate-500/30';
 
@@ -1540,16 +2353,25 @@ const ModelCard: React.FC<ModelCardProps> = ({ card, starred, onToggleStar, onCl
         <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${protocolCls}`}>
           {API_PROTOCOL_LABELS[card.api_protocol] || card.api_protocol}
         </span>
-        <button
-          onClick={onToggleStar}
-          className="p-0.5 rounded transition-colors"
-          title={starred ? t('modelsPage.starred') : t('modelsPage.starred')}
-        >
-          <Star
-            size={15}
-            className={starred ? 'fill-yellow-400 text-yellow-400' : 'text-textMuted hover:text-yellow-400 transition-colors'}
-          />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onToggleStar}
+            className="p-0.5 rounded transition-colors"
+            title={t('modelsPage.starred')}
+          >
+            <Star
+              size={15}
+              className={starred ? 'fill-yellow-400 text-yellow-400' : 'text-textMuted hover:text-yellow-400 transition-colors'}
+            />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="p-0.5 rounded text-textMuted hover:text-red-400 transition-colors"
+            title={t('modelsPage.deleteCard')}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
 
       {/* Title */}

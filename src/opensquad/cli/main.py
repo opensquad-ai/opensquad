@@ -14,6 +14,7 @@ Optional:
 """
 
 import argparse
+import os
 import sys
 
 
@@ -303,6 +304,18 @@ def main():
         help="Use the Vite dev server instead of the built static UI (requires npm)",
     )
 
+    # ── dev (developer mode: source + hot-reload + Vite) ──
+    p_dev = sub.add_parser(
+        "dev",
+        help="Developer mode: run backend from source with hot-reload + Vite frontend (no packaging)",
+    )
+    _add_gateway_flag(p_dev)
+    p_dev.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print URL only; do not open a browser",
+    )
+
     # ── chat / shell (Claude-Code-like interactive UI) ──
     p_chat = sub.add_parser(
         "chat",
@@ -498,6 +511,15 @@ def _dispatch(args) -> None:
 
         run_code(args)
     elif cmd == "web":
+        from opensquad.cli.commands.web_cmd import run_web
+
+        run_web(args)
+    elif cmd == "dev":
+        # Developer mode: force source (non-frozen) launch + uvicorn hot-reload
+        # so backend/agent Python edits take effect without repackaging.
+        os.environ["OPENSQUAD_SOURCE_MODE"] = "1"
+        os.environ["OPENSQUAD_RELOAD"] = "1"
+        args.dev = True  # always use the Vite dev server (5173)
         from opensquad.cli.commands.web_cmd import run_web
 
         run_web(args)

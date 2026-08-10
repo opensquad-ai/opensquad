@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, Database,
+  ArrowLeft, RefreshCw, AlertCircle, Database,
   Trash2, Search, ChevronDown,
   BrainCircuit, BookOpen, Zap, FileText, Info,
   X, ChevronUp, Clock,
 } from 'lucide-react';
 import { pluginAPI } from '../../../services/api';
+import { OpenSquadLoader } from '../../OpenSquadLoader';
 
 // ─── Types ───
 
@@ -252,7 +253,7 @@ const LongMemoryPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           className="p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors"
           title="Refresh"
         >
-          <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={18} /> : <RefreshCw size={18} />}
         </button>
       </div>
 
@@ -319,7 +320,7 @@ const LongMemoryPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       <div className="flex-1 overflow-y-auto">
         {initialLoading ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <Loader2 className="animate-spin text-primary" size={32} />
+            <OpenSquadLoader size={40} />
             <p className="text-textMuted text-sm">Loading...</p>
           </div>
         ) : error && memories.length === 0 ? (
@@ -518,7 +519,7 @@ const LongMemoryPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 disabled={deleting}
                 className="px-4 py-2 text-sm bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors flex items-center gap-1.5"
               >
-                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                {deleting ? <OpenSquadLoader size={14} /> : <Trash2 size={14} />}
                 Delete
               </button>
             </div>

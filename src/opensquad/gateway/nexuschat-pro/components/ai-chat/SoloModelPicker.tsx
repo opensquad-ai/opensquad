@@ -116,12 +116,14 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Hide models the user disabled in the model-card manager.
+    const visible = cards.filter((c) => c.enabled !== false);
     const filtered = q
-      ? cards.filter((c) => {
+      ? visible.filter((c) => {
           const hay = `${c.title || ''} ${c.name} ${c.model_name} ${c.provider || ''}`.toLowerCase();
           return hay.includes(q);
         })
-      : cards;
+      : visible;
 
     const out: { vendor: string; items: ModelCardInfo[] }[] = [];
     const idx: Record<string, number> = {};
@@ -240,10 +242,10 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
         setActiveVendor(null);
       }
     };
-    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('mousedown', onDoc, true);
     document.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('mousedown', onDoc, true);
       document.removeEventListener('keydown', onKey);
     };
   }, [open]);
@@ -334,7 +336,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       {activeGroup && (
         <div
           ref={flyoutRef}
-          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden ${
+          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden ${
             flyoutRight ? 'left-full ml-1.5' : 'right-full mr-1.5'
           }`}
           style={{ top: flyoutTop }}
@@ -360,7 +362,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                     className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                       selected
                         ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                        : 'bg-transparent text-textMain hover:bg-primary/10'
+                        : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                     }`}
                   >
                     <span className="w-4 shrink-0 flex items-center justify-center">
@@ -378,7 +380,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       )}
 
       {/* Level 1: providers */}
-      <div className="w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+      <div className="w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
         <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/70">
           <Search size={14} className="text-textMuted shrink-0" />
           <input
@@ -411,7 +413,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
                   className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors border-0 cursor-pointer ${
                     active
                       ? 'bg-black/[0.06] dark:bg-white/[0.08] text-textMain'
-                      : 'bg-transparent text-textMain hover:bg-primary/10'
+                      : 'bg-transparent text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10]'
                   }`}
                 >
                   <span className="w-4 shrink-0 flex items-center justify-center">
@@ -434,7 +436,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
               close();
               onAddModels();
             }}
-            className="w-full flex items-center gap-2 px-3 py-2.5 text-[13px] text-textMain hover:bg-primary/10 transition-colors border-0 bg-transparent cursor-pointer"
+            className="w-full flex items-center gap-2 px-3 py-2.5 text-[13px] text-textMain hover:bg-black/[0.06] dark:hover:bg-white/[0.10] transition-colors border-0 bg-transparent cursor-pointer"
           >
             <Plus size={14} className="text-textMuted" />
             <span className="font-medium">Add Models</span>

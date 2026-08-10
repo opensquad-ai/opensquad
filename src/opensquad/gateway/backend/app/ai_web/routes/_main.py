@@ -1427,6 +1427,42 @@ async def list_plan_snapshots(
     return {"ok": True, "snapshots": snapshots, "count": len(snapshots)}
 
 
+# MUST be registered BEFORE the catch-all /agent-sessions/{agent_id}/{session_id}
+# routes below, otherwise "search" is captured as a session_id and the request
+# hits agent_session_history() → 404 "Session not found: search".
+@router.get("/agent-sessions/{agent_id}/search")
+async def agent_session_search(
+    agent_id: str,
+    q: str = Query("", description="Fuzzy search query"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_user_dep),
+):
+    """Fuzzy search across user input and agent non-tool-flow text messages.
+
+    Used by the Agent Web sidebar search modal. Returns one entry per
+    matching session with up to 3 short snippets so the UI can show context
+    without re-fetching the full history.
+    """
+    query = (q or "").strip()
+    if not query:
+        return {"agent_id": agent_id, "query": "", "results": []}
+
+    reader = await async_get_agent_session_reader(agent_id)
+    if not reader:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+
+    search = getattr(reader, "async_search_sessions", None)
+    if search is None:
+        raise HTTPException(501, "Search not supported for this agent session reader")
+
+    results = await search(query, limit)
+    return {
+        "agent_id": agent_id,
+        "query": query,
+        "results": results,
+    }
+
+
 # ---- Catch-all {session_id} routes AFTER specific routes ----
 
 

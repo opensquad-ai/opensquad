@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 
 
 def start(
-    task_description: str,
+    description: str = "",
+    *,
+    task_description: str | None = None,
     check_interval: int = 120,
     max_stalls: int = 5,
     reminder_interval: int = 300,
@@ -38,7 +40,8 @@ def start(
     Start active task supervision with optional smart reminders.
 
     Args:
-        task_description: Clear description of the task objective.
+        description: Clear description of the task objective.
+        task_description: Deprecated alias for ``description`` (kept for back-compat).
         check_interval: Seconds of inactivity before a check-in is triggered. Default 120.
         max_stalls: Maximum consecutive stalls before the task is auto-abandoned. Default 5.
         reminder_interval: Seconds between smart reminders when agent is idle. Default 300 (5 min).
@@ -48,15 +51,16 @@ def start(
     Returns:
         Task ID and confirmation message.
     """
+    desc = (description or "").strip() or (task_description or "").strip() or "Untitled task"
     task_id = task_supervisor.start(
-        description=task_description,
+        description=desc,
         check_interval=check_interval,
         max_stalls=max_stalls,
     )
 
     # Start smart reminder if enabled
     if enable_reminder:
-        _start_smart_reminder(task_id, task_description, reminder_interval)
+        _start_smart_reminder(task_id, desc, reminder_interval)
 
     return {
         "status": "success",

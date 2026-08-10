@@ -3,9 +3,10 @@
  * Spinning while live; click opens CMD-style ShellJobPanel.
  */
 import React, { useState, useCallback, useMemo } from 'react';
-import { Loader2, CheckCircle, XCircle, Terminal } from 'lucide-react';
+import { CheckCircle, XCircle, Terminal } from 'lucide-react';
 import type { ShellJobBundle, ShellStreamState } from '../../utils/shellJobGrouping';
 import { ShellJobPanel } from './ShellJobPanel';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 export interface ShellJobFoldProps {
   bundle: ShellJobBundle;
@@ -70,9 +71,9 @@ export const ShellJobFold: React.FC<ShellJobFoldProps> = ({
   );
 
   if (variant === 'solo') {
-    const faint = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+    const faint = 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
     const accent = bundle.errored && !bundle.running
-      ? 'color-mix(in srgb, var(--color-danger, #ef4444) 75%, transparent)'
+      ? 'color-mix(in srgb, rgb(var(--color-danger, #ef4444)) 75%, transparent)'
       : faint;
     return (
       <>
@@ -98,7 +99,7 @@ export const ShellJobFold: React.FC<ShellJobFoldProps> = ({
   }
 
   const statusIcon = bundle.running ? (
-    <Loader2 size={12} className="text-emerald-400 animate-spin flex-shrink-0" />
+    <OpenSquadLoader size={12} className="flex-shrink-0" />
   ) : bundle.errored ? (
     <XCircle size={12} className="text-red-500 flex-shrink-0" />
   ) : (

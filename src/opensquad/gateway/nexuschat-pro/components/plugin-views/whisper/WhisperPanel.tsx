@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, CheckCircle2, Mic, Download,
+  ArrowLeft, RefreshCw, AlertCircle, CheckCircle2, Mic, Download,
   Database, Trash2, MapPin, Cpu,
 } from 'lucide-react';
 import { pluginAPI, pluginServiceAPI } from '../../../services/api';
 import { HoverTooltip } from '../../HoverTooltip';
+import { OpenSquadLoader } from '../../OpenSquadLoader';
 import type { PluginViewProps } from '../registry';
 
 type WhisperModel = {
@@ -201,7 +202,7 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
           className="p-1.5 rounded-md hover:bg-bgLight text-textMuted disabled:opacity-50"
           title={zh ? '刷新' : 'Refresh'}
         >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
         </button>
       </div>
 
@@ -366,7 +367,7 @@ const WhisperPanel: React.FC<PluginViewProps> = ({ onBack, locale }) => {
             onClick={() => void onDownload(false)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-xs disabled:opacity-50"
           >
-            {busy || downloading ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+            {busy || downloading ? <OpenSquadLoader size={14} /> : <Download size={13} />}
             {ready && selectedModel === status.model
               ? (zh ? '模型已下载' : 'Downloaded')
               : (zh ? '下载模型' : 'Download model')}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  FileText, RefreshCw, Loader2, ChevronDown, Search, X,
+  FileText, RefreshCw, ChevronDown, Search, X,
   Activity, Server, Bot, AlertTriangle, AlertCircle, Info, Bug,
   Download, Filter, Menu, ArrowLeft
 } from 'lucide-react';
@@ -14,6 +14,7 @@ import {
   adminHeaderSubtitle,
   adminHeaderTitle,
 } from './admin/adminShellStyles';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 // ============================================================
 // Types
@@ -361,7 +362,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
             disabled={logsLoading || !selectedSource}
             className="p-1.5 md:px-3 md:py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-medium hover:bg-primary/20 transition-colors disabled:opacity-50"
           >
-            {logsLoading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+            {logsLoading ? <OpenSquadLoader size={16} /> : <RefreshCw size={13} />}
             <span className="hidden md:inline ml-1.5">Refresh</span>
           </button>
           <button
@@ -373,7 +374,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
                 : 'bg-bgLight text-textMuted border border-border hover:text-textMain'
             }`}
           >
-            <RefreshCw size={13} className={autoRefresh ? 'animate-spin' : ''} />
+            {autoRefresh ? <OpenSquadLoader size={14} /> : <RefreshCw size={13} />}
             <span className="hidden md:inline">{autoRefresh ? 'Auto ON' : 'Auto OFF'}</span>
           </button>
           <button
@@ -392,7 +393,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
         <div className="w-48 bg-panel border-r border-border shrink-0 overflow-y-auto hidden md:flex flex-col">
           {sourcesLoading ? (
             <div className="flex items-center justify-center h-16 text-textMuted">
-              <Loader2 size={16} className="animate-spin" />
+              <OpenSquadLoader size={20} />
             </div>
           ) : (
             <>
@@ -574,7 +575,7 @@ export const LogsManagerPage: React.FC<LogsManagerPageProps> = ({ onBack }) => {
               >
                 {logsLoading && parsedLines.length === 0 ? (
                   <div className="flex items-center gap-2 p-4 text-gray-500">
-                    <Loader2 size={14} className="animate-spin" /> Loading logs...
+                    <OpenSquadLoader size={20} />
                   </div>
                 ) : filteredLines.length === 0 ? (
                   <div className="p-4 text-gray-500">

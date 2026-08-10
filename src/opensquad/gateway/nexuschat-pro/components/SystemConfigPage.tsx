@@ -12,6 +12,7 @@ import {
   failDesktopUpdate,
 } from '../services/desktopUpdateOverlay';
 import WorkspaceManager from './WorkspaceManager';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { ThemeSettingsPanel } from './ThemeSettingsModal';
 import { SoftOverlay } from './SoftOverlay';
 import {
@@ -570,7 +571,7 @@ const AboutTab: React.FC = () => {
           disabled={checking || versionInfo.check_skipped || updateBusy}
           className="w-full py-2.5 bg-primary/10 text-primary rounded-lg font-medium hover:bg-primary/20 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          <RefreshCw size={16} className={checking ? 'animate-spin' : ''} />
+          {checking ? <OpenSquadLoader size={16} /> : <RefreshCw size={16} />}
           {checking ? t('systemConfig.about.checking') : t('systemConfig.about.checkUpdate')}
         </button>
 
@@ -771,7 +772,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
 
   const appFallback = (
     <div className="flex h-full min-h-[12rem] items-center justify-center text-textMuted">
-      <RefreshCw size={22} className="animate-spin" />
+      <OpenSquadLoader size={22} />
     </div>
   );
 
@@ -929,7 +930,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
 
                   {loading && needsServerConfig && !config && (
                     <div className="flex h-40 items-center justify-center">
-                      <RefreshCw size={22} className="animate-spin text-primary" />
+                      <OpenSquadLoader size={22} />
                     </div>
                   )}
 
@@ -974,7 +975,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                         className="os-icon-btn"
                         title={t('systemConfig.reload')}
                       >
-                        <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                        {loading ? <OpenSquadLoader size={16} /> : <RefreshCw size={15} />}
                       </button>
                     )}
                     {showSave ? (
@@ -992,7 +993,7 @@ export const SystemConfigPage: React.FC<SystemConfigPageProps> = ({
                           disabled={saving || !config}
                           className="flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
                         >
-                          {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                          {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />}
                           {t('common.save')}
                         </button>
                       </>

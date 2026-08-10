@@ -75,7 +75,7 @@ export const CreateWorkspaceModal: React.FC<CreateWorkspaceModalProps> = ({
     <SoftOverlay
       open={open}
       onBackdrop={onCancel}
-      panelClassName="w-[min(440px,92vw)] rounded-xl bg-white dark:bg-[#252526] border border-black/10 dark:border-white/10 shadow-2xl"
+      panelClassName="w-[min(440px,92vw)] rounded-xl bg-bgLight border border-border shadow-2xl"
     >
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <h3 className="text-[15px] font-semibold text-textMain">创建新工作区</h3>

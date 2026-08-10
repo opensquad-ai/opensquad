@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   subscribeDesktopUpdateOverlay,
   setDesktopUpdatePhase,
@@ -101,7 +101,7 @@ export const DesktopUpdateOverlay: React.FC = () => {
     >
       <div className="w-full max-w-md rounded-2xl border border-white/10 bg-slate-900/95 p-8 shadow-2xl text-center">
         <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-primary/15">
-          <Loader2 className="h-9 w-9 animate-spin text-primary" />
+          <OpenSquadLoader size={40} />
         </div>
 
         <h2 className="text-lg font-semibold text-white mb-1">

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio, Loader2 } from 'lucide-react';
+import { MessageCircle, Users, Settings, Calendar, Star, Puzzle, Server, BookOpen, UserCircle, Cpu, ScrollText, Store, LayoutGrid, History, Zap, Bot, Layers, KanbanSquare, Radio } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { User } from '../types';
 import { getAvatarUrl, getLocalAvatarFallback, resolveChatAvatar, resolveChatName } from '../utils/image';
@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { setLanguage } from '../i18n';
 import { pluginAPI, PluginInfo, adminAPI, AdminAgent } from '../services/api';
 import { hasPluginViewAdapter } from './plugin-views/registry';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface SidebarProps {
   currentUser: User | null;
@@ -48,7 +49,7 @@ const PLUGIN_NAV_ICONS: Record<string, React.FC<{ size?: number; className?: str
   layers: Layers,
   board: KanbanSquare,
   radio: Radio,
-  loader: Loader2,
+  loader: OpenSquadLoader,
 };
 
 function loadAgentShortcutsCache(): AgentShortcutItem[] {
@@ -238,8 +239,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentUser, theme, onOpenProf
                 <svg viewBox="0 0 100 100" className="w-full h-full">
                     <defs>
                         <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stopColor="var(--color-primary)" stopOpacity="0.92" />
-                            <stop offset="100%" stopColor="var(--color-primary)" stopOpacity="0.72" />
+                            <stop offset="0%" stopColor="rgb(var(--color-primary))" stopOpacity="0.92" />
+                            <stop offset="100%" stopColor="rgb(var(--color-primary))" stopOpacity="0.72" />
                         </linearGradient>
                     </defs>
                     <rect width="100" height="100" rx="18" ry="18" fill={`url(#${gradientId})`} />

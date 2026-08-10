@@ -4,7 +4,6 @@ import {
   ChevronDown,
   CheckCircle2,
   Circle,
-  Loader2,
   FileText,
   Target,
   ListChecks,
@@ -16,6 +15,7 @@ import {
 } from 'lucide-react';
 import { marked } from 'marked';
 import { useTranslation } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import { collabBoardAPI, CollabBoardItem, CollabBoardTask, PlanSnapshot } from '../services/api';
 import {
   adminHeaderBar,
@@ -226,7 +226,7 @@ const MarkdownSection: React.FC<MarkdownSectionProps> = ({
 
 const PlanStatusIcon: React.FC<{ status: string }> = ({ status }) => {
   if (status === 'done') return <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />;
-  if (status === 'doing') return <Loader2 size={15} className="text-primary animate-spin shrink-0" />;
+  if (status === 'doing') return <OpenSquadLoader size={16} className="shrink-0" />;
   return <Circle size={15} className="text-textMuted shrink-0" />;
 };
 
@@ -811,7 +811,7 @@ export const CollabBoardPage: React.FC<Props> = ({ onBack }) => {
             </button>
           )}
           <button onClick={() => { loadTasks(); load(); }} className={adminHeaderGhostBtn}>
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
           <button
             onClick={onBack}
@@ -849,7 +849,7 @@ export const CollabBoardPage: React.FC<Props> = ({ onBack }) => {
           </div>
         ) : loading ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <RefreshCw className="animate-spin text-primary" size={32} />
+            <OpenSquadLoader size={40} />
             <p className="text-textMuted text-sm">{t('collabBoard.loading')}</p>
           </div>
         ) : (

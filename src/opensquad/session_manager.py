@@ -296,8 +296,46 @@ class SessionManager:
         loaded = self.ensure_session_loaded(sid)
         if loaded is not None:
             return loaded
-        logger.warning("[SessionManager] _resolve_session_data fallback to focused for sid=%s", sid)
-        return self.session_data
+        # 并行串线防护：未知 sid（agent 重启后 live 表清空、或磁盘尚无
+        # history/{sid}.json）时，绝不能再静默回退到 focused 会话——那会把
+        # A 会话的用户消息/历史加载/assistant 回复全部写进 focused 的 B，
+        # 表现为"给 A 发消息，内容串到 B 的并行任务"。这里为该 sid 创建
+        # 独立空会话并注册到 _live_sessions，后续所有读写都落在它自己。
+        logger.warning(
+            "[SessionManager] _resolve_session_data: creating orphan session for unknown sid=%s",
+            sid,
+        )
+        try:
+            now_iso = utc_now_iso()
+            data = {
+                "id": sid,
+                "title": None,
+                "messages": [],
+                "events": [],
+                "archived_messages": [],
+                "archived_events": [],
+                "latest_summary": "",
+                "last_updated": now_iso,
+                "created_at": now_iso,
+                "origin": "parallel_orphan",
+            }
+            self._live_sessions[sid] = data
+            try:
+                self._save_session_data(data, as_focused=False)
+            except Exception as save_e:
+                logger.error(
+                    "[SessionManager] orphan session persist failed sid=%s: %s",
+                    sid,
+                    save_e,
+                )
+            return data
+        except Exception as e:
+            logger.error(
+                "[SessionManager] failed to create orphan session sid=%s: %s",
+                sid,
+                e,
+            )
+            return self.session_data
 
     def _save_session_data(self, data: dict, *, as_focused: bool | None = None) -> None:
         """Persist a session dict. Focused → current_session.json; always mirror to history/{sid}.json when id set."""
@@ -871,8 +909,24 @@ class SessionManager:
                 self._log_records_since_snapshot = _replayed
 
                 if self._is_reusable_draft(self.session_data):
-                    # Keep the empty draft as the New Session cache — do not
-                    # bounce to latest history (that undoes New Session).
+                    # Empty New Session shell. On a fresh install there is no
+                    # history to restore, so keep it as the draft cache. But if
+                    # the service restarted and the previous conversation was
+                    # archived into history/ (e.g. user clicked New Session then
+                    # closed, or a restart happened mid-turn), restore the most
+                    # recent non-empty history session instead of leaving the
+                    # user staring at a blank shell — the "latest session" would
+                    # otherwise be silently lost while every older history entry
+                    # still loads.
+                    latest_sid = self._find_latest_history_session_with_input()
+                    if latest_sid:
+                        logger.info(
+                            "[SessionManager] Empty draft but history has content (%s) — restoring it after restart",
+                            latest_sid,
+                        )
+                        if self.load_history_session(latest_sid):
+                            self.session_data["draft"] = False
+                            return
                     self.session_data["draft"] = True
                     loaded = True
                     logger.info(
@@ -904,6 +958,49 @@ class SessionManager:
                         return
 
             self._init_new_session()
+
+    def _find_latest_history_session_with_input(self) -> str | None:
+        """Return the most recently modified history session that has user input.
+
+        Used after a restart to restore the last real conversation when the
+        current_session.json is only an empty New Session draft. Scans the
+        history directory (newest first) and returns the first sid whose
+        snapshot contains at least one user message — skipping empty shells,
+        scheduled-task sessions, and the draft itself.
+        """
+        try:
+            if not os.path.isdir(self.history_dir):
+                return None
+            files = [f for f in os.listdir(self.history_dir) if f.endswith(".json")]
+        except OSError:
+            return None
+        if not files:
+            return None
+        files.sort(key=lambda x: os.path.getmtime(os.path.join(self.history_dir, x)), reverse=True)
+        for fname in files:
+            sid = fname[:-5]
+            if sid == self.session_data.get("id"):
+                continue
+            try:
+                with open(os.path.join(self.history_dir, fname), encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, list):
+                user_input = any(
+                    isinstance(m, dict) and m.get("role") == "user" and str(m.get("content") or "").strip()
+                    for m in data
+                )
+                if user_input:
+                    return sid
+                continue
+            if not isinstance(data, dict):
+                continue
+            if str(data.get("origin") or "").strip() == "scheduled_task":
+                continue
+            if self._has_user_input(data):
+                return sid
+        return None
 
     def _generate_id(self):
         now = datetime.now(timezone.utc)
@@ -1614,37 +1711,41 @@ class SessionManager:
         except Exception as e:
             logger.error(f"[SessionManager] Failed to save session: {e}")
 
-    def update_last_message_elapsed_ms(self, elapsed_ms: int):
+    def update_last_message_elapsed_ms(self, elapsed_ms: int, *, sid: str | None = None):
         """Write elapsed_ms (total workflow time) to the last assistant message."""
+        target = self._resolve_session_data(sid)
+        target_id = target.get("id") or sid or self.session_data.get("id")
 
         def _mutate():
-            messages = self.session_data.get("messages", [])
+            messages = target.get("messages", [])
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "assistant":
                     messages[i]["elapsed_ms"] = elapsed_ms
                     self._append_log_record(
-                        self.session_data.get("id"),
+                        target_id,
                         {"op": "tail_patch", "patches": {"elapsed_ms": elapsed_ms}},
                     )
                     return
 
-        self._enqueue_mutation(_mutate)
+        self._enqueue_mutation_for(_mutate, sid=target_id)
 
-    def mark_last_assistant_end_task(self):
+    def mark_last_assistant_end_task(self, *, sid: str | None = None):
         """Mark the latest assistant message as a complex-task end report (for UI fold)."""
+        target = self._resolve_session_data(sid)
+        target_id = target.get("id") or sid or self.session_data.get("id")
 
         def _mutate():
-            messages = self.session_data.get("messages", [])
+            messages = target.get("messages", [])
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "assistant":
                     messages[i]["end_task"] = True
                     self._append_log_record(
-                        self.session_data.get("id"),
+                        target_id,
                         {"op": "tail_patch", "patches": {"end_task": True}},
                     )
                     return
 
-        self._enqueue_mutation(_mutate)
+        self._enqueue_mutation_for(_mutate, sid=target_id)
 
     def sync_tool_call_message(
         self,
@@ -1730,7 +1831,84 @@ class SessionManager:
                 if k not in _ui_only_keys:
                     api_msg[k] = v
             result.append(api_msg)
+        # 孤儿 tool_calls 修复：OpenAI 兼容 API 要求每条 assistant(tool_calls)
+        # 之后必须紧跟响应每个 tool_call_id 的 tool 消息。工具循环被中断
+        # （Stop / 异常 / 进程退出）时，sync_tool_call_message 可能已把 tool_calls
+        # 写入会话而 tool 结果消息未落盘，恢复会话后重发即触发 400：
+        #   "An assistant message with 'tool_calls' must be followed by tool messages"
+        # 这里在发送前补齐缺失的 tool 响应，让对话可以继续。
+        result = self._repair_orphan_tool_calls(result)
         return result
+
+    @staticmethod
+    def _repair_orphan_tool_calls(messages: list[dict]) -> list[dict]:
+        """Ensure every assistant tool_call has a matching tool response message.
+
+        For tool_calls that never received a response (interrupted turn / crash
+        between ``sync_tool_call_message`` and the tool-result append), prefer
+        to MOVE a real ``role: tool`` response found later in the list to the
+        correct position right after its assistant (out-of-order tool results
+        from a previous turn). Only when no real response exists, a placeholder
+        ``role: tool`` message is inserted. Returns a NEW list; does not mutate
+        the stored session data.
+        """
+        _INTERRUPTED_CONTENT = (
+            "(tool call was interrupted — no result was produced; do not retry this "
+            "exact call, adjust your plan and proceed)"
+        )
+        out: list[dict] = []
+        pending: set[str] = set()
+        msgs = list(messages)  # 可变副本（可能 pop 移动）
+        i = 0
+        while i < len(msgs):
+            m = msgs[i]
+            role = m.get("role")
+            if role == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    cid = (tc or {}).get("id")
+                    if cid:
+                        pending.add(cid)
+                out.append(m)
+            elif role == "tool":
+                cid = m.get("tool_call_id")
+                if cid in pending:
+                    pending.discard(cid)
+                out.append(m)
+            else:
+                # user / system marks a turn boundary — a preceding assistant
+                # tool_calls with un-responded ids is an orphan; patch it before
+                # this message so the API never sees an unpaired tool_calls.
+                for cid in list(pending):
+                    # 优先把后续真实响应移动到此处（乱序工具结果），避免重复响应
+                    moved: dict | None = None
+                    for j in range(i + 1, len(msgs)):
+                        _m = msgs[j]
+                        if _m.get("role") == "tool" and _m.get("tool_call_id") == cid:
+                            moved = msgs.pop(j)
+                            break
+                    if moved is not None:
+                        out.append(moved)
+                    else:
+                        out.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": cid,
+                                "content": _INTERRUPTED_CONTENT,
+                            }
+                        )
+                pending.clear()
+                out.append(m)
+            i += 1
+        # Trailing orphan (last message is assistant with tool_calls) — same fix.
+        for cid in list(pending):
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": cid,
+                    "content": _INTERRUPTED_CONTENT,
+                }
+            )
+        return out
 
     def get_events(self, limit: int | None = None, *, sid: str | None = None) -> list[dict]:
         data = self._resolve_session_data(sid)

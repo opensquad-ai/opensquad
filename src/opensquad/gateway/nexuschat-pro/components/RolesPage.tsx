@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   RefreshCw, Plus, UserCircle, Users2, Star, Search, ArrowLeft,
-  X, Save, Trash2, Users, Check, Loader2, AlertCircle, FileText, BookOpen,
+  X, Save, Trash2, Users, Check, AlertCircle, FileText, BookOpen,
   Eye, Pencil, Menu, LayoutGrid, List,
 } from 'lucide-react';
 import { marked } from 'marked';
@@ -17,6 +17,7 @@ import {
   adminHeaderSubtitle,
   adminHeaderTitle,
 } from './admin/adminShellStyles';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 // 剥离 frontmatter，仅保留正文用于预览
 function stripFrontmatter(text: string): string {
@@ -374,7 +375,7 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
             onClick={() => { setLoading(true); loadCards(); if (tab === 'role') loadAgents(); }}
             className={adminHeaderGhostBtn}
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -459,8 +460,7 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
       <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <Loader2 className="animate-spin text-primary" size={32} />
-            <p className="text-textMuted text-sm">{t('common.loading')}</p>
+            <OpenSquadLoader size={48} />
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
@@ -531,7 +531,7 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
                   disabled={saving || (isNew && !newName.trim())}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
                 >
-                  {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                  {saving ? <OpenSquadLoader size={16} /> : <Save size={14} />}
                    {t('common.save')}
                 </button>
                 <button onClick={closeDrawer} className="p-1.5 rounded-lg text-textMuted hover:bg-hover transition-colors ml-1">
@@ -627,7 +627,7 @@ const RolesPage: React.FC<RolesPageProps> = ({ onBack, embedded = false }) => {
                                 : 'bg-hover border border-border hover:bg-primary/15 hover:text-primary hover:border-primary/30'
                             } disabled:opacity-50`}
                           >
-                            {isLoading ? <Loader2 size={12} className="animate-spin" /> : assigned ? <><Check size={12} /> {t('rolesPage.assignedAgents')}</> : t('common.add')}
+                            {isLoading ? <OpenSquadLoader size={16} /> : assigned ? <><Check size={12} /> {t('rolesPage.assignedAgents')}</> : t('common.add')}
                           </button>
                         </div>
                       );

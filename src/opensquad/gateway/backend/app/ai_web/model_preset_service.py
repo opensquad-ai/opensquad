@@ -32,6 +32,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from .model_presets_static import STATIC_PRESETS
+
 
 # ── Vendor metadata (base_url is provided here; neither data source includes this info) ────────────────────────
 # Order determines the sort order of the frontend dropdown menu
@@ -537,7 +539,16 @@ async def initialize() -> None:
         n_models = sum(len(p["models"]) for p in _cached_presets["providers"])
         logger.info(f"[ModelPresets] Ready from disk: {n_providers} providers, {n_models} models")
     else:
-        logger.info("[ModelPresets] No disk cache found; providers empty until manual refresh")
+        # No persisted cache yet (e.g. a fresh offline deployment): fall back to
+        # the bundled static vendor/model list so providers are still configurable.
+        from copy import deepcopy
+
+        _cached_presets = deepcopy(STATIC_PRESETS)
+        n_providers = len(_cached_presets["providers"])
+        n_models = sum(len(p["models"]) for p in _cached_presets["providers"])
+        logger.info(
+            f"[ModelPresets] No disk cache; using bundled static fallback: {n_providers} providers, {n_models} models"
+        )
 
 
 def get_presets() -> dict:
@@ -586,19 +597,25 @@ async def manual_refresh() -> dict:
 
     # Merge: models.dev provides all vendors; openrouter is used only to build the openrouter vendor
     vendor_models = _build_from_models_dev(_models_dev_data)
+    # models.dev is the PRIMARY catalog source. If it failed (offline / blocked),
+    # do NOT rebuild the cache from a degraded result (e.g. openrouter alone would
+    # leave every known vendor with 0 models and clobber the good cached/static
+    # list). Only overwrite when models.dev actually produced vendor data.
+    models_dev_ok = bool(vendor_models)
     vendor_models = _merge_openrouter(vendor_models, _openrouter_data)
     assembled = _assemble_presets(vendor_models)
 
     n_models_new = sum(len(p["models"]) for p in assembled["providers"])
 
-    if n_models_new > 0:
+    if models_dev_ok and n_models_new > 0:
         # Successfully fetched model data — update in-memory cache and overwrite disk static file
         _cached_presets = assembled
         _save_cache_to_disk(assembled)
         logger.info("[ModelPresets] Manual refresh complete, disk file updated")
     else:
-        # All fetches failed (offline / network error) — keep existing cache, do not overwrite disk file
-        logger.warning("[ModelPresets] All fetches failed or returned no models; keeping existing cache intact")
+        # models.dev unavailable (offline / network error) — keep existing cache,
+        # do not overwrite disk file with a degraded/partial result.
+        logger.warning("[ModelPresets] models.dev unavailable; keeping existing cache intact")
 
     n_providers = len(_cached_presets["providers"])
     n_models = sum(len(p["models"]) for p in _cached_presets["providers"])

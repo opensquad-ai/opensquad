@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  RefreshCw, Loader2, AlertCircle, Download, CheckCircle2, HardDrive, Search,
+  RefreshCw, AlertCircle, Download, CheckCircle2, HardDrive, Search,
   Trash2, Folder, Cpu,
 } from 'lucide-react';
 import { pluginAPI } from '../../services/api';
 import { HoverTooltip } from '../HoverTooltip';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 /**
  * ModelDownloadCard
@@ -191,7 +192,7 @@ export const ModelDownloadCard: React.FC<ModelDownloadCardProps> = ({
           className="ml-auto p-1 rounded hover:bg-bgLight text-textMuted disabled:opacity-50 shrink-0"
           title={isZh ? '刷新' : 'Refresh'}
         >
-          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={12} /> : <RefreshCw size={12} />}
         </button>
       </div>
 
@@ -283,7 +284,7 @@ export const ModelDownloadCard: React.FC<ModelDownloadCardProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-white text-xs disabled:opacity-50 hover:bg-primary/90"
           >
             {busy || downloading ? (
-              <Loader2 size={13} className="animate-spin" />
+              <OpenSquadLoader size={14} />
             ) : (
               <Download size={13} />
             )}
@@ -297,7 +298,7 @@ export const ModelDownloadCard: React.FC<ModelDownloadCardProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs disabled:opacity-50"
             title={isZh ? '卸载模型文件并释放磁盘空间' : 'Remove model files from disk'}
           >
-            {busy ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+            {busy ? <OpenSquadLoader size={12} /> : <Trash2 size={12} />}
             {isZh ? '卸载模型' : 'Uninstall'}
           </button>
         )}

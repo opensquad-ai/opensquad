@@ -4,7 +4,8 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Maximize2, Minimize2, X, CheckCircle, XCircle } from 'lucide-react';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import type { WorkflowEvent } from '../../utils/aiChatTimeline';
 import { isToolResultFailure } from '../../utils/aiChatTimeline';
 import { extractFileEditInfo, parsePartialFileToolArgs, applyEditDiffContext } from './FileDiffBlock';
@@ -221,7 +222,7 @@ const NestedLineView: React.FC<{ line: NestedLine }> = ({ line }) => {
     ) : line.status === 'error' ? (
       <XCircle size={12} className="text-red-500 flex-shrink-0" />
     ) : (
-      <Loader2 size={12} className="text-violet-400 animate-spin flex-shrink-0" />
+      <OpenSquadLoader size={12} className="flex-shrink-0" />
     );
 
   return (
@@ -330,7 +331,7 @@ export const SubAgentPanel: React.FC<SubAgentPanelProps> = ({
             <div className="text-[14px] font-semibold text-textMain truncate">{title}</div>
             {running ? (
               <div className="text-[11px] text-violet-500/90 flex items-center gap-1 mt-0.5">
-                <Loader2 size={11} className="animate-spin" />
+                <OpenSquadLoader size={12} />
                 Exploring
               </div>
             ) : (

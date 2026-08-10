@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   ArrowLeft, RefreshCw, BookOpen, Search, Tag, Code, Terminal,
-  Loader2, AlertCircle, Package, Plus, Upload, X, FolderOpen, Trash2, Menu,
+  AlertCircle, Package, Plus, Upload, X, FolderOpen, Trash2, Menu,
   FileText, ChevronRight, File as FileIcon, Eye, LayoutGrid, List,
 } from 'lucide-react';
 import { skillAPI, SkillInfo, SkillSourceResponse, adminAPI, AdminAgent } from '../services/api';
 import { useTranslation } from 'react-i18next';
 import { marked } from 'marked';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface SkillManagerPageProps {
   onBack: () => void;
@@ -346,8 +347,7 @@ const SkillDetailView: React.FC<{
 
       {loading ? (
         <div className="flex-1 flex items-center justify-center text-textMuted">
-          <Loader2 size={24} className="animate-spin mr-2" />
-          {t('common.loading')}
+          <OpenSquadLoader size={36} />
         </div>
       ) : error ? (
         <div className="flex-1 p-6">
@@ -761,7 +761,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
                     disabled={deletingSkill !== null}
                     className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 flex items-center gap-2"
                   >
-                    {deletingSkill && <Loader2 size={16} className="animate-spin" />}
+                    {deletingSkill && <OpenSquadLoader size={16} />}
                     {t('common.delete')}
                   </button>
                 </div>
@@ -842,7 +842,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
             className="p-1.5 md:p-2 rounded-lg text-textMuted hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-40"
             title={t('common.refresh')}
           >
-            <RefreshCw size={14} className={`md:w-4 md:h-4 ${loading ? 'animate-spin' : ''}`} />
+            {loading ? <OpenSquadLoader size={14} className="md:w-4 md:h-4" /> : <RefreshCw size={14} className="md:w-4 md:h-4" />}
           </button>
         </div>
       </div>
@@ -910,8 +910,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
 
         {loading ? (
           <div className="flex items-center justify-center py-20 text-textMuted">
-            <Loader2 size={24} className="animate-spin mr-2" />
-            {t('common.loading')}
+            <OpenSquadLoader size={36} />
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-textMuted">
@@ -1026,7 +1025,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
               >
                 {uploading ? (
                   <>
-                    <Loader2 size={16} className="animate-spin" />
+                    <OpenSquadLoader size={16} />
                     {t('common.uploading')}
                   </>
                 ) : (
@@ -1067,7 +1066,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
                   disabled={deletingSkill !== null}
                   className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 flex items-center gap-2"
                 >
-                  {deletingSkill && <Loader2 size={16} className="animate-spin" />}
+                  {deletingSkill && <OpenSquadLoader size={16} />}
                   {t('common.delete')}
                 </button>
               </div>

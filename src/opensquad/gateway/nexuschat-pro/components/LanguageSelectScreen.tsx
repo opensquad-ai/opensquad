@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Globe, ChevronRight, Loader2 } from 'lucide-react';
+import { Globe, ChevronRight } from 'lucide-react';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface LanguageSelectScreenProps {
   onSelect: (lang: 'zh' | 'en') => void | Promise<void>;
@@ -60,7 +61,7 @@ export const LanguageSelectScreen: React.FC<LanguageSelectScreenProps> = ({ onSe
               </div>
             </div>
             {picking === 'zh' ? (
-              <Loader2 className="text-primary animate-spin" size={20} />
+              <OpenSquadLoader size={20} label="正在选择语言" />
             ) : (
               <ChevronRight className="text-textMuted group-hover:text-primary transition-colors" size={20} />
             )}
@@ -81,7 +82,7 @@ export const LanguageSelectScreen: React.FC<LanguageSelectScreenProps> = ({ onSe
               </div>
             </div>
             {picking === 'en' ? (
-              <Loader2 className="text-primary animate-spin" size={20} />
+              <OpenSquadLoader size={20} label="正在选择语言" />
             ) : (
               <ChevronRight className="text-textMuted group-hover:text-primary transition-colors" size={20} />
             )}

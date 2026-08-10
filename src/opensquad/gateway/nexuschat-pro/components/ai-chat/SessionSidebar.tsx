@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 import {
   Trash2,
   Check,
@@ -22,6 +23,7 @@ import {
   MessageCircle,
   LayoutGrid,
   Clock,
+  Search,
 } from 'lucide-react';
 import { agentSessionAPI, AgentSession } from '../../services/api';
 import {
@@ -61,6 +63,7 @@ interface SessionSidebarProps {
   onOpenPlugins?: () => void;
   onOpenRoles?: () => void;
   onOpenScheduledTasks?: () => void;
+  onOpenSearch?: () => void;
   /** Highlight Skill 库 when the in-chat skills panel is open. */
   skillsActive?: boolean;
   /** Highlight 插件 when the in-chat plugins panel is open. */
@@ -176,6 +179,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
   onOpenPlugins,
   onOpenRoles,
   onOpenScheduledTasks,
+  onOpenSearch,
   skillsActive = false,
   pluginsActive = false,
   rolesActive = false,
@@ -819,6 +823,15 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         <button
           type="button"
           disabled={!workspaceRootPath}
+          onClick={() => onOpenSearch?.()}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
+        >
+          <Search size={16} className="text-emerald-500" />
+          <span className="flex-1 text-left">{t('aiChat.search.title')}</span>
+        </button>
+        <button
+          type="button"
+          disabled={!workspaceRootPath}
           onClick={() => onOpenScheduledTasks?.()}
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
@@ -918,7 +931,11 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
                   onClick={() => void loadMoreSessions()}
                   className="w-full rounded-lg px-2 py-1.5 text-[11px] text-textMuted hover:text-textMain hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
                 >
-                  {loadingMore ? t('common.loading') : t('aiChat.loadMoreSessions')}
+                  {loadingMore ? (
+                    <span className="inline-flex items-center gap-1.5"><OpenSquadLoader size={16} /></span>
+                  ) : (
+                    t('aiChat.loadMoreSessions')
+                  )}
                 </button>
               </div>
             ) : null}

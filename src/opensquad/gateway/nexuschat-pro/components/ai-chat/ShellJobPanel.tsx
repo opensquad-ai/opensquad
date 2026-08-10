@@ -3,7 +3,8 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2, X, Loader2, CheckCircle, XCircle, Terminal } from 'lucide-react';
+import { Maximize2, Minimize2, X, CheckCircle, XCircle, Terminal } from 'lucide-react';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 export interface ShellJobPanelProps {
   open: boolean;
@@ -84,7 +85,7 @@ export const ShellJobPanel: React.FC<ShellJobPanelProps> = ({
             </div>
             <div className="text-[10px] text-emerald-400/70 flex items-center gap-1.5 mt-0.5 font-mono">
               {running ? (
-                <Loader2 size={10} className="animate-spin" />
+                <OpenSquadLoader size={12} />
               ) : errored ? (
                 <XCircle size={10} className="text-red-400" />
               ) : (

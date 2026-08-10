@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, Database,
+  ArrowLeft, RefreshCw, AlertCircle, Database,
   Clock, ChevronDown, ChevronRight
 } from 'lucide-react';
 import { pluginAPI } from '../../services/api';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 /**
  * GenericPluginView - Fallback view for plugins that have a data endpoint
@@ -106,7 +107,7 @@ export const GenericPluginView: React.FC<GenericPluginViewProps> = ({
           className="p-2 rounded-lg text-textMuted hover:bg-primary/10 hover:text-primary transition-colors"
           title="Refresh"
         >
-          <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
+          {loading ? <OpenSquadLoader size={18} /> : <RefreshCw size={18} />}
         </button>
       </div>
 
@@ -114,7 +115,7 @@ export const GenericPluginView: React.FC<GenericPluginViewProps> = ({
       <div className="flex-1 overflow-y-auto p-6">
         {loading && !data ? (
           <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <Loader2 className="animate-spin text-primary" size={32} />
+            <OpenSquadLoader size={40} />
             <p className="text-textMuted text-sm">Loading data...</p>
           </div>
         ) : error && !data ? (

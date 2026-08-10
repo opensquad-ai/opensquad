@@ -3,14 +3,14 @@ import {
   LayoutGrid, List, ArrowLeft, RefreshCw, Plus, Power, PowerOff, RotateCcw,
   Settings, FileText, Terminal, X, Save, ChevronDown, ChevronUp,
   Monitor, Code, PenTool, BarChart3, Globe, Bot, Wrench,
-  Circle, Loader2, MessageSquare, Trash2, Pencil, Eye, EyeOff,
+  Circle, MessageSquare, Trash2, Pencil, Eye, EyeOff,
   FolderOpen, Menu, Shield,
 } from 'lucide-react';
 import { marked } from 'marked';
 import { adminAPI, AdminAgent, TokenStats, ChatProfile, userAPI, pluginAPI, PluginInfo, modelCardAPI, ModelCardInfo, ModelCardDetail } from '../services/api';
 import { resolveChatAvatar, resolveChatName } from '../utils/image';
-import { filterCardsForVoiceSlot, withSelectedVoiceCard } from '../utils/voiceCardRole';
 import { useTranslation, Trans } from 'react-i18next';
+import { OpenSquadLoader } from './OpenSquadLoader';
 import {
   adminHeaderBar,
   adminHeaderCta,
@@ -29,6 +29,8 @@ interface AgentManagerPageProps {
   onChat?: (agentId: string) => void;
   /** Jump to group chat (business switch outside settings). */
   onOpenGroupChat?: () => void;
+  /** Open the System Config (settings) overlay. */
+  onOpenSettings?: () => void;
 }
 
 const LAYOUT_KEY = 'agent_manager_layout';
@@ -149,7 +151,7 @@ function fmtTokens(n: number): string {
 
 // ---- 主组件 ----
 
-export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat }) => {
+export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onChat, onOpenGroupChat, onOpenSettings }) => {
   const { t, i18n } = useTranslation();
   const [agents, setAgents] = useState<AdminAgent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -167,7 +169,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   const [roleText, setRoleText] = useState('');
   const [roleOriginal, setRoleOriginal] = useState('');
   const [roleEditing, setRoleEditing] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -192,7 +193,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
   const [availablePlugins, setAvailablePlugins] = useState<PluginInfo[]>([]);
   const [modelCards, setModelCards] = useState<ModelCardInfo[]>([]);
   const [modelCardLoading, setModelCardLoading] = useState(false);
-  const [voiceAdvancedOpen, setVoiceAdvancedOpen] = useState(false);
   const voiceHydratedRef = useRef<string | null>(null);
 
   // 后台预取缓存：key → config（避免触发不必要重渲染，用 ref）
@@ -437,8 +437,6 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
     setDetailAgent(agent);
     setDetailTab(tab);
     setRoleEditing(false);
-    setShowApiKey(false);
-    setVoiceAdvancedOpen(false);
     voiceHydratedRef.current = null;
 
     if (tab === 'config') {
@@ -752,384 +750,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           </div>
         </div>
 
-        {/* ── 模型设置 ── */}
-        <div>
-          <div className={sectionTitleCls}><Wrench size={11} /> {t('agentManager.modelSettings')}</div>
-          <div className="bg-bgLight rounded-lg p-3 space-y-2.5">
-            {(detailAgent?.model_card || cfgGet(['model', '_card'])) && (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-textMuted">{t('agentManager.importFromModelCard')}:</span>
-                <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary font-medium truncate">
-                  {detailAgent?.model_card || cfgGet(['model', '_card'])}
-                </span>
-              </div>
-            )}
-            {/* 模型卡导入选择器 */}
-            {modelCards.length > 0 && (
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">{t('agentManager.importFromModelCard')}</label>
-                <select
-                  value={cfgGet(['model', '_card'], '') || detailAgent?.model_card || ''}
-                  disabled={modelCardLoading}
-                  onChange={async e => {
-                    const cardName = e.target.value;
-                    if (!cardName) return;
-                    setModelCardLoading(true);
-                    try {
-                      const res = await modelCardAPI.getCard(cardName);
-                      const c = res.card;
-                      cfgSet(['model', '_card'], cardName);
-                      cfgSet(['model', 'api_protocol'], c.api_protocol);
-                      cfgSet(['model', 'provider'], c.provider ?? '');
-                      cfgSet(['model', 'model_name'], c.model_name);
-                      cfgSet(['model', 'api_key'], c.api_key);
-                      cfgSet(['model', 'base_url'], c.base_url);
-                      cfgSet(['model', 'token_max'], c.token_max);
-                      cfgSet(['model', 'tool_output_max_chars'], c.tool_output_max_chars ?? 50000);
-                      cfgSet(['model', 'temperature'], c.temperature);
-                      cfgSet(['model', 'frequency_penalty'], c.frequency_penalty ?? 0);
-                      cfgSet(['model', 'presence_penalty'], c.presence_penalty ?? 0);
-                      cfgSet(['model', 'top_k'], c.top_k ?? 0);
-                      if (c.tool_call_mode) cfgSet(['model', 'tool_call_mode'], c.tool_call_mode);
-                      if (c.render_mode) cfgSet(['model', 'render_mode'], c.render_mode);
-                      cfgSet(['model', 'is_think'], c.is_think);
-                      cfgSet(['model', 'is_image'], c.is_image);
-                      cfgSet(['model', 'is_audio_model'], c.is_audio ?? false);
-                      cfgSet(['model', 'is_video'], c.is_video);
-                      cfgSet(['model', 'is_audio_output'], c.is_audio_output ?? false);
-                      cfgSet(['model', 'is_image_output'], c.is_image_output ?? false);
-                      cfgSet(['model', 'audio_output_voice'], c.audio_output_voice ?? 'alloy');
-                    } catch (err: any) {
-                      alert(t('agentManager.loadModelCardFailed', { message: err.message }));
-                    } finally {
-                      setModelCardLoading(false);
-                    }
-                  }}
-                  className={inputCls}
-                >
-                  <option value="">{t('agentManager.selectModelCard')}</option>
-                  {modelCards.map(card => (
-                    <option key={card.name} value={card.name}>{card.title || card.name}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">API Protocol</label>
-                <input value={cfgGet(['model', 'api_protocol'])} onChange={e => cfgSet(['model', 'api_protocol'], e.target.value)} placeholder="openai_compat" className={inputCls} />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Provider</label>
-                <input value={cfgGet(['model', 'provider'])} onChange={e => cfgSet(['model', 'provider'], e.target.value)} placeholder="DeepSeek / OpenAI / Google Gemini" className={inputCls} />
-              </div>
-            </div>
-            <div>
-              <label className="block text-[10px] font-semibold text-textMuted mb-1">Model Name</label>
-              <input value={cfgGet(['model', 'model_name'])} onChange={e => cfgSet(['model', 'model_name'], e.target.value)} placeholder="gpt-4o" className={inputCls} />
-            </div>
-            <div>
-              <label className="block text-[10px] font-semibold text-textMuted mb-1">API Key</label>
-              <div className="relative">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={cfgGet(['model', 'api_key'])}
-                  onChange={e => cfgSet(['model', 'api_key'], e.target.value)}
-                  placeholder="sk-..."
-                  className={`${inputCls} pr-8`}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowApiKey(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-textMuted hover:text-textMain transition-colors"
-                >
-                  {showApiKey ? <EyeOff size={12} /> : <Eye size={12} />}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label className="block text-[10px] font-semibold text-textMuted mb-1">Base URL</label>
-              <input value={cfgGet(['model', 'base_url'])} onChange={e => cfgSet(['model', 'base_url'], e.target.value)} placeholder="https://api.openai.com/v1" className={inputCls} />
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Token Max</label>
-                <input
-                  type="number"
-                  value={cfgGet(['model', 'token_max'], '')}
-                  onChange={e => cfgSet(['model', 'token_max'], parseInt(e.target.value) || 0)}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1" title={t('agentManager.toolOutputMaxHint') || 'Per-tool-call output char limit (0=unlimited)'}>
-                  Tool Output Limit
-                </label>
-                <input
-                  type="number"
-                  min="0" step="100"
-                  value={cfgGet(['model', 'tool_output_max_chars'], 50000)}
-                  onChange={e => cfgSet(['model', 'tool_output_max_chars'], Math.max(0, parseInt(e.target.value) || 0))}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Temperature</label>
-                <input
-                  type="number"
-                  step="0.1" min="0" max="2"
-                  value={cfgGet(['model', 'temperature'], '')}
-                  onChange={e => cfgSet(['model', 'temperature'], parseFloat(e.target.value) || 0)}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1" title={t('agentManager.freqPenaltyHint')}>Freq.Penalty</label>
-                <input
-                  type="number" step="0.1" min="-2" max="2"
-                  value={cfgGet(['model', 'frequency_penalty'], 0)}
-                  onChange={e => cfgSet(['model', 'frequency_penalty'], parseFloat(e.target.value) || 0)}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1" title={t('agentManager.presPenaltyHint')}>Pres.Penalty</label>
-                <input
-                  type="number" step="0.1" min="-2" max="2"
-                  value={cfgGet(['model', 'presence_penalty'], 0)}
-                  onChange={e => cfgSet(['model', 'presence_penalty'], parseFloat(e.target.value) || 0)}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1" title={t('agentManager.topKHint')}>Top-K</label>
-                <input
-                  type="number" step="1" min="0"
-                  value={cfgGet(['model', 'top_k'], 0)}
-                  onChange={e => cfgSet(['model', 'top_k'], Math.max(0, Math.floor(parseInt(e.target.value) || 0)))}
-                  className={inputCls}
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Tool Call Mode</label>
-                <select
-                  value={cfgGet(['model', 'tool_call_mode'], 'auto')}
-                  onChange={e => cfgSet(['model', 'tool_call_mode'], e.target.value)}
-                  className={inputCls}
-                  title={t('agentManager.toolCallModeHint')}
-                >
-                  <option value="auto">Auto</option>
-                  <option value="native">Native FC</option>
-                  <option value="xml">XML</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Render Mode</label>
-                <select
-                  value={cfgGet(['model', 'render_mode'], 'strict')}
-                  onChange={e => cfgSet(['model', 'render_mode'], e.target.value)}
-                  className={inputCls}
-                  title={t('agentManager.renderModeHint')}
-                >
-                  <option value="strict">{t('agentManager.standardOutput')}</option>
-                  <option value="full">{t('agentManager.fullOutput')}</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Deep Think</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_think'], false)}
-                    onChange={v => cfgSet(['model', 'is_think'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Image</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_image'], false)}
-                    onChange={v => cfgSet(['model', 'is_image'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Audio</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_audio_model'], false)}
-                    onChange={v => cfgSet(['model', 'is_audio_model'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">Video</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_video'], false)}
-                    onChange={v => cfgSet(['model', 'is_video'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">AudioOut</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_audio_output'], false)}
-                    onChange={v => cfgSet(['model', 'is_audio_output'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">ImgOut</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['model', 'is_image_output'], false)}
-                    onChange={v => cfgSet(['model', 'is_image_output'], v)}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1" title={t('agentManager.repetitionDetectHint')}>Repetition Detect</label>
-                <div className="flex items-center h-[28px]">
-                  <Toggle
-                    value={cfgGet(['enable_repetition_detection'], true)}
-                    onChange={v => cfgSet(['enable_repetition_detection'], v)}
-                  />
-                </div>
-              </div>
-              {cfgGet(['model', 'is_audio_output'], false) && (
-                <div className="col-span-2">
-                  <label className="block text-[10px] font-semibold text-textMuted mb-1">Voice</label>
-                  <select
-                    value={cfgGet(['model', 'audio_output_voice'], 'alloy')}
-                    onChange={e => cfgSet(['model', 'audio_output_voice'], e.target.value)}
-                    className={inputCls}
-                  >
-                    {['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'].map(v => (
-                      <option key={v} value={v}>{v}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
 
-        {/* ── 语音能力：三项各自选模型卡 ── */}
-        <div>
-          <div className={sectionTitleCls}><Wrench size={11} /> Voice</div>
-          <div className="bg-bgLight rounded-lg p-3 space-y-2">
-            <p className="text-[10px] text-textMuted">
-              ASR（语音输入）/ TTS（语音输出）/ Realtime（双向）各自独立选择模型卡。
-              先在「模型」面板创建卡（只需 url / api_key / model），再在此绑定。
-            </p>
-            <div className="grid grid-cols-1 gap-2">
-              {([
-                { key: 'asr_card' as const, label: 'ASR 模型卡（语音输入）', hint: 'is_audio / builtin' },
-                { key: 'tts_card' as const, label: 'TTS 模型卡（语音输出）', hint: 'is_audio_output' },
-                { key: 'realtime_card' as const, label: 'Realtime 模型卡（双向）', hint: 'audio in+out' },
-              ]).map(({ key, label, hint }) => {
-                const selected = String(cfgGet(['voice', key], '') || '');
-                const options = withSelectedVoiceCard(
-                  filterCardsForVoiceSlot(modelCards, key),
-                  modelCards,
-                  selected,
-                );
-                return (
-                <div key={key}>
-                  <label className="block text-[10px] font-semibold text-textMuted mb-1">
-                    {label} <span className="font-normal opacity-60">({hint})</span>
-                  </label>
-                  <select
-                    value={selected}
-                    onChange={(e) => cfgSet(['voice', key], e.target.value)}
-                    className={inputCls}
-                  >
-                    <option value="">(none)</option>
-                    {options.map(card => (
-                      <option key={card.name} value={card.name}>
-                        {card.title || card.name}
-                        {card.model_name ? ` · ${card.model_name}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                );
-              })}
-              <div>
-                <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_voice（音色，可选）</label>
-                <input
-                  value={cfgGet(['voice', 'realtime_voice'], '')}
-                  onChange={e => cfgSet(['voice', 'realtime_voice'], e.target.value)}
-                  placeholder={t('common.optional') || 'optional'}
-                  className={inputCls}
-                />
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setVoiceAdvancedOpen(v => !v)}
-              className="flex items-center gap-1 text-[10px] text-textMuted hover:text-primary border-0 bg-transparent cursor-pointer px-0 py-1"
-            >
-              {voiceAdvancedOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-              高级：内联 url / api_key / model（无模型卡时的兜底）
-            </button>
-            {voiceAdvancedOpen && (
-              <div className="grid grid-cols-1 gap-2 pt-1 border-t border-border/50">
-                <p className="text-[10px] text-textMuted">
-                  若上方未选模型卡，则使用这里的共享凭证 + 各 model。有模型卡时以卡为准（url / key / model 均来自模型卡，勿在前端写死）。
-                </p>
-                <div>
-                  <label className="block text-[10px] font-semibold text-textMuted mb-1">base_url</label>
-                  <input
-                    value={cfgGet(['voice', 'base_url'], '')}
-                    onChange={e => cfgSet(['voice', 'base_url'], e.target.value)}
-                    placeholder="https://..."
-                    className={inputCls}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-semibold text-textMuted mb-1">api_key</label>
-                  <input
-                    type={showApiKey ? 'text' : 'password'}
-                    value={cfgGet(['voice', 'api_key'], '')}
-                    onChange={e => cfgSet(['voice', 'api_key'], e.target.value)}
-                    placeholder="sk-..."
-                    className={inputCls}
-                  />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-textMuted mb-1">asr_model</label>
-                    <input
-                      value={cfgGet(['voice', 'asr_model'], '')}
-                      onChange={e => cfgSet(['voice', 'asr_model'], e.target.value)}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-textMuted mb-1">tts_model</label>
-                    <input
-                      value={cfgGet(['voice', 'tts_model'], '')}
-                      onChange={e => cfgSet(['voice', 'tts_model'], e.target.value)}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-textMuted mb-1">realtime_model</label>
-                    <input
-                      value={cfgGet(['voice', 'realtime_model'], '')}
-                      onChange={e => cfgSet(['voice', 'realtime_model'], e.target.value)}
-                      className={inputCls}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
 
         {/* ── 系统内置工具（不可关闭） ── */}
         <div>
@@ -1389,7 +1010,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           }`}
         >
           {saving ? (
-            <><Loader2 size={14} className="animate-spin" /> Saving...</>
+            <><OpenSquadLoader size={16} /> Saving...</>
           ) : saveSuccess ? (
             <><span className="text-base leading-none">&#10003;</span> Saved!</>
           ) : (
@@ -1416,6 +1037,17 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
           >
             <ArrowLeft size={16} />
           </button>
+          {onOpenSettings ? (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className={adminHeaderNavBtn}
+              title={t('nav.settings', { defaultValue: 'Settings' })}
+              aria-label={t('nav.settings', { defaultValue: 'Settings' })}
+            >
+              <Settings size={16} />
+            </button>
+          ) : null}
           <button
             onClick={() => window.dispatchEvent(new CustomEvent('openMobileNav'))}
             className={`${adminHeaderNavBtn} md:hidden`}
@@ -1480,7 +1112,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             onClick={() => { setLoading(true); fetchAgents(); }}
             className={adminHeaderGhostBtn}
           >
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
           </button>
         </div>
       </div>
@@ -1497,7 +1129,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
       <div className="flex-1 overflow-y-auto p-4">
         {loading && agents.length === 0 ? (
           <div className="flex items-center justify-center h-64 text-textMuted">
-            <Loader2 className="animate-spin mr-2" size={20} /> Loading agents...
+            <OpenSquadLoader size={48} />
           </div>
         ) : agents.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-textMuted">
@@ -1536,7 +1168,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                   {isRunning ? (
                     <>
                       <button onClick={() => doAction(agent, 'stop')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-red-50 text-red-600 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-red-100'}`}>
-                        {isLoading ? <Loader2 size={11} className="animate-spin" /> : <PowerOff size={11} />} Stop
+                        {isLoading ? <OpenSquadLoader size={12} /> : <PowerOff size={11} />} Stop
                       </button>
                       <button onClick={() => doAction(agent, 'restart')} disabled={isLoading} className={`py-1 px-2 text-[11px] font-medium rounded-md bg-yellow-50 text-yellow-700 transition-colors flex items-center justify-center gap-1 ${isLoading ? 'opacity-40 cursor-not-allowed' : 'hover:bg-yellow-100'}`}>
                         <RotateCcw size={11} /> Restart
@@ -1544,7 +1176,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     </>
                   ) : agent.process_status !== 'external' ? (
                     <button onClick={() => doAction(agent, 'start')} disabled={isLoading} className="py-1 px-2 text-[11px] font-medium rounded-md bg-green-50 text-green-700 hover:bg-green-100 transition-colors disabled:opacity-50 flex items-center justify-center gap-1">
-                      {isLoading ? <Loader2 size={11} className="animate-spin" /> : <Power size={11} />} Start
+                      {isLoading ? <OpenSquadLoader size={12} /> : <Power size={11} />} Start
                     </button>
                   ) : (
                     <span className="py-1 px-2 text-[11px] text-textMuted">External</span>
@@ -1657,7 +1289,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                     <div className="flex items-center gap-3 text-[10px] text-textMuted mb-3">
                       {starting ? (
                         <span className="text-yellow-500 flex items-center gap-1">
-                          <Loader2 size={10} className="animate-spin" /> {statusLabel}...
+                          <OpenSquadLoader size={14} /> {statusLabel}...
                         </span>
                       ) : (
                         <>
@@ -1744,7 +1376,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             <div className="flex-1 overflow-y-auto p-4">
               {detailLoading ? (
                 <div className="flex items-center justify-center h-32 text-textMuted">
-                  <Loader2 className="animate-spin mr-2" size={18} /> Loading...
+                  <OpenSquadLoader size={32} />
                 </div>
               ) : detailTab === 'config' ? (
                 renderConfigForm()
@@ -1774,7 +1406,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                         disabled={saving}
                         className="flex-1 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:opacity-90 transition-all disabled:opacity-50 flex items-center justify-center gap-1"
                       >
-                        {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save
+                        {saving ? <OpenSquadLoader size={14} /> : <Save size={14} />} Save
                       </button>
                     </div>
                   </div>
@@ -1803,7 +1435,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                       onClick={() => setAutoRefresh(prev => !prev)}
                       className={`text-xs flex items-center gap-1 px-2 py-1 rounded-md transition-colors ${autoRefresh ? 'bg-green-100 text-green-700' : 'bg-primary/10 text-textMuted hover:text-primary'}`}
                     >
-                      <RefreshCw size={12} className={autoRefresh ? 'animate-spin' : ''} />
+                      {autoRefresh ? <OpenSquadLoader size={12} /> : <RefreshCw size={12} />}
                       {autoRefresh ? 'Auto ON' : 'Auto OFF'}
                     </button>
                     <button onClick={refreshLogs} className="text-xs text-primary hover:underline flex items-center gap-1">
@@ -1865,7 +1497,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                   className="w-full px-3 py-2 bg-bgLight border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
                 />
                 {emailLookupLoading && (
-                  <p className="text-[10px] text-textMuted mt-1 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> {t('agentManager.searchingAccount')}</p>
+                  <p className="text-[10px] text-textMuted mt-1 flex items-center gap-1"><OpenSquadLoader size={14} /> {t('agentManager.searchingAccount')}</p>
                 )}
                 {!emailLookupLoading && newEmail && newEmailUser && (
                   <p className="text-[10px] text-green-500 mt-1">
@@ -1897,7 +1529,7 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
                 disabled={creating || !newName.trim() || !newEmail.trim() || !newPassword.trim()}
                 className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:opacity-90 transition-all disabled:opacity-50 flex items-center gap-1"
               >
-                {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Create
+                {creating ? <OpenSquadLoader size={14} /> : <Plus size={14} />} Create
               </button>
             </div>
           </div>

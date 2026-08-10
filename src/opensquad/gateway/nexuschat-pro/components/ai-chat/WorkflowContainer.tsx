@@ -16,8 +16,9 @@
  *     The display freezes at this value. It is also persisted in the session.
  */
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { Cpu, ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { formatElapsed } from '../../utils/formatElapsed';
+import { OpenSquadLoader } from '../OpenSquadLoader';
 
 interface WorkflowContainerProps {
   status?: string;
@@ -95,7 +96,7 @@ export const WorkflowContainer: React.FC<WorkflowContainerProps> = ({
 
   const displayStatus = status || 'Completed';
   const icon = isRunning ? (
-    <Cpu size={14} className="text-primary animate-spin" />
+    <OpenSquadLoader size={14} />
   ) : (
     <CheckCircle2 size={14} className="text-emerald-500" />
   );

@@ -880,6 +880,7 @@ class SystemHandlerMixin:
                     "group_asr": bool(data.get("group_asr", False)),
                     "auto_asr": bool(data.get("auto_asr", False)),
                     "render_mode": data.get("render_mode", "strict"),
+                    "enabled": bool(data.get("enabled", True)),
                 }
             )
         return cards

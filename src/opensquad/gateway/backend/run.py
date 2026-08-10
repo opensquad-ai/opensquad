@@ -324,10 +324,13 @@ if __name__ == "__main__":
     print("==========================================")
 
     # Disable uvicorn hot-reload in frozen mode (reloader forks subprocesses; PyInstaller doesn't support that)
-    # Electron can also force-disable reload via OPENSQUAD_RELOAD=0
-    enable_reload = (
-        not IS_FROZEN and os.environ.get("OPENSQUAD_RELOAD", "0") != "0" and backend_config.get("reload", False)
-    )
+    # Electron can also force-disable reload via OPENSQUAD_RELOAD=0.
+    # Source-mode dev convenience: OPENSQUAD_RELOAD=1 forces reload on regardless
+    # of config; otherwise backend.reload=true (and not OPENSQUAD_RELOAD=0) enables it.
+    _reload_env = os.environ.get("OPENSQUAD_RELOAD", "").strip().lower()
+    _force_reload = _reload_env in ("1", "true", "on", "yes")
+    _config_reload = bool(backend_config.get("reload", False)) and _reload_env not in ("0", "false", "off", "no")
+    enable_reload = not IS_FROZEN and (_force_reload or _config_reload)
 
     # When reload is disabled, pass the app object directly (not a string).
     # Passing a string "app.main:app" causes uvicorn to spawn a subprocess

@@ -255,11 +255,11 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
 
   return (
     <div
-      className={`my-3 w-full rounded-xl border border-border/60 bg-white dark:bg-[#1a1a1c] shadow-[0_2px_12px_rgba(0,0,0,0.04)] overflow-hidden ${className}`}
+      className={`my-3 w-full rounded-xl border border-border/60 bg-bgLight shadow-[0_2px_12px_rgba(0,0,0,0.04)] overflow-hidden ${className}`}
       data-html-embed="1"
       data-html-embed-variant="chrome"
     >
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-black/[0.02] dark:bg-white/[0.03]">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-bgLight">
         <span className="text-[12px] font-medium text-textMain truncate flex-1 min-w-0">{title}</span>
         <button
           type="button"
@@ -291,7 +291,7 @@ export const HtmlEmbedBlock: React.FC<HtmlEmbedBlockProps> = ({
         srcDoc={srcDoc}
         sandbox="allow-scripts allow-forms allow-modals"
         referrerPolicy="no-referrer"
-        className="w-full border-0 block bg-white"
+        className="w-full border-0 block bg-bgLight"
         style={{ height: displayHeight }}
       />
     </div>

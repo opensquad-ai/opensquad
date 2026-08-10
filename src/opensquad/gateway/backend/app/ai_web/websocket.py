@@ -28,6 +28,48 @@ security = HTTPBearer()
 # not a valid session file name and always 404s the history API.
 _agent_current_session_id: dict[str, str] = {}
 
+# Agent output / workflow event types that MUST reach every connected client
+# (TUI + Web, any account). An agent's disk session is a shared workspace: a
+# turn started from the TUI should stream live into the Web UI of the same
+# session, and vice versa. Forwarding these with a user-directed push would
+# hide the whole run from every other client (cross-account desync).
+_AGENT_OUTPUT_BROADCAST_TYPES = frozenset(
+    {
+        "message",
+        "response",
+        "thought",
+        "stream",
+        "tool_call",
+        "tool_call_delta",
+        "tool_result",
+        "state",
+        "wake",
+        "sleep",
+        "info",
+        "status",
+        "turn_start",
+        "turn_elapsed",
+        "token_stats",
+        "current_session",
+        "history_sync",
+        "session_list",
+        "busy_sessions",
+        "primary_session",
+        "file_push",
+        "plan",
+        "prompt_update",
+        "output_media",
+        "summary_stream",
+        "compression_progress",
+        "job_stdout",
+        "job_status",
+        "voice_realtime_status",
+        "voice_audio_out",
+        "voice_transcript",
+        "scheduled_task_turn_done",
+    }
+)
+
 
 def _resolve_registered_agent_id(agent_id: str) -> str:
     """Map UI/dir aliases (e.g. ``agent305``) to the registered WS agent_id.
@@ -435,6 +477,10 @@ class AgentWebSocketHandler:
                             # token_stats must reach every pane on this agent WS
                             # (parallel sessions / exec view filter by sid).
                             or msg_type == "token_stats"
+                            # All agent output / workflow events must reach every
+                            # client (TUI + Web, any account) for same-session
+                            # realtime sync; clients filter by sid.
+                            or msg_type in _AGENT_OUTPUT_BROADCAST_TYPES
                         ):
                             await user_handler.broadcast_to_agent(agent_id, message)
                         else:

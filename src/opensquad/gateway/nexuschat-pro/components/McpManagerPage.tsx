@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Server, Plus, Trash2, Save, ChevronDown, ChevronUp,
-  ToggleLeft, ToggleRight, Loader2, AlertCircle, Check, Menu, ArrowLeft,
+  ToggleLeft, ToggleRight, AlertCircle, Check, Menu, ArrowLeft,
 } from 'lucide-react';
 import { mcpAPI, McpServerConfig } from '../services/api';
 import { useTranslation } from 'react-i18next';
@@ -14,6 +14,7 @@ import {
   adminHeaderNavBtn,
   adminHeaderTitle,
 } from './admin/adminShellStyles';
+import { OpenSquadLoader } from './OpenSquadLoader';
 
 interface McpManagerPageProps {
   onBack: () => void;
@@ -318,7 +319,7 @@ export const McpManagerPage: React.FC<McpManagerPageProps> = ({ onBack }) => {
             className={adminHeaderCta}
           >
             {saving ? (
-              <Loader2 size={13} className="animate-spin" />
+              <OpenSquadLoader size={16} />
             ) : saveOk ? (
               <Check size={13} />
             ) : (
@@ -340,8 +341,7 @@ export const McpManagerPage: React.FC<McpManagerPageProps> = ({ onBack }) => {
 
         {loadingMcp ? (
           <div className="flex items-center justify-center py-16 text-textMuted">
-            <Loader2 size={24} className="animate-spin mr-2" />
-            {t('common.loading')}
+            <OpenSquadLoader size={32} />
           </div>
         ) : Object.keys(mcpServers).length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-textMuted">

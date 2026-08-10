@@ -27,7 +27,13 @@ def run_login(args) -> None:
 
     client = GatewayClient(gateway_url=gateway)
     try:
-        data = client.login(email, password, language=language)
+        # Registration required when no web account exists yet (Web parity).
+        status = client.registration_status()
+        if status.get("registration_required"):
+            name = getattr(args, "name", None) or input("Name: ").strip() or email.split("@")[0]
+            data = client.register(name, email, password, language=language)
+        else:
+            data = client.login(email, password, language=language)
     except Exception as e:
         handle_api_error(e)
         print(f"[login] Failed: {e}")

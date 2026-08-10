@@ -2118,6 +2118,8 @@ export interface ModelCardInfo {
   tool_call_mode?: 'auto' | 'native' | 'xml';
   render_mode?: 'full' | 'strict'; // full=显示全部, strict=仅显示<to_user>
   enable_repetition_check?: boolean;
+  /** When false, the model is hidden from the Agent Web model switcher. */
+  enabled?: boolean;
 }
 
 export interface ModelCardDetail extends ModelCardInfo {
@@ -2268,6 +2270,26 @@ export const agentSessionAPI = {
         body: JSON.stringify({ title }),
       }
     );
+  },
+
+  /**
+   * Fuzzy search across the agent's session messages — matches user input
+   * and agent non-tool-flow text. Returns one entry per session with up
+   * to 3 short context snippets.
+   */
+  searchSessions: async (agentId: string, query: string, limit: number = 50) => {
+    const params = new URLSearchParams({ q: query, limit: String(limit) });
+    return apiRequest<{
+      agent_id: string;
+      query: string;
+      results: Array<{
+        id: string;
+        title: string;
+        matches: Array<{ role: 'user' | 'assistant'; snippet: string; timestamp?: string }>;
+        last_updated?: string | null;
+        created_at?: string | null;
+      }>;
+    }>(`/ai-web/agent-sessions/${agentId}/search?${params.toString()}`);
   },
 
   /** Upload an image for chat */

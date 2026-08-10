@@ -482,10 +482,14 @@ class ScheduledTaskManager:
         """
         body = (
             f"[Scheduled Task: {name}]\n"
-            "You are in Scheduled Task mode. First call "
-            "`task_watch.start(description=..., check_interval=120)` "
-            "before executing; use `task_watch.update` for progress and "
-            "`task_watch.complete` when done.\n"
+            "You are in Scheduled Task mode.\n"
+            "HARD RULE: you MUST call real tools; a plan or an announcement like "
+            "'我先启动任务监控，然后获取行情数据' is NOT an acceptable result and will be "
+            "rejected. Your first actual tool call must be "
+            "`task_watch.start(description=..., check_interval=120)`; then call the "
+            "data-gathering / search / shell tools to actually complete the task; then "
+            "finish with `task_watch.complete(summary)` and the concrete deliverable. "
+            "If a tool call fails, fix the arguments and retry — never just announce.\n"
             f"{prompt or ''}"
         )
         tags: list[str] = []

@@ -3718,6 +3718,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         "group_asr": bool(data.get("group_asr", False)),
                         "auto_asr": bool(data.get("auto_asr", False)),
                         "render_mode": data.get("render_mode", "strict"),  # full | strict (Default: strict)
+                        "enabled": bool(data.get("enabled", True)),  # false = hidden from Agent Web switcher
                     }
                 )
             return self._send_json({"cards": cards})
@@ -3763,6 +3764,9 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 "group_asr": body.get("group_asr", False),
                 "auto_asr": body.get("auto_asr", False),
                 "render_mode": body.get("render_mode", "strict"),
+                "enabled": body.get("enabled", True),  # false = hidden from Agent Web switcher
+                "tool_call_mode": body.get("tool_call_mode", "auto"),
+                "enable_repetition_check": body.get("enable_repetition_check", False),
             }
             fpath = os.path.join(MODEL_CARDS_DIR, f"{card_name}.json")
             with open(fpath, "w", encoding="utf-8") as f:

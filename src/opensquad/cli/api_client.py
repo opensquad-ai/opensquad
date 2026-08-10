@@ -310,6 +310,29 @@ class GatewayClient:
 
     # ── Auth ──────────────────────────────────────────────────────────────
 
+    def registration_status(self) -> dict[str, Any]:
+        """Query whether web registration is still open (no web account yet)."""
+        return self.get("/api/auth/registration-status")
+
+    def register(self, name: str, email: str, password: str, language: str = "zh") -> dict[str, Any]:
+        """Create the first web account and save its token (Web parity)."""
+        data = self.post(
+            "/api/auth/register",
+            {"name": name, "email": email, "password": password, "language": language},
+        )
+        token = data.get("access_token") or ""
+        user = data.get("user") or {}
+        save_credentials(
+            {
+                "gateway_url": self.gateway_url,
+                "token": token,
+                "email": email,
+                "user": user,
+            }
+        )
+        self.token = token
+        return data
+
     def login(self, email: str, password: str, language: str = "zh") -> dict[str, Any]:
         data = self.post(
             "/api/auth/login",

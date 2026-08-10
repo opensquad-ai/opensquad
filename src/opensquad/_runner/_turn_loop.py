@@ -346,7 +346,9 @@ class TurnLoop:
                 _saved_msg = _send_msg
                 _saved_output_media = output_media
                 if user_msg_from_tag == "to_user_end_task":
-                    _get_session_manager().mark_last_assistant_end_task()
+                    _get_session_manager().mark_last_assistant_end_task(
+                        sid=getattr(self.runner, "_turn_sid", "") or None
+                    )
                 # --- Plugin Hook: on_after_send ---
                 if self.runner._plugin_manager:
                     await self.runner._plugin_manager.run_hook(
@@ -839,6 +841,7 @@ class TurnLoop:
                     )
                     logger.warning(f"[Runner] {_abort_msg}")
                     await self.runner._emit("error", {"message": _abort_msg})
+                    await self.runner._emit("to_user_final", f"[Error] {_abort_msg}")
                     _get_session_manager().add_event(
                         "info",
                         {"event": "repeated_action_guard", "text": _abort_msg},
@@ -878,7 +881,9 @@ class TurnLoop:
                 )
                 if _saved_msg:
                     _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)
-                    _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
+                    _get_session_manager().update_last_message_elapsed_ms(
+                        _elapsed_ms, sid=getattr(self.runner, "_turn_sid", "") or None
+                    )
                 return True, "", False
 
             tc_log.info(
@@ -891,7 +896,9 @@ class TurnLoop:
             if _saved_msg:
                 # Update elapsed_ms on the assistant message that ChatAPI already saved
                 _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)
-                _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
+                _get_session_manager().update_last_message_elapsed_ms(
+                    _elapsed_ms, sid=getattr(self.runner, "_turn_sid", "") or None
+                )
                 logger.info(
                     "[Runner] Tool turn complete: saved_msg_len=%d, elapsed_ms=%d",
                     len(_saved_msg),
@@ -931,7 +938,9 @@ class TurnLoop:
         # Here we only need to update elapsed_ms on that message.
         if _saved_msg:
             _elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)
-            _get_session_manager().update_last_message_elapsed_ms(_elapsed_ms)
+            _get_session_manager().update_last_message_elapsed_ms(
+                _elapsed_ms, sid=getattr(self.runner, "_turn_sid", "") or None
+            )
             sess = _get_session_manager().session_data
             msgs = sess.get("messages", [])
             evts = sess.get("events", [])

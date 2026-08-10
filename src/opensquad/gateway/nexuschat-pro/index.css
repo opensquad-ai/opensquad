@@ -7,22 +7,22 @@
   width: 100%;
   padding: 0.375rem 0.5rem;
   border-radius: 0.5rem;
-  border: 1px solid var(--color-border, #d1d5db);
+  border: 1px solid rgb(var(--color-border, 209 213 219));
   background: transparent;
   font-size: 12px;
-  color: var(--color-text, inherit);
+  color: rgb(var(--color-text-main, 31 31 31));
   outline: none;
 }
 .os-input:focus {
-  border-color: var(--color-primary, #0ea5e9);
-  box-shadow: 0 0 0 1px var(--color-primary, #0ea5e9);
+  border-color: rgb(var(--color-primary, 14 165 233));
+  box-shadow: 0 0 0 1px rgb(var(--color-primary, 14 165 233));
 }
 
 /* Fenced code blocks in assistant dialogue + thought Markdown */
 .ai-markdown .ai-code-wrap {
   margin: 0.5rem 0;
   border-radius: 0.5rem;
-  border: 1px solid color-mix(in srgb, var(--color-border, #444) 80%, transparent);
+  border: 1px solid color-mix(in srgb, rgb(var(--color-border, 68 68 68)) 80%, transparent);
   background: color-mix(in srgb, #0b0f17 92%, transparent);
   overflow: hidden;
 }
@@ -31,7 +31,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   letter-spacing: 0.02em;
   text-transform: lowercase;
-  color: color-mix(in srgb, var(--color-text-muted, #9ca3af) 85%, transparent);
+  color: color-mix(in srgb, rgb(var(--color-text-muted, 156 163 175)) 85%, transparent);
   padding: 0.35rem 0.65rem 0;
   user-select: none;
 }
@@ -123,10 +123,10 @@
   border-radius: 999px;
   background: linear-gradient(
     to right,
-    var(--slider-fill, var(--color-primary)) 0%,
-    var(--slider-fill, var(--color-primary)) var(--slider-pct, 50%),
-    color-mix(in srgb, var(--color-border) 80%, transparent) var(--slider-pct, 50%),
-    color-mix(in srgb, var(--color-border) 80%, transparent) 100%
+    var(--slider-fill, rgb(var(--color-primary))) 0%,
+    var(--slider-fill, rgb(var(--color-primary))) var(--slider-pct, 50%),
+    color-mix(in srgb, rgb(var(--color-border)) 80%, transparent) var(--slider-pct, 50%),
+    color-mix(in srgb, rgb(var(--color-border)) 80%, transparent) 100%
   );
   outline: none;
   cursor: pointer;
@@ -137,8 +137,8 @@
   width: 16px;
   height: 16px;
   border-radius: 999px;
-  background: var(--color-panel, #fff);
-  border: 2px solid var(--slider-fill, var(--color-primary));
+  background: rgb(var(--color-panel));
+  border: 2px solid var(--slider-fill, rgb(var(--color-primary)));
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   cursor: pointer;
 }
@@ -146,8 +146,8 @@
   width: 16px;
   height: 16px;
   border-radius: 999px;
-  background: var(--color-panel, #fff);
-  border: 2px solid var(--slider-fill, var(--color-primary));
+  background: rgb(var(--color-panel));
+  border: 2px solid var(--slider-fill, rgb(var(--color-primary)));
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   cursor: pointer;
 }
@@ -169,6 +169,21 @@
 .dark {
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-soft-lg: 0 8px 24px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.25);
+  /* Note: dark-mode border darkening is done in themeEngine.buildPalette
+     (mix toward panel) so the inline style set by applyThemePrefs already
+     carries the muted value. This class-level override is intentionally
+     NOT used — inline styles win specificity, so a CSS class here would
+     be silently ignored. */
+}
+
+/* Filled `bg-primary` buttons: in light mode, `text-white` reads fine on a
+   dark primary, but in dark mode the rose preset inverts primary to a light
+   grey and white text would disappear. Use the theme-derived
+   `--color-on-primary` token so labels stay legible without forcing every
+   component to opt in. `!important` is required to win against the
+   explicit `text-white` utility class (same specificity otherwise). */
+.dark .bg-primary {
+  color: rgb(var(--color-on-primary)) !important;
 }
 
 .os-icon-btn {
@@ -177,23 +192,23 @@
   justify-content: center;
   border-radius: 0.5rem;
   padding: 0.5rem;
-  color: var(--color-text-muted);
-  background: color-mix(in srgb, var(--color-bg) 70%, var(--color-panel));
+  color: rgb(var(--color-text-muted));
+  background: color-mix(in srgb, rgb(var(--color-bg)) 70%, rgb(var(--color-panel)));
   border: 1px solid transparent;
   transition: color var(--duration-soft) var(--ease-soft),
     background-color var(--duration-soft) var(--ease-soft),
     border-color var(--duration-soft) var(--ease-soft);
 }
 .os-icon-btn:hover {
-  color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-panel));
-  border-color: color-mix(in srgb, var(--color-primary) 18%, var(--color-border));
+  color: rgb(var(--color-primary));
+  background: color-mix(in srgb, rgb(var(--color-primary)) 8%, rgb(var(--color-panel)));
+  border-color: color-mix(in srgb, rgb(var(--color-primary)) 18%, rgb(var(--color-border)));
 }
 .os-icon-btn[aria-pressed='true'],
 .os-icon-btn.is-active {
-  color: var(--color-primary);
-  background: color-mix(in srgb, var(--color-primary) 12%, var(--color-panel));
-  border-color: color-mix(in srgb, var(--color-primary) 22%, var(--color-border));
+  color: rgb(var(--color-primary));
+  background: color-mix(in srgb, rgb(var(--color-primary)) 12%, rgb(var(--color-panel)));
+  border-color: color-mix(in srgb, rgb(var(--color-primary)) 22%, rgb(var(--color-border)));
 }
 
 .os-list-row {
@@ -201,32 +216,32 @@
     border-color var(--duration-soft) var(--ease-soft);
 }
 .os-list-row:hover {
-  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 10%, transparent);
 }
 .os-list-row.is-active {
-  background: var(--color-panel);
-  border-color: color-mix(in srgb, var(--color-primary) 18%, var(--color-border));
+  background: rgb(var(--color-panel));
+  border-color: color-mix(in srgb, rgb(var(--color-primary)) 18%, rgb(var(--color-border)));
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 /* Depth cards + interactive rows (Agent Web) */
 .os-depth-card {
   border-radius: 0.875rem;
-  border: 1px solid color-mix(in srgb, var(--color-border) 85%, transparent);
-  background: var(--color-rail);
+  border: 1px solid color-mix(in srgb, rgb(var(--color-border)) 85%, transparent);
+  background: rgb(var(--color-rail));
   overflow: hidden;
 }
 .os-depth-panel {
   border-radius: 0.875rem;
-  border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+  border: 1px solid color-mix(in srgb, rgb(var(--color-border)) 70%, transparent);
   /* Nest wash so L2/content rounded top corners read as arcs (not square against white) */
-  background: var(--color-nest);
+  background: rgb(var(--color-nest));
   overflow: hidden;
 }
 /* L2 tab row + session/file body: full-bleed width, soft top arcs into L1 nest */
 .os-depth-body {
   border-radius: 0.75rem 0.75rem 0 0;
-  background: var(--color-panel);
+  background: rgb(var(--color-panel));
   overflow: hidden;
 }
 
@@ -240,7 +255,7 @@
   mask-image: linear-gradient(to right, #000 40%, transparent 92%);
 }
 .os-ws-tab-active {
-  background: var(--color-panel);
+  background: rgb(var(--color-panel));
   border: none;
   border-radius: 10px 10px 0 0;
   /* Concave corners where active tab meets the L2 bar */
@@ -256,11 +271,11 @@
 }
 .os-ws-tab-active::before {
   left: -10px;
-  background: radial-gradient(circle at 0 0, transparent 9.5px, var(--color-panel) 10px);
+  background: radial-gradient(circle at 0 0, transparent 9.5px, rgb(var(--color-panel)) 10px);
 }
 .os-ws-tab-active::after {
   right: -10px;
-  background: radial-gradient(circle at 100% 0, transparent 9.5px, var(--color-panel) 10px);
+  background: radial-gradient(circle at 100% 0, transparent 9.5px, rgb(var(--color-panel)) 10px);
 }
 .os-ws-tab-scroll {
   /* Soft fade at the trailing edge of the L1 tab strip */
@@ -269,7 +284,7 @@
 }
 .os-depth-nest {
   border-radius: 0.625rem;
-  background: var(--color-nest);
+  background: rgb(var(--color-nest));
 }
 /* Flush to card sides/bottom; keep top arcs so list isn't square under the header */
 .os-depth-nest--flush {
@@ -281,38 +296,38 @@
 }
 /* Theme-tinted hover (not gray) — matches main sidebar / 图一 */
 .os-interactive:hover {
-  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 10%, transparent);
 }
 .dark .os-interactive:hover {
-  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 14%, transparent);
 }
 .os-interactive.is-active {
-  background: var(--color-panel);
-  color: var(--color-text-main);
+  background: rgb(var(--color-panel));
+  color: rgb(var(--color-text-main));
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 .os-interactive.is-active:hover {
-  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-panel));
+  background: color-mix(in srgb, rgb(var(--color-primary)) 8%, rgb(var(--color-panel)));
 }
 
 /* Theme-tinted hover utility for icon buttons / menu rows */
 .os-hover:hover {
-  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 10%, transparent);
 }
 .dark .os-hover:hover {
-  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 14%, transparent);
 }
 .os-hover-strong:hover {
-  background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 15%, transparent);
 }
 .dark .os-hover-strong:hover {
-  background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+  background: color-mix(in srgb, rgb(var(--color-primary)) 18%, transparent);
 }
 
 .os-modal-shell {
   border-radius: 1rem;
-  border: 1px solid var(--color-border);
-  background: var(--color-panel);
+  border: 1px solid rgb(var(--color-border));
+  background: rgb(var(--color-panel));
   box-shadow: var(--shadow-soft-lg);
 }
 
@@ -322,8 +337,8 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg) 55%, var(--color-panel));
+  border-bottom: 1px solid rgb(var(--color-border));
+  background: color-mix(in srgb, rgb(var(--color-bg)) 55%, rgb(var(--color-panel)));
 }
 
 /* Soft show/hide — width + margin ease together (avoids flex gap pop on unmount). */
@@ -337,7 +352,12 @@
   flex-shrink: 0;
   height: 100%;
   margin-inline-end: 0;
-  transition: none;
+  /* 常态启用 width/margin 过渡：收起时 width 从设定值渐变到 0，
+     而非瞬间跳变（此前仅 .is-toggling 存在 transition，收起瞬间
+     transition 属性才出现，浏览器不会为这次变化补插值动画）。 */
+  transition:
+    width var(--duration-panel) var(--ease-soft),
+    margin var(--duration-panel) var(--ease-soft);
 }
 .os-soft-rail--right {
   margin-inline-start: 0;
@@ -504,7 +524,11 @@
   }
 }
 
-/* ── Agent working: circular fade-pulse dots (no rotation) ─────────── */
+/* ── Agent working: dense purple dots with a clockwise gaussian sweep ──
+   Layout: 31 dots on concentric rings (PulseDotsStatus.tsx). A highlight
+   travels clockwise with random step jitter; JS drives opacity/scale so the
+   highlight fades through neighbors via gaussian falloff. Brand purple
+   #8257CC keeps it in the logo family. */
 .os-pulse-orbit {
   position: relative;
   width: 18px;
@@ -513,28 +537,14 @@
 }
 .os-pulse-orbit .os-pulse-cell {
   position: absolute;
-  width: 2.5px;
-  height: 2.5px;
   border-radius: 999px;
   transform: translate(-50%, -50%);
-  background: color-mix(in srgb, var(--color-text-muted) 82%, transparent);
-  opacity: var(--pulse-base, 0.55);
-  animation: os-pulse-fade 1.8s ease-in-out infinite;
-}
-@keyframes os-pulse-fade {
-  0%,
-  100% {
-    opacity: calc(var(--pulse-base, 0.55) * 0.28);
-  }
-  50% {
-    opacity: var(--pulse-base, 0.55);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .os-pulse-orbit .os-pulse-cell {
-    animation: none !important;
-    opacity: var(--pulse-base, 0.55);
-  }
+  background: #8257CC;
+  box-shadow: 0 0 4px rgba(130, 87, 204, 0.5);
+  /* JS 每步直接写 opacity/transform；此处 0.2 为初始暗态 */
+  opacity: 0.2;
+  /* 亮点逐点推进时平滑交叉淡化，避免跳跃 */
+  transition: opacity 400ms ease, transform 400ms ease;
 }
 
 /* ── Composer: Plan behind input with slight overlap ────────────────── */

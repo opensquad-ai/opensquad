@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ArrowLeft, RefreshCw, Loader2, AlertCircle, GraduationCap,
+  ArrowLeft, RefreshCw, AlertCircle, GraduationCap,
   Play, Download, Upload, Settings2, BookOpen, History, ToggleLeft,
 } from 'lucide-react';
 import { pluginAPI } from '../../../services/api';
+import { OpenSquadLoader } from '../../OpenSquadLoader';
 
 interface AgentItem {
   agent_id: string;
@@ -296,7 +297,7 @@ const SelfLearnPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           ))}
         </select>
         <button type="button" onClick={() => load(agentId, tab)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10" title="Refresh">
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          {loading ? <OpenSquadLoader size={14} /> : <RefreshCw size={14} />}
         </button>
       </div>
 
@@ -366,7 +367,7 @@ const SelfLearnPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                   onClick={() => startLearn(false)}
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-white text-xs font-medium disabled:opacity-50"
                 >
-                  {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                  {busy ? <OpenSquadLoader size={14} /> : <Play size={14} />}
                   Learn now
                 </button>
                 <button
@@ -483,7 +484,7 @@ const SelfLearnPanel: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                     <div className="border-t border-border px-3 py-3 space-y-3 bg-black/[0.015] dark:bg-white/[0.02]">
                       {runDetailLoading && (
                         <div className="flex items-center gap-2 text-xs text-textMuted">
-                          <Loader2 size={12} className="animate-spin" /> Loading detail…
+                          <OpenSquadLoader size={12} /> Loading detail…
                         </div>
                       )}
                       {!runDetailLoading && (

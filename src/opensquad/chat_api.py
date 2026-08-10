@@ -1041,7 +1041,10 @@ class ChatAPI:
         # preceding assistant message with tool_calls, otherwise DeepSeek rejects
         # the request with "Messages with role 'tool' must be a response to a
         # preceding message with 'tool_calls'".
-        while recent_start > 0 and self.req[recent_start].get("role") == "tool":
+        # FIX: recent_start may equal len(self.req) when the newest message is too
+        # large to fit the retention budget (kept at its initial value). Guard the
+        # index to avoid IndexError that kills the whole tool flow mid-turn.
+        while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
             recent_start -= 1
             logger.warning(
                 "[CompressTrace] tool message at recent_start, extending to include "
@@ -1112,7 +1115,7 @@ class ChatAPI:
             if recent_start < min_scan:
                 recent_start = min_scan
             # Re-run tool-pair integrity fix on the forced boundary.
-            while recent_start > 0 and self.req[recent_start].get("role") == "tool":
+            while recent_start > 0 and recent_start < len(self.req) and self.req[recent_start].get("role") == "tool":
                 recent_start -= 1
             recent_msgs = self.req[recent_start:]
             end_scan = recent_start
@@ -1893,6 +1896,16 @@ class ChatAPI:
 
         self._last_tools = tools
         messages = self._prepare_messages()
+
+        # CRITICAL FIX: 孤儿 tool_calls 修复 —— 内存 req 继续对话（并行会话保持
+        # req 跨 turn 存活，_has_mem_history=true 时不再 _load_history）时，上一轮
+        # 工具循环若在 add_tool_result 之前中断（Stop/异常），req 里会残留
+        # assistant(tool_calls) 而无对应 role=tool 响应，重发即触发 400：
+        #   "An assistant message with 'tool_calls' must be followed by tool messages
+        #    responding to each 'tool_call_id'"
+        # session_manager._repair_orphan_tool_calls 负责补齐占位 tool 响应
+        # （返回新列表，不改 self.req 与落盘数据）。
+        messages = _session_module.SessionManager._repair_orphan_tool_calls(messages)
 
         # DeepSeek V4 thinking mode: reasoning_content must be passed back on
         # the turn FOLLOWING a tool-call turn — i.e. the most recent assistant

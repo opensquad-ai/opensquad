@@ -36,7 +36,7 @@ export const ElectronTitleBar: React.FC = () => {
   return (
     <div
       className="electron-titlebar h-8 flex items-stretch shrink-0 bg-bgLight text-textMain border-b border-border transition-colors duration-300"
-      style={{ WebkitAppRegion: 'drag', backgroundColor: 'var(--color-bg)' }}
+      style={{ WebkitAppRegion: 'drag', backgroundColor: 'rgb(var(--color-bg))' }}
     >
       <div className="flex items-stretch h-full" style={{ WebkitAppRegion: 'no-drag' }}>
         <div
@@ -45,7 +45,7 @@ export const ElectronTitleBar: React.FC = () => {
         >
           <div
             className="flex items-center justify-center w-[22px] h-[22px] rounded-[5px] border border-border/50"
-            style={{ backgroundColor: 'color-mix(in srgb, var(--color-text-main) 5%, var(--color-bg))' }}
+            style={{ backgroundColor: 'color-mix(in srgb, rgb(var(--color-text-main)) 5%, rgb(var(--color-bg)))' }}
           >
             <img
               src="/logo.svg"

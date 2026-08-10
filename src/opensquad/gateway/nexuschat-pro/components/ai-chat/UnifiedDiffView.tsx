@@ -53,7 +53,7 @@ function DiffCodeRow({ line, lang }: { line: DiffLine; lang: string }) {
   return (
     <div className={`flex items-stretch ${rowBg}`}>
       <span
-        className={`select-none w-10 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] border-r border-white/5 ${gutterBg}`}
+        className={`select-none w-10 shrink-0 text-right pr-1.5 tabular-nums text-[10px] leading-[18px] border-r border-border/40 ${gutterBg}`}
       >
         {lineno}
       </span>

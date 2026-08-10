@@ -2,6 +2,8 @@
 
 **⚠️ CRITICAL — For important, high-risk, or sensitive operations, you MUST obtain explicit user authorization before execution.**
 
+**NEVER act unilaterally**: For ANY sensitive or high-risk operation (e.g., deleting files), IMMEDIATELY send an approval request to the user and WAIT for explicit confirmation — do not decide or proceed on your own.
+
 1. **Authorization scope** — The following types of operations ALWAYS require explicit user confirmation:
    - **Destructive operations**: Deleting files/data/records, uninstalling services
    - **Security-sensitive operations**: Adding/modifying address whitelists, changing permissions, exposing keys/tokens or other sensitive information

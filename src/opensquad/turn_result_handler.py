@@ -223,7 +223,9 @@ class TurnResultHandler:
                 saved_msg = send_msg
                 saved_output_media = output_media
                 if user_message.user_msg_from_tag == "to_user_end_task":
-                    self.runner._session_manager.mark_last_assistant_end_task()
+                    self.runner._session_manager.mark_last_assistant_end_task(
+                        sid=getattr(self.runner, "_turn_sid", "") or None
+                    )
                 if self.runner._plugin_manager:
                     await self.runner._plugin_manager.run_hook(
                         "on_after_send",
@@ -269,7 +271,9 @@ class TurnResultHandler:
                 extra["reasoning_content"] = self.runner.chat_api._prev_reasoning_content
             self.runner._session_manager.add_message("assistant", user_message.saved_msg, **extra)
             elapsed_ms = int(datetime.now().timestamp() * 1000) - int(self.runner._workflow_started_ms)
-            self.runner._session_manager.update_last_message_elapsed_ms(elapsed_ms)
+            self.runner._session_manager.update_last_message_elapsed_ms(
+                elapsed_ms, sid=getattr(self.runner, "_turn_sid", "") or None
+            )
 
         if user_message.user_msg.strip():
             if self.runner._awaiting_user_reply:

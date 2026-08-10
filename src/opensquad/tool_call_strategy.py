@@ -156,6 +156,18 @@ class NativeToolCallStrategy(ToolCallStrategy):
         if callback is None:
             self._last_delta_emit_at.clear()
 
+    def fork(self) -> "NativeToolCallStrategy":
+        """Independent per-turn copy.
+
+        The agent keeps one shared strategy for schema generation; concurrent
+        parallel turns must NOT share the streaming state (single
+        ``_delta_callback`` slot + shared ``_tool_calls_buffer`` would interleave
+        two sessions' tool_call chunks — tools from session B executed under
+        session A's sid). Fork a fresh instance per chat() call so streaming
+        tool-call accumulation and delta emission are isolated per session.
+        """
+        return NativeToolCallStrategy(self.tool_registry, tool_filter=self._tool_filter)
+
     @classmethod
     def _should_stream_args(cls, tool_name: str) -> bool:
         n = (tool_name or "").lower().replace(".", "__")

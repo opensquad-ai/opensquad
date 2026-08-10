@@ -29,7 +29,7 @@ interface PlanBlockProps {
 }
 
 const StepIcon: React.FC<{ status: PlanStep['status'] }> = ({ status }) => {
-  const muted = 'color-mix(in srgb, var(--color-text-muted) 55%, transparent)';
+  const muted = 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
   switch (status) {
     case 'done':
       return <CheckCircle2 size={14} className="text-emerald-500/80 flex-shrink-0 mt-0.5" />;
@@ -64,7 +64,7 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
     <div
       className={
         className ||
-        'mb-3 border border-border/55 rounded-lg overflow-hidden bg-black/[0.02] dark:bg-white/[0.03]'
+        'mb-3 border border-border/55 rounded-lg overflow-hidden bg-bgLight'
       }
     >
       <button
@@ -103,7 +103,7 @@ export const PlanBlock: React.FC<PlanBlockProps> = ({
                 }`}
                 style={
                   step.status === 'done' || step.status === 'pending'
-                    ? { color: 'color-mix(in srgb, var(--color-text-muted) 70%, transparent)' }
+                    ? { color: 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)' }
                     : undefined
                 }
               >

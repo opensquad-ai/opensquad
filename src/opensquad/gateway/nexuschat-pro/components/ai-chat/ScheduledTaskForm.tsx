@@ -364,7 +364,7 @@ export const ScheduledTaskForm: React.FC<Props> = ({ agentName, rootPath, value,
             </div>
 
             {skillsOpen && (
-              <div className="absolute z-50 mt-1 left-0 right-0 rounded-lg border border-border bg-white dark:bg-[#2a2a2c] shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+              <div className="absolute z-50 mt-1 left-0 right-0 rounded-lg border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
                 <div className="flex items-center gap-2 px-2 py-1.5 border-b border-border/60">
                   <Search size={12} className="text-textMuted" />
                   <input

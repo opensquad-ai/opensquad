@@ -703,6 +703,219 @@ class AgentSessionReader:
 
     # ---- async interface (thin wrappers — uniform API for all reader types) ----
 
+    def search_sessions(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Fuzzy search across user input and agent non-tool text messages.
+
+        Iterates every session (current + history) for this agent and returns
+        one hit per matching session, with up to 3 short context snippets
+        around the matched substring. Snippets are HTML/markdown-stripped and
+        truncated to keep the response small for the sidebar search modal.
+
+        Substring + token-order match (case-insensitive) keeps behavior
+        predictable across Chinese / English queries without pulling in a
+        full-text search dependency. Heavy work is bounded by ``limit`` and
+        the modal only fires once per debounced keystroke.
+        """
+        if not query or not query.strip():
+            return []
+        q_norm = query.strip().casefold()
+        tokens_cf = [t for t in re.split(r"\s+", query.strip()) if t]
+
+        self._reload()
+
+        try:
+            from opensquad.scheduled_tasks import scheduled_execution_session_ids
+
+            _sched_sids = scheduled_execution_session_ids()
+        except Exception:
+            _sched_sids = set()
+
+        results: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        def _hidden(sid: str, origin: str = "", data: dict | None = None) -> bool:
+            o = (origin or "").strip()
+            if not o and isinstance(data, dict):
+                o = str(data.get("origin") or "").strip()
+            if o == "scheduled_task":
+                return True
+            return bool(sid) and sid in _sched_sids
+
+        def _strip(text: str) -> str:
+            if not text:
+                return ""
+            t = re.sub(r"<image>.*?</image>", "[image]", text, flags=re.IGNORECASE | re.DOTALL)
+            t = re.sub(r"\[File:[^\]]*\]", "", t)
+            return re.sub(r"\s+", " ", t).strip()
+
+        def _build_snippet(text: str, max_len: int = 90) -> str:
+            t = _strip(text)
+            if not t:
+                return ""
+            return t if len(t) <= max_len else t[: max_len - 1] + "…"
+
+        def _message_content(m: Any) -> str:
+            if not isinstance(m, dict):
+                return ""
+            c = m.get("content")
+            if isinstance(c, str):
+                return c
+            if isinstance(c, list):
+                parts: list[str] = []
+                for part in c:
+                    if isinstance(part, dict):
+                        text = part.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                    elif isinstance(part, str):
+                        parts.append(part)
+                return "".join(parts)
+            return ""
+
+        def _matches(text: str) -> bool:
+            if not text:
+                return False
+            t = text.casefold()
+            if q_norm in t:
+                return True
+            if not tokens_cf:
+                return False
+            cursor = 0
+            for tok in tokens_cf:
+                idx = t.find(tok, cursor)
+                if idx < 0:
+                    return False
+                cursor = idx + len(tok)
+            return True
+
+        def _extract_matches(session: dict[str, Any]) -> list[dict[str, Any]]:
+            if not isinstance(session, dict):
+                return []
+            out: list[dict[str, Any]] = []
+            for key in ("messages", "archived_messages"):
+                msgs = session.get(key) or []
+                if not isinstance(msgs, list):
+                    continue
+                for m in msgs:
+                    if not isinstance(m, dict):
+                        continue
+                    role = m.get("role")
+                    if role not in ("user", "assistant"):
+                        continue
+                    content = _message_content(m)
+                    if not _matches(content):
+                        continue
+                    if role == "assistant" and m.get("type") in ("context_summary", "system_prompt"):
+                        continue
+                    out.append(
+                        {
+                            "role": role,
+                            "snippet": _build_snippet(content),
+                            "timestamp": m.get("timestamp"),
+                        }
+                    )
+                    if len(out) >= 3:
+                        return out
+            return out
+
+        def _file_mtime(path: str) -> float:
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return 0.0
+
+        def _consider(sid: str, data: dict | None, source_path: str | None) -> None:
+            if not sid or sid in seen_ids:
+                return
+            if not isinstance(data, dict):
+                return
+            origin = str(data.get("origin") or "")
+            if _hidden(sid, origin=origin, data=data):
+                seen_ids.add(sid)
+                return
+            matches = _extract_matches(data)
+            if not matches:
+                return
+            seen_ids.add(sid)
+            title = (data.get("title") or "").strip()
+            if not title:
+                head = (data.get("messages") or [])[:12]
+                for m in head:
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        c = _strip(_message_content(m))
+                        if c:
+                            title = c[:80]
+                            break
+            if not title:
+                title = sid
+            last_updated = data.get("last_updated")
+            created_at = data.get("created_at")
+            if source_path:
+                f_mtime = _file_mtime(source_path)
+                if f_mtime:
+                    last_updated = datetime.fromtimestamp(f_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            if not last_updated and not created_at and source_path:
+                f_mtime = _file_mtime(source_path)
+                if f_mtime:
+                    last_updated = datetime.fromtimestamp(f_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            results.append(
+                {
+                    "id": sid,
+                    "title": title,
+                    "matches": matches,
+                    "last_updated": last_updated,
+                    "created_at": created_at,
+                }
+            )
+
+        curr_id = self.session_data.get("id")
+        if curr_id:
+            _consider(curr_id, self.session_data, self.current_session_file)
+
+        if os.path.exists(self.history_dir):
+            try:
+                files = [f for f in os.listdir(self.history_dir) if f.endswith(".json") and not f.endswith(".json.log")]
+            except Exception:
+                files = []
+            files.sort(
+                key=lambda x: _file_mtime(os.path.join(self.history_dir, x)),
+                reverse=True,
+            )
+            for fname in files:
+                if len(results) >= limit:
+                    break
+                sid = fname[: -len(".json")]
+                fp = os.path.join(self.history_dir, fname)
+                data = self._cache_get(sid)
+                if data is None:
+                    try:
+                        with open(fp, encoding="utf-8") as f:
+                            raw = json.load(f)
+                        if isinstance(raw, dict):
+                            data = raw
+                        elif isinstance(raw, list):
+                            data = {
+                                "id": sid,
+                                "messages": raw,
+                                "events": [],
+                                "archived_messages": [],
+                                "archived_events": [],
+                            }
+                        else:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        self._replay_log_into(data, sid, int(data.get("_save_seq") or 0))
+                    except Exception:
+                        continue
+                _consider(sid, data, fp)
+
+        def _ts(entry: dict[str, Any]) -> str:
+            return str(entry.get("last_updated") or entry.get("created_at") or "")
+
+        results.sort(key=_ts, reverse=True)
+        return results[:limit]
+
     async def async_get_session_list(self, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.get_session_list, limit, offset)
 
@@ -722,6 +935,14 @@ class AgentSessionReader:
 
     async def async_rename_session(self, session_id: str, title: str) -> bool:
         return await asyncio.to_thread(self.rename_session, session_id, title)
+
+    async def async_search_sessions(
+        self,
+        query: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fuzzy search across user input and agent non-tool text messages."""
+        return await asyncio.to_thread(self.search_sessions, query, limit)
 
     def get_session_history_paged(
         self,
@@ -746,6 +967,28 @@ class AgentSessionReader:
         all_events = full.get("events", [])
         total_messages = len(all_messages)
         total_events = len(all_events)
+
+        # Scheduled-task execution sessions are dedicated per-run panes: the
+        # user must be able to review the FULL output + workflow of a run, not
+        # just the newest page. Returning only the latest `limit` messages (and
+        # the events in that window) made every new output slide the window and
+        # hide/overwrite the earlier output + tool-flow. For these sessions,
+        # offset=0 returns the complete set so history is never lost from view.
+        if offset == 0 and (full.get("origin") or "") == "scheduled_task":
+            return {
+                "id": session_id,
+                "title": full.get("title"),
+                "model_card": full.get("model_card"),
+                "messages": list(all_messages),
+                "events": list(all_events),
+                "archived_messages": full.get("archived_messages") or [],
+                "archived_events": full.get("archived_events") or [],
+                "total_messages": total_messages,
+                "total_events": total_events,
+                "has_more": False,
+                "last_updated": full.get("last_updated"),
+                "created_at": full.get("created_at"),
+            }
 
         # Slice messages from end: offset=0 → last `limit` messages
         if total_messages == 0:
@@ -1067,6 +1310,21 @@ class _RemoteSessionReader:
             logger.error(f"Remote rename_session failed for {session_id}: {e}")
             return False
 
+    def search_sessions(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        try:
+            import httpx
+
+            with httpx.Client(timeout=15) as c:
+                r = c.get(
+                    f"{self._base}/search",
+                    params={"q": query, "limit": limit},
+                )
+                r.raise_for_status()
+                return r.json().get("results", []) or []
+        except Exception as e:
+            logger.error(f"Remote search_sessions failed: {e}")
+            return []
+
     # ---- async interface (wraps sync HTTP calls via to_thread) ----
 
     async def async_get_session_list(self, limit: int | None = None, offset: int = 0):
@@ -1086,6 +1344,9 @@ class _RemoteSessionReader:
 
     async def async_rename_session(self, session_id: str, title: str) -> bool:
         return await asyncio.to_thread(self.rename_session, session_id, title)
+
+    async def async_search_sessions(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.search_sessions, query, limit)
 
 
 # ============================================================
@@ -1164,6 +1425,21 @@ class _WsSessionReader:
         except Exception as e:
             logger.error(f"WS rename_session failed for {session_id}: {e}")
             return False
+
+    async def async_search_sessions(
+        self,
+        query: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        try:
+            from urllib.parse import urlencode
+
+            qs = urlencode({"q": query, "limit": limit})
+            result = await self._call("GET", f"{self._base}/search?{qs}")
+            return result.get("results", []) or []
+        except Exception as e:
+            logger.error(f"WS search_sessions failed: {e}")
+            return []
 
 
 # ============================================================
