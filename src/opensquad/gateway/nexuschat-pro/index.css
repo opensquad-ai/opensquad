@@ -233,9 +233,7 @@
 }
 .os-depth-panel {
   border-radius: 0.875rem;
-  /* No border — the panel sits flush against the page background so the
-     middle column reads as a single continuous surface instead of a
-     framed card. */
+  border: 1px solid color-mix(in srgb, rgb(var(--color-border)) 70%, transparent);
   /* Nest wash so L2/content rounded top corners read as arcs (not square against white) */
   background: rgb(var(--color-nest));
   overflow: hidden;
