@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.41]                                                               | 2026-08-10 | [0.8.40 → 0.8.41](https://github.com/opensquad-ai/opensquad/compare/v0.8.40...v0.8.41) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.41) |
 | [0.8.40]                                                               | 2026-08-10 | [0.8.30 → 0.8.40](https://github.com/opensquad-ai/opensquad/compare/v0.8.30...v0.8.40) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.40) |
 | [0.8.8]                                                                | 2026-08-04 | [0.8.7 → 0.8.8](https://github.com/opensquad-ai/opensquad/compare/v0.8.7...v0.8.8)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.8)  |
 | [0.8.7]                                                                | 2026-08-03 | [0.8.6 → 0.8.7](https://github.com/opensquad-ai/opensquad/compare/v0.8.6...v0.8.7)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.7)  |
@@ -33,6 +34,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.41] — 2026-08-10
+
+> Patch release — fix the broken `v0.8.40` Docker image so the published
+> artifact is actually runnable. v0.8.40 was tagged and the GitHub Release
+> page was created, but `release.yml`'s Docker build failed at the final
+> stage and PyPI trusted publishing was unconfigured, so no usable artifact
+> was shipped. v0.8.41 re-publishes the same code with the Docker fix in
+> place.
+
+### Fixed
+
+- **docker: `chmod +x` on `docker-entrypoint.sh` failed as the non-root
+  `opensquad` user.** The Dockerfile switched to `USER opensquad` *before*
+  copying the entrypoint, then tried to `chmod +x` as that user, which is
+  denied. Moved the `COPY` + `chmod` + `chown` sequence to before
+  `USER opensquad` so `chmod` runs as root, then `chown` hands the
+  executable bit back to the `opensquad` user. Restores a green
+  `release.yml` Docker job.
 
 ---
 
