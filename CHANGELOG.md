@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.42]                                                               | 2026-08-10 | [0.8.41 → 0.8.42](https://github.com/opensquad-ai/opensquad/compare/v0.8.41...v0.8.42) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.42) |
 | [0.8.41]                                                               | 2026-08-10 | [0.8.40 → 0.8.41](https://github.com/opensquad-ai/opensquad/compare/v0.8.40...v0.8.41) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.41) |
 | [0.8.40]                                                               | 2026-08-10 | [0.8.30 → 0.8.40](https://github.com/opensquad-ai/opensquad/compare/v0.8.30...v0.8.40) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.40) |
 | [0.8.8]                                                                | 2026-08-04 | [0.8.7 → 0.8.8](https://github.com/opensquad-ai/opensquad/compare/v0.8.7...v0.8.8)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.8)  |
@@ -34,6 +35,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.42] — 2026-08-10
+
+> Agent chat latency hardening: fix the per-5s plugin force-reload loop,
+> keep the ~60KB system prompt byte-stable so provider-side prefix caches
+> can hit, and restore the dynamic context prefix (runtime state / MCP
+> status / memory) that web-chat requests had silently dropped.
+
+### Fixed
+
+- **plugin hot-reload: per-5s `Config change detected` force-reload loop.**
+  `check_reload_needed()` resolved `project_root` as
+  `dirname(plugins_dir)` while `_load_new_style` recorded the config
+  mtime under `syscfg.get_workspace()`. The two paths pointed at
+  different files with different mtimes, so every idle tick looked like a
+  config change and force-reloaded the plugin (e.g. `websearch`), clearing
+  the tool-schema cache in a tight loop. Both now use
+  `syscfg.get_workspace()`.
+- **system prompt byte stability.** MCP service state was appended to the
+  system prompt (a per-turn variable block); it now always rides the
+  dynamic prefix on the user message, leaving the ~60KB system prompt
+  byte-identical across turns (and across sessions of the same agent) so
+  provider-side prefix caching can actually hit.
+- **parallel dispatcher dropped the dynamic context prefix.** The serial
+  loop prepends `_dynamic_context_prefix` to the user input, but
+  `_parallel_session_turn` (the web-chat path since v0.8.0) never did, so
+  requests carried no current time / input source / MCP availability to
+  the model. The prefix is now prepended on the user-input turn (tool-result
+  continuation turns are unchanged).
 
 ---
 
