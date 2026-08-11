@@ -34,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -4574,37 +4575,92 @@ def _shutdown_all():
             pass
 
 
+def _launcher_lock_path() -> str:
+    """Path of the single-launcher PID lock, shared across Python installs."""
+    try:
+        ws = syscfg.get_workspace()
+    except Exception:
+        ws = None
+    if ws:
+        reg_dir = os.path.join(ws, "registry")
+        try:
+            os.makedirs(reg_dir, exist_ok=True)
+        except OSError:
+            pass
+        return os.path.join(reg_dir, "launcher.pid")
+    return os.path.join(tempfile.gettempdir(), "opensquad_launcher.pid")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
 def _ensure_single_launcher(port: int) -> bool:
     """Exit when another healthy launcher already owns the management port.
 
     Dual-launcher instances (e.g. uv-tools opensquad and anaconda editable
     install both spawning launcher_main.py) share the runtime registry and
     kill each other's agents as "stale" — a 60s kill/restart loop. The second
-    instance probes the port and steps aside instead of fighting for it.
+    instance steps aside instead of fighting for it.
+
+    Port probing alone has a TOCTOU race: two launchers started in the same
+    second both see the port free and both proceed, then one fails to bind
+    while the other wins — each may already have spawned agents. An atomic
+    O_EXCL PID lockfile (shared workspace → shared across Python installs)
+    serializes ownership so only ONE launcher manages a workspace.
     """
     import socket
 
+    lock_path = _launcher_lock_path()
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        # We hold the lockfile — we are the owner. Still verify the port in
+        # case a pre-existing (lock-less) launcher already serves it.
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                pass
+            try:
+                import urllib.request
+
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/workspace", timeout=2.0) as r:
+                    if r.status == 200 and "workspace" in r.read().decode("utf-8", "ignore"):
+                        _log.warning(
+                            f"[Launcher] Port {port} already served by another launcher; "
+                            "exiting (avoid dual-instance agent management)."
+                        )
+                        return False
+            except Exception:
+                pass
+        except OSError:
             pass
-    except OSError:
-        return True  # port free — we are the owner
-
-    # Port occupied: verify it is really a launcher before stepping aside.
-    try:
-        import urllib.request
-
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/workspace", timeout=3.0) as r:
-            if r.status == 200 and "workspace" in r.read().decode("utf-8", "ignore"):
-                _log.warning(
-                    f"[Launcher] Another launcher already owns port {port}; "
-                    "exiting (avoid dual-instance agent management)."
-                )
-                return False
-    except Exception:
-        pass
-    # Occupied by an unknown service — let the bind fail naturally.
-    return True
+        return True
+    except FileExistsError:
+        # Another launcher holds the lock; respect it while the owner is alive.
+        try:
+            with open(lock_path, encoding="utf-8") as f:
+                owner = int(f.read().strip() or "0")
+        except Exception:
+            owner = 0
+        if owner and _pid_alive(owner):
+            _log.warning(
+                f"[Launcher] Another launcher (pid {owner}) owns {lock_path}; exiting "
+                "(avoid dual-instance agent management)."
+            )
+            return False
+        # Stale lock (owner crashed/exited) — take it over.
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+        return _ensure_single_launcher(port)
 
 
 def main():

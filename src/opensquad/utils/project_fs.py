@@ -108,7 +108,10 @@ def _under_root(root: str, abs_path: str) -> bool:
 
 
 def resolve_under_root(root: str, rel_or_abs: str | None) -> str | None:
-    """Resolve *rel_or_abs* under *root*. Empty / '.' → root itself."""
+    """Resolve *rel_or_abs* under *root*. Empty / '.' → root itself.
+
+    Sandboxed: returns None when the target escapes *root* (writes only).
+    """
     root_abs = os.path.normcase(os.path.abspath(root))
     raw = (rel_or_abs or "").strip()
     if not raw or raw in (".", "./"):
@@ -123,12 +126,26 @@ def resolve_under_root(root: str, rel_or_abs: str | None) -> str | None:
     return candidate
 
 
-def list_dir(root: str, rel_path: str | None = None) -> dict[str, Any]:
-    """List one directory level under *root*."""
+def resolve_for_read(root: str, rel_or_abs: str | None) -> str:
+    """Resolve *rel_or_abs* for READ access — no project-root sandbox.
+
+    Read-only browse/preview (file tree, list, content) may target any
+    absolute path; relative paths resolve against *root* and may escape it.
+    Mutating operations keep using ``resolve_under_root()``.
+    """
     root_abs = os.path.normcase(os.path.abspath(root))
-    target = resolve_under_root(root_abs, rel_path)
-    if target is None:
-        return {"error": "Path outside project root", "status": 403}
+    raw = (rel_or_abs or "").strip()
+    if not raw or raw in (".", "./"):
+        return root_abs
+    if os.path.isabs(raw):
+        return os.path.normcase(os.path.abspath(raw))
+    return os.path.normcase(os.path.abspath(os.path.join(root_abs, raw)))
+
+
+def list_dir(root: str, rel_path: str | None = None) -> dict[str, Any]:
+    """List one directory level under *root* (read-only; outside paths allowed)."""
+    root_abs = os.path.normcase(os.path.abspath(root))
+    target = resolve_for_read(root_abs, rel_path)
     if not os.path.isdir(target):
         return {"error": f"Not a directory: {rel_path or '.'}", "status": 404}
 
@@ -331,13 +348,15 @@ def _looks_text(path: str, sample: bytes) -> bool:
 
 
 def read_file(root: str, rel_path: str | None) -> dict[str, Any]:
-    """Read a text or image file under *root* (truncated for UI)."""
+    """Read a text or image file under *root* (truncated for UI).
+
+    Read-only preview is not sandboxed: absolute paths outside *root* (e.g.
+    a shared plugin dir) are displayable; only writes stay inside the root.
+    """
     root_abs = os.path.normcase(os.path.abspath(root))
     if not rel_path or not str(rel_path).strip():
         return {"error": "path is required", "status": 400}
-    target = resolve_under_root(root_abs, rel_path)
-    if target is None:
-        return {"error": "Path outside project root", "status": 403}
+    target = resolve_for_read(root_abs, rel_path)
     if not os.path.isfile(target):
         return {"error": f"Not a file: {rel_path}", "status": 404}
 

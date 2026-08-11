@@ -1158,11 +1158,74 @@ async def main(agent_dir: str, override_port: int | None = None):
     )
 
 
+def _agent_lock_path(agent_dir: str) -> str:
+    return os.path.join(agent_dir, "data", "agents_boot.lock")
+
+
+def _agent_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _acquire_agent_lock(agent_dir: str) -> bool:
+    """Single-instance guard for one agent-dir across Python installs.
+
+    A second launcher from another environment (uv-tools vs anaconda3) can
+    spawn a duplicate ``agents_boot`` for the same agent-dir; both then fight
+    over the same gateway registration and the UI shows a "重连中" reconnect
+    loop. An atomic O_EXCL lockfile keyed on the agent-dir lets only ONE boot
+    process proceed; the duplicate exits immediately.
+    """
+    lock_path = _agent_lock_path(agent_dir)
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    except OSError:
+        pass
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        try:
+            with open(lock_path, encoding="utf-8") as f:
+                owner = int(f.read().strip() or "0")
+        except Exception:
+            owner = 0
+        if owner and _agent_pid_alive(owner):
+            print(
+                f"[agents_boot] Another agent process (pid {owner}) already boots "
+                f"{agent_dir}; exiting (single-instance guard).",
+                flush=True,
+            )
+            return False
+        # Stale lock (owner crashed/exited) — take it over.
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+        return _acquire_agent_lock(agent_dir)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Boot an AI agent from config")
     parser.add_argument("--agent-dir", required=True, help="Path to agent directory containing config.json")
     parser.add_argument("--port", type=int, help="Override web server port")
     args = parser.parse_args()
 
+    if not _acquire_agent_lock(args.agent_dir):
+        sys.exit(0)
+
     with contextlib.suppress(KeyboardInterrupt, SystemExit):
         asyncio.run(main(args.agent_dir, override_port=args.port))
+
+    # Best-effort release of the lockfile on normal exit.
+    try:
+        os.remove(_agent_lock_path(args.agent_dir))
+    except OSError:
+        pass

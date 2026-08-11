@@ -697,17 +697,28 @@ class ChatAPI:
         # Some models output both text AND tool_calls in the same response.
         if self.req and self.req[-1].get("role") == "assistant":
             last_msg = self.req[-1]
-            # If it has content text, keep it and add tool_calls
-            last_msg["tool_calls"] = [
-                {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(tool_args, ensure_ascii=False) if tool_args else "{}",
-                    },
-                }
-            ]
+            new_call = {
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(tool_args, ensure_ascii=False) if tool_args else "{}",
+                },
+            }
+            existing = last_msg.get("tool_calls")
+            if isinstance(existing, list):
+                # Parallel tool calls: MERGE instead of overwriting. The LLM can
+                # emit several tool_calls in one turn; each tool result arrives
+                # via its own add_tool_result. Overwriting here dropped sibling
+                # calls from the assistant message while their tool responses
+                # stayed in history — those responses became orphaned and the
+                # next request 400'd ("tool_call_ids did not have response
+                # messages"). De-dup by id in case a call is reported twice.
+                ids = {c.get("id") for c in existing}
+                if tool_call_id not in ids:
+                    last_msg["tool_calls"] = [*existing, new_call]
+            else:
+                last_msg["tool_calls"] = [new_call]
             # If content was empty (pure tool_call response), set to null for OpenAI compatibility
             if not last_msg.get("content"):
                 last_msg["content"] = None
@@ -1923,24 +1934,34 @@ class ChatAPI:
         )
 
         if self._prev_reasoning_content and messages:
-            injected = False
-            for m in reversed(messages):
+            injected = 0
+            for m in messages:
                 if m.get("role") != "assistant":
                     continue
                 # With tool involvement, the following assistant turn must carry
-                # reasoning; without it, any assistant message qualifies. Either
-                # way only the MOST RECENT one needs it.
+                # reasoning; without it, any assistant message qualifies. We
+                # patch EVERY assistant message that is missing reasoning_content
+                # (not just the most recent one): Console Go's thinking mode
+                # requires reasoning_content to be passed back on every
+                # historical tool-call assistant message. Pure tool-loop turns
+                # (request ends with a tool message) return NO reasoning from the
+                # upstream, so those assistant messages land in history without
+                # the field — leaving even one of them unpatched triggers a 400
+                # ("The reasoning_content in the thinking mode must be passed
+                # back to the API"). Only MISSING ones are patched (typically a
+                # handful), so this stays far below the token blow-up that the
+                # old "inject into ALL 121 messages" logic caused.
                 needs = (m.get("tool_calls") or m.get("content")) if not has_tool_involvement else m.get("tool_calls")
                 if not needs:
                     continue
                 if "reasoning_content" not in m:
                     m["reasoning_content"] = self._prev_reasoning_content
-                    injected = True
-                    logger.debug(
-                        f"[ChatAPI] Injected _prev_reasoning_content into latest assistant message, len={len(self._prev_reasoning_content)}"
-                    )
-                break
-            if not injected:
+                    injected += 1
+            if injected:
+                logger.debug(
+                    f"[ChatAPI] Injected _prev_reasoning_content into {injected} assistant message(s) missing reasoning, len={len(self._prev_reasoning_content)}"
+                )
+            else:
                 # P1-6: failing to inject is EXPECTED when the conversation has
                 # no assistant message yet (e.g. a fresh session whose first
                 # message is user-only) — that is not an error worth a WARNING

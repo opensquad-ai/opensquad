@@ -62,17 +62,112 @@
 /* Mermaid diagrams in Agent Web replies */
 .ai-markdown .ai-mermaid {
   margin: 0.75rem 0;
-  padding: 0.75rem;
-  overflow-x: auto;
+  padding: 0.5rem;
+  overflow: auto;
   border-radius: 0.5rem;
   border: 1px solid rgba(127, 127, 127, 0.25);
   background: rgba(127, 127, 127, 0.06);
 }
-.ai-markdown .ai-mermaid svg {
-  max-width: 100%;
-  height: auto;
+/* Diagrams render at natural size (wide ones scroll horizontally);
+   JS sets explicit px width/height when zooming. */
+.ai-markdown .ai-mermaid-svg {
+  cursor: zoom-in;
+  min-height: 3rem;
+}
+.ai-markdown .ai-mermaid-svg svg {
   display: block;
-  margin: 0 auto;
+  margin: 0;
+  width: auto;
+  height: auto;
+  max-width: none !important;
+}
+.ai-markdown .ai-mermaid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed rgba(127, 127, 127, 0.25);
+  user-select: none;
+}
+.ai-markdown .ai-mermaid-tool {
+  appearance: none;
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  color: inherit;
+  border-radius: 0.375rem;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+.ai-markdown .ai-mermaid-tool:hover {
+  background: rgba(127, 127, 127, 0.25);
+}
+.ai-markdown .ai-mermaid-scale {
+  font-size: 11px;
+  opacity: 0.7;
+  min-width: 2.8rem;
+  text-align: center;
+}
+
+/* Fullscreen diagram viewer (zoom / pan) */
+.ai-mmd-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  flex-direction: column;
+}
+.ai-mmd-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.ai-mmd-title {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-right: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-mmd-btn {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  border-radius: 0.375rem;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+}
+.ai-mmd-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.ai-mmd-close {
+  font-size: 16px;
+}
+.ai-mmd-scale {
+  font-size: 12px;
+  color: #fff;
+  min-width: 3rem;
+  text-align: center;
+}
+.ai-mmd-body {
+  flex: 1;
+  overflow: auto;
+  cursor: grab;
+  padding: 24px;
+}
+.ai-mmd-body svg {
+  display: block;
+  max-width: none !important;
 }
 .ai-markdown .ai-mermaid-fallback {
   margin: 0;

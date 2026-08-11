@@ -192,6 +192,12 @@ def _is_path_safe(path: str) -> bool:
     Check path safety.
     Delegates to opensquad.utils.path_utils.is_path_safe which supports
     workspace root and whitelist directories.
+
+    Policy: only MUTATING tools (write_file / replace_in_file / delete_file /
+    create_directory) are gated by this check. Read-only tools (list_directory,
+    read_file, search_files, find_files) intentionally skip the whitelist so
+    browsing / searching outside the workspace is never rejected — reads have
+    no side effects and the UI needs them for file-tree navigation.
     """
     return _is_path_safe_unified(path, extra_allowed_dirs=_EXTRA_ALLOWED_DIRS)
 
@@ -280,8 +286,6 @@ def list_directory(path: str = ".") -> dict[str, Any]:
     List directory contents.
     """
     resolved = _resolve_path(path)
-    if not _is_path_safe(resolved):
-        return {"status": "error", "message": "Security Denied: Path outside project."}
 
     try:
         items = os.listdir(resolved)
@@ -317,9 +321,6 @@ def read_file(path: str, start_line: int = 1, end_line: int = -1, max_lines: int
         end_line: Ending line number (-1 means auto-limit to max_lines), default -1.
         max_lines: Maximum lines to read when end_line=-1, default 200. Set to -1 to read all.
     """
-    if not _is_path_safe(path):
-        return {"status": "error", "message": "Security Denied: Path outside project."}
-
     resolved = _resolve_path(path)
 
     try:
@@ -394,9 +395,6 @@ def search_files(
         context_lines: Show N lines of context before and after each match (like grep -C N), default 0.
         max_results: Maximum number of matches to return, default 100.
     """
-    if not _is_path_safe(path):
-        return {"status": "error", "message": "Security Denied: Path outside project."}
-
     resolved = _resolve_path(path)
 
     if not pattern:
@@ -540,9 +538,6 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
         sort_by: Sort order: "name" (default, by name) or "mtime" (by modification time, newest first).
         max_results: Maximum number of results, default 200.
     """
-    if not _is_path_safe(path):
-        return {"status": "error", "message": "Security Denied: Path outside project."}
-
     resolved = _resolve_path(path)
 
     try:
@@ -553,7 +548,7 @@ def find_files(path: str = ".", pattern: str = "**/*", sort_by: str = "name", ma
         rel_files = []
 
         for f in files:
-            if not _is_path_safe(f) or not os.path.isfile(f):
+            if not os.path.isfile(f):
                 continue
 
             # Check if the path contains any excluded directories
