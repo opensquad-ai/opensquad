@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.43]                                                               | 2026-08-11 | [0.8.42 → 0.8.43](https://github.com/opensquad-ai/opensquad/compare/v0.8.42...v0.8.43) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.43) |
 | [0.8.42]                                                               | 2026-08-10 | [0.8.41 → 0.8.42](https://github.com/opensquad-ai/opensquad/compare/v0.8.41...v0.8.42) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.42) |
 | [0.8.41]                                                               | 2026-08-10 | [0.8.40 → 0.8.41](https://github.com/opensquad-ai/opensquad/compare/v0.8.40...v0.8.41) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.41) |
 | [0.8.40]                                                               | 2026-08-10 | [0.8.30 → 0.8.40](https://github.com/opensquad-ai/opensquad/compare/v0.8.30...v0.8.40) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.40) |
@@ -35,6 +36,36 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.43] — 2026-08-11
+
+> Desktop: end-to-end auto-update. The packaged app now polls GitHub
+> releases in the background (30s after launch, then hourly), asks the
+> user before installing, downloads the new installer, runs it silently,
+> and relaunches the freshly installed app with the old process and its
+> backend killed first so ports 9555/9600 never collide. Also surfaces
+> installer failures in a native dialog instead of failing silently.
+
+### Added
+
+- **Desktop auto-update flow.** `main.ts` already polled for updates and
+  broadcast `electron:update-available`, but no renderer listened. The
+  frontend now subscribes, dedupes by version within the session, prompts
+  with a confirm dialog, and drives the same download-and-install path as
+  the manual "Check for updates" button (download → NSIS `/S` silent
+  install). Failure surfaces in a dialog.
+- **Installer relaunches the app after a silent install.** `customInstall`
+  now runs `ExecShell open "$INSTDIR\...exe"` when installed with `/S`.
+  `customCheckAppRunning` already killed the old app and its `run.exe`
+  backend before file copy, so ports 9555/9600 are free for the new
+  instance — no "address already in use" on first boot. Interactive
+  installs keep the standard finish-page checkbox.
+- **Installer error dialogs.** Setup failures (backend binary missing,
+  agent runtime setup errors, etc.) now pop a native error box with the
+  actual message instead of failing silently; cancelled installs stay
+  silent.
 
 ---
 

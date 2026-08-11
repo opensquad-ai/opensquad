@@ -46,6 +46,16 @@ declare global {
         transferred?: number
         total?: number
       }) => void) => () => void
+      onUpdateAvailable?: (callback: (info: {
+        hasUpdate: boolean
+        currentVersion: string
+        latestVersion: string
+        downloadUrl?: string
+        fileName?: string
+        releaseNotes?: string
+        isBeta: boolean
+        releaseUrl?: string
+      }) => void) => () => void
       onMaximizedChanged?: (callback: (maximized: boolean) => void) => () => void
     }
   }

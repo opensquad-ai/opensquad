@@ -33,6 +33,29 @@ contextBridge.exposeInMainWorld('electronEnv', {
     ipcRenderer.on('electron:update-status', listener)
     return () => ipcRenderer.removeListener('electron:update-status', listener)
   },
+  onUpdateAvailable: (callback: (info: {
+    hasUpdate: boolean
+    currentVersion: string
+    latestVersion: string
+    downloadUrl?: string
+    fileName?: string
+    releaseNotes?: string
+    isBeta: boolean
+    releaseUrl?: string
+  }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, info: {
+      hasUpdate: boolean
+      currentVersion: string
+      latestVersion: string
+      downloadUrl?: string
+      fileName?: string
+      releaseNotes?: string
+      isBeta: boolean
+      releaseUrl?: string
+    }) => callback(info)
+    ipcRenderer.on('electron:update-available', listener)
+    return () => ipcRenderer.removeListener('electron:update-available', listener)
+  },
   onMaximizedChanged: (callback: (maximized: boolean) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, maximized: boolean) => callback(maximized)
     ipcRenderer.on('electron:maximized-changed', listener)

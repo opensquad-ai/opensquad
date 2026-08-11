@@ -14,6 +14,7 @@ import { ChatState, Message, MessageType, Attachment, Group, User } from './type
 import { authAPI, userAPI, groupAPI, messageAPI, uploadAPI, getAuthToken, directMessageAPI, adminAPI } from './services/api';
 import { preloadSystemConfig } from './services/configCache';
 import { wsService } from './services/websocket';
+import { beginDesktopUpdate, failDesktopUpdate } from './services/desktopUpdateOverlay';
 import { AvatarImg } from './components/AvatarImg';
 import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
@@ -231,6 +232,47 @@ const App: React.FC = () => {
     window.addEventListener('openThemeSettings', openTheme);
     return () => window.removeEventListener('openThemeSettings', openTheme);
   }, []);
+
+  // ─── Desktop 自动更新 ──────────────────────────────────────────────
+  // main.ts 的 startAutoUpdateChecker 在启动 30s 后 + 每 1h 轮询 GitHub
+  // releases，发现新版本即向所有窗口广播 electron:update-available。
+  // 这里弹确认框询问用户；接受后走与手动检查相同的下载安装流程。安装器
+  // （installer.nsh）在文件复制前已 kill 旧 App 与后端 run.exe，端口
+  // 9555/9600 在重启前已释放，新实例启动不会端口冲突。
+  // 已处理过的版本在会话内去重（ref），避免 1h 轮询重复弹窗；重启后
+  // 若新版本仍未安装，会再提示一次，不会永久静默。
+  const handledUpdateVersionsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const env = window.electronEnv;
+    if (!env?.onUpdateAvailable) return;
+
+    return env.onUpdateAvailable((info) => {
+      if (!info.hasUpdate) return;
+      if (handledUpdateVersionsRef.current.has(info.latestVersion)) return;
+      if (!info.downloadUrl || !info.fileName) return;
+
+      handledUpdateVersionsRef.current.add(info.latestVersion);
+      const confirmed = window.confirm(
+        t('systemConfig.about.desktopUpdateConfirm', { version: info.latestVersion }),
+      );
+      if (!confirmed) return;
+
+      beginDesktopUpdate(info.latestVersion);
+      void env
+        .downloadAndInstallUpdate?.({ url: info.downloadUrl, fileName: info.fileName })
+        .then((result) => {
+          if (!result.ok) {
+            failDesktopUpdate(result.error);
+            window.alert(result.error || t('systemConfig.about.desktopUpdateFailed'));
+          }
+        })
+        .catch((e: any) => {
+          const message = e?.message || t('systemConfig.about.desktopUpdateFailed');
+          failDesktopUpdate(message);
+          window.alert(message);
+        });
+    });
+  }, [t]);
 
   const [editName, setEditName] = useState('');
   const [editAvatar, setEditAvatar] = useState('');

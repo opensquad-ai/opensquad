@@ -41,4 +41,13 @@
   ${If} $0 != 0
     MessageBox MB_ICONEXCLAMATION "Agent runtime setup did not complete (exit $0).$\nYou can retry on first launch."
   ${EndIf}
+
+  ; Auto-update path: after a silent (/S) install, relaunch the freshly
+  ; installed app. customCheckAppRunning already killed the previous app and
+  ; its backend (run.exe) before file copy, so ports 9555/9600 are free for
+  ; the new instance — no "address already in use" on first boot. Interactive
+  ; installs keep the standard "Run OpenSquad" finish-page checkbox instead.
+  ${If} ${Silent}
+    ExecShell open "$INSTDIR\${PRODUCT_FILENAME}.exe"
+  ${EndIf}
 !macroend
