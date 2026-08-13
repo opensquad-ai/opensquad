@@ -32,8 +32,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-from .model_presets_static import STATIC_PRESETS
-
 
 # ── Vendor metadata (base_url is provided here; neither data source includes this info) ────────────────────────
 # Order determines the sort order of the frontend dropdown menu
@@ -542,6 +540,8 @@ async def initialize() -> None:
         # No persisted cache yet (e.g. a fresh offline deployment): fall back to
         # the bundled static vendor/model list so providers are still configurable.
         from copy import deepcopy
+
+        from .model_presets_static import STATIC_PRESETS
 
         _cached_presets = deepcopy(STATIC_PRESETS)
         n_providers = len(_cached_presets["providers"])

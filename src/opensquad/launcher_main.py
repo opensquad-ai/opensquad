@@ -534,7 +534,12 @@ def _start_launcher_ws_tunnel(management_port: int):
 
 
 def _start_management_server(port: int = MANAGEMENT_PORT):
-    """Start the HTTP management server in a dedicated thread"""
+    """Start the HTTP management server in a dedicated thread.
+
+    Canonical implementation lives here (nested ``ManagementHandler``).
+    ``opensquad._launcher_api`` is an unfinished extract of this handler and is
+    **not** imported — do not swap them without a dedicated parity PR.
+    """
     import hashlib
     import secrets
     import socket as _socket_mod

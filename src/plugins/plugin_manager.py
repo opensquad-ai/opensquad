@@ -32,6 +32,38 @@ logger = logging.getLogger("plugins.manager")
 # fetches / memory lookups but protects the main turn loop from indefinite
 # stalls. Hook handlers doing heavy I/O should spawn their own task.
 _HOOK_HANDLER_TIMEOUT = 10.0
+_RUNTIME_MANIFEST_KEYS = ("service", "service_toggle", "enabled")
+
+
+def merge_plugin_manifest(existing: dict, generated: dict) -> dict:
+    """Overlay generated @register metadata onto disk plugin.json, keep runtime keys."""
+    merged = dict(existing)
+    merged.update(generated)
+    for runtime_key in _RUNTIME_MANIFEST_KEYS:
+        if runtime_key in existing:
+            merged[runtime_key] = existing[runtime_key]
+    return merged
+
+
+def write_plugin_manifest_if_changed(manifest_path: str, generated: dict, existing: dict | None = None) -> str:
+    """Write plugin.json only when merged content differs. Returns created|updated|unchanged."""
+    if existing is None and os.path.isfile(manifest_path):
+        with open(manifest_path, encoding="utf-8") as f:
+            existing = json.load(f)
+    if existing is not None:
+        payload = merge_plugin_manifest(existing, generated)
+        if payload == existing:
+            return "unchanged"
+        action = "updated"
+    else:
+        payload = generated
+        action = "created"
+    parent = os.path.dirname(os.path.abspath(manifest_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return action
 
 
 class PluginManager:
@@ -529,16 +561,11 @@ class PluginManager:
             if os.path.isfile(manifest_path):
                 with open(manifest_path, encoding="utf-8") as f:
                     existing_manifest = json.load(f)
-                # Overlay generated metadata on top of existing, preserving runtime keys
-                merged = existing_manifest.copy()
-                merged.update(generated)
-                # Explicitly preserve critical runtime-only fields even if generated touched them
-                for runtime_key in ("service", "service_toggle", "enabled"):
-                    if runtime_key in existing_manifest:
-                        merged[runtime_key] = existing_manifest[runtime_key]
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(merged, f, indent=2, ensure_ascii=False)
-                logger.debug(f"[PluginManager] Merged plugin.json for '{name}'")
+                status = write_plugin_manifest_if_changed(manifest_path, generated, existing_manifest)
+                if status == "unchanged":
+                    logger.debug(f"[PluginManager] plugin.json unchanged for '{name}'")
+                else:
+                    logger.debug(f"[PluginManager] Merged plugin.json for '{name}'")
             else:
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(generated, f, indent=2, ensure_ascii=False)

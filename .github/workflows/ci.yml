@@ -133,9 +133,8 @@ jobs:
           run: uv sync --extra dev --extra websearch --python ${{ matrix.python-version }}
 
         - name: Run tests
-          # ~44 pre-existing failures (stale tests from earlier refactors, env
-          # plugin deps) predate this release; keep the job visible but
-          # non-blocking until the debt is paid down.
+          # Pre-existing failures: tests/known_failures.txt
+          # Keep the job visible but non-blocking until that list is empty.
           continue-on-error: true
           env:
             PYTHONPATH: src

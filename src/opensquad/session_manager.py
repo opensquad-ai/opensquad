@@ -356,14 +356,14 @@ class SessionManager:
                     self._adopt_disk_title_lock()
                 tmp_path = self.current_session_file + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    json.dump(data, f, ensure_ascii=False)
                 os.replace(tmp_path, self.current_session_file)
             if sid:
                 os.makedirs(self.history_dir, exist_ok=True)
                 hist_path = os.path.join(self.history_dir, f"{sid}.json")
                 tmp_h = hist_path + ".tmp"
                 with open(tmp_h, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    json.dump(data, f, ensure_ascii=False)
                 os.replace(tmp_h, hist_path)
                 self._cache_put(sid, data)
                 self._live_sessions[sid] = data
@@ -538,7 +538,7 @@ class SessionManager:
             os.makedirs(self.history_dir, exist_ok=True)
             file_path = os.path.join(self.history_dir, f"{sid}.json")
             with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False)
             self._cache_put(sid, data)
             self._truncate_log(sid)
             logger.info(f"[SessionManager] Archived session: {sid}")

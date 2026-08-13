@@ -1,13 +1,11 @@
 """
-Launcher Management API package — __init__.py re-exports the factory + server.
+Launcher Management API package — unfinished extract; NOT wired.
 
-This module provides the full HTTP management API that was extracted from
-launcher.py during commit 9cefa8a's refactor.  It exposes all /api/* and
-/_internal/* endpoints via a ThreadingHTTPServer running on the management port.
-
-Launcher.py imports _start_management_server from here and passes all required
-runtime state as arguments.  create_management_handler() builds a
-BaseHTTPRequestHandler subclass bound to that state.
+``launcher_main._start_management_server`` (nested ``ManagementHandler``) is the
+live HTTP API. This package was split out during an earlier refactor but
+``launcher_main`` never imported it. Do not delete until a dedicated parity PR
+swaps the nested handler over, and do not import this module from boot paths
+(it pulls the full handler graph).
 """
 
 from __future__ import annotations

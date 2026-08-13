@@ -25,6 +25,7 @@ import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
+import { TimelineRow } from './TimelineRow';
 import {
   SoloUserNavRail,
   buildUserNavNodesFromTimeline,
@@ -471,10 +472,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                         : undefined,
                     anchorId: entryKey,
                   };
-                  return isSolo ? (
-                    <SoloMessage key={entryKey} {...msgProps} />
-                  ) : (
-                    <MessageBubble key={entryKey} {...msgProps} />
+                  return (
+                    <TimelineRow key={entryKey}>
+                      {isSolo ? (
+                        <SoloMessage {...msgProps} />
+                      ) : (
+                        <MessageBubble {...msgProps} />
+                      )}
+                    </TimelineRow>
                   );
                 }
                 if (entry.kind === 'workflow') {
@@ -501,14 +506,15 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   }
                   const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
                   return (
-                    <SoloActivityRow
-                      key={entryKey}
-                      block={merged}
-                      expandLevel={expandLevel}
-                      embedVisualizations={false}
-                      uiMode={isSolo ? 'solo' : 'classic'}
-                      shellStreams={EMPTY_SHELL_STREAMS}
-                    />
+                    <TimelineRow key={entryKey}>
+                      <SoloActivityRow
+                        block={merged}
+                        expandLevel={expandLevel}
+                        embedVisualizations={false}
+                        uiMode={isSolo ? 'solo' : 'classic'}
+                        shellStreams={EMPTY_SHELL_STREAMS}
+                      />
+                    </TimelineRow>
                   );
                 }
                 return null;

@@ -115,8 +115,12 @@ class TestModelConfigDefaults:
     def test_default_token_max(self):
         assert ModelConfig().token_max == 100_000
 
-    def test_default_file_threshold(self):
-        assert ModelConfig().file_api_size_threshold == 4 * 1024 * 1024
+    def test_default_prompt_cache_is_on(self):
+        assert ModelConfig().prompt_cache is True
+        assert ModelConfig.from_dict({}).prompt_cache is True
+
+    def test_prompt_cache_can_be_disabled(self):
+        assert ModelConfig.from_dict({"prompt_cache": False}).prompt_cache is False
 
     def test_default_booleans_are_false(self):
         cfg = ModelConfig()

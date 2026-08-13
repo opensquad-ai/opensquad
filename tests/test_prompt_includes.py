@@ -52,3 +52,20 @@ def test_real_prompt_entries_expand(entry: str):
     assert "## 7. Memory System" in text
     # Size sanity: shared parts should still yield a full prompt
     assert len(text) > 20_000
+    # Heavy mode rulebooks stay out of the cached system prefix
+    assert "verifiable completion contract" not in text
+    assert "Cursor-style design before coding" not in text
+    assert "HARD RULE — you MUST call real tools" not in text
+    assert "mcp__{server_name}__{tool_name}" not in text
+    assert "goal__mark_achieved" in text
+
+
+def test_load_prompt_part_and_scheduled_helper():
+    from opensquad.prompt_includes import is_scheduled_task_turn, load_prompt_part
+
+    stub = load_prompt_part("parts/common_2.20_mode_stubs.md")
+    assert "goal__mark_achieved" in stub
+    with pytest.raises(ValueError):
+        load_prompt_part("../secret.md")
+    assert is_scheduled_task_turn("[Scheduled Task: daily]")
+    assert not is_scheduled_task_turn("hello")

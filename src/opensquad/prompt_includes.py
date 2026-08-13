@@ -7,11 +7,49 @@ are supported; cycles and path escape are rejected.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
 
 logger = logging.getLogger(__name__)
+
+
+def default_prompts_root() -> str:
+    """Return ``src/prompts`` (or the frozen equivalent next to this package)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.abspath(os.path.join(here, "..", "prompts"))
+    if os.path.isdir(candidate):
+        return candidate
+    alt = os.path.abspath(os.path.join(here, "prompts"))
+    return alt if os.path.isdir(alt) else candidate
+
+
+@functools.lru_cache(maxsize=32)
+def load_prompt_part(rel: str) -> str:
+    """Load ``src/prompts/{rel}`` (cached). ``rel`` is relative to the prompts root."""
+    rel = (rel or "").strip().replace("\\", "/")
+    if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel) or ".." in rel.split("/"):
+        raise ValueError(f"Invalid prompt part path: {rel!r}")
+    root = default_prompts_root()
+    path = os.path.abspath(os.path.join(root, rel))
+    try:
+        common = os.path.commonpath([root, path])
+    except ValueError as exc:
+        raise ValueError(f"Prompt part escapes prompts root: {rel!r}") from exc
+    if common != os.path.abspath(root):
+        raise ValueError(f"Prompt part escapes prompts root: {rel!r}")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Prompt part not found: {rel} ({path})")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def is_scheduled_task_turn(text: str) -> bool:
+    """True when this user turn was fired by the scheduled-task engine."""
+    t = (text or "").lstrip()
+    return t.startswith("[Scheduled Task") or t.lower().startswith("[scheduled task")
+
 
 _INCLUDE_RE = re.compile(r"\{\{\s*include:([^}]+?)\s*\}\}(\n?)")
 

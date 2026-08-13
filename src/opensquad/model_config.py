@@ -58,11 +58,11 @@ class ModelConfig:
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
     enable_repetition_check: bool = False
-    # Explicit prompt-caching opt-in for OpenAI-compatible providers that
-    # require a request flag (e.g. DeepSeek chat_template_kwargs.cache.use).
-    # OpenAI/other providers prefix-cache automatically; keep this off unless
-    # the endpoint documents an opt-in parameter.
-    prompt_cache: bool = False
+    # Prefix-cache opt-in for OpenAI-compatible providers that need a request
+    # flag (e.g. DeepSeek chat_template_kwargs.cache.use). OpenAI/Claude cache
+    # the stable system prefix automatically; the flag is a no-op there.
+    # Default on so DeepSeek (official URL or model name on Ark/compat) hits cache.
+    prompt_cache: bool = True
 
     # ── Claude-specific / thinking ──
     max_video_frames: int = 8
@@ -135,7 +135,7 @@ class ModelConfig:
             frequency_penalty=float(_get("frequency_penalty", 0.0)),
             presence_penalty=float(_get("presence_penalty", 0.0)),
             enable_repetition_check=_get("enable_repetition_check", False),
-            prompt_cache=_get("prompt_cache", False),
+            prompt_cache=_get("prompt_cache", True),
             # Claude-specific
             max_video_frames=min(int(_get("max_video_frames", 8)), 20),
             is_think=is_think,

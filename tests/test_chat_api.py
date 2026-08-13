@@ -266,3 +266,49 @@ class TestPrepareMessages:
 
         assert result == chat.req
         assert chat._auto_compressed is False
+
+
+class TestDeepSeekPromptCache:
+    def test_official_url(self):
+        from opensquad.chat_api import apply_deepseek_prompt_cache, wants_deepseek_prompt_cache
+
+        assert wants_deepseek_prompt_cache(True, "https://api.deepseek.com/v1", "deepseek-chat")
+        params = apply_deepseek_prompt_cache(
+            {},
+            prompt_cache=True,
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-chat",
+        )
+        assert params["extra_body"]["chat_template_kwargs"]["cache"]["use"] is True
+
+    def test_ark_model_name_without_deepseek_host(self):
+        from opensquad.chat_api import apply_deepseek_prompt_cache, wants_deepseek_prompt_cache
+
+        assert wants_deepseek_prompt_cache(
+            True,
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "deepseek-v4-pro",
+        )
+        params = apply_deepseek_prompt_cache(
+            {},
+            prompt_cache=True,
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            model="deepseek-v4-pro",
+        )
+        assert params["extra_body"]["chat_template_kwargs"]["cache"]["use"] is True
+
+    def test_opt_out_and_non_deepseek(self):
+        from opensquad.chat_api import apply_deepseek_prompt_cache, wants_deepseek_prompt_cache
+
+        assert not wants_deepseek_prompt_cache(False, "https://api.deepseek.com/v1", "deepseek-chat")
+        assert not wants_deepseek_prompt_cache(True, "https://api.openai.com/v1", "gpt-4")
+        params = apply_deepseek_prompt_cache(
+            {"model": "gpt-4"},
+            prompt_cache=True,
+            base_url="https://api.openai.com/v1",
+            model="gpt-4",
+        )
+        assert "extra_body" not in params
+
+    def test_chat_api_default_enables_cache_flag(self, chat):
+        assert chat._enable_prompt_cache is True

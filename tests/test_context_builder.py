@@ -13,6 +13,7 @@ from opensquad.context_builder import (
     ContextBuilder,
     build_context_prefix,
     build_dynamic_mcp_state,
+    collect_on_demand_prompt_parts,
 )
 
 
@@ -180,3 +181,27 @@ async def test_context_builder_build_returns_tuple():
     assert "tools" in llm_params
     assert "tool_choice" in llm_params
     assert isinstance(is_changed, bool)
+
+
+def test_on_demand_parts_empty_when_idle():
+    parts = collect_on_demand_prompt_parts()
+    assert parts == {}
+
+
+def test_on_demand_parts_load_only_active_modes():
+    goal = collect_on_demand_prompt_parts(goal_active=True)
+    assert "GOAL_MODE_RULES" in goal
+    assert "verifiable completion contract" in goal["GOAL_MODE_RULES"]
+    assert "PLAN_WORKFLOW_RULES" not in goal
+
+    plan = collect_on_demand_prompt_parts(mode="plan")
+    assert "PLAN_WORKFLOW_RULES" in plan
+    assert "Cursor-style design before coding" in plan["PLAN_WORKFLOW_RULES"]
+
+    sched = collect_on_demand_prompt_parts(scheduled_turn=True)
+    assert "SCHEDULED_TASK_RULES" in sched
+    assert "HARD RULE" in sched["SCHEDULED_TASK_RULES"]
+
+    mcp = collect_on_demand_prompt_parts(mcp_connected=True)
+    assert "MCP_USAGE_GUIDE" in mcp
+    assert "mcp__{server_name}__{tool_name}" in mcp["MCP_USAGE_GUIDE"]

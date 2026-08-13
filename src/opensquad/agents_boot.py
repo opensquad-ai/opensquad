@@ -503,14 +503,11 @@ def build_system_prompt(config: dict, agent_dir: str) -> str:
     # Collaboration protocol is injected per-turn via {{TEAM_COLLAB_CARDS}} by
     # context_base.py; nothing to do here at boot time.
 
-    # Inject MCP usage guide (only when mcp.enabled = true)
+    # Inject MCP usage guide (full examples are per-turn when servers exist)
     mcp_cfg = config.get("mcp", {})
     if mcp_cfg.get("enabled", True):
-        mcp_guide = _build_mcp_guide()
-        system_prompt = system_prompt.replace("{{MCP_GUIDE}}", mcp_guide)
-        # {{MCP_CURRENT_STATE}} is kept as a placeholder; runner.py replaces it each turn with the live state.
-        # Do NOT replace it at boot time, otherwise the placeholder disappears and runner cannot update it.
-        logger.info("[Boot] MCP guide injected")
+        system_prompt = system_prompt.replace("{{MCP_GUIDE}}", "")
+        logger.info("[Boot] MCP enabled (usage guide loaded on demand)")
     else:
         system_prompt = system_prompt.replace("{{MCP_GUIDE}}", "(MCP service is not enabled.)")
         system_prompt = system_prompt.replace("{{MCP_CURRENT_STATE}}", "(MCP service is not enabled.)")
@@ -540,42 +537,6 @@ Rules for these turns:
 2. Plain speech only: no emoji, emoticons, markdown, or decorative symbols (no *, **, #, backticks, _, ~, |, decorative brackets, ★, •, →, etc.). TTS would read them aloud. Use plain sentences and commas/periods only.
 3. If you deliberately choose not to speak this turn, reply with ONLY `[VOICE_NO_REPLY]` and nothing else.
 4. Do not mention the realtime_voice tag, VoiceAsk, or mouthpiece in a normal answer.
-"""
-
-
-def _build_mcp_guide() -> str:
-    """Build the MCP usage guide (generic version, without hard-coding specific server lists)"""
-    return """## MCP (Model Context Protocol) Service Usage Guide
-
-### What is MCP?
-MCP is a plugin system that extends your capabilities, allowing you to call external tools (e.g. browser, filesystem, database, etc.).
-The currently enabled MCP services and their tool details are shown in the "Current MCP Service Status" section below (updated in real time).
-
-### Tool Naming Convention
-- Format: `mcp__{server_name}__{tool_name}`
-- Example: `mcp__filesystem__read_file`, `mcp__windows-cli__execute_command`
-
-### How to Call MCP Tools
-
-**Direct call (recommended)** -- when you know the full tool name:
-```
-<tool_call name="mcp__{server}__{tool}">
-  <arguments>{"param": "value"}</arguments>
-</tool_call>
-```
-
-**Query available tools** -- when you are unsure:
-- `mcp_query.list_servers()` -- List all MCP server statuses
-- `mcp_query.get_all_tools()` -- View all available tool details
-
-**Dynamically add new services** -- when you need new capabilities:
-- `mcp_query.add_server(server_name, command, args, timeout)` -- Install immediately, no restart needed
-
-### Notes
-1. All Agents share a unified MCP configuration managed centrally in `data/mcp_config.json`
-2. You can enable/disable services through the MCP Manager in the admin panel
-
----
 """
 
 

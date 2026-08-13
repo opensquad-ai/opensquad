@@ -577,3 +577,9 @@
     0 -2px 12px rgba(0, 0, 0, 0.25),
     0 4px 24px rgba(0, 0, 0, 0.35);
 }
+
+/* Off-screen chat rows skip layout/paint (see TimelineRow.tsx). */
+.timeline-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}

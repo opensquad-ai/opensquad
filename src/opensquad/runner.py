@@ -4321,7 +4321,7 @@ class AgentRunner:
                 },
             }
 
-            logger.warning(
+            logger.debug(
                 "[Runner] _broadcast_token_stats: sid=%s used=%d max=%d pct=%.1f%% msgs=%d sys=%d tool=%d tool_defs=%d thought=%d overhead=%d",
                 sid or "-",
                 total,

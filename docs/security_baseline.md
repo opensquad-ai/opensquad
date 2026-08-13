@@ -8,17 +8,47 @@ today (not aspirational targets).
 | Fast gate | [`ci-fast.yml`](../.github/workflows/ci-fast.yml) | Push to `main`/`dev`, PRs → `dev` |
 | Full gate | [`ci.yml`](../.github/workflows/ci.yml) | PRs → `main` (release gate) |
 
+Known pre-existing pytest failures on the full gate are listed in
+[`tests/known_failures.txt`](../tests/known_failures.txt). `continue-on-error`
+stays on until that list is empty.
+
 ---
 
 ## Static Analysis (SAST)
 
 **Tool**: bandit (CI job `sast` in `ci.yml`)
 
-**Current mode**: strict — `--severity-level high --confidence-level high --exit-non-zero-on-failure`
+**Current mode**: high-severity / high-confidence scan
+(`bandit -r src/ --skip B101 --severity-level high --confidence-level high`).
+
+**Gate**: **non-blocking** — the step has `continue-on-error: true` because
+remaining findings (MD5 fingerprints, intentional `shell=True`) predate the
+current release. The job is still visible in CI.
 
 **Excluded checks**: B101 (assert statements — development use only)
 
 **ci-fast**: not run (keeps the daily gate cheap).
+
+---
+
+## Tests (full gate)
+
+**Tool**: pytest (CI job in `ci.yml`)
+
+**Gate**: **non-blocking** (`continue-on-error: true`). Coverage
+`--cov-fail-under=80` is requested but does not fail the workflow while the
+step continues on error. See [`tests/known_failures.txt`](../tests/known_failures.txt).
+
+**ci-fast**: a short pytest subset plus frontend `npm test` / `npm run build`
+(not a full `tsc` typecheck; `tsc` is in `ci.yml`).
+
+---
+
+## Typecheck (full gate)
+
+**Tool**: mypy (`uv run mypy src/opensquad/ --ignore-missing-imports --warn-unused-ignores`)
+
+**Gate**: **non-blocking** (`continue-on-error: true`; ~270 pre-existing errors).
 
 ---
 

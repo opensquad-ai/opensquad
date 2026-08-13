@@ -48,7 +48,6 @@ import {
   timelineHasVisibleChatContent,
   workflowToolEventKey,
   sealIncompleteWorkflows,
-  shouldTreatWorkflowComplete,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowBlock,
@@ -143,6 +142,7 @@ import {
   userNavAnchorDomId,
 } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
+import { TimelineRow } from './ai-chat/TimelineRow';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
@@ -161,17 +161,11 @@ import {
   type SlashCommandDef,
 } from './ai-chat/slashCommands';
 import { SoloContextFooter } from './ai-chat/SoloContextFooter';
-import { WorkflowContainer } from './ai-chat/WorkflowContainer';
-import { ThoughtBlock } from './ai-chat/ThoughtBlock';
-import { ToolCallBlock } from './ai-chat/ToolCallBlock';
-import { DelegateFold } from './ai-chat/DelegateFold';
-import { ShellJobFold } from './ai-chat/ShellJobFold';
 import { PlanBlock, PlanStep, parsePlanContent } from './ai-chat/PlanBlock';
 import { StatusBadge, AgentStatus } from './ai-chat/StatusBadge';
 import { SessionSidebar } from './ai-chat/SessionSidebar';
 import { SessionSearchModal } from './ai-chat/SessionSearchModal';
 import { ContextViewer, ContextEntry } from './ai-chat/ContextViewer';
-import { buildDisplayWorkflowItems } from '../utils/delegateGrouping';
 
 const SkillManagerPage = React.lazy(() =>
   import('./SkillManagerPage').then((m) => ({ default: m.SkillManagerPage })),
@@ -183,7 +177,6 @@ const RolesPage = React.lazy(() => import('./RolesPage'));
 import {
   applyJobStatus,
   applyJobStdout,
-  attachShellJobsToDisplayItems,
   seedShellStreamFromToolCall,
   sealShellStreamFromResult,
   rebuildShellStreamsFromTimeline,
@@ -249,363 +242,6 @@ interface UploadedFile {
   type?: string;
   duration?: number;
 }
-
-// ---- Workflow Block with event pagination ----
-const WORKFLOW_EVENTS_PAGE_SIZE = 10;
-
-const WorkflowBlockView: React.FC<{
-  block: WorkflowBlock;
-  blockKey: number;
-  turnStartedMs?: number;
-  shellStreams?: Record<string, ShellStreamState>;
-  onOpenFile?: (path: string) => void;
-}> = ({ block, blockKey, turnStartedMs, shellStreams = {}, onOpenFile }) => {
-  const displayItems = useMemo(
-    () => attachShellJobsToDisplayItems(buildDisplayWorkflowItems(block.events), shellStreams),
-    [block.events, shellStreams],
-  );
-  const totalEvents = displayItems.length;
-  // Trailing compression/summary may never get a following chat message to flip
-  // `completed`. But do NOT treat "all tools have results" as complete while this
-  // turn is still live (turnStartedMs set) — that auto-collapsed the fold between
-  // tool rounds while the agent was still working.
-  const effectivelyCompleted =
-    block.completed ||
-    (turnStartedMs == null && shouldTreatWorkflowComplete(block));
-  // After restart/hydrate, completed blocks used to paginate to the last 10 items
-  // and hide earlier DelegateFold / ShellJobFold. Keep folds always expanded.
-  const hasFolds = useMemo(
-    () => displayItems.some((i) => i.kind === 'delegation' || i.kind === 'shell_job'),
-    [displayItems],
-  );
-  const [visibleCount, setVisibleCount] = useState(() =>
-    totalEvents <= WORKFLOW_EVENTS_PAGE_SIZE ? totalEvents : WORKFLOW_EVENTS_PAGE_SIZE
-  );
-
-  // While the workflow is active, auto-grow visibleCount to always show all events.
-  // This prevents the sliding-window effect where new events push user-expanded
-  // tool calls out of the visible range.
-  // For completed workflows, the count is frozen so the user can use "Show more"
-  // — unless the block contains sub-agent / CMD folds (always show full nest).
-  useEffect(() => {
-    if (!effectivelyCompleted || hasFolds) {
-      setVisibleCount(totalEvents);
-    } else if (visibleCount > totalEvents) {
-      setVisibleCount(totalEvents);
-    }
-  }, [totalEvents, effectivelyCompleted, hasFolds]);
-
-  // For active workflows (or completed ones with folds), always show ALL events.
-  const effectiveCount = (!effectivelyCompleted || hasFolds) ? totalEvents : visibleCount;
-  const hiddenCount = Math.max(0, totalEvents - effectiveCount);
-  const visibleItems = hiddenCount <= 0
-    ? displayItems
-    : displayItems.slice(totalEvents - effectiveCount);
-
-  const handleShowMore = () => {
-    setVisibleCount(prev => Math.min(prev + WORKFLOW_EVENTS_PAGE_SIZE, totalEvents));
-  };
-
-  const displayStatus = effectivelyCompleted ? undefined : (block.status || undefined);
-
-  // Skip empty / lifecycle-only blocks (e.g. "New session started" → bare Completed).
-  const hasRenderableContent = visibleItems.some((item) => {
-    if (item.kind === 'delegation' || item.kind === 'shell_job') return true;
-    const evt = item.event;
-    if (evt.subAgent) return false;
-    if (evt.type === 'info') {
-      const infoObj = typeof evt.content === 'object' && evt.content !== null ? evt.content as any : null;
-      const text =
-        typeof evt.content === 'string'
-          ? evt.content
-          : (infoObj?.text || infoObj?.message || '');
-      if (/^New session started$/i.test(String(text).trim()) || /^Workflow started$/i.test(String(text).trim())) {
-        return false;
-      }
-    }
-    return true;
-  });
-  if (!hasRenderableContent) return null;
-
-  return (
-    <WorkflowContainer
-      status={displayStatus}
-      defaultOpen={!effectivelyCompleted}
-      startedMs={effectivelyCompleted ? undefined : turnStartedMs}
-      finalElapsedMs={block.elapsed_ms}
-    >
-      {hiddenCount > 0 && (
-        <button
-          onClick={handleShowMore}
-          className="w-full text-center py-1.5 text-xs text-primary hover:text-primary/80 hover:bg-primary/5 rounded transition-colors"
-        >
-          Show {Math.min(WORKFLOW_EVENTS_PAGE_SIZE, hiddenCount)} more events ({hiddenCount} hidden)
-        </button>
-      )}
-      {visibleItems.map((item, i) => {
-        if (item.kind === 'delegation') {
-          return (
-            <DelegateFold
-              key={item.key}
-              bundle={item.bundle}
-              variant="classic"
-            />
-          );
-        }
-        if (item.kind === 'shell_job') {
-          return (
-            <ShellJobFold
-              key={item.key}
-              bundle={item.bundle}
-              stream={shellStreams[item.bundle.id]}
-              variant="classic"
-            />
-          );
-        }
-
-        const evt = item.event;
-        // Nested under a delegate window — do not duplicate in the main stream.
-        if (evt.subAgent) return null;
-
-        // Use pre-assigned _uid for stable key during window shifts
-        const eventKey = item.key || evt._uid || `${evt.type}-${evt.timestamp}-${i}`;
-
-        if (evt.type === 'thought') {
-          return (
-            <ThoughtBlock
-              key={eventKey}
-              content={typeof evt.content === 'string' ? evt.content : JSON.stringify(evt.content)}
-              defaultOpen
-            />
-          );
-        }
-        if (evt.type === 'tool_call') {
-          const data = typeof evt.content === 'object' ? evt.content : {};
-          const status = evt.result ? (evt.resultStatus === 'error' ? 'error' : 'success') : 'running';
-          return (
-            <ToolCallBlock
-              key={eventKey}
-              persistKey={eventKey}
-              toolName={data.name || data.tool || 'Tool'}
-              args={data.arguments || data.args || data.input}
-              result={evt.result}
-              status={status}
-              subAgent={evt.subAgent}
-              subTaskLabel={evt.subTaskLabel}
-              diffOld={evt.diffOld}
-              diffNew={evt.diffNew}
-              diffStartLine={evt.diffStartLine}
-              onFileClick={onOpenFile}
-            />
-          );
-        }
-        if (evt.type === 'tool_result') {
-          const data = typeof evt.content === 'object' ? evt.content : {};
-          return (
-            <ToolCallBlock
-              key={eventKey}
-              persistKey={eventKey}
-              toolName={data.name || data.tool || 'Tool'}
-              result={typeof data.result === 'string' ? data.result : (data.output || JSON.stringify(data))}
-              status={data.error ? 'error' : 'success'}
-              subAgent={evt.subAgent}
-              subTaskLabel={evt.subTaskLabel}
-              onFileClick={onOpenFile}
-            />
-          );
-        }
-        if (evt.type === 'info') {
-          const isSubInfo = !!evt.subAgent;
-          const infoObj = typeof evt.content === 'object' && evt.content !== null ? evt.content as any : null;
-          const rawInfoText =
-            typeof evt.content === 'string'
-              ? evt.content
-              : (infoObj?.text || infoObj?.message || '');
-          if (/^New session started$/i.test(String(rawInfoText).trim()) || /^Workflow started$/i.test(String(rawInfoText).trim())) {
-            return null;
-          }
-
-          // Plan ↔ Build approval — interactive card lives above the composer;
-          // timeline shows a compact status line.
-          if (infoObj?.event === 'mode_switch_approval') {
-            const fromL = infoObj.from_mode === 'plan' ? 'Plan' : 'Build';
-            const toL = infoObj.to_mode === 'plan' ? 'Plan' : 'Build';
-            return (
-              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
-                Mode switch requested: {fromL} → {toL}
-                {infoObj.reason ? ` — ${infoObj.reason}` : ''}
-              </div>
-            );
-          }
-          if (infoObj?.event === 'mode_switch_resolved') {
-            const st = infoObj.status === 'denied' ? 'Denied' : 'Approved';
-            const toL = (infoObj.to_mode || infoObj.mode) === 'plan' ? 'Plan' : 'Build';
-            return (
-              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
-                Mode switch {st.toLowerCase()}: now {toL}
-              </div>
-            );
-          }
-          if (infoObj?.event === 'propose_options') {
-            const prompt = String(infoObj.prompt || '请选择一个选项');
-            const opts = (infoObj.options || []) as { id: string; title: string; description?: string }[];
-            const count = Array.isArray(opts) ? opts.length : 0;
-            return (
-              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
-                选项请求：{prompt}{count ? `（${count} 个选项）` : ''}
-              </div>
-            );
-          }
-          if (infoObj?.event === 'propose_options_resolved') {
-            const st = infoObj.status === 'ignored' ? '已忽略' : infoObj.status === 'custom' ? '自定义答案' : '已选择';
-            return (
-              <div key={eventKey} className="my-2 text-[11px] text-textMuted px-1">
-                选项已处理：{st}
-              </div>
-            );
-          }
-
-          // --- Task Supervisor check-in: special badge rendering ---
-          if (infoObj?.event === 'task_supervisor_checkin') {
-            const stall = infoObj.stall_count || 0;
-            const elapsed = Math.round(infoObj.elapsed_seconds || 0);
-            const sinceActivity = Math.round(infoObj.since_last_activity || 0);
-            const urgency = stall <= 2 ? 'reminder' : stall <= 4 ? 'warning' : 'urgent';
-            const urgencyColor = urgency === 'urgent' ? 'text-red-400 border-red-500/40 bg-red-500/5'
-              : urgency === 'warning' ? 'text-amber-400 border-amber-500/40 bg-amber-500/5'
-              : 'text-sky-400 border-sky-500/40 bg-sky-500/5';
-            const urgencyLabel = urgency === 'urgent' ? 'URGENT' : urgency === 'warning' ? 'WARNING' : 'REMINDER';
-            return (
-              <div key={eventKey} className={`flex flex-col gap-1 px-2 py-1.5 rounded-md border ${urgencyColor}`}>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] font-bold leading-none">&#x23F0;</span>
-                  <span className={`text-[10px] font-semibold leading-none`}>TASK SUPERVISOR · {urgencyLabel}</span>
-                  <span className="text-[9px] text-textMuted ml-auto">stall {stall} · {elapsed}s elapsed · idle {sinceActivity}s</span>
-                </div>
-                {infoObj.text && (
-                  <details className="rounded bg-bgDark border border-border/50">
-                    <summary className="cursor-pointer px-2 py-0.5 text-[10px] text-textMuted">View check-in message</summary>
-                    <pre className="text-[10px] leading-5 whitespace-pre-wrap break-words p-2 text-textMain max-h-[200px] overflow-auto">
-{infoObj.text}
-                    </pre>
-                  </details>
-                )}
-              </div>
-            );
-          }
-
-          const summaryText = infoObj?.event === 'context_summary_generated' && typeof infoObj?.summary === 'string'
-            ? infoObj.summary
-            : null;
-          // Build a meaningful label from the info content
-          const infoLabel = (() => {
-            if (summaryText) return 'Context summary generated';
-            if (typeof evt.content === 'string') return evt.content;
-            if (!infoObj) return 'Info';
-            // Structured events: use event name as category + text as description
-            const evtName = infoObj.event;
-            const evtText = infoObj.text;
-            if (evtName === 'model_card_switched') return `Model switched to ${infoObj.card || infoObj.model || 'new model'}`;
-            if (evtName === 'model_card_switch_failed') return evtText || `Model switch failed: ${infoObj.card || ''}`;
-            if (evtName === 'context_compressed') return evtText || 'Context compressed';
-            if (evtName === 'context_compress_skipped') return evtText || 'Context compression skipped';
-            if (evtName === 'incoming_messages') return `Received ${infoObj.count || ''} message(s) from ${infoObj.source || 'external'}`;
-            if (evtName === 'prompt_updated') return evtText || 'Prompt updated';
-            // Fallback: use text field, or event name, or stringify
-            if (evtText) return String(evtText).slice(0, 200);
-            if (evtName) return String(evtName).replace(/_/g, ' ');
-            return 'Info';
-          })();
-          // Determine if there's extra detail worth showing in a collapsible
-          const infoDetail = (() => {
-            if (summaryText) return summaryText;
-            if (!infoObj) return null;
-            // For incoming_messages, show the message list
-            if (infoObj.event === 'incoming_messages' && Array.isArray(infoObj.messages) && infoObj.messages.length > 0) {
-              return infoObj.messages.map((m: any) =>
-                `[${m.sender_name || m.source_name || 'unknown'}] ${m.content || ''}`
-              ).join('\n');
-            }
-            // For model switch, show full details
-            if (infoObj.event === 'model_card_switched') {
-              return `Card: ${infoObj.card || '-'}\nModel: ${infoObj.model || '-'}\nProtocol: ${infoObj.api_protocol || '-'}`;
-            }
-            // Generic: if there's a text field different from the label, show it
-            if (infoObj.text && String(infoObj.text).length > 60) return String(infoObj.text);
-            return null;
-          })();
-          return (
-            <div
-              key={eventKey}
-              className={`flex flex-col gap-1.5 px-2 py-1 rounded-md ${
-                isSubInfo
-                  ? 'bg-violet-500/5 border border-violet-500/20'
-                  : 'bg-blue-500/5 border border-blue-500/20'
-              }`}
-            >
-              <div className="flex items-center gap-1.5">
-                {isSubInfo
-                  ? <span className="text-[9px] text-violet-400 font-semibold leading-none flex-shrink-0">&#x21B3;&nbsp;Sub</span>
-                  : <span className="text-[11px]">&#x2139;&#xFE0F;</span>
-                }
-                <span className={`text-[11px] ${isSubInfo ? 'text-violet-400' : 'text-blue-400'}`}>
-                  {infoLabel}
-                </span>
-              </div>
-              {infoDetail && (
-                <details className="rounded bg-bgLight border border-border">
-                  <summary className="cursor-pointer px-2 py-1 text-[11px] text-textMuted">View details</summary>
-                  <pre className="text-[11px] leading-5 whitespace-pre-wrap break-words p-2 text-textMain max-h-[320px] overflow-auto">
-{infoDetail}
-                  </pre>
-                </details>
-              )}
-            </div>
-          );
-        }
-        if (evt.type === 'summary_stream') {
-          const data = typeof evt.content === 'object' && evt.content !== null ? evt.content as any : {};
-          const text = typeof data.text === 'string' ? data.text : '';
-          const done = !!data.done;
-          const pending = !!data.pending;
-          const statusLabel = done
-            ? (text ? 'Context summary completed' : 'Context compression completed (no summary generated)')
-            : (pending ? 'Waiting for context compression...' : 'Generating context summary...');
-          // When done, show the summary text in a collapsible <details> block
-          // so the user can always review the compressed content.
-          const bodyText = pending ? '' : (text || 'Summarizing...');
-          return (
-            <div key={eventKey} className={`flex flex-col gap-1.5 px-2 py-1 rounded-md ${done ? 'bg-emerald-500/5 border border-emerald-500/20' : 'bg-indigo-500/5 border border-indigo-500/20'}`}>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px]">{done ? '\u2705' : '\u2699\uFE0F'}</span>
-                <span className={`text-[11px] ${done ? 'text-emerald-400' : 'text-indigo-400'}`}>{statusLabel}</span>
-              </div>
-              {bodyText && (
-                done ? (
-                  <details className="rounded bg-bgLight border border-border mt-1">
-                    <summary className="cursor-pointer px-2 py-1 text-[11px] text-textMuted">View summary</summary>
-                    <pre className="text-[11px] leading-5 whitespace-pre-wrap break-words p-2 text-textMain max-h-[320px] overflow-auto">
-{bodyText}
-                    </pre>
-                  </details>
-                ) : (
-                  <pre className="text-[11px] leading-5 whitespace-pre-wrap break-words p-2 text-textMain max-h-[320px] overflow-auto rounded bg-bgLight border border-border">
-{bodyText}
-                  </pre>
-                )
-              )}
-            </div>
-          );
-        }
-        if (evt.type === 'plan') {
-          const steps = Array.isArray(evt.content) ? evt.content : parsePlanContent(evt.content);
-          return steps.length > 0 ? <PlanBlock key={eventKey} steps={steps} /> : null;
-        }
-        return null;
-      })}
-    </WorkflowContainer>
-  );
-};
 
 /** Expand any legacy archived_section folds into a flat timeline. */
 function flattenArchivedSections(entries: TimelineEntry[]): TimelineEntry[] {
@@ -8574,12 +8210,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 !isSolo && entry.data.role === 'assistant'
                   ? collectHtmlEmbedsPrecedingMessage(displayTimeline, i)
                   : [];
-              const bubble = isSolo
-                ? <SoloMessage key={entryKey} {...msgProps} anchorId={entryKey} />
-                : <MessageBubble key={entryKey} {...msgProps} anchorId={entryKey} />;
-              if (replyEmbeds.length === 0) return bubble;
+              if (replyEmbeds.length === 0) {
+                return (
+                  <TimelineRow key={entryKey}>
+                    {isSolo
+                      ? <SoloMessage {...msgProps} anchorId={entryKey} />
+                      : <MessageBubble {...msgProps} anchorId={entryKey} />}
+                  </TimelineRow>
+                );
+              }
               return (
-                <React.Fragment key={entryKey}>
+                <TimelineRow key={entryKey}>
                   {isSolo
                     ? <SoloMessage {...msgProps} anchorId={entryKey} />
                     : <MessageBubble {...msgProps} anchorId={entryKey} />}
@@ -8593,7 +8234,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                       />
                     ))}
                   </div>
-                </React.Fragment>
+                </TimelineRow>
               );
             }
             if (entry.kind === 'workflow') {
@@ -8631,16 +8272,17 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 ? turnStartedMs
                 : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
-                <SoloActivityRow
-                  key={entryKey}
-                  block={merged}
-                  expandLevel={workflowExpandLevel}
-                  turnStartedMs={turnMs}
-                  shellStreams={shellStreams}
-                  onOpenFile={openProjectFile}
-                  embedVisualizations={false}
-                  uiMode={uiMode}
-                />
+                <TimelineRow key={entryKey}>
+                  <SoloActivityRow
+                    block={merged}
+                    expandLevel={workflowExpandLevel}
+                    turnStartedMs={turnMs}
+                    shellStreams={shellStreams}
+                    onOpenFile={openProjectFile}
+                    embedVisualizations={false}
+                    uiMode={uiMode}
+                  />
+                </TimelineRow>
               );
             }
             if (entry.kind === 'status_hint') {
@@ -8669,8 +8311,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             if (entry.kind === 'task_fold') {
               const fold = entry.data;
               return (
+                <TimelineRow key={entryKey}>
                 <TaskFoldBlock
-                  key={entryKey}
                   title={fold.title}
                   messageCount={fold.messageCount}
                   eventCount={fold.eventCount}
@@ -8765,6 +8407,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                     return null;
                   })}
                 </TaskFoldBlock>
+                </TimelineRow>
               );
             }
             if (entry.kind === 'archived_section') {

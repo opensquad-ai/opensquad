@@ -13,6 +13,7 @@ import os
 from typing import Any
 
 from opensquad.context_base import inject_standard
+from opensquad.prompt_includes import is_scheduled_task_turn, load_prompt_part
 from opensquad.skill_loader import build_skills_prompt, get_loaded_skills
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,39 @@ def build_context_prefix(dynamic_parts: dict) -> str:
 
     body = "\n\n---\n\n".join(sections)
     return f"[System Context - Updated Each Round]\n\n{body}\n\n[/System Context]\n\n"
+
+
+def collect_on_demand_prompt_parts(
+    *,
+    mode: str = "",
+    goal_active: bool = False,
+    scheduled_turn: bool = False,
+    mcp_connected: bool = False,
+) -> dict[str, str]:
+    """Load mode/MCP rulebooks only when that mode is actually active.
+
+    Kept out of the cached system prompt so the prefix stays stable across turns.
+    """
+    parts: dict[str, str] = {}
+
+    def _load(key: str, rel: str) -> None:
+        try:
+            text = load_prompt_part(rel)
+        except Exception as exc:
+            logger.debug("[ContextBuilder] skip prompt part %s: %s", rel, exc)
+            return
+        if text:
+            parts[key] = text
+
+    if goal_active:
+        _load("GOAL_MODE_RULES", "parts/common_2.20_goal_mode.md")
+    if (mode or "").strip().lower() == "plan":
+        _load("PLAN_WORKFLOW_RULES", "parts/common_2.21_plan_workflow.md")
+    if scheduled_turn:
+        _load("SCHEDULED_TASK_RULES", "parts/common_2.22_scheduled_task_mode.md")
+    if mcp_connected:
+        _load("MCP_USAGE_GUIDE", "parts/common_3.2_mcp_guide_full.md")
+    return parts
 
 
 def build_dynamic_mcp_state(mcp_adapter) -> str:
@@ -90,18 +124,15 @@ class ContextBuilder:
     Stateless: create a new instance per turn, or reuse with fresh `build()` calls.
     """
 
-    # Anti-repetition reminder appended to every system prompt
+    # Anti-repetition reminder appended to every system prompt.
+    # Shell routing lives in the shared prompt (§2.4.1); keep this short so the
+    # cached system prefix does not grow by another copy of those rules.
     _REPETITION_REMINDER = (
         "\n\n[STRICT OPERATIONAL RULES]\n"
-        "1. ANTI-REPETITION:\n"
-        "   - Do NOT repeat your previous sentences or conversational filler.\n"
-        "   - If you find yourself outputting the same phrase as before, STOP immediately and proceed with a tool call or a new perspective.\n"
-        "   - When in a task-oriented loop, focus strictly on tool output and next actions. "
-        "Do NOT output repetitive 'I will now execute...' statements if you already said them.\n"
-        "2. COMMAND SELECTION:\n"
-        "   - For commands that complete quickly (e.g., git, pip install, python scripts < 2min), use `system.run_session_job` (persistent shell session).\n"
-        "   - For LONG-RUNNING services, SERVERS, or BACKGROUND tasks (e.g., npm run dev, starting an API, large builds), "
-        "YOU MUST USE `system.start_job` with non-blocking mode and poll by check_job."
+        "Do NOT repeat previous sentences or conversational filler. "
+        "In a task loop, call a tool or take a new action — do not restate "
+        "'I will now execute…'. Long-running servers/background jobs must use "
+        "`system.start_job` (not a blocking shell)."
     )
 
     def __init__(
@@ -271,6 +302,7 @@ class ContextBuilder:
                 logger.warning(f"[ContextBuilder] on_before_prompt hook error: {e}")
 
         # Agent Plan/Build mode instructions + tool schema gate
+        mode = ""
         try:
             from opensquad.agent_mode import (
                 MODE_PLAN,
@@ -320,14 +352,29 @@ class ContextBuilder:
 
         # Active /goal section (session-level completion contract)
         # 目标状态每轮注入 user 消息前缀，进度/暂停等更新不再触发 system prompt 重建。
+        goal_active = False
         try:
             from opensquad.goal_mode import get_goal, goal_prompt_section
 
-            goal_section = goal_prompt_section(get_goal())
+            goal_state = get_goal()
+            goal_section = goal_prompt_section(goal_state)
             if goal_section:
                 dynamic_parts["ACTIVE_GOAL"] = goal_section
+                goal_active = True
         except Exception as e:
             logger.warning(f"[ContextBuilder] goal_mode injection error: {e}")
+
+        try:
+            dynamic_parts.update(
+                collect_on_demand_prompt_parts(
+                    mode=mode,
+                    goal_active=goal_active,
+                    scheduled_turn=is_scheduled_task_turn(last_user_input),
+                    mcp_connected=bool(str(mcp_state or "").strip()),
+                )
+            )
+        except Exception as e:
+            logger.debug(f"[ContextBuilder] on-demand prompt parts error: {e}")
 
         # Anti-repetition reminder (skip shell guidance in Plan mode)
         try:

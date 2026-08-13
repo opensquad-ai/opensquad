@@ -84,7 +84,35 @@ def _get_tiktoken():
     return _tiktoken_mod
 
 
-__all__ = ["ChatAPI"]
+def wants_deepseek_prompt_cache(prompt_cache: bool, base_url: str = "", model: str = "") -> bool:
+    """True when DeepSeek-style ``chat_template_kwargs.cache.use`` should be sent.
+
+    Official DeepSeek hosts put ``deepseek`` in the URL. Volcengine Ark and
+    other OpenAI-compat gateways often use ``ark.cn-beijing.volces.com`` with a
+    ``deepseek-v4-*`` model name — match either.
+    """
+    if not prompt_cache:
+        return False
+    return "deepseek" in f"{base_url} {model}".lower()
+
+
+def apply_deepseek_prompt_cache(
+    request_params: dict,
+    *,
+    prompt_cache: bool,
+    base_url: str = "",
+    model: str = "",
+) -> dict:
+    """Mutate *request_params* in place; return the same dict."""
+    if not wants_deepseek_prompt_cache(prompt_cache, base_url, model):
+        return request_params
+    extra_body = dict(request_params.get("extra_body") or {})
+    extra_body["chat_template_kwargs"] = {"cache": {"use": True}}
+    request_params["extra_body"] = extra_body
+    return request_params
+
+
+__all__ = ["ChatAPI", "apply_deepseek_prompt_cache", "wants_deepseek_prompt_cache"]
 
 
 class ChatAPI:
@@ -175,7 +203,7 @@ class ChatAPI:
         self.use_file_api = config.use_file_api
         self.file_api_size_threshold = config.file_api_size_threshold
         # Explicit prompt-caching opt-in (OpenAI-compat providers only).
-        self._enable_prompt_cache = bool(getattr(config, "prompt_cache", False))
+        self._enable_prompt_cache = bool(getattr(config, "prompt_cache", True))
         # file_id cache: path -> file_id, avoids re-uploading the same file within a session
         self._file_id_cache: OrderedDict[str, str] = OrderedDict()  # path -> file_id LRU cache (max 1000)
         self.is_audio_output = config.is_audio_output
@@ -1997,10 +2025,12 @@ class ChatAPI:
         # Prompt caching (OpenAI-compat): DeepSeek-compatible endpoints opt in
         # via chat_template_kwargs.cache.use; OpenAI/other providers cache the
         # stable system prefix automatically, so nothing is injected there.
-        if self._enable_prompt_cache and (self.base_url or "").lower().find("deepseek") != -1:
-            extra_body = dict(request_params.get("extra_body") or {})
-            extra_body["chat_template_kwargs"] = {"cache": {"use": True}}
-            request_params["extra_body"] = extra_body
+        apply_deepseek_prompt_cache(
+            request_params,
+            prompt_cache=self._enable_prompt_cache,
+            base_url=self.base_url or "",
+            model=self.model or "",
+        )
 
         # Add tools parameter if provided (for Native Function Calling)
         if tools:
