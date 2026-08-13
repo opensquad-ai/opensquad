@@ -273,7 +273,7 @@ _plugin_services: dict[str, "PluginServiceProcess"] = {}
 
 # Global reentrant lock protecting _processes, _plugin_services, and all
 # launcher shared state (task heartbeats, stalled set).  Acquired by
-# launcher.py and _launcher_api.py for the same dicts.
+# launcher.py for the same dicts.
 _launcher_state_lock = threading.RLock()
 
 

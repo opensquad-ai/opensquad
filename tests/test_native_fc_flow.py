@@ -197,7 +197,7 @@ def test_streaming_parse():
     print(f"\n最终解析结果: {parsed_data}")
 
     if parsed_data:
-        tool_name, args_dict = parsed_data
+        tool_name, args_dict = parsed_data[0]
         assert tool_name == "test_tools__test_tool", f"❌ 工具名称错误: {tool_name}"
         assert args_dict == {"arg1": "test_value"}, f"❌ 参数错误: {args_dict}"
         print("\n✅ 流式解析测试通过")

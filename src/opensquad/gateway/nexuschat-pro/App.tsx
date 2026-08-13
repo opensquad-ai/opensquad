@@ -59,7 +59,7 @@ const App: React.FC = () => {
     return localStorage.getItem('nexus_selected_agent') || '';
   });
 
-  // LRU 多聊天缓存：最多同时保留 3 个 agent 聊天页面（keep-alive）
+  // 当前 Agent Web：切走即卸载，避免后台页继续占 WS / timeline CPU
   const [openAgentChats, setOpenAgentChats] = useState<string[]>(() => {
     const saved = localStorage.getItem('nexus_selected_agent');
     return saved ? [saved] : [];
@@ -78,7 +78,8 @@ const App: React.FC = () => {
       setOpenAgentChats((prev) => {
         const deduped = prev.filter((id) => id !== canonical && id !== raw);
         const updated = [...deduped, canonical];
-        return updated.length > 3 ? updated.slice(-3) : updated;
+        // One mounted Agent Web at a time: hidden copies still run WS + timeline.
+        return updated.slice(-1);
       });
       setSelectedAgentId(canonical);
       setCurrentView('ai-chat');
@@ -86,7 +87,7 @@ const App: React.FC = () => {
       setOpenAgentChats((prev) => {
         const deduped = prev.filter((id) => id !== raw);
         const updated = [...deduped, raw];
-        return updated.length > 3 ? updated.slice(-3) : updated;
+        return updated.slice(-1);
       });
       setSelectedAgentId(raw);
       setCurrentView('ai-chat');
@@ -1277,7 +1278,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* === AI Chat View (keep-alive: 最多 3 个 agent，切换时隐藏而非卸载) === */}
+      {/* === AI Chat View（仅挂载当前 agent；切走卸载） === */}
       {openAgentChats.map(agentId => (
           <div
             key={agentId}

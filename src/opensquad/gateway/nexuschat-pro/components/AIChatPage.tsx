@@ -143,6 +143,7 @@ import {
 } from './ai-chat/SoloUserNavRail';
 import { TaskFoldBlock } from './ai-chat/TaskFoldBlock';
 import { TimelineRow } from './ai-chat/TimelineRow';
+import { ChatTimeline } from './ai-chat/ChatTimeline';
 import { SoloModelPicker } from './ai-chat/SoloModelPicker';
 import { EffortPicker, type ReasoningEffort } from './ai-chat/EffortPicker';
 import { ModePicker, type AgentMode } from './ai-chat/ModePicker';
@@ -8168,22 +8169,34 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </div>
           </div>
         )}
-        <div className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative" style={{ minHeight: 0 }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
-          <div className={soloColumnClass}>
-          {/* Render timeline entries (messages + workflow blocks interleaved) */}
-          {/* Lazy loading indicator at top */}
-          {isLoadingMore && (
+        <ChatTimeline
+          scrollRef={messagesContainerRef}
+          entries={displayTimeline}
+          className="h-full overflow-y-auto px-2 sm:px-4 py-3 sm:py-4 relative"
+          style={{ minHeight: 0 }}
+          onScroll={handleMessagesScroll}
+          columnClass={soloColumnClass}
+          header={isLoadingMore ? (
             <div className="flex items-center justify-center py-3">
               <OpenSquadLoader size={18} className="mr-2" />
               <span className="text-xs text-textMuted">Loading earlier messages...</span>
             </div>
+          ) : null}
+          footer={(
+            <>
+          {(displayStreamingText || isStreaming) && (
+            <StreamingMessage
+              content={displayStreamingText}
+              isComplete={!isStreaming}
+              avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
+              variant={isSolo ? 'solo' : 'classic'}
+              senderName={agentProfile?.agent_name}
+            />
           )}
-
-
-          {displayTimeline.map((entry, i) => {
-            // Stable key from _uid prevents remounting during turn updates or lazy loading
-            const entryKey = entry._uid || `entry-${i}`;
-
+          <div ref={chatEndRef} />
+            </>
+          )}
+          renderEntry={(entry, i, entryKey) => {
             if (entry.kind === 'message') {
               const msgProps = {
                 message: entry.data,
@@ -8415,22 +8428,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               return null;
             }
             return null;
-          })}
-
-          {/* Streaming message (always at the very bottom) */}
-          {(displayStreamingText || isStreaming) && (
-            <StreamingMessage
-              content={displayStreamingText}
-              isComplete={!isStreaming}
-              avatarSrc={resolveChatAvatar(agentProfile?.chat_profile) ?? undefined}
-              variant={isSolo ? 'solo' : 'classic'}
-              senderName={agentProfile?.agent_name}
-            />
-          )}
-
-          <div ref={chatEndRef} />
-          </div>
-        </div>
+          }}
+        />
         </div>
 
         {/* Image & attachment preview */}

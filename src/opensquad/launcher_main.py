@@ -538,8 +538,8 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
     """Start the HTTP management server in a dedicated thread.
 
     Canonical implementation lives here (nested ``ManagementHandler``).
-    ``opensquad._launcher_api`` is an unfinished extract of this handler and is
-    **not** imported — do not swap them without a dedicated parity PR.
+    A previous unused extract under ``opensquad._launcher_api`` was removed;
+    do not reintroduce a second handler without a dedicated parity PR.
     """
     import hashlib
     import secrets

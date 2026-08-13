@@ -23,8 +23,12 @@ from opensquad.tools import filesystem, system
 
 def load_agent_config(agent_name: str):
     """加载 Agent 配置"""
+    import pytest
+
     project_root = os.environ.get("OPENSQUAD_WORKSPACE", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     config_path = os.path.join(project_root, "agents", agent_name, "config.json")
+    if not os.path.isfile(config_path):
+        pytest.skip(f"agent config not in this checkout: {config_path}")
     with open(config_path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -46,13 +50,13 @@ def test_config_loading():
     return model_config
 
 
-def test_strategy_selection(model_config):
+def test_strategy_selection():
     """测试 2: 策略选择"""
     print("\n" + "=" * 60)
     print("测试 2: 策略选择")
     print("=" * 60)
 
-    # 创建模拟的配置
+    model_config = load_agent_config("ultimate").get("model", {})
     config = {"model": model_config}
 
     # 创建真实的 registry
@@ -99,7 +103,7 @@ def test_tools_schema_generation():
     return tools
 
 
-def test_token_comparison(tools):
+def test_token_comparison():
     """测试 4: Token 使用量对比"""
     print("\n" + "=" * 60)
     print("测试 4: Token 使用量对比（估算）")
@@ -108,6 +112,7 @@ def test_token_comparison(tools):
     registry = ToolRegistry()
     registry.register(filesystem, "filesystem", level="core")
     registry.register(system, "system", level="core")
+    tools = registry.generate_openai_tools()
 
     # XML 模式：生成文本描述
     xml_descriptions = registry.generate_tool_descriptions()

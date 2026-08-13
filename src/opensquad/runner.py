@@ -4114,7 +4114,7 @@ class AgentRunner:
         try:
             from opensquad.agent_mode import filter_tools_for_mode, get_current_mode
 
-            raw = self.tool_registry.generate_openai_tools("all") if self.tool_registry else None
+            raw = self.tool_registry.generate_openai_tools("high") if self.tool_registry else None
             if not raw:
                 return None
             return filter_tools_for_mode(raw, get_current_mode())

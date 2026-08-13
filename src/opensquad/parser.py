@@ -90,11 +90,10 @@ _ESCAPE_RESTORE_MAP = {
     "\a": r"\a",  # bell (0x07)  -> \a  (e.g., C:\app)
     "\b": r"\b",  # backspace    -> \b  (e.g., C:\bin)
     "\f": r"\f",  # form feed    -> \f
-    "\n": r"\n",  # newline      -> \n  (only for paths, not intentional newlines)
-    "\r": r"\r",  # carriage ret -> \r
-    "\t": r"\t",  # tab          -> \t
     "\v": r"\v",  # vertical tab -> \v
-    # Note: '\0' (null) is rare in paths, skip
+    # Do not restore \n / \t / \r: multiline tool args (file writes) must keep
+    # real newlines. Windows path accidents for those letters are rarer than
+    # intentional content, and GLM-5 already unescapes \\n before parse.
 }
 
 

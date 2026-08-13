@@ -133,15 +133,19 @@ jobs:
           run: uv sync --extra dev --extra websearch --python ${{ matrix.python-version }}
 
         - name: Run tests
-          # Pre-existing failures: tests/known_failures.txt
-          # Keep the job visible but non-blocking until that list is empty.
+          env:
+            PYTHONPATH: src
+          # Legacy failures are xfailed via tests/known_failures.txt (conftest).
+          # New failures fail this job. Coverage floor is the next (advisory) step
+          # so --cov-fail-under cannot hollow-out the pytest gate.
+          run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html --cov-fail-under=0
+
+        - name: Coverage floor (advisory)
+          if: always() && matrix.python-version == '3.11'
           continue-on-error: true
           env:
             PYTHONPATH: src
-          # CI-5/CI-3: coverage gate now enforced explicitly here (the global
-          # addopts was removed so local pytest stays fast). fail_under=80 is
-          # read from [tool.coverage.report] in pyproject.toml.
-          run: uv run pytest tests/ -v --tb=short --cov=opensquad --cov-report=term-missing --cov-report=html --cov-fail-under=80
+          run: uv run coverage report --fail-under=80
 
         - name: Upload coverage report
           if: matrix.python-version == '3.11'
@@ -170,6 +174,7 @@ jobs:
           working-directory: src/opensquad/gateway/nexuschat-pro
           run: |
             npm install --no-package-lock
+            npm test
             npm run build
 
         - name: TypeScript type check

@@ -642,7 +642,7 @@ async def _prewarm_tool_schema(tool_registry: Any, agent_logger: logging.Logger)
     path. Runs in a thread so the GIL-bound imports never block the event loop.
     """
     try:
-        await asyncio.to_thread(tool_registry.generate_openai_tools, "all")
+        await asyncio.to_thread(tool_registry.generate_openai_tools, "high")
         await asyncio.to_thread(tool_registry.generate_tool_descriptions)
         agent_logger.info("[Boot] Tool schema prewarmed")
     except Exception as exc:

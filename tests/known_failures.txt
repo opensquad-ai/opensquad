@@ -1,16 +1,9 @@
 # Known pytest failures on the full CI gate (ci.yml).
-# Recorded 2026-08-13 on Windows / Python 3.13, `PYTHONPATH=src`.
-# Result: 862 passed, 1 skipped, 41 failed, 3 errors.
-# Do not remove `continue-on-error: true` from ci.yml until this list is empty.
+# Remaining entries are xfailed (strict) in tests/conftest.py — new failures
+# fail CI. Remove a line when that test is fixed so an unexpected pass also
+# fails (xpass).
 #
-# These predate the 2026-08 prompt-cache / write-path optimizations. Failures
-# in this file are stale tests, missing fixtures, or plugin-path assumptions —
-# not regressions from that work. Targeted tests for the new behavior all pass.
-
-# Collection errors
-tests/test_version_display.py  # FileNotFoundError: routes.py was split; helper extract fails at collection
-tests/test_sprint3.py::test_strategy_selection
-tests/test_sprint3.py::test_token_comparison
+# Do not put `continue-on-error: true` on the pytest job.
 
 # Failures
 tests/test_agent_runner_core.py::TestAgentRunnerDI::test_creates_with_context
@@ -24,33 +17,9 @@ tests/test_claude_google_native_fc.py::TestGoogleAPIToolConversion::test_convert
 tests/test_e2e_tool_calls.py::test_websearch_tool_call
 tests/test_ingress_policy.py::test_resolve_session_id_external_uses_primary
 tests/test_init_wizard.py::test_register_with_wrong_node_secret_still_blocked
-tests/test_integration.py::test_multiline_workflow
 tests/test_integration_sprint3.py::test_integration
 tests/test_model_config.py::TestModelConfigWithGoogleAPI::test_google_api_with_config
 tests/test_multi_model_adaptation.py::TestModelCapabilityRegistry::test_get_model_capability
-tests/test_native_fc_flow.py::test_prompt_cleanup
-tests/test_native_fc_flow.py::test_streaming_parse
 tests/test_parallel_sessions.py::test_message_router_idle_pushes_process_queue_to_primary
 tests/test_parallel_sessions.py::test_dispatcher_process_queue_starts_primary_turn
-tests/test_process_manager.py::TestReadJson::test_bom_json
-tests/test_process_manager.py::TestReadJson::test_file_not_found
-tests/test_process_manager.py::TestReadJson::test_invalid_json
-tests/test_sprint3.py::test_config_loading
 tests/test_sprint4_integration.py::TestEndToEndNativeFCFlow::test_complete_flow_native_fc_tool_call
-tests/test_token_stats_broadcast.py::test_broadcast_token_stats_falls_back_sid_and_emits
-tests/test_tool_call_strategy.py::TestXMLToolCallStrategy::test_parse_response_delegates_to_parser
-tests/test_tool_call_strategy.py::TestNativeToolCallStrategy::test_prepare_llm_call_generates_tools_schema
-tests/test_tool_call_strategy.py::TestNativeToolCallStrategy::test_remove_tool_format_section
-tests/test_tool_call_strategy.py::TestNativeFCToolCallParsing::test_parse_streaming_tool_call_single_chunk
-tests/test_tool_call_strategy.py::TestNativeFCToolCallParsing::test_parse_streaming_tool_call_multiple_chunks
-tests/test_tool_call_strategy.py::TestNativeFCToolCallParsing::test_preserve_skills_and_mcp_sections
-tests/test_tool_call_strategy.py::TestNativeFCToolCallParsing::test_skills_instructions_replacement_after_cleanup
-tests/test_tool_filtering.py::test_tool_filtering
-tests/test_websearch_structure.py::test_websearch_plugin_structure
-tests/test_websearch_structure.py::test_websearch_plugin_on_load_disabled
-tests/test_websearch_structure.py::test_websearch_service_script_exists
-tests/test_whisper_structure.py::test_whisper_plugin_structure
-tests/test_whisper_structure.py::test_whisper_plugin_on_load_disabled
-tests/test_whisper_structure.py::test_whisper_service_script_exists
-tests/test_xml_parser.py::test_parse_xml_arguments_multiline
-tests/test_xml_parser.py::test_parse_tool_call_with_newlines

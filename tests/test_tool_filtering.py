@@ -14,8 +14,13 @@ from plugins.plugin_manager import PluginManager
 
 
 def _agent_config_path(agent_name: str = "ultimate") -> str:
+    import pytest
+
     project_root = os.environ.get("OPENSQUAD_WORKSPACE", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(project_root, "agents", agent_name, "config.json")
+    path = os.path.join(project_root, "agents", agent_name, "config.json")
+    if not os.path.isfile(path):
+        pytest.skip(f"agent config not in this checkout: {path}")
+    return path
 
 
 async def test_tool_filtering():

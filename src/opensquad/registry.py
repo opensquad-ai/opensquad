@@ -9,6 +9,53 @@ from typing import Any, Union
 from .log_setup import get_tool_call_debug_logger
 from .tool import logger
 
+_FN_DESC_MAX = 160
+_PARAM_DESC_MAX = 96
+_FN_DESC_MAX_EXTENDED = 96
+
+
+def _clip_desc(text: str, limit: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[: limit - 1].rstrip() + "…"
+
+
+def _compact_json_schema(node: dict, *, strip_desc: bool = False) -> dict:
+    """Keep types/required; clip or drop verbose description strings."""
+    out = dict(node)
+    desc = out.get("description")
+    if strip_desc:
+        out.pop("description", None)
+    elif isinstance(desc, str):
+        out["description"] = _clip_desc(desc, _PARAM_DESC_MAX)
+    props = out.get("properties")
+    if isinstance(props, dict):
+        out["properties"] = {
+            key: _compact_json_schema(val, strip_desc=strip_desc) if isinstance(val, dict) else val
+            for key, val in props.items()
+        }
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _compact_json_schema(items, strip_desc=strip_desc)
+    return out
+
+
+def _compact_openai_tool(tool: dict, *, strip_param_desc: bool = False, fn_desc_max: int = _FN_DESC_MAX) -> dict:
+    """Shrink per-turn tool JSON without dropping names, types, or required keys."""
+    if not isinstance(tool, dict):
+        return tool
+    fn = tool.get("function")
+    if not isinstance(fn, dict):
+        return tool
+    new_fn = dict(fn)
+    if isinstance(new_fn.get("description"), str):
+        new_fn["description"] = _clip_desc(new_fn["description"], fn_desc_max)
+    params = new_fn.get("parameters")
+    if isinstance(params, dict):
+        new_fn["parameters"] = _compact_json_schema(params, strip_desc=strip_param_desc)
+    return {**tool, "function": new_fn}
+
 
 # PERF-13: ``get_type_hints`` is slow (evaluates string annotations / walks
 # MRO) and is invoked on every tool call.  Cache per-function.  We deliberately
@@ -208,9 +255,7 @@ class ToolRegistry:
                 # the two views of the tool set diverge.
                 if info["level"] == "hidden":
                     continue
-                desc = self._generate_single_tool_desc(
-                    namespace, self._ensure_module(info), detail=(info["level"] == "core")
-                )
+                desc = self._generate_single_tool_desc(namespace, self._ensure_module(info), detail=False)
                 descriptions.append(desc)
 
         if self._mcp_adapter:
@@ -376,7 +421,15 @@ class ToolRegistry:
                                 "parameters": self._extract_parameters_schema(func),
                             },
                         }
-                        tools.append(schema)
+                        # Core keeps clipped param docs (models + tests rely on them).
+                        # Extended/MCP drop param prose — names/types/required stay.
+                        tools.append(
+                            _compact_openai_tool(
+                                schema,
+                                strip_param_desc=(level != "core"),
+                                fn_desc_max=_FN_DESC_MAX if level == "core" else _FN_DESC_MAX_EXTENDED,
+                            )
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to generate schema for {namespace}.{name}: {e}")
 
@@ -385,8 +438,9 @@ class ToolRegistry:
             try:
                 with self._lock:
                     mcp_tools = self._mcp_adapter.get_all_tools()
-                # MCP tools are already in OpenAI format, add directly
-                tools.extend(mcp_tools)
+                tools.extend(
+                    _compact_openai_tool(t, strip_param_desc=True, fn_desc_max=_FN_DESC_MAX_EXTENDED) for t in mcp_tools
+                )
             except Exception as e:
                 logger.warning(f"Failed to get MCP tools: {e}")
 

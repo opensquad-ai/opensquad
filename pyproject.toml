@@ -164,7 +164,6 @@ ignore = [
 "conftest.py" = ["T201"]
 "src/opensquad/_syscfg/__init__.py" = ["F401"]  # re-exports
 "src/opensquad/_syscfg/_paths.py" = ["F401"]  # re-exports
-"src/opensquad/_launcher_api/__init__.py" = ["F821"]  # unreachable blocks after early returns
 "src/opensquad/launcher/__init__.py" = ["F401"]
 "src/opensquad/tools/agent_memory_tool/memory/__init__.py" = ["F401"]
 "src/plugins/sequential_think/sequential_thinking/__init__.py" = ["F401"]

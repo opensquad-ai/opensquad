@@ -22,6 +22,7 @@ import {
 } from '../../utils/sessionTimelineCache';
 import { useWorkflowExpandLevel, type WorkflowExpandLevel } from '../../utils/workflowExpandPref';
 import { useTextSelectionFreeze } from '../../hooks/useTextSelectionFreeze';
+import { ChatTimeline } from './ChatTimeline';
 import { SoloMessage } from './SoloMessage';
 import { MessageBubble, type ChatMessage } from './MessageBubble';
 import { SoloActivityRow, mergeWorkflowBlocks } from './SoloActivityRow';
@@ -437,13 +438,14 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
             </div>
           </div>
         )}
-        <div
-          ref={listRef}
+        <ChatTimeline
+          scrollRef={listRef}
+          entries={timeline}
           className="h-full min-h-0 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4"
           onScroll={handleScroll}
-        >
-          <div className={columnClass}>
-            {loading && timeline.length === 0 ? (
+          columnClass={columnClass}
+          header={
+            loading && timeline.length === 0 ? (
               showSpinner ? (
                 <div className="flex items-center justify-center text-textMuted text-xs gap-2 py-12">
                   <OpenSquadLoader size={18} /> 加载中…
@@ -453,9 +455,10 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
               )
             ) : error && timeline.length === 0 ? (
               <div className="px-1 py-8 text-[12px] text-rose-400 text-center">{error}</div>
-            ) : timeline.length === 0 ? null : (
-              timeline.map((entry, i) => {
-                const entryKey = entry._uid || `entry-${i}`;
+            ) : null
+          }
+          footer={<div ref={endRef} />}
+          renderEntry={(entry, i, entryKey) => {
                 if (entry.kind === 'message') {
                   const msgProps = {
                     message: entry.data,
@@ -518,11 +521,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   );
                 }
                 return null;
-              })
-            )}
-            <div ref={endRef} />
-          </div>
-        </div>
+          }}
+        />
       </div>
 
       {/* Classic: scroll-to-bottom centered above composer */}

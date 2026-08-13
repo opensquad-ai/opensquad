@@ -74,13 +74,13 @@ def _make_loader(filename: str):
         if filename != "routes.py"
         else os.path.join(_BACKEND_DIR, "app", "ai_web", "routes.py")
     )
-    fn_src = _extract_function(src, "_get_current_version")
 
     def _load():
+        if not os.path.isfile(src):
+            pytest.skip(f"{filename} is not present (legacy routes.py was split)")
+        fn_src = _extract_function(src, "_get_current_version")
         ns = {"__name__": f"_test_{filename.replace('.py', '')}"}
         exec(fn_src, ns)
-        # Bind a clean copy of the function so the closure / module attrs
-        # don't leak between tests.
         return ns["_get_current_version"]
 
     return _load

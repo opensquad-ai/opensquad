@@ -44,6 +44,7 @@ async def test_broadcast_token_stats_falls_back_sid_and_emits():
         _hist_requests=0,
         _hist_cache_read_tokens=0,
         _hist_cache_creation_tokens=0,
+        _token_stats_cache={},
         tool_registry=None,
         _current_tools=None,
         _tools_for_token_stats=lambda: None,
@@ -51,11 +52,13 @@ async def test_broadcast_token_stats_falls_back_sid_and_emits():
     # Bind real methods
     runner._resolve_token_stats_sid = AgentRunner._resolve_token_stats_sid.__get__(runner, type(runner))
     runner._chat_api_for_token_stats = AgentRunner._chat_api_for_token_stats.__get__(runner, type(runner))
+    runner._req_for_token_stats = AgentRunner._req_for_token_stats.__get__(runner, type(runner))
     runner._broadcast_token_stats = AgentRunner._broadcast_token_stats.__get__(runner, type(runner))
 
     sm = MagicMock()
     sm.get_focused_session_id.return_value = "sess-1"
     sm.get_current_session_id.return_value = "sess-1"
+    sm.ensure_session_loaded.return_value = {}
 
     emitted = []
 

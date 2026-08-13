@@ -19,14 +19,17 @@ def read_json(path: str, default: Any = None) -> Any:
     Args:
         path: Absolute path to the JSON file.
         default: Value returned when the file does not exist or is malformed.
+            ``None`` is treated as ``{}`` so launcher config reads stay dict-shaped.
 
     Returns:
         Parsed Python object, or *default* on any error.
     """
+    if default is None:
+        default = {}
     if not os.path.exists(path):
         return default
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         import logging

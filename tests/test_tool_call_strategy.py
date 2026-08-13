@@ -46,10 +46,11 @@ class TestXMLToolCallStrategy:
 
         result = strategy.parse_response(response_text)
 
-        # Should return parsed tool call
+        # Should return parsed tool call(s) as a list of (name, args)
         assert result is not None
-        assert result[0] == "websearch.search"
-        assert "query" in result[1]
+        name, args = result[0]
+        assert name == "websearch.search"
+        assert "query" in args
 
     def test_get_strategy_name(self):
         """Test strategy name is XML"""
@@ -244,10 +245,11 @@ class TestNativeFCToolCallParsing:
         # Parse
         result = strategy.parse_response(mock_response)
 
-        # Should return parsed tool call
+        # Should return parsed tool call (list of (name, args) for parallel FC)
         assert result is not None
-        assert result[0] == "websearch.search"
-        assert result[1] == {"query": "test"}
+        name, args = result[0]
+        assert name == "websearch.search"
+        assert args == {"query": "test"}
 
     def test_parse_streaming_tool_call_multiple_chunks(self):
         """Test parsing tool call from multiple streaming chunks"""
@@ -299,8 +301,9 @@ class TestNativeFCToolCallParsing:
 
         result3 = strategy.parse_response(chunk3)
         assert result3 is not None
-        assert result3[0] == "websearch.search"
-        assert result3[1] == {"query": "test"}
+        name, args = result3[0]
+        assert name == "websearch.search"
+        assert args == {"query": "test"}
 
     def test_preserve_skills_and_mcp_sections(self):
         """Test that Skills and MCP sections are preserved in Native FC mode"""

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Scan the whole source tree that ships in the bundle. The previous version
 # only scanned launcher_main.py + gateway/backend/app, which let bugs in
-# tools/, utils/, _launcher_api/, _syscfg/, gateway/plugin_registry/ and
+# tools/, utils/, _syscfg/, gateway/plugin_registry/ and
 # src/plugins/ slip through (B1/B2/B5/B6/B7 in the v0.4.8 audit).
 SCAN_ROOTS = [
     ROOT / "src" / "opensquad",

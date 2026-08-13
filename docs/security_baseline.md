@@ -9,8 +9,10 @@ today (not aspirational targets).
 | Full gate | [`ci.yml`](../.github/workflows/ci.yml) | PRs → `main` (release gate) |
 
 Known pre-existing pytest failures on the full gate are listed in
-[`tests/known_failures.txt`](../tests/known_failures.txt). `continue-on-error`
-stays on until that list is empty.
+[`tests/known_failures.txt`](../tests/known_failures.txt). Those nodeids are
+**xfailed (strict)** in `tests/conftest.py`. New failures fail the pytest job.
+An unexpected pass of a listed test also fails (xpass) until the line is
+removed from the list.
 
 ---
 
@@ -35,12 +37,15 @@ current release. The job is still visible in CI.
 
 **Tool**: pytest (CI job in `ci.yml`)
 
-**Gate**: **non-blocking** (`continue-on-error: true`). Coverage
-`--cov-fail-under=80` is requested but does not fail the workflow while the
-step continues on error. See [`tests/known_failures.txt`](../tests/known_failures.txt).
+**Gate**: **blocking** for new pytest failures. Listed nodeids in
+[`tests/known_failures.txt`](../tests/known_failures.txt) are xfailed.
+Coverage `--fail-under=80` is an **advisory** follow-up step
+(`continue-on-error: true`) so a coverage dip cannot hide a test regression.
 
 **ci-fast**: a short pytest subset plus frontend `npm test` / `npm run build`
-(not a full `tsc` typecheck; `tsc` is in `ci.yml`).
+(not a full `tsc` typecheck).
+
+**ci.yml frontend-smoke**: `npm test` + `npm run build` + `tsc --noEmit`.
 
 ---
 

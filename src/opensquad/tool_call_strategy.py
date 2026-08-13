@@ -11,6 +11,7 @@ The strategy pattern allows seamless switching between formats based on model ca
 import functools
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -206,18 +207,41 @@ class NativeToolCallStrategy(ToolCallStrategy):
         except Exception as e:
             logger.debug("[NativeFC] delta callback failed: %s", e)
 
+    _NATIVE_FC_NOTICE = (
+        "\n## Native Function Calling\n"
+        "This session uses Native Function Calling via the API `tools` parameter. "
+        "DO NOT emit XML format tool calls; use the structured tools parameter instead.\n\n"
+    )
+
+    def _strip_markdown_section(self, text: str, needle: str) -> str:
+        """Drop a ##/### section whose heading contains *needle* (until next heading)."""
+        pattern = re.compile(
+            rf"(?ms)^[ \t]*(#{{2,3}})[ \t]+[^\n]*{re.escape(needle)}[^\n]*\n.*?(?=^[ \t]*#{{2,3}}[ \t]|\Z)"
+        )
+        return pattern.sub("", text)
+
+    def _remove_tool_format_section(self, prompt: str) -> str:
+        """Strip leftover XML tool-format prose so Native FC is not double-instructed."""
+        text = prompt
+        text = self._strip_markdown_section(text, "Tool Call Format")
+        text = self._strip_markdown_section(text, "Built-in Tools")
+        text = self._strip_markdown_section(text, "Available Tools")
+        text = text.replace("{{TOOL_DESCRIPTIONS}}", "")
+        if "Native Function Calling" not in text:
+            text = self._NATIVE_FC_NOTICE + text
+        return text
+
     def prepare_llm_call(self, system_prompt: str) -> dict[str, Any]:
         """
         Generate OpenAI Tools schema and return call parameters.
 
         Returns:
-            - system_prompt: Prompt as-is (tool format instructions already in FC template)
+            - system_prompt: XML tool-format leftover stripped; Native FC notice added
             - tools: List of tool definitions in OpenAI format
             - tool_choice: "auto" (let model decide)
         """
-        # Generate OpenAI Tools JSON Schema with filtering
         tools = self.tool_registry.generate_openai_tools(tool_filter=self._tool_filter)
-
+        system_prompt = self._remove_tool_format_section(system_prompt)
         return {"system_prompt": system_prompt, "tools": tools, "tool_choice": "auto"}
 
     def parse_response(self, api_response) -> list[tuple[str, dict[str, Any]]] | None:

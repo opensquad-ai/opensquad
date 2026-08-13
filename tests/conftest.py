@@ -1,5 +1,6 @@
 """Shared fixtures for OpenSquad unit tests."""
 
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -118,3 +119,32 @@ def sample_dynamic_parts():
         "MEMORY_CONTEXT": "User mentioned Python project",
         "custom_key": "custom_value",
     }
+
+
+def _known_failure_ids() -> set[str]:
+    path = os.path.join(os.path.dirname(__file__), "known_failures.txt")
+    if not os.path.isfile(path):
+        return set()
+    out: set[str] = set()
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.split("#", 1)[0].strip()
+            if line:
+                out.add(line.replace("\\", "/"))
+    return out
+
+
+def pytest_collection_modifyitems(config, items):
+    """Xfail documented legacy failures so new regressions fail the gate."""
+    known = _known_failure_ids()
+    if not known:
+        return
+    mark = pytest.mark.xfail(
+        reason="listed in tests/known_failures.txt",
+        strict=True,
+        run=True,
+    )
+    for item in items:
+        nodeid = item.nodeid.replace("\\", "/")
+        if nodeid in known or nodeid.split("::", 1)[0] in known:
+            item.add_marker(mark)
