@@ -32,6 +32,7 @@ def build_context_prefix(dynamic_parts: dict) -> str:
         ("RUNTIME_STATE", "Runtime State"),
         ("TASK_STATE", "Task Plan"),
         ("MEMORY_CONTEXT", "Long-term Memory (Recalled This Round)"),
+        ("MCP_CURRENT_STATE", "MCP Service Status"),
     ]
     _known_keys = {k for k, _ in _ORDER}
 
@@ -157,8 +158,6 @@ class ContextBuilder:
         # Parallel sessions are independent: keep these per-session instead of
         # letting one pane's prompt snapshot suppress another pane's first emit.
         self._has_prompt_snapshot_by_sid: set[str] = set()
-        self._mcp_in_system_prompt_by_sid: dict[str, str] = {}
-        self._last_base_system_prompt_by_sid: dict[str, str] = {}
 
     def _state_sid(self) -> str:
         """Best-effort session id for per-session prompt cache state."""
@@ -207,7 +206,13 @@ class ContextBuilder:
         final = final.replace("{{SKILLS_INSTRUCTIONS}}", skills_prompt)
         final = final.replace("{{TASK_STATE}}", "")
 
-        # MCP two-stage injection
+        # MCP two-stage injection: MCP state ALWAYS rides the dynamic prefix
+        # (prepended to the user message), never the system prompt. Keeping the
+        # ~60KB system prompt byte-identical across turns — and across sessions
+        # of the same agent — lets provider-side prefix caches actually hit;
+        # the MCP block is the only per-turn variable chunk and must not
+        # perturb that stable prefix. ({{MCP_CURRENT_STATE}} placeholder is
+        # already blanked out of the base template.)
         try:
             from opensquad.tools.mcp_adapter import get_mcp_adapter
 
@@ -219,23 +224,8 @@ class ContextBuilder:
 
         if "{{MCP_CURRENT_STATE}}" in final:
             final = final.replace("{{MCP_CURRENT_STATE}}", "")
-        base_final = final
-        sid = self._state_sid()
-
-        last_base = self._last_base_system_prompt_by_sid.get(sid, "")
-        last_mcp = self._mcp_in_system_prompt_by_sid.get(sid, "")
-        base_changed = base_final != last_base
-        if base_changed:
-            self._last_base_system_prompt_by_sid[sid] = base_final
-            if mcp_state:
-                final = base_final + f"\n\n## MCP Service Status\n\n{mcp_state}"
-            self._mcp_in_system_prompt_by_sid[sid] = mcp_state
-        else:
-            if mcp_state != last_mcp:
-                dynamic_parts["MCP_CURRENT_STATE"] = mcp_state
-            else:
-                if last_mcp:
-                    final = base_final + f"\n\n## MCP Service Status\n\n{last_mcp}"
+        if mcp_state:
+            dynamic_parts["MCP_CURRENT_STATE"] = mcp_state
 
         # Layer 2: Standard injection (parallelize independent state queries)
         from opensquad import state_manager as _state_module

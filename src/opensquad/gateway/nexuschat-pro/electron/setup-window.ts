@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, app } from 'electron'
+import { BrowserWindow, dialog, ipcMain, app } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import {
@@ -69,7 +69,14 @@ export function runSetupWizard(options: { setupOnly?: boolean } = {}): Promise<S
         const message = err instanceof Error ? err.message : String(err)
         log(`ERROR: ${message}`)
         win.webContents.send('setup:complete', { ok: false, error: message })
-        if (message === 'Cancelled') finish({ ok: false, cancelled: true })
+        if (message === 'Cancelled') {
+          finish({ ok: false, cancelled: true })
+        } else {
+          // Surface the failure in a modal OS dialog so it is unmissable even
+          // when the wizard window is not focused (e.g. launched by the NSIS
+          // installer via `--setup-runtime`).
+          dialog.showErrorBox('OpenSquad 安装失败', message)
+        }
       }
     })
 

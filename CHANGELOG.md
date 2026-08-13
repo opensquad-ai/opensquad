@@ -10,6 +10,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.43]                                                               | 2026-08-11 | [0.8.42 → 0.8.43](https://github.com/opensquad-ai/opensquad/compare/v0.8.42...v0.8.43) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.43) |
+| [0.8.42]                                                               | 2026-08-10 | [0.8.41 → 0.8.42](https://github.com/opensquad-ai/opensquad/compare/v0.8.41...v0.8.42) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.42) |
+| [0.8.41]                                                               | 2026-08-10 | [0.8.40 → 0.8.41](https://github.com/opensquad-ai/opensquad/compare/v0.8.40...v0.8.41) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.41) |
 | [0.8.40]                                                               | 2026-08-10 | [0.8.30 → 0.8.40](https://github.com/opensquad-ai/opensquad/compare/v0.8.30...v0.8.40) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.40) |
 | [0.8.8]                                                                | 2026-08-04 | [0.8.7 → 0.8.8](https://github.com/opensquad-ai/opensquad/compare/v0.8.7...v0.8.8)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.8)  |
 | [0.8.7]                                                                | 2026-08-03 | [0.8.6 → 0.8.7](https://github.com/opensquad-ai/opensquad/compare/v0.8.6...v0.8.7)     | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.7)  |
@@ -33,6 +36,88 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.43] — 2026-08-11
+
+> Desktop: end-to-end auto-update. The packaged app now polls GitHub
+> releases in the background (30s after launch, then hourly), asks the
+> user before installing, downloads the new installer, runs it silently,
+> and relaunches the freshly installed app with the old process and its
+> backend killed first so ports 9555/9600 never collide. Also surfaces
+> installer failures in a native dialog instead of failing silently.
+
+### Added
+
+- **Desktop auto-update flow.** `main.ts` already polled for updates and
+  broadcast `electron:update-available`, but no renderer listened. The
+  frontend now subscribes, dedupes by version within the session, prompts
+  with a confirm dialog, and drives the same download-and-install path as
+  the manual "Check for updates" button (download → NSIS `/S` silent
+  install). Failure surfaces in a dialog.
+- **Installer relaunches the app after a silent install.** `customInstall`
+  now runs `ExecShell open "$INSTDIR\...exe"` when installed with `/S`.
+  `customCheckAppRunning` already killed the old app and its `run.exe`
+  backend before file copy, so ports 9555/9600 are free for the new
+  instance — no "address already in use" on first boot. Interactive
+  installs keep the standard finish-page checkbox.
+- **Installer error dialogs.** Setup failures (backend binary missing,
+  agent runtime setup errors, etc.) now pop a native error box with the
+  actual message instead of failing silently; cancelled installs stay
+  silent.
+
+---
+
+## [0.8.42] — 2026-08-10
+
+> Agent chat latency hardening: fix the per-5s plugin force-reload loop,
+> keep the ~60KB system prompt byte-stable so provider-side prefix caches
+> can hit, and restore the dynamic context prefix (runtime state / MCP
+> status / memory) that web-chat requests had silently dropped.
+
+### Fixed
+
+- **plugin hot-reload: per-5s `Config change detected` force-reload loop.**
+  `check_reload_needed()` resolved `project_root` as
+  `dirname(plugins_dir)` while `_load_new_style` recorded the config
+  mtime under `syscfg.get_workspace()`. The two paths pointed at
+  different files with different mtimes, so every idle tick looked like a
+  config change and force-reloaded the plugin (e.g. `websearch`), clearing
+  the tool-schema cache in a tight loop. Both now use
+  `syscfg.get_workspace()`.
+- **system prompt byte stability.** MCP service state was appended to the
+  system prompt (a per-turn variable block); it now always rides the
+  dynamic prefix on the user message, leaving the ~60KB system prompt
+  byte-identical across turns (and across sessions of the same agent) so
+  provider-side prefix caching can actually hit.
+- **parallel dispatcher dropped the dynamic context prefix.** The serial
+  loop prepends `_dynamic_context_prefix` to the user input, but
+  `_parallel_session_turn` (the web-chat path since v0.8.0) never did, so
+  requests carried no current time / input source / MCP availability to
+  the model. The prefix is now prepended on the user-input turn (tool-result
+  continuation turns are unchanged).
+
+---
+
+## [0.8.41] — 2026-08-10
+
+> Patch release — fix the broken `v0.8.40` Docker image so the published
+> artifact is actually runnable. v0.8.40 was tagged and the GitHub Release
+> page was created, but `release.yml`'s Docker build failed at the final
+> stage and PyPI trusted publishing was unconfigured, so no usable artifact
+> was shipped. v0.8.41 re-publishes the same code with the Docker fix in
+> place.
+
+### Fixed
+
+- **docker: `chmod +x` on `docker-entrypoint.sh` failed as the non-root
+  `opensquad` user.** The Dockerfile switched to `USER opensquad` *before*
+  copying the entrypoint, then tried to `chmod +x` as that user, which is
+  denied. Moved the `COPY` + `chmod` + `chown` sequence to before
+  `USER opensquad` so `chmod` runs as root, then `chown` hands the
+  executable bit back to the `opensquad` user. Restores a green
+  `release.yml` Docker job.
 
 ---
 

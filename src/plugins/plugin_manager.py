@@ -1138,8 +1138,18 @@ class PluginManager:
             except Exception:
                 pass
 
-        # Check per-plugin config.json mtime for already-loaded plugins
-        project_root = os.path.dirname(self.plugins_dir)
+        # Check per-plugin config.json mtime for already-loaded plugins.
+        # MUST resolve project_root the same way _load_new_style does
+        # (syscfg.get_workspace() in production). Otherwise the mtime recorded
+        # at load time (workspace data dir) is compared against a DIFFERENT
+        # file (install dir / dev src dir), whose mtime never matches — every
+        # idle tick then looks like a config change and force-reloads the
+        # plugin, clearing the tool-schema cache in a tight loop. Fall back to
+        # dirname(plugins_dir) only when syscfg is unavailable (dev mode).
+        try:
+            project_root = syscfg.get_workspace()
+        except Exception:
+            project_root = os.path.dirname(self.plugins_dir)
         for plugin_name in list(self._plugins.keys()):
             config_path = os.path.join(project_root, "data", "plugins", plugin_name, "config.json")
             if not os.path.isfile(config_path):

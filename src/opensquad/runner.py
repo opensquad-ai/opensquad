@@ -1302,6 +1302,16 @@ class AgentRunner:
 
                 await self._setup_prompt()
 
+                # Dynamic context (RUNTIME_STATE / MCP state / recalled memory)
+                # must ride the user message, exactly like the serial loop does.
+                # The parallel path previously dropped it entirely, so web-chat
+                # requests never carried current time / input source / MCP
+                # availability to the model. Apply on the user-input turn only
+                # (turn 0) — tool-result continuation turns carry their own
+                # context via next_input and must not repeat the prefix.
+                if turn == 0 and self._dynamic_context_prefix:
+                    current_input = self._dynamic_context_prefix + current_input
+
                 _native_images = self._current_images if turn == 0 else None
                 _b64_images = self._tool_result_images or None
                 _is_first_turn = turn == 0

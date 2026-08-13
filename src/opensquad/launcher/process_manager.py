@@ -427,7 +427,11 @@ def _kill_port_owner(port: int) -> bool:
         return False
     try:
         if sys.platform == "win32":
-            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, check=False)
+            # netstat can hang indefinitely on Windows under heavy connection
+            # tables; bound it so the launcher main thread never stalls here
+            # (a stalled netstat previously froze Phase 7a and skipped Phase 8
+            # agent auto-start entirely).
+            result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, check=False, timeout=8)
             for line in result.stdout.splitlines():
                 if f":{port}" in line and "LISTENING" in line:
                     parts = line.split()
@@ -435,7 +439,12 @@ def _kill_port_owner(port: int) -> bool:
                     try:
                         pid = int(pid_str)
                         _log.warning(f"[Launcher] Found stale port {port} held by PID {pid}, killing...")
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                            check=False,
+                            timeout=10,
+                        )
                         import time
 
                         time.sleep(1)

@@ -42,34 +42,25 @@ _find_python_cache: str | None = None
 
 
 def _find_python():
-    """Find a usable Python interpreter (handles pip console_scripts .exe wrappers on Windows)."""
+    """Find a usable Python interpreter (handles pip console_scripts .exe wrappers on Windows).
+
+    Source/dev mode: ALWAYS return ``sys.executable`` — the interpreter that is
+    running this very CLI. Never fall back to a PATH probe: on machines that
+    have several Python installs (e.g. uv-tools opensquad + anaconda3 editable
+    + Python313) ``shutil.which("python")`` can resolve to a *different*
+    environment, silently spawning a second, parallel service stack with
+    duplicate gateways/launchers/agents fighting over 9555/9600/9720/8001 and
+    the UI stuck in "重连中".
+    """
     global _find_python_cache
     if _find_python_cache:
         return _find_python_cache
-    import shutil
-
-    # Prefer sys.executable — it's the actual python that's running right now
     exe = sys.executable
     if exe and os.path.isfile(exe):
-        # Verify it's a real Python, not a pip stub
-        try:
-            result = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and "Python" in result.stdout:
-                _find_python_cache = exe
-                return exe
-        except Exception:
-            pass
-    # Fallback: search PATH for python/python3
-    for name in ("python3", "python"):
-        path = shutil.which(name)
-        if path and path != sys.executable:
-            try:
-                result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0 and "Python" in result.stdout:
-                    _find_python_cache = path
-                    return path
-            except Exception:
-                pass
+        _find_python_cache = exe
+        return exe
+    # sys.executable unavailable (embedded/pip stub). A bare command is the only
+    # option, but it must never pick a *different* install on purpose.
     _find_python_cache = "python"
     return "python"
 
@@ -558,6 +549,13 @@ def run_start(args):
     syscfg.set_workspace(workspace)
     os.environ["OPENSQUAD_WORKSPACE"] = workspace
     os.environ["OPENSQUAD_USER_DATA"] = workspace
+    # Force UTF-8 for every child (gateway/registry/launcher/agents). On
+    # Chinese-locale Windows the default GBK console codepage makes children
+    # emit GBK bytes; readers that decode utf-8 strictly then crash with
+    # UnicodeDecodeError (e.g. opensquad start's launcher stderr pipe), which
+    # kills startup threads and can cascade into the whole stack being torn
+    # down. PYTHONUTF8=1 inherited by all children fixes the encoding chain.
+    os.environ["PYTHONUTF8"] = "1"
     # Also set PYTHONPATH for subprocesses
     python_path = os.path.join(_root, "src")
     if "PYTHONPATH" in os.environ:

@@ -306,3 +306,11 @@ docs/report_*.md
 docs/方案讨论*/
 docs/优化修复方案_*.md
 plan_fix_*.md
+
+# ===== Private plugin: news2theme (not for public repo) =====
+src/plugins/news2theme/
+src/skills/news2theme/
+docs/new2theme_agent_role.md
+docs/new2theme_plugin_design.md
+scripts/cfg_news2theme_agent.py
+src/skills/news2theme-ops/

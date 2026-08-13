@@ -1771,21 +1771,30 @@ class SessionManager:
             messages = target.setdefault("messages", [])
             for i in range(len(messages) - 1, -1, -1):
                 m = messages[i]
-                if m.get("role") == "assistant" and not m.get("tool_calls"):
-                    m["tool_calls"] = tool_calls
-                    if content is not None:
-                        m["content"] = content
-                    elif not m.get("content"):
-                        m["content"] = None
-                    if reasoning_content is not None:
-                        m["reasoning_content"] = reasoning_content
-                    target["last_updated"] = utc_now_iso()
-                    self._append_log_record(
-                        target_id,
-                        {"op": "tail_patch", "patches": {"tool_calls": tool_calls, "content": m.get("content")}},
-                    )
-                    return
-            # No patchable assistant — append a fresh assistant(tool_calls) msg.
+                if m.get("role") != "assistant":
+                    continue
+                # Merge parallel tool calls into the latest assistant message
+                # instead of overwriting (and instead of spawning a duplicate
+                # assistant). A single LLM turn can emit several tool_calls and
+                # each add_tool_result persists them one at a time; overwriting
+                # here left sibling calls un-declared while their tool responses
+                # stayed in history → orphaned tool messages → upstream 400
+                # ("tool_call_ids did not have response messages").
+                merged = self._merge_tool_calls(m.get("tool_calls"), tool_calls)
+                m["tool_calls"] = merged
+                if content is not None:
+                    m["content"] = content
+                elif not m.get("content"):
+                    m["content"] = None
+                if reasoning_content is not None:
+                    m["reasoning_content"] = reasoning_content
+                target["last_updated"] = utc_now_iso()
+                self._append_log_record(
+                    target_id,
+                    {"op": "tail_patch", "patches": {"tool_calls": merged, "content": m.get("content")}},
+                )
+                return
+            # No assistant message found — append a fresh assistant(tool_calls) msg.
             message = {
                 "role": "assistant",
                 "content": content or "",
@@ -1800,6 +1809,19 @@ class SessionManager:
             self._append_log_record(target_id, {"op": "msg_append", "msg": message, "ts": message["timestamp"]})
 
         self._enqueue_mutation_for(_mutate, sid=target_id)
+
+    @staticmethod
+    def _merge_tool_calls(existing, incoming) -> list[dict]:
+        """Merge two tool_calls lists by id, preserving order and deduping."""
+        merged = list(existing) if isinstance(existing, list) else []
+        if not isinstance(incoming, list):
+            return merged
+        ids = {c.get("id") for c in merged if isinstance(c, dict) and c.get("id")}
+        for tc in incoming:
+            if isinstance(tc, dict) and tc.get("id") and tc["id"] not in ids:
+                merged.append(tc)
+                ids.add(tc["id"])
+        return merged
 
     def get_messages(self, limit: int | None = None, *, sid: str | None = None) -> list[dict]:
         data = self._resolve_session_data(sid)
@@ -1858,6 +1880,7 @@ class SessionManager:
         )
         out: list[dict] = []
         pending: set[str] = set()
+        declared: set[str] = set()  # every tool_call_id any assistant has declared
         msgs = list(messages)  # 可变副本（可能 pop 移动）
         i = 0
         while i < len(msgs):
@@ -1868,11 +1891,37 @@ class SessionManager:
                     cid = (tc or {}).get("id")
                     if cid:
                         pending.add(cid)
+                        declared.add(cid)
                 out.append(m)
             elif role == "tool":
                 cid = m.get("tool_call_id")
                 if cid in pending:
                     pending.discard(cid)
+                elif cid and cid not in declared:
+                    # Orphan tool message: no preceding assistant declared this
+                    # call. Happens when parallel tool calls were emitted in one
+                    # LLM turn but the assistant's tool_calls got overwritten
+                    # (old add_tool_result / sync_tool_call_message bug), leaving
+                    # sibling responses undeclared → upstream 400 ("tool_call_ids
+                    # did not have response messages"). Re-declare the call on the
+                    # nearest preceding assistant(tool_calls) so the pairing is
+                    # restored. `name` may be absent on historical messages; the
+                    # API only needs the id for pairing validation.
+                    for j in range(len(out) - 1, -1, -1):
+                        prev = out[j]
+                        if prev.get("role") == "assistant" and prev.get("tool_calls"):
+                            prev_ids = {c.get("id") for c in prev["tool_calls"]}
+                            if cid not in prev_ids:
+                                prev["tool_calls"] = [
+                                    *prev["tool_calls"],
+                                    {
+                                        "id": cid,
+                                        "type": "function",
+                                        "function": {"name": m.get("name") or "", "arguments": "{}"},
+                                    },
+                                ]
+                                declared.add(cid)
+                            break
                 out.append(m)
             else:
                 # user / system marks a turn boundary — a preceding assistant
