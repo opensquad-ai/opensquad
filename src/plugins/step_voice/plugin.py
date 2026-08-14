@@ -7,11 +7,11 @@ not limited to StepFun.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.asr_tts")
 
@@ -36,20 +36,19 @@ class AsrTtsPlugin(Plugin):
         logger.info("[AsrTtsPlugin] loaded.")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        tools = []
-        try:
-            module = importlib.import_module("plugins.step_voice.step_voice_tools")
-            # Primary namespace (generic). Keep step_voice as alias for existing agents/prompts.
-            for name in ("asr_tts", "step_voice"):
-                tools.append(
-                    {
-                        "name": name,
-                        "module": module,
-                        "level": "core",
-                        "auto_register": True,
-                        "requires_agent_id": False,
-                    }
-                )
-        except ImportError as e:
-            logger.error("[AsrTtsPlugin] Cannot import step_voice_tools: %s", e)
-        return tools
+        asr = proxy_tool_module(
+            "plugins.step_voice.step_voice_tools",
+            name="asr_tts",
+            level="core",
+            auto_register=True,
+        )
+        return [
+            asr,
+            proxy_tool_module(
+                "plugins.step_voice.step_voice_tools",
+                name="step_voice",
+                level="core",
+                auto_register=True,
+                module=asr["module"],
+            ),
+        ]

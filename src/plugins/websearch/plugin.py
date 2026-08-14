@@ -6,11 +6,11 @@ Service lifecycle is owned by the Launcher's PluginServiceProcess
 (declared via `service` field in plugin.json).
 """
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.websearch")
 
@@ -84,24 +84,11 @@ class WebSearchPlugin(Plugin):
             logger.warning(f"[WebSearchPlugin] Browser shutdown error: {e}")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        """
-        Proxy pattern: return the existing tool module for ToolRegistry.
-
-        This method is recognized by PluginManager for new-style plugins
-        that proxy existing tool modules instead of using @tool decorators.
-        """
-        tools = []
-        try:
-            module = importlib.import_module("plugins.websearch.websearch")
-            tools.append(
-                {
-                    "name": "websearch",
-                    "module": module,
-                    "level": "core",
-                    "auto_register": True,
-                    "requires_agent_id": False,
-                }
+        return [
+            proxy_tool_module(
+                "plugins.websearch.websearch",
+                name="websearch",
+                level="core",
+                auto_register=True,
             )
-        except ImportError as e:
-            logger.error(f"[WebSearchPlugin] Cannot import websearch module: {e}")
-        return tools
+        ]

@@ -59,6 +59,49 @@ if sys.platform == "win32":
 
 from opensquad.system_config import syscfg
 
+
+def _ensure_frozen_utils() -> None:
+    """Register opensquad.utils.* from disk when the frozen PYZ omitted them."""
+    import importlib
+    import importlib.util
+
+    roots: list[str] = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        roots.append(os.path.join(meipass, "opensquad", "utils"))
+    roots.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils"))
+    root = next((p for p in roots if os.path.isdir(p)), "")
+    if not root:
+        return
+    try:
+        importlib.import_module("opensquad.utils")
+    except Exception:
+        pass
+    for fname in os.listdir(root):
+        if not fname.endswith(".py") or fname.startswith("_"):
+            continue
+        modname = f"opensquad.utils.{fname[:-3]}"
+        if modname in sys.modules:
+            continue
+        try:
+            importlib.import_module(modname)
+            continue
+        except ModuleNotFoundError:
+            pass
+        path = os.path.join(root, fname)
+        spec = importlib.util.spec_from_file_location(modname, path)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[modname] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            sys.modules.pop(modname, None)
+
+
+_ensure_frozen_utils()
+
 # Project root is where agents/ and plugins/ live (the workspace)
 PROJECT_ROOT = syscfg.project_root()
 
@@ -88,6 +131,22 @@ if os.path.isfile(_builtin_plugins_path):
         pass
 
 
+def _refresh_builtin_plugins() -> dict:
+    """Reload builtin_plugins.json from the live builtin dir (frozen-safe)."""
+    global _BUILTIN_PLUGINS, BUILTIN_PLUGINS_DIR
+    BUILTIN_PLUGINS_DIR = syscfg.builtin_resources_dir("plugins")
+    path = os.path.join(BUILTIN_PLUGINS_DIR, "builtin_plugins.json")
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f).get("plugins") or {}
+            if data:
+                _BUILTIN_PLUGINS = data
+        except Exception:
+            pass
+    return _BUILTIN_PLUGINS
+
+
 def _plugin_search_dirs() -> list[str]:
     return syscfg.resource_search_dirs("plugins")
 
@@ -111,19 +170,14 @@ def discover_all_plugin_services() -> list[dict]:
 
 
 def _collect_plugin_dirs() -> dict[str, str]:
-    """Map dir_name -> plugin_dir; workspace entries override builtin."""
-    out: dict[str, str] = {}
-    for root in (BUILTIN_PLUGINS_DIR, PLUGINS_DIR):
-        if not os.path.isdir(root):
-            continue
-        for entry in os.listdir(root):
-            plugin_dir = os.path.join(root, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
-            if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
-                continue
-            out[entry] = plugin_dir
-    return out
+    """Map dir_name -> plugin_dir; workspace entries override builtin.
+
+    Use live syscfg paths (not import-time constants) and accept frozen
+    layouts where ``plugin.py`` lives in the PYZ archive.
+    """
+    from plugins.plugin_manager import collect_plugin_dirs
+
+    return collect_plugin_dirs()
 
 
 def _find_skill_dir(name: str) -> str | None:
@@ -2244,30 +2298,22 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             Returns (plugin_dir, dir_name) tuple, or (None, None) if not found.
             """
-            for root in _plugin_search_dirs():
-                direct = os.path.join(root, name)
-                if os.path.isdir(direct) and os.path.isfile(os.path.join(direct, "plugin.py")):
-                    return direct, name
-
-            for root in _plugin_search_dirs():
-                if not os.path.isdir(root):
+            collected = _collect_plugin_dirs()
+            if name in collected and os.path.isdir(collected[name]):
+                return collected[name], name
+            for dir_name, plugin_dir in collected.items():
+                if not os.path.isdir(plugin_dir):
                     continue
-                for entry in os.listdir(root):
-                    plugin_dir = os.path.join(root, entry)
-                    if not os.path.isdir(plugin_dir):
-                        continue
-                    if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
-                        continue
-                    manifest = os.path.join(plugin_dir, "plugin.json")
-                    if os.path.isfile(manifest):
-                        try:
-                            with open(manifest, encoding="utf-8") as f:
-                                meta = json.load(f)
-                            if meta.get("name") == name:
-                                return plugin_dir, entry
-                        except Exception:
-                            pass
-
+                manifest = os.path.join(plugin_dir, "plugin.json")
+                if not os.path.isfile(manifest):
+                    continue
+                try:
+                    with open(manifest, encoding="utf-8") as f:
+                        meta = json.load(f)
+                    if meta.get("name") == name:
+                        return plugin_dir, dir_name
+                except Exception:
+                    pass
             return None, None
 
         def _writable_plugin_json_path(self, name: str) -> tuple[str, str] | tuple[None, None]:
@@ -2288,10 +2334,11 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
             plugin_dirs = _collect_plugin_dirs()
             if not plugin_dirs:
                 return self._send_json({"plugins": []})
+            builtin_reg = _refresh_builtin_plugins()
 
             for name in sorted(plugin_dirs):
                 plugin_dir = plugin_dirs[name]
-                plugin_json_path = os.path.join(plugin_dir, "plugin.json")
+                plugin_json_path = os.path.join(plugin_dir, "plugin.json") if os.path.isdir(plugin_dir) else ""
                 if os.path.isfile(plugin_json_path):
                     try:
                         with open(plugin_json_path, encoding="utf-8") as f:
@@ -2301,7 +2348,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 else:
                     meta = {}
 
-                is_builtin = name in _BUILTIN_PLUGINS
+                is_builtin = name in builtin_reg
 
                 # For built-in plugins without a plugin.json, enforce default enabled state
                 if is_builtin and not meta:
@@ -4224,12 +4271,22 @@ def _init_workspace():
         _log.error(f"[ERROR] Failed to initialize workspace: {e}")
         sys.exit(1)
     global AGENTS_DIR, PLUGINS_DIR, SKILLS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR
+    global BUILTIN_PLUGINS_DIR, BUILTIN_SKILLS_DIR, _BUILTIN_PLUGINS
     AGENTS_DIR = syscfg.workspace_agents_dir()
     PLUGINS_DIR = syscfg.workspace_plugins_dir()
     SKILLS_DIR = syscfg.workspace_skills_dir()
     ROLE_CARDS_DIR = syscfg.workspace_role_cards_dir()
     COLLAB_CARDS_DIR = syscfg.workspace_collab_cards_dir()
     MODEL_CARDS_DIR = syscfg.workspace_model_cards_dir()
+    BUILTIN_PLUGINS_DIR = syscfg.builtin_resources_dir("plugins")
+    BUILTIN_SKILLS_DIR = syscfg.builtin_resources_dir("skills")
+    _builtin_plugins_path = os.path.join(BUILTIN_PLUGINS_DIR, "builtin_plugins.json")
+    if os.path.isfile(_builtin_plugins_path):
+        try:
+            with open(_builtin_plugins_path, encoding="utf-8") as _bf:
+                _BUILTIN_PLUGINS = json.load(_bf).get("plugins", {}) or _BUILTIN_PLUGINS
+        except Exception:
+            pass
     for d in (PLUGINS_DIR, SKILLS_DIR, ROLE_CARDS_DIR, COLLAB_CARDS_DIR, MODEL_CARDS_DIR):
         os.makedirs(d, exist_ok=True)
 
@@ -4597,6 +4654,27 @@ def _launcher_lock_path() -> str:
 
 
 def _pid_alive(pid: int) -> bool:
+    """True only if *pid* is a running process (Windows: still-active, not a zombie)."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            # 5 = ERROR_ACCESS_DENIED → process exists but we cannot query it.
+            return k32.GetLastError() == 5
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return int(code.value) == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -4606,7 +4684,18 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _ensure_single_launcher(port: int) -> bool:
+def _launcher_api_healthy(port: int) -> bool:
+    """True when something on *port* answers the launcher workspace API."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/api/workspace", timeout=2.0) as r:
+            return r.status == 200 and "workspace" in r.read().decode("utf-8", "ignore")
+    except Exception:
+        return False
+
+
+def _ensure_single_launcher(port: int, _attempt: int = 0) -> bool:
     """Exit when another healthy launcher already owns the management port.
 
     Dual-launcher instances (e.g. uv-tools opensquad and anaconda editable
@@ -4619,9 +4708,14 @@ def _ensure_single_launcher(port: int) -> bool:
     while the other wins — each may already have spawned agents. An atomic
     O_EXCL PID lockfile (shared workspace → shared across Python installs)
     serializes ownership so only ONE launcher manages a workspace.
-    """
-    import socket
 
+    A live PID with a dead management port (desktop frozen launcher shutting
+    down, crash before bind, stale lock) is treated as stale so ``opensquad
+    dev`` can take over instead of waiting 45s on a port that never opens.
+    """
+    if _attempt > 3:
+        _log.error("[Launcher] Could not acquire launcher lock after retries; exiting.")
+        return False
     lock_path = _launcher_lock_path()
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -4629,43 +4723,38 @@ def _ensure_single_launcher(port: int) -> bool:
             f.write(str(os.getpid()))
         # We hold the lockfile — we are the owner. Still verify the port in
         # case a pre-existing (lock-less) launcher already serves it.
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                pass
+        if _launcher_api_healthy(port):
+            _log.warning(
+                f"[Launcher] Port {port} already served by another launcher; "
+                "exiting (avoid dual-instance agent management)."
+            )
+            # Do not leave our (soon-dead) pid in the lock — that blocks the
+            # next ``opensquad dev`` after the lock-less owner later exits.
             try:
-                import urllib.request
-
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/workspace", timeout=2.0) as r:
-                    if r.status == 200 and "workspace" in r.read().decode("utf-8", "ignore"):
-                        _log.warning(
-                            f"[Launcher] Port {port} already served by another launcher; "
-                            "exiting (avoid dual-instance agent management)."
-                        )
-                        return False
-            except Exception:
+                os.remove(lock_path)
+            except OSError:
                 pass
-        except OSError:
-            pass
+            return False
         return True
     except FileExistsError:
-        # Another launcher holds the lock; respect it while the owner is alive.
+        owner = 0
         try:
             with open(lock_path, encoding="utf-8") as f:
                 owner = int(f.read().strip() or "0")
         except Exception:
             owner = 0
-        if owner and _pid_alive(owner):
+        if owner and _pid_alive(owner) and _launcher_api_healthy(port):
             _log.warning(
                 f"[Launcher] Another launcher (pid {owner}) owns {lock_path}; exiting "
                 "(avoid dual-instance agent management)."
             )
             return False
-        # Stale lock (owner crashed/exited) — take it over.
+        _log.info(f"[Launcher] Stale launcher lock (pid {owner or '?'}, api down); taking over {lock_path}")
         try:
             os.remove(lock_path)
         except OSError:
             pass
-        return _ensure_single_launcher(port)
+        return _ensure_single_launcher(port, _attempt + 1)
 
 
 def main():

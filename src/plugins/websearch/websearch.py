@@ -11,6 +11,39 @@ from opensquad.system_config import syscfg
 
 logger = logging.getLogger("plugins.websearch")
 
+
+def _ssrf_mod():
+    """Load SSRF helpers; frozen PYZ builds have omitted opensquad.utils.ssrf."""
+    import importlib
+    import importlib.util
+
+    name = "opensquad.utils.ssrf"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError:
+        pass
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(_os.path.join(meipass, "opensquad", "utils", "ssrf.py"))
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    candidates.append(_os.path.normpath(_os.path.join(here, "..", "..", "opensquad", "utils", "ssrf.py")))
+    for path in candidates:
+        if not _os.path.isfile(path):
+            continue
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    raise ModuleNotFoundError(name)
+
+
 TIMEOUT = 60  # Request timeout in seconds (search=60s, fetch=60s)
 
 # Token counting encoder (lazy init)
@@ -106,9 +139,7 @@ def _make_request(endpoint: str, params: dict) -> dict:
     # service's own loopback URL here makes every search fail with
     # "Blocked internal URL", so skip the guard for the service endpoint.
     try:
-        from opensquad.utils.ssrf import is_public_http_url
-
-        if not is_public_http_url(url):
+        if not _ssrf_mod().is_public_http_url(url):
             logger.warning(
                 "[websearch] Service URL is a loopback/local endpoint (normal for the "
                 "local websearch service); skipping SSRF guard for trusted service URL: %s",
@@ -234,9 +265,7 @@ def fetch(urls: list[str], max_token=100000) -> dict[str, str]:
         if not _u.strip():
             continue
         try:
-            from opensquad.utils.ssrf import assert_public_http_url
-
-            assert_public_http_url(_u)
+            _ssrf_mod().assert_public_http_url(_u)
         except ValueError as _e:
             logger.error(f"SSRF guard rejected fetch target {_u}: {_e}")
             return {"error": f"Blocked internal URL: {_e}"}
@@ -286,9 +315,7 @@ def fetch_html(url: str | None = None) -> dict:
     # SSRF guard. The service URL itself is trusted/local and is exempt.
     if url and url.strip():
         try:
-            from opensquad.utils.ssrf import assert_public_http_url
-
-            assert_public_http_url(url)
+            _ssrf_mod().assert_public_http_url(url)
         except ValueError as _e:
             logger.error(f"SSRF guard rejected fetch_html target {url}: {_e}")
             return {"error": f"Blocked internal URL: {_e}"}

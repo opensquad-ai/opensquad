@@ -92,6 +92,18 @@ print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build
 # Source lives at GATEWAY_DIR.parent = src/opensquad/.
 datas += [(str(GATEWAY_DIR.parent / "launcher_main.py"), "opensquad/_launcher_main")]
 
+# Also extract opensquad.utils onto disk. FrozenImporter only serves modules
+# present in the PYZ TOC; PathFinder then loads these from _internal/.
+_utils_src = GATEWAY_DIR.parent / "utils"
+if _utils_src.is_dir():
+    _n_utils = 0
+    for _uf in sorted(_utils_src.glob("*.py")):
+        datas += [(str(_uf), "opensquad/utils")]
+        _n_utils += 1
+    print(f"[spec] bundling {_n_utils} opensquad/utils/*.py -> _internal/opensquad/utils/")
+else:
+    print(f"[spec] WARNING: {_utils_src} not found")
+
 # pkg_import_map.json — shared pip-distribution-name → import-name mapping used
 # by launcher's dependency install logic. Must be bundled so frozen launcher
 # can load it via os.path.dirname(__file__).
@@ -172,6 +184,24 @@ hiddenimports += collect_submodules("pydantic_settings")
 
 # opensquad 子模块（动态导入的部分）
 hiddenimports += collect_submodules("opensquad")
+hiddenimports += collect_submodules("opensquad.utils")
+# launcher_main.py ships as a data file; plugins lazy-import these. Analysis
+# has missed them in frozen builds (ssrf / fs_index / project_fs).
+hiddenimports += [
+    "opensquad.utils",
+    "opensquad.utils.archive_util",
+    "opensquad.utils.audit_vcs",
+    "opensquad.utils.desktop_release",
+    "opensquad.utils.fs_index",
+    "opensquad.utils.media_util",
+    "opensquad.utils.path_utils",
+    "opensquad.utils.pick_directory",
+    "opensquad.utils.project_fs",
+    "opensquad.utils.session_changeset",
+    "opensquad.utils.session_cwd",
+    "opensquad.utils.ssrf",
+    "opensquad.utils.version_channel",
+]
 
 # app 子模块
 hiddenimports += [
@@ -360,6 +390,28 @@ for _res_pkg in ("plugins", "skills"):
 # _copy_default_resources() look for them at _internal/<name>. Ship each dir as
 # a data tree rooted at _internal/<name>.
 _builtin_root = GATEWAY_DIR.parent.parent  # = src/ (PROJECT_ROOT is also src/)
+
+# Frozen launcher lists plugins by scanning _internal/plugins/*/plugin.py.
+# collect_all() puts .py in the PYZ, so also extract plugin.py + plugin.json.
+_plugins_src = _builtin_root / "plugins"
+if _plugins_src.is_dir():
+    _n_plugin_files = 0
+    for _pdir in sorted(_plugins_src.iterdir()):
+        if not _pdir.is_dir() or _pdir.name.startswith(("_", ".")):
+            continue
+        for _fname in ("plugin.py", "plugin.json"):
+            _f = _pdir / _fname
+            if _f.is_file():
+                datas += [(str(_f), f"plugins/{_pdir.name}")]
+                _n_plugin_files += 1
+    _bp = _plugins_src / "builtin_plugins.json"
+    if _bp.is_file():
+        datas += [(str(_bp), "plugins")]
+        _n_plugin_files += 1
+    print(f"[spec] bundling {_n_plugin_files} plugin.py/json files -> _internal/plugins/")
+else:
+    print(f"[spec] WARNING: {_plugins_src} not found, skipping plugin tree extract")
+
 for _res_dir in ("role_cards", "model_cards", "collab_cards", "agents", "pymcp"):
     _src = _builtin_root / _res_dir
     if _src.exists():

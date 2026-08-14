@@ -4,11 +4,11 @@ Media Tool Plugin (New-style Decorator API)
 Tool implementation lives in plugins/media/media.py.
 """
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.media")
 
@@ -33,18 +33,10 @@ class MediaPlugin(Plugin):
         logger.info("[MediaPlugin] loaded (new-style).")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        tools = []
-        try:
-            module = importlib.import_module("plugins.media.media")
-            tools.append(
-                {
-                    "name": "media",
-                    "module": module,
-                    "level": "core",
-                    "auto_register": False,
-                    "requires_agent_id": False,
-                }
+        return [
+            proxy_tool_module(
+                "plugins.media.media",
+                name="media",
+                level="core",
             )
-        except ImportError as e:
-            logger.error(f"[MediaPlugin] Cannot import media module: {e}")
-        return tools
+        ]

@@ -6,11 +6,11 @@ mcp_query depends on opensquad.tools.mcp_adapter which remains in
 opensquad/tools/ as it is also used by runner.py and boot.py.
 """
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.mcp_query")
 
@@ -34,18 +34,11 @@ class McpQueryPlugin(Plugin):
         logger.info("[McpQueryPlugin] loaded (new-style).")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        tools = []
-        try:
-            module = importlib.import_module("plugins.mcp_query.mcp_query")
-            tools.append(
-                {
-                    "name": "mcp_query",
-                    "module": module,
-                    "level": "extended",
-                    "auto_register": True,
-                    "requires_agent_id": False,
-                }
+        return [
+            proxy_tool_module(
+                "plugins.mcp_query.mcp_query",
+                name="mcp_query",
+                level="extended",
+                auto_register=True,
             )
-        except ImportError as e:
-            logger.error(f"[McpQueryPlugin] Cannot import mcp_query module: {e}")
-        return tools
+        ]

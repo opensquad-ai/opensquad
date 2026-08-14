@@ -7,11 +7,11 @@ Tool implementation: plugins/bocha_search/bocha_search.py
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.bocha_search")
 
@@ -59,18 +59,11 @@ class BochaSearchPlugin(Plugin):
         logger.info("[BochaSearchPlugin] loaded.")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = []
-        try:
-            module = importlib.import_module("plugins.bocha_search.bocha_search")
-            tools.append(
-                {
-                    "name": "bocha_search",
-                    "module": module,
-                    "level": "core",
-                    "auto_register": True,
-                    "requires_agent_id": False,
-                }
+        return [
+            proxy_tool_module(
+                "plugins.bocha_search.bocha_search",
+                name="bocha_search",
+                level="core",
+                auto_register=True,
             )
-        except ImportError as e:
-            logger.error("[BochaSearchPlugin] Cannot import bocha_search module: %s", e)
-        return tools
+        ]

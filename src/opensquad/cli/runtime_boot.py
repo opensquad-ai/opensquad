@@ -12,6 +12,7 @@ Startup strategy (Claude Code–style):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import subprocess
@@ -62,14 +63,26 @@ def _wait_with_backoff(
     return False
 
 
-def _wait_port(name: str, port: int, timeout: float = 45.0) -> bool:
-    return _wait_with_backoff(
-        lambda: _port_open("127.0.0.1", port),
-        timeout=timeout,
-        initial=0.05,
-        max_delay=0.4,
-        name=f"{name} port {port}",
-    )
+def _wait_port(name: str, port: int, timeout: float = 45.0, proc: subprocess.Popen | None = None) -> bool:
+    """Wait until *port* is listening. Fail fast if *proc* already exited."""
+    deadline = time.time() + timeout
+    delay = 0.05
+    while time.time() < deadline:
+        if _port_open("127.0.0.1", port):
+            return True
+        if proc is not None and proc.poll() is not None:
+            code = proc.returncode or 0
+            print(
+                f"[code] {name} exited before port {port} opened (code={code:#x}). "
+                "Close the OpenSquad desktop app if it is running, then: "
+                "opensquad stop && opensquad dev",
+                file=sys.stderr,
+            )
+            return False
+        time.sleep(delay)
+        delay = min(delay * 1.4, 0.4)
+    print(f"[code] {name} port {port} not ready after {timeout:.0f}s", file=sys.stderr)
+    return False
 
 
 def _gateway_url(port: int | None = None) -> str:
@@ -129,6 +142,130 @@ def _frozen_backend_exe() -> str | None:
     return None
 
 
+def _norm_exe(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _pid_on_port(port: int) -> int | None:
+    """PID listening on *port*, or None if unknown / nothing bound."""
+    try:
+        import psutil
+
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.status != psutil.CONN_LISTEN or not conn.laddr or not conn.pid:
+                continue
+            if int(conn.laddr.port) == int(port):
+                return int(conn.pid)
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            want = str(int(port))
+            for line in result.stdout.splitlines():
+                if "LISTENING" not in line.upper():
+                    continue
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                if parts[1].rsplit(":", 1)[-1] != want:
+                    continue
+                pid = parts[-1]
+                if pid.isdigit() and pid != "0":
+                    return int(pid)
+        except Exception:
+            pass
+    return None
+
+
+def _proc_ident(pid: int) -> dict[str, Any] | None:
+    try:
+        import psutil
+
+        proc = psutil.Process(pid)
+        with proc.oneshot():
+            return {
+                "exe": proc.exe() or "",
+                "cmdline": list(proc.cmdline() or []),
+                "create_time": float(proc.create_time()),
+            }
+    except Exception:
+        return None
+
+
+def ident_matches_frozen(
+    ident: dict[str, Any],
+    frozen_exe: str,
+    *,
+    bundle_mtime: float | None = None,
+) -> bool:
+    """True when *ident* is this repo's frozen ``run.exe`` and not older than the file."""
+    exe = _norm_exe(str(ident.get("exe") or ""))
+    want = _norm_exe(frozen_exe)
+    if exe != want:
+        return False
+    mtime = bundle_mtime
+    if mtime is None:
+        try:
+            mtime = os.path.getmtime(frozen_exe)
+        except OSError:
+            return True
+    return float(ident.get("create_time") or 0) + 2.0 >= float(mtime)
+
+
+def ident_is_source_script(ident: dict[str, Any], script_name: str) -> bool:
+    """True when *ident* is a Python process running *script_name* (not frozen run.exe)."""
+    exe = _norm_exe(str(ident.get("exe") or ""))
+    base = os.path.basename(exe).lower()
+    if base in {"run.exe", "run"}:
+        return False
+    cmd = " ".join(str(x) for x in (ident.get("cmdline") or [])).replace("\\", "/").lower()
+    return script_name.replace("\\", "/").lower() in cmd
+
+
+def _stack_mismatch_reason(gateway_port: int, launcher_port: int) -> str | None:
+    """None when the listening stack matches SOURCE_MODE / latest frozen bundle."""
+    frozen = _frozen_backend_exe()
+    gw_pid = _pid_on_port(gateway_port)
+    la_pid = _pid_on_port(launcher_port)
+    gw = _proc_ident(gw_pid) if gw_pid else None
+    la = _proc_ident(la_pid) if la_pid else None
+    if frozen:
+        if not gw or not ident_matches_frozen(gw, frozen):
+            return f"gateway is not the latest frozen backend ({frozen})"
+        if not la or not ident_matches_frozen(la, frozen):
+            return f"launcher is not the latest frozen backend ({frozen})"
+        return None
+    if not gw or not ident_is_source_script(gw, "run.py"):
+        return "gateway is not source run.py (OPENSQUAD_SOURCE_MODE=1)"
+    if not la or not ident_is_source_script(la, "launcher_main.py"):
+        return "launcher is not source launcher_main.py (OPENSQUAD_SOURCE_MODE=1)"
+    return None
+
+
+def _recycle_running_stack(gateway_port: int, launcher_port: int, registry_port: int, *, quiet: bool) -> None:
+    """Stop the current core stack (and registered children) so a new backend can bind."""
+    from opensquad.cli.commands.start_cmd import _kill_port_owners, _try_graceful_launcher_shutdown
+    from opensquad.cli.commands.stop_cmd import _terminate_registered_processes
+
+    if not quiet:
+        print("[code] Stopping current Gateway/Launcher so the desired backend can bind…")
+    _try_graceful_launcher_shutdown(launcher_port)
+    with contextlib.suppress(Exception):
+        _terminate_registered_processes()
+    _kill_port_owners(gateway_port, launcher_port, registry_port)
+    deadline = time.time() + 8.0
+    while time.time() < deadline:
+        if not any(_port_open("127.0.0.1", p) for p in (gateway_port, launcher_port)):
+            return
+        time.sleep(0.15)
+
+
 def _service_command(component: str, *, launcher_port: int, python_exe: str, root: str) -> list[str]:
     """Prefer frozen ``run.exe --service …`` when available; else Python scripts."""
     frozen = _frozen_backend_exe()
@@ -172,10 +309,20 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
     gw_ok = _port_open("127.0.0.1", gateway_port)
     la_ok = _port_open("127.0.0.1", launcher_port)
 
-    if gw_ok and la_ok:
-        if not quiet:
-            print(f"[code] Services already up (gateway:{gateway_port} launcher:{launcher_port})")
-        return True
+    if gw_ok or la_ok:
+        mismatch = _stack_mismatch_reason(gateway_port, launcher_port)
+        if mismatch:
+            if not quiet:
+                print(f"[code] Running stack is not the desired backend ({mismatch})")
+            _recycle_running_stack(gateway_port, launcher_port, registry_port, quiet=quiet)
+            gw_ok = False
+            la_ok = False
+        elif gw_ok and la_ok:
+            frozen = _frozen_backend_exe()
+            if not quiet:
+                kind = f"frozen {frozen}" if frozen else "source"
+                print(f"[code] Services already up (gateway:{gateway_port} launcher:{launcher_port}, {kind})")
+            return True
 
     root = _repo_root()
     if root not in sys.path:
@@ -201,6 +348,8 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
         print("[code] Starting OpenSquad services in background…")
 
     started: list[str] = []
+    gw_proc: subprocess.Popen | None = None
+    la_proc: subprocess.Popen | None = None
 
     if not gw_ok:
         gateway_cwd = _service_cwd("gateway", root)
@@ -213,7 +362,7 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
             "ALL_PROXY": "",
         }
         try:
-            proc = subprocess.Popen(
+            gw_proc = subprocess.Popen(
                 _service_command("gateway", launcher_port=launcher_port, python_exe=python_exe, root=root),
                 cwd=gateway_cwd,
                 env=env,
@@ -221,8 +370,8 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
             )
             started.append("gateway")
             time.sleep(0.15)
-            if proc.poll() is not None:
-                code = proc.returncode or 0
+            if gw_proc.poll() is not None:
+                code = gw_proc.returncode or 0
                 print(
                     f"[code] Gateway exited immediately (code={code:#x}). Try: opensquad stop && opensquad code",
                     file=sys.stderr,
@@ -248,15 +397,15 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
 
     if not la_ok:
         try:
-            proc = subprocess.Popen(
+            la_proc = subprocess.Popen(
                 _service_command("launcher", launcher_port=launcher_port, python_exe=python_exe, root=root),
                 cwd=_service_cwd("launcher", root),
                 **popts,
             )
             started.append("launcher")
             time.sleep(0.15)
-            if proc.poll() is not None:
-                code = proc.returncode or 0
+            if la_proc.poll() is not None:
+                code = la_proc.returncode or 0
                 print(
                     f"[code] Launcher exited immediately (code={code:#x}). Try: opensquad stop && opensquad code",
                     file=sys.stderr,
@@ -269,8 +418,8 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
     if started and not quiet:
         print(f"[code] Launched: {', '.join(started)}")
 
-    ok_gw = _wait_port("gateway", gateway_port)
-    ok_la = _wait_port("launcher", launcher_port)
+    ok_gw = _wait_port("gateway", gateway_port, proc=gw_proc)
+    ok_la = _wait_port("launcher", launcher_port, proc=la_proc)
     if not (ok_gw and ok_la):
         print(
             "[code] Core services failed to start. Try: opensquad doctor / opensquad stop then opensquad code",
@@ -286,7 +435,9 @@ def ensure_services(*, quiet: bool = False, skip_registry: bool = False) -> bool
             return False
 
     if not quiet:
-        print("[code] Gateway + Launcher ready")
+        frozen = _frozen_backend_exe()
+        kind = f"frozen {frozen}" if frozen else "source"
+        print(f"[code] Gateway + Launcher ready ({kind})")
     return True
 
 

@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.44]                                                               | 2026-08-14 | [0.8.43 → 0.8.44](https://github.com/opensquad-ai/opensquad/compare/v0.8.43...v0.8.44) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.44) |
 | [0.8.43]                                                               | 2026-08-11 | [0.8.42 → 0.8.43](https://github.com/opensquad-ai/opensquad/compare/v0.8.42...v0.8.43) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.43) |
 | [0.8.42]                                                               | 2026-08-10 | [0.8.41 → 0.8.42](https://github.com/opensquad-ai/opensquad/compare/v0.8.41...v0.8.42) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.42) |
 | [0.8.41]                                                               | 2026-08-10 | [0.8.40 → 0.8.41](https://github.com/opensquad-ai/opensquad/compare/v0.8.40...v0.8.41) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.41) |
@@ -36,6 +37,49 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.44] — 2026-08-14
+
+> Frozen desktop regression: builtin plugins vanished from the packaged
+> app, several proxy tools attached with `tools=0`, and `opensquad web`
+> kept reusing leftover source processes instead of the new `run.exe`.
+> Also unblocks `opensquad dev` when a stale `launcher.pid` owns port 9600.
+
+### Fixed
+
+- **Frozen plugin discovery.** Packaged launcher only listed directories
+  that still had `plugin.py` on disk; PyInstaller put those modules in the
+  PYZ, so `_internal/plugins` was empty except workspace extras. Discovery
+  now accepts `plugin.py` **or** `plugin.json`, and the spec extracts both
+  plus `builtin_plugins.json` onto disk.
+- **Missing `opensquad.utils` in the frozen bundle.** Lazy imports
+  (`ssrf`, `fs_index`, …) were omitted from Analysis; websearch fetch and
+  the file tree crashed with `No module named 'opensquad.utils.*'`. Spec
+  now hidden-imports and extracts `opensquad/utils/*.py`; launcher
+  registers them from disk when the PYZ is incomplete.
+- **Proxy plugins loaded with zero tools.** `get_tool_modules()` swallowed
+  `ImportError` / `IndentationError` and returned `[]`, so the plugin
+  shell looked fine while Agent saw no tools (websearch, whisper, vision,
+  …). Failures now raise `PluginToolAttachError`, log ERROR, mark
+  DEGRADED, and keep `plugin.json` tool names. `websearch.py` indent
+  break from the SSRF fix is repaired.
+- **`opensquad dev` waited 45s on a dead launcher lock.** A leftover
+  `registry/launcher.pid` from the desktop app made the source launcher
+  exit even when port 9600 was down. The lock is respected only when the
+  owner is alive **and** `/api/workspace` is healthy; otherwise it is
+  stolen. Windows PID liveness uses `OpenProcess` / `GetExitCodeProcess`.
+- **`opensquad web` reused source Python.** If 9555/9600 were already
+  listening, web skipped startup and never switched to the latest
+  `build/backend-win/run/run.exe`. It now replaces a source or stale
+  frozen stack with the current bundle (mtime-aware). `opensquad dev`
+  still forces source via `OPENSQUAD_SOURCE_MODE`.
+
+### Changed
+
+- CLI wait on gateway/launcher fails fast if the spawned process exits
+  instead of sleeping the full 45s.
 
 ---
 

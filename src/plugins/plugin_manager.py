@@ -10,6 +10,7 @@ Provides hook chain execution for runner.py lifecycle hooks.
 
 import asyncio
 import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -33,6 +34,90 @@ logger = logging.getLogger("plugins.manager")
 # stalls. Hook handlers doing heavy I/O should spawn their own task.
 _HOOK_HANDLER_TIMEOUT = 10.0
 _RUNTIME_MANIFEST_KEYS = ("service", "service_toggle", "enabled")
+_SKIP_PLUGIN_MODS = frozenset({"plugin_manager", "plugin_api"})
+
+
+def _ensure_plugins_path() -> None:
+    """Make ``import plugins.X`` see both builtin and workspace plugin trees."""
+    try:
+        import plugins as pkg
+
+        seen = {os.path.abspath(p) for p in pkg.__path__}
+        for extra in (syscfg.builtin_resources_dir("plugins"), syscfg.workspace_plugins_dir()):
+            if not os.path.isdir(extra):
+                continue
+            ab = os.path.abspath(extra)
+            if ab not in seen:
+                pkg.__path__.append(extra)
+                seen.add(ab)
+    except Exception:
+        logger.debug("[PluginManager] could not extend plugins.__path__", exc_info=True)
+
+
+def collect_plugin_dirs() -> dict[str, str]:
+    """Map plugin dir_name -> filesystem path (workspace overrides builtin).
+
+    Frozen builds keep ``plugin.py`` in the PYZ archive, so a directory may
+    exist with only ``plugin.json``, or the package may be importable with no
+    extracted folder at all. Listing must not require an on-disk ``plugin.py``.
+    """
+    _ensure_plugins_path()
+    out: dict[str, str] = {}
+    try:
+        roots = list(reversed(syscfg.resource_search_dirs("plugins")))
+    except Exception:
+        roots = [os.path.dirname(os.path.abspath(__file__))]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.startswith(("_", ".")) or entry in _SKIP_PLUGIN_MODS:
+                continue
+            plugin_dir = os.path.join(root, entry)
+            if not os.path.isdir(plugin_dir):
+                continue
+            if os.path.isfile(os.path.join(plugin_dir, "plugin.py")) or os.path.isfile(
+                os.path.join(plugin_dir, "plugin.json")
+            ):
+                out[entry] = plugin_dir
+    try:
+        import pkgutil
+
+        import plugins as pkg
+
+        for info in pkgutil.iter_modules(list(pkg.__path__)):
+            name = info.name
+            if name in out or name.startswith("_") or name in _SKIP_PLUGIN_MODS:
+                continue
+            loc = None
+            finder_path = getattr(info.module_finder, "path", None)
+            if finder_path:
+                cand = os.path.join(finder_path, name)
+                if os.path.isdir(cand):
+                    loc = cand
+            if loc is None:
+                for p in pkg.__path__:
+                    cand = os.path.join(p, name)
+                    if os.path.isdir(cand):
+                        loc = cand
+                        break
+            out[name] = loc or name
+    except Exception:
+        logger.debug("[PluginManager] pkgutil plugin scan skipped", exc_info=True)
+    return out
+
+
+def _plugin_importable(dir_name: str, plugin_dir: str) -> bool:
+    if os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
+        return True
+    try:
+        return importlib.util.find_spec(f"plugins.{dir_name}.plugin") is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
 
 
 def merge_plugin_manifest(existing: dict, generated: dict) -> dict:
@@ -64,6 +149,21 @@ def write_plugin_manifest_if_changed(manifest_path: str, generated: dict, existi
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return action
+
+
+def collect_proxy_tool_modules(plugin) -> tuple[list[dict[str, Any]], str | None]:
+    """Call get_tool_modules(); empty list without error is intentional (no agent tools).
+
+    Import/syntax failures must raise PluginToolAttachError (or any Exception)
+    so the manager can mark the plugin degraded instead of registering nothing.
+    """
+    if not hasattr(plugin, "get_tool_modules"):
+        return [], None
+    try:
+        descs = plugin.get_tool_modules() or []
+        return list(descs), None
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
 
 
 class PluginManager:
@@ -170,22 +270,13 @@ class PluginManager:
             List of loaded plugin names.
         """
         loaded = []
-        if not os.path.isdir(self.plugins_dir):
-            logger.warning(f"[PluginManager] Plugins directory not found: {self.plugins_dir}")
-            return loaded
-
         wanted: set[str] | None = None
         if wanted_names is not None:
             wanted = {str(n) for n in wanted_names if n}
         skipped = 0
 
-        for entry in sorted(os.listdir(self.plugins_dir)):
-            plugin_dir = os.path.join(self.plugins_dir, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
-
-            plugin_py = os.path.join(plugin_dir, "plugin.py")
-            if not os.path.isfile(plugin_py):
+        for entry, plugin_dir in sorted(collect_plugin_dirs().items()):
+            if not _plugin_importable(entry, plugin_dir):
                 continue
 
             # Skip service_only plugins — they have no agent tools and should
@@ -230,6 +321,7 @@ class PluginManager:
             logger.info(f"[PluginManager] Loaded {len(loaded)} plugins (skipped {skipped} unused): {loaded}")
         else:
             logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
+        self._log_attach_failures(wanted_names)
         return loaded
 
     def _import_plugin_class(self, plugin_dir: str, dir_name: str):
@@ -263,21 +355,13 @@ class PluginManager:
         import asyncio as _asyncio
 
         loaded = []
-        if not os.path.isdir(self.plugins_dir):
-            logger.warning(f"[PluginManager] Plugins directory not found: {self.plugins_dir}")
-            return loaded
-
         wanted: set[str] | None = None
         if wanted_names is not None:
             wanted = {str(n) for n in wanted_names if n}
         skipped = 0
 
-        for entry in sorted(os.listdir(self.plugins_dir)):
-            plugin_dir = os.path.join(self.plugins_dir, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
-            plugin_py = os.path.join(plugin_dir, "plugin.py")
-            if not os.path.isfile(plugin_py):
+        for entry, plugin_dir in sorted(collect_plugin_dirs().items()):
+            if not _plugin_importable(entry, plugin_dir):
                 continue
 
             plugin_json_path = os.path.join(plugin_dir, "plugin.json")
@@ -327,6 +411,7 @@ class PluginManager:
             logger.info(f"[PluginManager] Loaded {len(loaded)} plugins (skipped {skipped} unused): {loaded}")
         else:
             logger.info(f"[PluginManager] Loaded {len(loaded)} plugins: {loaded}")
+        self._log_attach_failures(wanted_names)
         return loaded
 
     # ------------------------------------------------------------------
@@ -496,25 +581,27 @@ class PluginManager:
         # Auto-generate plugin.json
         generated = generate_plugin_json(plugin_class, plugin_instance)
 
-        # If plugin has get_tool_modules() (proxy pattern), merge those tools
-        if hasattr(plugin_instance, "get_tool_modules"):
-            try:
-                proxy_tools = plugin_instance.get_tool_modules()
-                existing_names = {t["name"] for t in generated.get("tools", [])}
-                for pt in proxy_tools:
-                    pt_name = pt.get("name", "")
-                    if pt_name and pt_name not in existing_names:
-                        generated.setdefault("tools", []).append(
-                            {
-                                "name": pt_name,
-                                "module": "proxy",
-                                "level": pt.get("level", "extended"),
-                                "auto_register": pt.get("auto_register", False),
-                                "requires_agent_id": pt.get("requires_agent_id", False),
-                            }
-                        )
-            except Exception as e:
-                logger.debug(f"[PluginManager] get_tool_modules() failed for '{name}': {e}")
+        # If plugin has get_tool_modules() (proxy pattern), merge those tools.
+        # Import failure is an attach error: keep existing plugin.json tools,
+        # do not pretend the plugin has zero tools.
+        proxy_tools, attach_error = collect_proxy_tool_modules(plugin_instance)
+        if attach_error:
+            logger.error("[PluginManager] Proxy tools failed for '%s': %s", name, attach_error)
+            generated.pop("tools", None)
+        else:
+            existing_names = {t["name"] for t in generated.get("tools", []) if isinstance(t, dict)}
+            for pt in proxy_tools:
+                pt_name = pt.get("name", "")
+                if pt_name and pt_name not in existing_names:
+                    generated.setdefault("tools", []).append(
+                        {
+                            "name": pt_name,
+                            "module": "proxy",
+                            "level": pt.get("level", "extended"),
+                            "auto_register": pt.get("auto_register", False),
+                            "requires_agent_id": pt.get("requires_agent_id", False),
+                        }
+                    )
 
         # Preserve runtime-only fields from existing file (not declared in @register)
         if os.path.isfile(manifest_path):
@@ -594,6 +681,8 @@ class PluginManager:
             "plugin_dir": plugin_dir,
             "project_root": project_root,
             "version": meta.get("version", "?"),
+            "attach_error": attach_error,
+            "proxy_tool_count": 0 if attach_error else len(proxy_tools),
         }
 
     def _finalize_new_style(self, prepared: dict) -> str | None:
@@ -636,15 +725,50 @@ class PluginManager:
             "dir": plugin_dir,
             "hook_map": hook_map,
             "tool_wrappers": tool_wrappers,
+            "attach_error": prepared.get("attach_error"),
         }
         self._index_plugin_hooks(name, hook_map)
 
-        logger.info(
-            f"[PluginManager] Loaded: {name} v{prepared.get('version', '?')} "
-            f"(type={plugin_type}, tools={len(tool_wrappers)}, "
-            f"hooks={list(hook_map.keys())}, events={len(event_methods)})"
-        )
+        proxy_n = int(prepared.get("proxy_tool_count") or 0)
+        attach_error = prepared.get("attach_error")
+        tool_n = len(tool_wrappers) + proxy_n
+        if attach_error:
+            logger.error(
+                "[PluginManager] Loaded DEGRADED: %s v%s (type=%s, tools=%s, "
+                "hooks=%s, events=%s) — tools not attached: %s",
+                name,
+                prepared.get("version", "?"),
+                plugin_type,
+                tool_n,
+                list(hook_map.keys()),
+                len(event_methods),
+                attach_error,
+            )
+        else:
+            logger.info(
+                f"[PluginManager] Loaded: {name} v{prepared.get('version', '?')} "
+                f"(type={plugin_type}, tools={tool_n}, "
+                f"hooks={list(hook_map.keys())}, events={len(event_methods)})"
+            )
         return name
+
+    def _log_attach_failures(self, wanted_names: list[str] | None = None) -> None:
+        failed = [(n, info.get("attach_error")) for n, info in self._plugins.items() if info.get("attach_error")]
+        if not failed:
+            return
+        wanted = {str(n) for n in (wanted_names or []) if n}
+        for name, err in failed:
+            if wanted and name in wanted:
+                logger.error(
+                    "[PluginManager] Agent requested plugin '%s' but its tools are NOT attached: %s",
+                    name,
+                    err,
+                )
+        logger.error(
+            "[PluginManager] %d plugin(s) loaded without tools: %s",
+            len(failed),
+            "; ".join(f"{n} ({e})" for n, e in failed),
+        )
 
     # ------------------------------------------------------------------
     # Tool registration
@@ -725,57 +849,63 @@ class PluginManager:
                             exc_info=True,
                         )
 
-                # 2) Also check get_tool_modules() for proxy-pattern tools
-                if hasattr(plugin, "get_tool_modules"):
-                    try:
-                        _proxy_descs = plugin.get_tool_modules()
-                    except Exception as _gtm_err:
+                # 2) Proxy-pattern tools (import failure is attach_error, not empty success)
+                _proxy_descs, proxy_err = collect_proxy_tool_modules(plugin)
+                if proxy_err:
+                    info["attach_error"] = proxy_err
+                    if plugin_enabled_by_name:
                         logger.error(
-                            f"[PluginManager] get_tool_modules() raised for plugin '{plugin_name}': "
-                            f"{type(_gtm_err).__name__}: {_gtm_err}",
+                            "[PluginManager] Agent enabled plugin '%s' but tools are NOT attached: %s",
+                            plugin_name,
+                            proxy_err,
+                        )
+                    else:
+                        logger.error(
+                            "[PluginManager] get_tool_modules() failed for plugin '%s': %s",
+                            plugin_name,
+                            proxy_err,
+                        )
+                    _proxy_descs = []
+                for desc in _proxy_descs:
+                    try:
+                        tool_name = desc.get("name", "")
+                        module = desc.get("module")
+                        # Per-agent level override takes precedence over plugin default
+                        level = agent_tool_levels.get(
+                            tool_name, agent_tool_levels.get(plugin_name, desc.get("level", "extended"))
+                        )
+                        auto_register = desc.get("auto_register", False)
+                        requires_agent_id = desc.get("requires_agent_id", False)
+                        enabled_by_tool_name = tool_name in agent_tool_names
+
+                        if not (auto_register or plugin_enabled_by_name or enabled_by_tool_name):
+                            logger.info(
+                                f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': "
+                                f"not enabled for agent (auto_register={auto_register}, "
+                                f"plugin_toggle={plugin_enabled_by_name}, tool_toggle={enabled_by_tool_name})"
+                            )
+                            continue
+                        if module is None:
+                            logger.warning(
+                                f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': module is None"
+                            )
+                            continue
+
+                        registry.register(module, tool_name, level=level)
+                        if requires_agent_id and hasattr(module, "set_agent_id") and agent_id:
+                            module.set_agent_id(agent_id)
+
+                        count += 1
+                        logger.info(
+                            f"[PluginManager] Registered tool '{tool_name}' from "
+                            f"plugin '{plugin_name}' (proxy, level={level})"
+                        )
+                    except Exception as _desc_err:
+                        logger.error(
+                            f"[PluginManager] Failed to register proxy tool from plugin '{plugin_name}': "
+                            f"{type(_desc_err).__name__}: {_desc_err}",
                             exc_info=True,
                         )
-                        _proxy_descs = []
-                    for desc in _proxy_descs:
-                        try:
-                            tool_name = desc.get("name", "")
-                            module = desc.get("module")
-                            # Per-agent level override takes precedence over plugin default
-                            level = agent_tool_levels.get(
-                                tool_name, agent_tool_levels.get(plugin_name, desc.get("level", "extended"))
-                            )
-                            auto_register = desc.get("auto_register", False)
-                            requires_agent_id = desc.get("requires_agent_id", False)
-                            enabled_by_tool_name = tool_name in agent_tool_names
-
-                            if not (auto_register or plugin_enabled_by_name or enabled_by_tool_name):
-                                logger.info(
-                                    f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': "
-                                    f"not enabled for agent (auto_register={auto_register}, "
-                                    f"plugin_toggle={plugin_enabled_by_name}, tool_toggle={enabled_by_tool_name})"
-                                )
-                                continue
-                            if module is None:
-                                logger.warning(
-                                    f"[PluginManager] Skipped proxy tool '{tool_name}' from plugin '{plugin_name}': module is None"
-                                )
-                                continue
-
-                            registry.register(module, tool_name, level=level)
-                            if requires_agent_id and hasattr(module, "set_agent_id") and agent_id:
-                                module.set_agent_id(agent_id)
-
-                            count += 1
-                            logger.info(
-                                f"[PluginManager] Registered tool '{tool_name}' from "
-                                f"plugin '{plugin_name}' (proxy, level={level})"
-                            )
-                        except Exception as _desc_err:
-                            logger.error(
-                                f"[PluginManager] Failed to register proxy tool from plugin '{plugin_name}': "
-                                f"{type(_desc_err).__name__}: {_desc_err}",
-                                exc_info=True,
-                            )
             except Exception as _plugin_err:
                 logger.error(
                     f"[PluginManager] Plugin '{plugin_name}' registration failed, "
@@ -784,6 +914,7 @@ class PluginManager:
                     exc_info=True,
                 )
 
+        self._log_attach_failures(agent_tool_names)
         return count
 
     # ------------------------------------------------------------------
@@ -1026,13 +1157,10 @@ class PluginManager:
                 self.unload_plugin(name, registry=registry)
                 result["unloaded"].append(name)
 
-        # Scan all plugin directories on disk
+        # Scan builtin + workspace plugin directories (frozen: json-only dirs ok)
         disk_plugins = {}
-        for entry in sorted(os.listdir(self.plugins_dir)):
-            plugin_dir = os.path.join(self.plugins_dir, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
-            if not os.path.isfile(os.path.join(plugin_dir, "plugin.py")):
+        for entry, plugin_dir in sorted(collect_plugin_dirs().items()):
+            if not _plugin_importable(entry, plugin_dir):
                 continue
 
             manifest_path = os.path.join(plugin_dir, "plugin.json")
@@ -1092,7 +1220,16 @@ class PluginManager:
                                 registry.register(tw["wrapper"], ns, level=level)
 
                         if hasattr(plugin, "get_tool_modules"):
-                            for desc in plugin.get_tool_modules():
+                            _proxy_descs, proxy_err = collect_proxy_tool_modules(plugin)
+                            if proxy_err:
+                                info["attach_error"] = proxy_err
+                                logger.error(
+                                    "[PluginManager] Reload: tools not attached for '%s': %s",
+                                    loaded_name,
+                                    proxy_err,
+                                )
+                                _proxy_descs = []
+                            for desc in _proxy_descs:
                                 t_name = desc.get("name", "")
                                 module = desc.get("module")
                                 level = desc.get("level", "extended")

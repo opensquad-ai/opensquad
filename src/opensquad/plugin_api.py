@@ -28,6 +28,8 @@ Lifecycle:
     6. Scans @hook methods -> hook chain
     7. Scans @on_event methods -> EventBus.subscribe()
     8. Auto-generates plugin.json for Launcher static reads
+    9. Proxy-pattern plugins import a tool module via proxy_tool_module()
+       (import failure is PluginToolAttachError, not a silent empty list)
 """
 
 import functools
@@ -206,6 +208,16 @@ def register(
         return cls
 
     return decorator
+
+
+# Re-export so `from opensquad.plugin_api import proxy_tool_module` works in source.
+try:
+    from plugins.proxy_tools import PluginToolAttachError, proxy_tool_module
+except ImportError:  # pragma: no cover - plugins package always present in-repo
+    PluginToolAttachError = RuntimeError  # type: ignore[misc, assignment]
+
+    def proxy_tool_module(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise ImportError("plugins.proxy_tools is required")
 
 
 # ---------------------------------------------------------------------------

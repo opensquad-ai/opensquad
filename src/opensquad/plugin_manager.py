@@ -13,8 +13,10 @@ All new code should use `opensquad.plugin_manager`.
 from plugins.plugin_manager import (
     PluginManager as _PluginManager,
 )
+from plugins.plugin_manager import (
+    collect_plugin_dirs,
+)
 
-# Re-export for convenience
 PluginManager = _PluginManager
 
-__all__ = ["PluginManager"]
+__all__ = ["PluginManager", "collect_plugin_dirs"]

@@ -6,11 +6,11 @@ Service lifecycle is owned by the Launcher's PluginServiceProcess
 (declared via `service` field in plugin.json).
 """
 
-import importlib
 import logging
 from typing import Any
 
 from opensquad.plugin_api import Context, Plugin, register
+from plugins.proxy_tools import proxy_tool_module
 
 logger = logging.getLogger("plugins.whisper")
 
@@ -52,24 +52,10 @@ class WhisperPlugin(Plugin):
         logger.info("[WhisperPlugin] loaded.")
 
     def get_tool_modules(self) -> list[dict[str, Any]]:
-        """
-        Proxy pattern: return the existing tool module for ToolRegistry.
-
-        This method is recognized by PluginManager for new-style plugins
-        that proxy existing tool modules instead of using @tool decorators.
-        """
-        tools = []
-        try:
-            module = importlib.import_module("plugins.whisper.whisper_transcribe")
-            tools.append(
-                {
-                    "name": "whisper_transcribe",
-                    "module": module,
-                    "level": "core",
-                    "auto_register": False,
-                    "requires_agent_id": False,
-                }
+        return [
+            proxy_tool_module(
+                "plugins.whisper.whisper_transcribe",
+                name="whisper_transcribe",
+                level="core",
             )
-        except ImportError as e:
-            logger.error(f"[WhisperPlugin] Cannot import whisper_transcribe module: {e}")
-        return tools
+        ]

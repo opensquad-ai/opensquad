@@ -208,11 +208,22 @@ scripts/opensquad_watchdog.py
 # (The root-level /check_*.py and /test_*.py rules above do not reach
 # into scripts/, so list these explicitly.)
 scripts/check_completion.py
+scripts/check_csv_order.py
+scripts/export_plugin_config.py
+scripts/find_*.py
+scripts/patch_*.py
+scripts/sync_pipeline_fix.py
+scripts/verify_theme_url_fix.py
 scripts/test_new_session_ws.py
 scripts/manual_tests/
 
 # ── Local daily reports / personal scratch documents (not source) ──
 daily_reports/
+reports/
+.release-notes/
+
+# Root-level stray file (empty scratch, not source)
+/1
 *.excalidraw
 /a\股*报告*.md
 /docs/*_test_report_*.md
