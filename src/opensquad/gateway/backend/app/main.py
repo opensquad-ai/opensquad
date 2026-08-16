@@ -490,7 +490,7 @@ async def lifespan(app: FastAPI):
         model_preset_service.shutdown()
     except Exception:
         pass
-    # PERF-9: close the shared httpx client used by the admin proxy routes.
+    # Close shared httpx clients (admin launcher proxy + GitHub TLS).
     try:
         from app.ai_web.routes._admin import close_shared_http_client
 
@@ -646,9 +646,11 @@ async def launcher_http_proxy(path: str, request: Request):
     headers = {k: v for k, v in request.headers.items() if k.lower() not in hop_by_hop}
     body = await request.body()
 
+    from app.http_clients import get_local_http_client
+
     try:
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            upstream = await client.request(request.method, f"{base}{target}", content=body, headers=headers)
+        client = get_local_http_client()
+        upstream = await client.request(request.method, f"{base}{target}", content=body, headers=headers, timeout=30.0)
     except httpx.ConnectError:
         return Response(
             content='{"detail":"Launcher is not running"}',

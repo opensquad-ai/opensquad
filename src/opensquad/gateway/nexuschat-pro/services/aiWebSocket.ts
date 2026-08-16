@@ -41,6 +41,10 @@ export interface AIWSMessage {
   sid?: string;
   /** Synthetic ids like scheduled-task:{exec_id} for non-browser turns */
   user_id?: string;
+  turn_id?: number;
+  round_id?: number;
+  agent_id?: string;
+  trace_id?: string;
 }
 
 /** Token stats payload */
@@ -95,6 +99,7 @@ const SESSION_PASSTHROUGH_TYPES = new Set([
   // when sid ≠ activeSessionId — otherwise Switching… spinner never clears.
   'info',
   'error',
+  'turn_cancelled',
   'voice_audio_out',
   'voice_transcript',
   'voice_realtime_status',

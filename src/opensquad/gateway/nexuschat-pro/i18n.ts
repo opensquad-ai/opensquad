@@ -21,10 +21,11 @@ i18n
     },
   });
 
-/** Switch language and persist to localStorage */
+/** Switch language and persist to localStorage + host (cross-origin). */
 export function setLanguage(lang: 'zh' | 'en') {
   localStorage.setItem(LANG_KEY, lang);
   i18n.changeLanguage(lang);
+  void import('./utils/hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
 }
 
 export default i18n;

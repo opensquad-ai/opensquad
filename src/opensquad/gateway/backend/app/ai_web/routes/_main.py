@@ -15,20 +15,14 @@ import time
 import uuid
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from opensquad.system_config import syscfg
-
-# SSL context for GitHub API calls (Windows may lack proper CA certificates)
-# Default to "1" (verify SSL). Set OPENQUAD_SSL_VERIFY="0" to disable in dev/air-gapped environments.
-_SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
-
 # Import gateway authentication
 from app.api import get_current_user_dep
 from app.models import User
+from opensquad.system_config import syscfg
 
 from ..audit_routes import router as audit_router
 from ..registry import registry
@@ -652,36 +646,38 @@ async def check_version(platform: str | None = None, arch: str | None = None):
         return result
 
     try:
-        async with httpx.AsyncClient(timeout=10, verify=_SSL_VERIFY) as client:
-            resp = await client.get(
-                "https://api.github.com/repos/opensquad-ai/opensquad/releases/latest",
-                headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "OpenSquad"},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                tag = data.get("tag_name", "").lstrip("v")
-                result["latest"] = tag
-                result["url"] = data.get("html_url", "")
-                # Compare versions
-                if tag and current and tag != current:
-                    try:
-                        from packaging.version import Version
+        from app.http_clients import get_tls_http_client
 
-                        result["update_available"] = Version(tag) > Version(current)
-                    except Exception:
-                        # Fallback: simple string comparison
-                        result["update_available"] = tag != current
+        resp = await get_tls_http_client().get(
+            "https://api.github.com/repos/opensquad-ai/opensquad/releases/latest",
+            headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "OpenSquad"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tag = data.get("tag_name", "").lstrip("v")
+            result["latest"] = tag
+            result["url"] = data.get("html_url", "")
+            # Compare versions
+            if tag and current and tag != current:
+                try:
+                    from packaging.version import Version
 
-                if result["update_available"] and normalized_platform:
-                    picked = pick_desktop_installer_asset(
-                        data.get("assets"),
-                        normalized_platform,
-                        arch=arch,
-                    )
-                    if picked:
-                        result["download_url"] = picked["url"]
-                        result["download_name"] = picked["name"]
-                        result["download_size"] = picked["size"]
+                    result["update_available"] = Version(tag) > Version(current)
+                except Exception:
+                    # Fallback: simple string comparison
+                    result["update_available"] = tag != current
+
+            if result["update_available"] and normalized_platform:
+                picked = pick_desktop_installer_asset(
+                    data.get("assets"),
+                    normalized_platform,
+                    arch=arch,
+                )
+                if picked:
+                    result["download_url"] = picked["url"]
+                    result["download_name"] = picked["name"]
+                    result["download_size"] = picked["size"]
     except Exception as e:
         logger.debug(f"[version] GitHub check failed: {e}")
 

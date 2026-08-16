@@ -415,19 +415,27 @@ export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
  */
 export function sealIncompleteWorkflows(
   prev: TimelineEntry[],
-  opts?: { nowMs?: number; fallbackStartedMs?: number },
+  opts?: { nowMs?: number; fallbackStartedMs?: number; cancelOpenTools?: string },
 ): TimelineEntry[] {
   const now = opts?.nowMs ?? Date.now();
   const fallbackStarted = opts?.fallbackStartedMs;
+  const cancelText = opts?.cancelOpenTools;
   return prev.map((entry) => {
     if (entry.kind !== 'workflow' || entry.data.completed) return entry;
     const wf = entry.data;
+    const events = cancelText
+      ? wf.events.map((evt) => (
+        evt.type === 'tool_call' && !evt.result
+          ? { ...evt, result: cancelText, resultStatus: 'error' as const }
+          : evt
+      ))
+      : wf.events;
     const started =
       typeof wf.started_ms === 'number'
         ? wf.started_ms
         : typeof fallbackStarted === 'number'
           ? fallbackStarted
-          : wf.events[0]?.timestamp;
+          : events[0]?.timestamp;
     // Prefer wall-clock seal time so Stop freezes "Worked for" at the moment
     // the user cancelled (even when the last tool event was much earlier).
     const elapsed =
@@ -440,6 +448,7 @@ export function sealIncompleteWorkflows(
       ...entry,
       data: {
         ...wf,
+        events,
         completed: true,
         status: null,
         started_ms: typeof started === 'number' ? started : wf.started_ms,
@@ -1181,6 +1190,17 @@ export function appendWorkflowEvent(
   }
 
   return updated;
+}
+
+export function appendWorkflowEvents(
+  prev: TimelineEntry[],
+  items: Array<{ event: WorkflowEvent; status: string | null }>,
+): TimelineEntry[] {
+  let next = prev;
+  for (const item of items) {
+    next = appendWorkflowEvent(next, item.event, item.status);
+  }
+  return next;
 }
 
 export function toWebMediaUrl(input: any): string {

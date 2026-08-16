@@ -7,7 +7,6 @@ import os
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.models import Base
 from opensquad.system_config import syscfg
@@ -64,19 +63,29 @@ _write_init_log(f"[DB] ENGINE DATABASE_URL = {DATABASE_URL}")
 _db_file = DATABASE_URL.replace("sqlite+aiosqlite:///", "")
 os.makedirs(os.path.dirname(_db_file), exist_ok=True)
 
-# Create async engine
+# Small pool instead of NullPool: WAL allows concurrent readers, and
+# per-connection PRAGMA cache_size would otherwise cold-start 16MB on
+# every request. SQLite still serializes writers — keep the pool tiny.
 engine = create_async_engine(
-    DATABASE_URL, echo=DATABASE_ECHO, poolclass=NullPool, connect_args={"check_same_thread": False}
+    DATABASE_URL,
+    echo=DATABASE_ECHO,
+    pool_size=8,
+    max_overflow=4,
+    pool_timeout=30,
+    pool_pre_ping=True,
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 
 
-# Enable WAL mode: allows concurrent reads and writes, significantly reducing write contention
+# Per-connection pragmas (cache_size / temp_store are not file-level).
+# journal_mode=WAL is also set here so a recycled pooled connection stays in WAL.
 @event.listens_for(engine.sync_engine, "connect")
-def _set_wal_mode(dbapi_connection, connection_record):
+def _set_sqlite_pragmas(dbapi_connection, connection_record):
     dbapi_connection.execute("PRAGMA journal_mode=WAL")
     dbapi_connection.execute("PRAGMA synchronous=NORMAL")
     dbapi_connection.execute("PRAGMA cache_size=-16000")  # 16MB page cache
     dbapi_connection.execute("PRAGMA temp_store=MEMORY")
+    dbapi_connection.execute("PRAGMA busy_timeout=5000")
 
 
 # Create async session factory
@@ -99,16 +108,19 @@ async def init_db():
     await ensure_indexes()
 
 
+INDEX_DDLS = [
+    "CREATE INDEX IF NOT EXISTS ix_messages_group_id   ON messages (group_id)",
+    "CREATE INDEX IF NOT EXISTS ix_messages_timestamp  ON messages (timestamp)",
+    "CREATE INDEX IF NOT EXISTS ix_messages_group_ts   ON messages (group_id, timestamp)",
+    "CREATE INDEX IF NOT EXISTS ix_ugs_group_id        ON user_group_settings (group_id)",
+    "CREATE INDEX IF NOT EXISTS ix_attachments_message_id ON attachments (message_id)",
+]
+
+
 async def ensure_indexes():
     """Add missing performance indexes and columns to existing databases (idempotent, safe to re-run)"""
-    ddls = [
-        "CREATE INDEX IF NOT EXISTS ix_messages_group_id   ON messages (group_id)",
-        "CREATE INDEX IF NOT EXISTS ix_messages_timestamp  ON messages (timestamp)",
-        "CREATE INDEX IF NOT EXISTS ix_messages_group_ts   ON messages (group_id, timestamp)",
-        "CREATE INDEX IF NOT EXISTS ix_ugs_group_id        ON user_group_settings (group_id)",
-    ]
     async with engine.begin() as conn:
-        for ddl in ddls:
+        for ddl in INDEX_DDLS:
             await conn.execute(text(ddl))
         # Add duration column to attachments table if missing (for voice messages)
         try:

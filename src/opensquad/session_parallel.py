@@ -64,6 +64,10 @@ class TurnLocal:
     dynamic_context_prefix: str = ""
     current_tools: Any = None
     current_tool_choice: str = "auto"
+    tool_result_generated: bool = False
+    parallel_scheduled_mode: bool = False
+    sched_any_tool: bool = False
+    sched_continue_count: int = 0
 
 
 _cv_turn: contextvars.ContextVar[TurnLocal | None] = contextvars.ContextVar("opensquad_turn_local", default=None)
@@ -162,7 +166,16 @@ class ParallelTurnScheduler:
         showing the composer as busy until the next reap tick (seconds of
         perceived lag after the reply already rendered). Called by the runner
         before broadcasting the final busy_sessions set.
+
+        Idempotent: ``_release_busy_state`` and the turn ``finally`` may both
+        call this; only the first call releases the parallel slot.
         """
+        had_slot = sid in self._tasks or sid in self._busy_sessions
         self._busy_sessions.discard(sid)
         self._tasks.pop(sid, None)
-        self._sem.release()
+        if not had_slot:
+            return
+        try:
+            self._sem.release()
+        except ValueError:
+            pass

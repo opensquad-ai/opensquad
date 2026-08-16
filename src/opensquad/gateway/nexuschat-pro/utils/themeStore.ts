@@ -214,6 +214,7 @@ export function saveThemePrefs(prefs: ThemePrefs): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(THEME_PREFS_EVENT, { detail: next }));
   }
+  void import('./hostUiPrefs').then((m) => m.schedulePushHostUiPrefs()).catch(() => undefined);
 }
 
 function clearLegacyThemeClasses(root: HTMLElement): void {

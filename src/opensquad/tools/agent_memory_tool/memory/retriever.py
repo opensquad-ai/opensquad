@@ -232,39 +232,33 @@ class MemoryRetriever:
         if not tier0_keywords:
             return self._empty_result(stats, t_start)
 
-        # === Step 1: Time-range pre-filter (determine candidate pool) ===
-        if time_range or time_recent:
-            all_ids = list(self.store.entries.keys())
-            # Apply source filter first if set
-            if source_filter:
-                all_ids = [eid for eid in all_ids if self.store.entries[eid].get("source") == source_filter]
-            candidate_pool = set(self.store.filter_by_time(all_ids, time_range=time_range, time_recent=time_recent))
-            stats["time_filtered"] = len(all_ids) - len(candidate_pool)
-        else:
-            candidate_pool = None  # None means no restriction
+        # === Step 1: Time-range / source pre-filter (SQL, no full-table load) ===
+        allowed_ids = None
+        if time_range or time_recent or source_filter:
+            allowed_ids = set(
+                self.store.list_entry_ids(
+                    source_filter=source_filter,
+                    time_range=time_range,
+                    time_recent=time_recent,
+                )
+            )
+            if time_range or time_recent:
+                if source_filter:
+                    source_count = len(self.store.list_entry_ids(source_filter=source_filter))
+                    stats["time_filtered"] = source_count - len(allowed_ids)
+                else:
+                    stats["time_filtered"] = len(self.store) - len(allowed_ids)
 
         # === Step 2: Tier 0 exact matching ===
         exact_hits = self.store.search_exact(tier0_keywords)
-        if candidate_pool is not None:
-            exact_hits = {eid: n for eid, n in exact_hits.items() if eid in candidate_pool}
-        if source_filter and candidate_pool is None:
-            exact_hits = {
-                eid: n
-                for eid, n in exact_hits.items()
-                if self.store.entries.get(eid, {}).get("source") == source_filter
-            }
+        if allowed_ids is not None:
+            exact_hits = {eid: n for eid, n in exact_hits.items() if eid in allowed_ids}
         stats["exact_hits"] = len(exact_hits)
 
         # === Step 3: Tier 1 fuzzy matching ===
         fuzzy_hits = self.store.search_fuzzy(tier1_keywords)
-        if candidate_pool is not None:
-            fuzzy_hits = {eid: s for eid, s in fuzzy_hits.items() if eid in candidate_pool}
-        if source_filter and candidate_pool is None:
-            fuzzy_hits = {
-                eid: s
-                for eid, s in fuzzy_hits.items()
-                if self.store.entries.get(eid, {}).get("source") == source_filter
-            }
+        if allowed_ids is not None:
+            fuzzy_hits = {eid: s for eid, s in fuzzy_hits.items() if eid in allowed_ids}
         stats["fuzzy_hits"] = len(fuzzy_hits)
 
         # === Step 4: Tier 2 association expansion (standard / deep) ===
@@ -278,11 +272,11 @@ class MemoryRetriever:
                 assoc_fuzzy = self.store.search_fuzzy(expanded_keywords)
                 # Merge; association-expanded hits have half weight
                 for eid, n in assoc_exact.items():
-                    if candidate_pool is not None and eid not in candidate_pool:
+                    if allowed_ids is not None and eid not in allowed_ids:
                         continue
                     assoc_hits[eid] = assoc_hits.get(eid, 0) + n * 0.5
                 for eid, s in assoc_fuzzy.items():
-                    if candidate_pool is not None and eid not in candidate_pool:
+                    if allowed_ids is not None and eid not in allowed_ids:
                         continue
                     assoc_hits[eid] = max(assoc_hits.get(eid, 0), s * 0.3)
                 stats["assoc_hits"] = len(assoc_hits)
@@ -306,14 +300,14 @@ class MemoryRetriever:
                     chain_words = [hw["word"] for hw in chain_result["hidden_words"][:5]]
                     chain_hits = self.store.search_exact(chain_words)
                     for eid, n in chain_hits.items():
-                        if candidate_pool is not None and eid not in candidate_pool:
+                        if allowed_ids is not None and eid not in allowed_ids:
                             continue
                         assoc_hits[eid] = assoc_hits.get(eid, 0) + n * 0.4
                     # Optional: fuzzy match hidden-chain words as well
                     if chain_fuzzy:
                         chain_fuzzy_hits = self.store.search_fuzzy(chain_words)
                         for eid, s in chain_fuzzy_hits.items():
-                            if candidate_pool is not None and eid not in candidate_pool:
+                            if allowed_ids is not None and eid not in allowed_ids:
                                 continue
                             assoc_hits[eid] = max(assoc_hits.get(eid, 0), s * 0.2)
 
@@ -324,8 +318,9 @@ class MemoryRetriever:
 
         now = time.time()
         scored_entries = []
+        by_id = self.store.get_many(all_entry_ids)
         for eid in all_entry_ids:
-            entry = self.store.get(eid)
+            entry = by_id.get(eid)
             if entry is None:
                 continue
 

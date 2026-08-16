@@ -822,9 +822,8 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
         </button>
         <button
           type="button"
-          disabled={!workspaceRootPath}
           onClick={() => onOpenSearch?.()}
-          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive"
         >
           <Search size={16} className="text-emerald-500" />
           <span className="flex-1 text-left">{t('aiChat.search.title')}</span>

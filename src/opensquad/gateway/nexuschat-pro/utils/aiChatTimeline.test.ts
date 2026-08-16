@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
+  appendWorkflowEvents,
   buildTimelineFromSession,
   composeAssistantDisplayContent,
   foldTaskProcessSinceLastUser,
@@ -850,6 +851,56 @@ describe('sealIncompleteWorkflows (mid-send)', () => {
     expect(sealed[0].data.elapsed_ms).toBe(5500);
     expect(sealed[0].data.started_ms).toBe(started);
   });
+
+  it('cancels every open tool_call across all incomplete workflows', () => {
+    const uid = () => genTimelineUID();
+    const started = 1_700_000_000_000;
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { type: 'tool_call', content: { id: 'call_a', name: 'shell' }, timestamp: started },
+            { type: 'thought', content: 'still going', timestamp: started + 10 },
+          ],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+      {
+        kind: 'message',
+        data: { role: 'user', content: 'again', timestamp: new Date().toISOString() },
+        _uid: uid(),
+      },
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            { type: 'tool_call', content: { id: 'call_b', name: 'write' }, timestamp: started + 100, result: 'ok' },
+            { type: 'tool_call', content: { id: 'call_c', name: 'edit' }, timestamp: started + 200 },
+          ],
+          status: 'working',
+          completed: false,
+          started_ms: started + 100,
+        },
+        _uid: uid(),
+      },
+    ];
+    const sealed = sealIncompleteWorkflows(prev, {
+      nowMs: started + 900,
+      cancelOpenTools: 'Cancelled: stopped by user',
+    });
+    expect(sealed.filter((e) => e.kind === 'workflow').every((e) => e.kind === 'workflow' && e.data.completed)).toBe(true);
+    const tools = sealed
+      .filter((e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
+    expect(tools[0].result).toBe('Cancelled: stopped by user');
+    expect(tools[0].resultStatus).toBe('error');
+    expect(tools[1].result).toBe('ok');
+    expect(tools[2].result).toBe('Cancelled: stopped by user');
+  });
 });
 
 describe('buildTimelineFromSession in-progress refresh', () => {
@@ -1003,5 +1054,24 @@ describe('timelineHasVisibleChatContent', () => {
         },
       ]),
     ).toBe(true);
+  });
+});
+
+describe('appendWorkflowEvents', () => {
+  it('applies events in order and dedups tool_call replays', () => {
+    const call = toolCall('c1', 'read_file');
+    const result = toolResult('c1', 'ok');
+    const next = appendWorkflowEvents([], [
+      { event: call, status: 'Calling...' },
+      { event: call, status: 'Calling...' },
+      { event: result, status: 'done' },
+    ]);
+    const wf = next.find((e) => e.kind === 'workflow');
+    expect(wf?.kind).toBe('workflow');
+    if (wf && wf.kind === 'workflow') {
+      const calls = wf.data.events.filter((e) => e.type === 'tool_call');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].result).toBe('ok');
+    }
   });
 });

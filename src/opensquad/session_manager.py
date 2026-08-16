@@ -1979,25 +1979,30 @@ class SessionManager:
     def get_current_session_id(self) -> str:
         return self.session_data.get("id", "unknown")
 
-    def set_title(self, title: str):
+    def set_title(self, title: str, sid: str | None = None):
         if not title:
             return
+        target = self._resolve_session_data(sid) if sid else self.session_data
+        target_sid = (sid or target.get("id") or self.session_data.get("id") or "").strip()
 
         def _mutate():
             # User-renamed titles stay sticky until unlocked.
-            if self.session_data.get("title_locked"):
+            if target.get("title_locked"):
                 return
-            self.session_data["title"] = title
-            self.session_data["last_updated"] = utc_now_iso()
+            target["title"] = title
+            target["last_updated"] = utc_now_iso()
             self._append_log_record(
-                self.session_data.get("id"),
+                target_sid or target.get("id"),
                 {
                     "op": "meta",
-                    "fields": {"title": title, "last_updated": self.session_data["last_updated"]},
+                    "fields": {"title": title, "last_updated": target["last_updated"]},
                 },
             )
 
-        self._enqueue_mutation(_mutate)
+        if sid:
+            self._enqueue_mutation_for(_mutate, sid=sid)
+        else:
+            self._enqueue_mutation(_mutate)
 
     def get_title(self) -> str | None:
         return self.session_data.get("title")

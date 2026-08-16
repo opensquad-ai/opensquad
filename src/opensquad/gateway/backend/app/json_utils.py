@@ -31,3 +31,11 @@ def make_json_safe(data: Any) -> Any:
         # On error, convert and retry
         converted = convert_to_json_serializable(data)
         return converted
+
+
+def dumps_json_safe(data: Any) -> str:
+    """Serialize once for fan-out (group WS send_text to N sockets)."""
+    try:
+        return json.dumps(data, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps(convert_to_json_serializable(data), ensure_ascii=False)

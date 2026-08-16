@@ -3,6 +3,7 @@ import {
   collectHtmlEmbedsFromEvents,
   collectHtmlEmbedsPrecedingMessage,
   extractHtmlEmbed,
+  indexHtmlEmbedsByAssistantMessage,
   isVisualizationToolName,
 } from './HtmlEmbedBlock';
 import type { TimelineEntry, WorkflowEvent } from '../../utils/aiChatTimeline';
@@ -140,5 +141,43 @@ describe('collectHtmlEmbedsPrecedingMessage', () => {
     ];
     expect(collectHtmlEmbedsPrecedingMessage(timeline, 4)).toEqual([]);
     expect(collectHtmlEmbedsPrecedingMessage(timeline, 2)[0]?.id).toBe('old');
+  });
+});
+
+describe('indexHtmlEmbedsByAssistantMessage', () => {
+  it('matches per-row collectHtmlEmbedsPrecedingMessage', () => {
+    const timeline: TimelineEntry[] = [
+      { kind: 'message', data: { role: 'user', content: 'first' }, _uid: 'u0' },
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            {
+              type: 'tool_call',
+              content: { name: 'visualization.create', arguments: { html: '<b>old</b>' } },
+              timestamp: 1,
+              result: JSON.stringify({
+                ok: true,
+                kind: 'html_embed',
+                html: '<b>old</b>',
+                id: 'old',
+              }),
+              resultStatus: 'success',
+            },
+          ],
+          status: null,
+          completed: true,
+        },
+        _uid: 'wf0',
+      },
+      { kind: 'message', data: { role: 'assistant', content: 'old reply' }, _uid: 'a0' },
+      { kind: 'message', data: { role: 'user', content: 'second' }, _uid: 'u1' },
+      { kind: 'message', data: { role: 'assistant', content: 'new reply' }, _uid: 'a1' },
+    ];
+    const map = indexHtmlEmbedsByAssistantMessage(timeline);
+    expect(map.get(2)?.[0]?.id).toBe('old');
+    expect(map.get(4)).toBeUndefined();
+    expect(map.get(2)).toEqual(collectHtmlEmbedsPrecedingMessage(timeline, 2));
+    expect(map.get(4) ?? []).toEqual(collectHtmlEmbedsPrecedingMessage(timeline, 4));
   });
 });

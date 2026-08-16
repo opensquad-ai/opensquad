@@ -20,15 +20,7 @@ import logging
 import os
 import time
 
-import httpx
-
-# SSL verification: use certifi CA bundle on Windows where system store may be unavailable
-try:
-    import certifi
-
-    _SSL_VERIFY = certifi.where()
-except ImportError:
-    _SSL_VERIFY = True
+from app.http_clients import get_tls_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -498,17 +490,15 @@ def _load_cache_from_disk() -> dict | None:
 
 
 async def _fetch_models_dev() -> dict:
-    async with httpx.AsyncClient(timeout=30.0, verify=_SSL_VERIFY) as client:
-        resp = await client.get(MODELS_DEV_URL)
-        resp.raise_for_status()
-        return resp.json()
+    resp = await get_tls_http_client().get(MODELS_DEV_URL, timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def _fetch_openrouter() -> list:
-    async with httpx.AsyncClient(timeout=15.0, verify=_SSL_VERIFY) as client:
-        resp = await client.get(OPENROUTER_URL)
-        resp.raise_for_status()
-        return resp.json().get("data", [])
+    resp = await get_tls_http_client().get(OPENROUTER_URL, timeout=15.0)
+    resp.raise_for_status()
+    return resp.json().get("data", [])
 
 
 # ── Public interface ──────────────────────────────────────────────────────────

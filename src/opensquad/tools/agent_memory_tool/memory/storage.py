@@ -1225,6 +1225,25 @@ class MemoryStore:
             return None
         return self._row_to_dict(row)
 
+    def get_many(self, entry_ids):
+        """Hydrate many entries in IN-batches. Returns {entry_id: dict} for ids that exist."""
+        ids = [eid for eid in (entry_ids or []) if eid]
+        if not ids:
+            return {}
+        out = {}
+        batch_size = 500
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            rows = self._conn.execute(
+                f"SELECT * FROM entries WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                d = self._row_to_dict(row)
+                out[d["id"]] = d
+        return out
+
     def remove(self, entry_id):
         """Delete a memory entry; returns whether it succeeded."""
         row = self._conn.execute("SELECT id FROM entries WHERE id=?", (entry_id,)).fetchone()
@@ -1270,37 +1289,50 @@ class MemoryStore:
         "trade" -> hits "trade war", "international trade", "trade agreement"
         "Trum" -> hits "Trump"
 
+        Exact equals are skipped (handled by search_exact). Scoring matches the
+        previous Python nested-loop formula; candidates come from one instr()
+        SQL instead of loading every distinct keyword then querying per hit.
+
         Args:  keywords: list[str]
         Returns:  dict[str, float] -- {entry_id: fuzzy match score}, sorted by score descending
         """
-        if not keywords:
+        queries = [kw for kw in (keywords or []) if kw]
+        if not queries:
             return {}
 
-        # Get all indexed keywords (for fuzzy matching)
-        all_index_keys = [row[0] for row in self._conn.execute("SELECT DISTINCT keyword FROM keyword_index").fetchall()]
+        # instr() is case-sensitive like Python `in`; LIKE would fold ASCII case.
+        # Batch to stay under SQLite's bound-variable limit (~999).
+        rows = []
+        batch_size = 200
+        for i in range(0, len(queries), batch_size):
+            batch = queries[i : i + batch_size]
+            clauses = []
+            params = []
+            for q in batch:
+                clauses.append(
+                    "(keyword != ? AND (instr(keyword, ?) > 0 OR (length(keyword) > 0 AND instr(?, keyword) > 0)))"
+                )
+                params.extend([q, q, q])
+            sql = "SELECT keyword, entry_id FROM keyword_index WHERE " + " OR ".join(clauses)
+            rows.extend(self._conn.execute(sql, params).fetchall())
 
         hits = defaultdict(float)
-
-        for query_kw in keywords:
-            for idx_kw in all_index_keys:
+        for idx_kw, entry_id in rows:
+            if not idx_kw:
+                continue
+            best = 0.0
+            for query_kw in queries:
                 if query_kw == idx_kw:
-                    continue  # exact match handled by search_exact
-
+                    continue
                 score = 0.0
-
                 if query_kw in idx_kw:
-                    # Query word is substring of index word: "trade" in "trade war"
                     score = len(query_kw) / len(idx_kw)
                 elif idx_kw in query_kw:
-                    # Index word is substring of query word
                     score = len(idx_kw) / len(query_kw) * 0.8
-
-                if score > 0:
-                    rows = self._conn.execute(
-                        "SELECT entry_id FROM keyword_index WHERE keyword=?", (idx_kw,)
-                    ).fetchall()
-                    for row in rows:
-                        hits[row[0]] = max(hits[row[0]], score)
+                if score > best:
+                    best = score
+            if best > 0:
+                hits[entry_id] = max(hits[entry_id], best)
 
         return dict(sorted(hits.items(), key=lambda x: x[1], reverse=True))
 
@@ -1432,6 +1464,26 @@ class MemoryStore:
     # ========================
     # List / Stats / Utilities
     # ========================
+
+    def list_entry_ids(self, source_filter=None, time_range=None, time_recent=None):
+        """Return entry ids with optional source / time filters (no full-row hydrate)."""
+        conditions = []
+        params = []
+        if source_filter:
+            conditions.append("source = ?")
+            params.append(source_filter)
+        if time_range is not None:
+            start_ts, end_ts = time_range
+            conditions.append("timestamp >= ? AND timestamp <= ?")
+            params.extend([start_ts, end_ts])
+        elif time_recent is not None:
+            now = time.time()
+            conditions.append("timestamp >= ? AND timestamp <= ?")
+            params.extend([now - float(time_recent) * 3600, now])
+        sql = "SELECT id FROM entries"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        return [row[0] for row in self._conn.execute(sql, params).fetchall()]
 
     def list_entries(self, source_filter=None, entry_type=None):
         """

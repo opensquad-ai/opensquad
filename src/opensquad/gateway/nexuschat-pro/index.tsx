@@ -4,9 +4,7 @@ import './index.css';
 import './i18n';
 import App from './App';
 import { initTheme } from './utils/themeStore';
-
-// Apply theme before first paint of React tree
-initTheme();
+import { hydrateHostUiPrefs } from './utils/hostUiPrefs';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -14,8 +12,25 @@ if (!rootElement) {
 }
 
 const root = ReactDOM.createRoot(rootElement);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+
+async function boot() {
+  // Apply this origin's cache immediately, then overlay host prefs so
+  // packaged :9555 matches Vite :5173 even though localStorage is isolated.
+  initTheme();
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 800);
+  try {
+    await hydrateHostUiPrefs(ctrl.signal);
+  } catch {
+    /* offline / timeout — keep local theme */
+  } finally {
+    window.clearTimeout(timer);
+  }
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}
+
+void boot();

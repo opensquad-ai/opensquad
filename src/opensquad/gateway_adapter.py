@@ -78,6 +78,7 @@ class GatewayAdapter(BaseAgent):
         # shared buffer mixed A/B stream chunks under concurrent turns.
         self._stream_buffers: dict[str, list] = {}
         self._stream_flush_tasks: dict[str, asyncio.Task] = {}
+        self._stream_turn_meta: dict[str, dict] = {}
         self._max_chunks = 1000  # P2: hard cap to prevent unbounded growth
         # Bus subscription tracking — enables clean dispose()
         self._subscriptions: list[tuple[str, callable]] = []
@@ -115,6 +116,7 @@ class GatewayAdapter(BaseAgent):
         _sub("plan", self.on_generic_event("plan"))
         # Subscribe to workflow elapsed-time events
         _sub("turn_elapsed", self.on_generic_event("turn_elapsed"))
+        _sub("turn_cancelled", self.on_generic_event("turn_cancelled"))
         # Subscribe to prompt_update events
         _sub("prompt_update", self.on_generic_event("prompt_update"))
         # Subscribe to model output media events (audio/image)
@@ -176,7 +178,13 @@ class GatewayAdapter(BaseAgent):
             return data["sid"]
         return ""
 
-    async def _send_event(self, content, msg_type: str = "message", sid: str = ""):
+    @staticmethod
+    def _extract_turn_meta(data) -> dict:
+        if not isinstance(data, dict):
+            return {}
+        return {k: data[k] for k in ("turn_id", "round_id", "agent_id", "trace_id") if data.get(k) not in (None, "")}
+
+    async def _send_event(self, content, msg_type: str = "message", sid: str = "", **meta):
         """
         Unified event dispatch: directed push when user_id is set, broadcast otherwise.
         Includes session_id so the frontend can filter cross-session messages.
@@ -190,9 +198,9 @@ class GatewayAdapter(BaseAgent):
         if not uid:
             uid = (self.current_user_id or "").strip() if self.current_user_id else ""
         if uid:
-            await self.send_response_to_user(uid, content, msg_type, sid=sid)
+            await self.send_response_to_user(uid, content, msg_type, sid=sid, **meta)
         else:
-            await self.send_response(content, msg_type, sid=sid)
+            await self.send_response(content, msg_type, sid=sid, **meta)
 
     async def on_runner_state(self, data):
         """When Runner state changes: forward the event to the frontend and update local load_percent."""
@@ -208,7 +216,7 @@ class GatewayAdapter(BaseAgent):
             else:
                 self._load_percent = 0
             logger.debug(f"[GatewayAdapter] State changed to '{state_value}', load_percent={self._load_percent}")
-            await self._send_event(content, "state", sid=sid)
+            await self._send_event(content, "state", sid=sid, **self._extract_turn_meta(data))
 
     def on_generic_event(self, event_type):
         """Generic event forwarder."""
@@ -230,6 +238,7 @@ class GatewayAdapter(BaseAgent):
             if self.connected:
                 sid = self._extract_sid(data)
                 content = self._unwrap(data)
+                meta = self._extract_turn_meta(data)
                 logger.debug(f"[GatewayAdapter] Event {event_type}: {str(content)[:50]}...")
                 broadcast = bool(
                     event_type == "info"
@@ -239,9 +248,9 @@ class GatewayAdapter(BaseAgent):
                 )
                 if broadcast:
                     # No user_id -> Gateway broadcasts to every connection.
-                    await self.send_response(content, event_type, sid=sid)
+                    await self.send_response(content, event_type, sid=sid, **meta)
                 else:
-                    await self._send_event(content, event_type, sid=sid)
+                    await self._send_event(content, event_type, sid=sid, **meta)
 
         return handler
 
@@ -912,7 +921,7 @@ class GatewayAdapter(BaseAgent):
                 logger.info(
                     f"[GatewayAdapter] Sending final response (user={self._user_id_by_sid.get(sid) or self.current_user_id or 'broadcast'}), content_len={len(str(content))}, content_preview={str(content)[:100]}"
                 )
-                await self._send_event(content, "message", sid=sid)
+                await self._send_event(content, "message", sid=sid, **self._extract_turn_meta(data))
             else:
                 logger.warning("[GatewayAdapter] on_runner_output called but content is empty")
         else:
@@ -930,14 +939,14 @@ class GatewayAdapter(BaseAgent):
         if not content:
             logger.warning("[GatewayAdapter] on_runner_end_task called but content is empty")
             return
-        await self._send_event(content, "to_user_end_task", sid=sid)
+        await self._send_event(content, "to_user_end_task", sid=sid, **self._extract_turn_meta(data))
 
     async def on_runner_thought(self, data):
         """When Runner is thinking (content may be a {"text":...,"final":...} object)."""
         if self.connected:
             sid = self._extract_sid(data)
             content = self._unwrap(data)
-            await self._send_event(content, "thought", sid=sid)
+            await self._send_event(content, "thought", sid=sid, **self._extract_turn_meta(data))
 
     async def on_runner_stream(self, data):
         """When Runner streams output -- uses 30ms debounce batching to reduce WS frame count."""
@@ -947,6 +956,9 @@ class GatewayAdapter(BaseAgent):
         content = self._unwrap(data)
         if not content:
             return
+        meta = self._extract_turn_meta(data)
+        if meta:
+            self._stream_turn_meta[sid] = meta
 
         buf = self._stream_buffers.setdefault(sid, [])
         # First frame goes out immediately (no 30ms debounce) to minimize TTFT;
@@ -1014,31 +1026,31 @@ class GatewayAdapter(BaseAgent):
         self._stream_buffers[sid] = []
         combined = "".join(c for c in chunks if isinstance(c, str))
         if combined and self.connected:
-            await self._send_event(combined, "stream", sid=sid)
+            await self._send_event(combined, "stream", sid=sid, **self._stream_turn_meta.get(sid, {}))
         for c in chunks:
             if not isinstance(c, str) and self.connected:
-                await self._send_event(c, "stream", sid=sid)
+                await self._send_event(c, "stream", sid=sid, **self._stream_turn_meta.get(sid, {}))
 
     async def on_tool_call(self, data):
         """When a tool is called (content is a {"name":...,"args":...,"id":...} object)."""
         if self.connected:
             sid = self._extract_sid(data)
             content = self._unwrap(data)
-            await self._send_event(content, "tool_call", sid=sid)
+            await self._send_event(content, "tool_call", sid=sid, **self._extract_turn_meta(data))
 
     async def on_tool_call_delta(self, data):
         """Incremental native-FC tool arguments (file write/edit streaming preview)."""
         if self.connected:
             sid = self._extract_sid(data)
             content = self._unwrap(data)
-            await self._send_event(content, "tool_call_delta", sid=sid)
+            await self._send_event(content, "tool_call_delta", sid=sid, **self._extract_turn_meta(data))
 
     async def on_tool_result(self, data):
         """When a tool result is returned (content is a {"id":...,"name":...,"result":...} object)."""
         if self.connected:
             sid = self._extract_sid(data)
             content = self._unwrap(data)
-            await self._send_event(content, "tool_result", sid=sid)
+            await self._send_event(content, "tool_result", sid=sid, **self._extract_turn_meta(data))
 
 
 async def start_gateway_adapter():

@@ -112,24 +112,21 @@ class TurnLoop:
             self.runner._auto_continue_retries = 0
             task_name = task_start.strip()
             if task_name:
-                _get_session_manager().set_title(task_name)
-                await self.runner._emit(
-                    "current_session", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
-                )
+                _title_sid = getattr(self.runner, "_turn_sid", "") or _get_session_manager().get_current_session_id()
+                _get_session_manager().set_title(task_name, sid=_title_sid)
+                await self.runner._emit("current_session", {"id": _title_sid, "title": task_name})
                 await bus.emit_async("session_list", _get_session_manager().get_session_list())
-                await self.runner._emit(
-                    "session_title", {"id": _get_session_manager().get_current_session_id(), "title": task_name}
-                )
+                await self.runner._emit("session_title", {"id": _title_sid, "title": task_name})
 
         # Agent-chosen session subject via <title>...</title>
         title_tag = self.runner._extract_tag(full_response, "title")
         if title_tag and title_tag.strip():
             title_name = title_tag.strip()
-            _get_session_manager().set_title(title_name)
-            sid = _get_session_manager().get_current_session_id()
-            await self.runner._emit("current_session", {"id": sid, "title": title_name})
+            _title_sid = getattr(self.runner, "_turn_sid", "") or _get_session_manager().get_current_session_id()
+            _get_session_manager().set_title(title_name, sid=_title_sid)
+            await self.runner._emit("current_session", {"id": _title_sid, "title": title_name})
             await bus.emit_async("session_list", _get_session_manager().get_session_list())
-            await self.runner._emit("session_title", {"id": sid, "title": title_name})
+            await self.runner._emit("session_title", {"id": _title_sid, "title": title_name})
 
         if sys_cmd in ["task_complete", "task_failed"]:
             self.runner._in_task = False

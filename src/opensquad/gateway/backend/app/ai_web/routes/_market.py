@@ -22,13 +22,18 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api import get_current_user_dep
+from app.http_clients import get_tls_http_client
 from app.models import User
 from opensquad.system_config import syscfg
 
 from ..routes._admin import _proxy_get
 
 logger = logging.getLogger(__name__)
-_SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
+
+
+def _http() -> httpx.AsyncClient:
+    return get_tls_http_client()
+
 
 market_router = APIRouter()  # prefix comes from main router include
 
@@ -136,16 +141,16 @@ async def _get_likes_data(kind: str = "plugins") -> tuple:
     }
     url = _likes_api_url(kind)
     try:
-        async with httpx.AsyncClient(timeout=10, verify=_SSL_VERIFY) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code == 404:
-                return {}, None
-            resp.raise_for_status()
-            payload = resp.json()
-            sha = payload.get("sha")
-            content = base64.b64decode(payload["content"]).decode("utf-8")
-            data = json.loads(content)
-            return data, sha
+        client = _http()
+        resp = await client.get(url, headers=headers)
+        if resp.status_code == 404:
+            return {}, None
+        resp.raise_for_status()
+        payload = resp.json()
+        sha = payload.get("sha")
+        content = base64.b64decode(payload["content"]).decode("utf-8")
+        data = json.loads(content)
+        return data, sha
     except Exception as e:
         logger.warning(f"[likes] Failed to read likes.json ({kind}): {e}")
         return {}, None
@@ -179,12 +184,12 @@ async def _update_likes_data(data: dict, sha, kind: str = "plugins") -> bool:
         body["sha"] = sha
     url = _likes_api_url(kind)
     try:
-        async with httpx.AsyncClient(timeout=10, verify=_SSL_VERIFY) as client:
-            resp = await client.put(url, headers=headers, json=body)
-            if resp.status_code == 409:
-                return False
-            resp.raise_for_status()
-            return True
+        client = _http()
+        resp = await client.put(url, headers=headers, json=body)
+        if resp.status_code == 409:
+            return False
+        resp.raise_for_status()
+        return True
     except Exception as e:
         logger.warning(f"[likes] Failed to write likes.json ({kind}): {e}")
         return False
@@ -217,14 +222,14 @@ async def _market_like_item(item_id: str, registry_url: str, kind: str) -> dict:
         local_liked[kind] = list(liked_set)
         _write_local_liked(local_liked)
         try:
-            async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-                resp = await client.get(registry_url)
-                resp.raise_for_status()
-                items = resp.json()
-                meta = next((p for p in items if p.get("id") == item_id), None)
-                if not meta:
-                    raise HTTPException(status_code=404, detail="Item not found")
-                return {"likes": meta.get("likes", 0) + 1, "already_liked": False}
+            client = _http()
+            resp = await client.get(registry_url)
+            resp.raise_for_status()
+            items = resp.json()
+            meta = next((p for p in items if p.get("id") == item_id), None)
+            if not meta:
+                raise HTTPException(status_code=404, detail="Item not found")
+            return {"likes": meta.get("likes", 0) + 1, "already_liked": False}
         except HTTPException:
             raise
         except Exception as e:
@@ -268,10 +273,10 @@ async def market_list_plugins(
 ):
     """Fetch plugin index.json from GitHub in real-time, paginate locally; likes.json is the source of truth for like counts"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(PLUGIN_REGISTRY_URL)
-            resp.raise_for_status()
-            all_plugins = resp.json()
+        client = _http()
+        resp = await client.get(PLUGIN_REGISTRY_URL)
+        resp.raise_for_status()
+        all_plugins = resp.json()
 
         # Fetch likes.json, overwrite static values in index.json with real like counts (failure does not affect main flow)
         likes_data, _ = await _get_likes_data()
@@ -365,15 +370,15 @@ async def market_get_plugin(
 ):
     """Fetch single plugin detail from full GitHub data"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(PLUGIN_REGISTRY_URL)
-            resp.raise_for_status()
-            all_plugins = resp.json()
+        client = _http()
+        resp = await client.get(PLUGIN_REGISTRY_URL)
+        resp.raise_for_status()
+        all_plugins = resp.json()
 
-            for p in all_plugins:
-                if p.get("id") == plugin_id:
-                    return p
-            raise HTTPException(status_code=404, detail="Plugin not found in GitHub registry")
+        for p in all_plugins:
+            if p.get("id") == plugin_id:
+                return p
+        raise HTTPException(status_code=404, detail="Plugin not found in GitHub registry")
     except HTTPException:
         raise
     except Exception as e:
@@ -434,13 +439,13 @@ async def market_install_plugin(
     """
     # 1. Fetch plugin metadata from registry (search in full index.json)
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            idx_resp = await client.get(PLUGIN_REGISTRY_URL)
-            idx_resp.raise_for_status()
-            all_plugins = idx_resp.json()
-            plugin_meta = next((p for p in all_plugins if p.get("id") == plugin_id), None)
-            if not plugin_meta:
-                raise HTTPException(status_code=404, detail="Plugin not found in registry")
+        client = _http()
+        idx_resp = await client.get(PLUGIN_REGISTRY_URL)
+        idx_resp.raise_for_status()
+        all_plugins = idx_resp.json()
+        plugin_meta = next((p for p in all_plugins if p.get("id") == plugin_id), None)
+        if not plugin_meta:
+            raise HTTPException(status_code=404, detail="Plugin not found in registry")
     except HTTPException:
         raise
     except Exception as e:
@@ -490,12 +495,12 @@ async def market_install_plugin(
 
     # 3. Download zip from Mock Git Server
     try:
-        async with httpx.AsyncClient(timeout=30, verify=_SSL_VERIFY) as client:
-            zip_resp = await client.get(download_url)
-            if zip_resp.status_code == 404:
-                raise HTTPException(status_code=404, detail="Plugin archive not found")
-            zip_resp.raise_for_status()
-            zip_bytes = zip_resp.content
+        client = _http()
+        zip_resp = await client.get(download_url)
+        if zip_resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Plugin archive not found")
+        zip_resp.raise_for_status()
+        zip_bytes = zip_resp.content
     except HTTPException:
         raise
     except httpx.RequestError as e:
@@ -836,10 +841,10 @@ async def market_list_skills(
 ):
     """Fetch skills index.json from GitHub in real-time, paginate locally"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(SKILL_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(SKILL_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
 
         likes_data, _ = await _get_likes_data("skills")
         likes_map: dict = likes_data.get("plugins", {})
@@ -900,10 +905,10 @@ async def market_install_skill(
 ):
     """Download skill zip and extract to skills/{id}/"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(SKILL_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(SKILL_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
         meta = next((p for p in items if p.get("id") == item_id), None)
         if not meta:
             raise HTTPException(status_code=404, detail="Skill not found in registry")
@@ -920,9 +925,9 @@ async def market_install_skill(
     installed_files: list[str] = []
     total_size = 0
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True, verify=_SSL_VERIFY) as client:
-            zip_resp = await client.get(download_url)
-            zip_resp.raise_for_status()
+        client = _http()
+        zip_resp = await client.get(download_url, follow_redirects=True)
+        zip_resp.raise_for_status()
         zip_bytes_raw = zip_resp.content
         zip_size_kb = len(zip_bytes_raw) / 1024
         zip_bytes = io.BytesIO(zip_bytes_raw)
@@ -978,10 +983,10 @@ async def market_list_roles(
 ):
     """Fetch role card index.json from GitHub in real-time, paginate locally"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(ROLE_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(ROLE_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
 
         likes_data, _ = await _get_likes_data("roles")
         likes_map: dict = likes_data.get("plugins", {})
@@ -1044,10 +1049,10 @@ async def market_install_role(
     Each URL's filename is extracted from the URL tail and written to role_cards/{filename}.
     """
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(ROLE_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(ROLE_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
         meta = next((p for p in items if p.get("id") == item_id), None)
         if not meta:
             raise HTTPException(status_code=404, detail="Role not found in registry")
@@ -1064,34 +1069,34 @@ async def market_install_role(
     installed_files: list[str] = []
     total_size = 0
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True, verify=_SSL_VERIFY) as client:
-            for url in download_urls:
-                # Extract filename from URL tail, ensure .md extension
-                fname = url.rstrip("/").split("/")[-1]
-                if not fname.endswith(".md"):
-                    fname = fname + ".md"
-                md_resp = await client.get(url)
-                md_resp.raise_for_status()
-                dest_path = os.path.join(_ROLE_CARDS_DIR, fname)
-                text = md_resp.text
-                with open(dest_path, "w", encoding="utf-8") as f:
-                    f.write(text)
-                installed_files.append(fname)
-                total_size += len(text.encode("utf-8"))
+        client = _http()
+        for url in download_urls:
+            # Extract filename from URL tail, ensure .md extension
+            fname = url.rstrip("/").split("/")[-1]
+            if not fname.endswith(".md"):
+                fname = fname + ".md"
+            md_resp = await client.get(url, follow_redirects=True)
+            md_resp.raise_for_status()
+            dest_path = os.path.join(_ROLE_CARDS_DIR, fname)
+            text = md_resp.text
+            with open(dest_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            installed_files.append(fname)
+            total_size += len(text.encode("utf-8"))
 
-            # Also download icon if index.json has icon_url
-            icon_url = meta.get("icon_url")
-            icon_downloaded = False
-            if icon_url:
-                try:
-                    icon_resp = await client.get(icon_url)
-                    if icon_resp.status_code == 200:
-                        icon_path = os.path.join(_ROLE_CARDS_DIR, f"{item_id}_icon.svg")
-                        with open(icon_path, "wb") as f:
-                            f.write(icon_resp.content)
-                        icon_downloaded = True
-                except Exception as icon_err:
-                    logger.warning(f"Role icon download failed for '{item_id}': {icon_err}")
+        # Also download icon if index.json has icon_url
+        icon_url = meta.get("icon_url")
+        icon_downloaded = False
+        if icon_url:
+            try:
+                icon_resp = await client.get(icon_url, follow_redirects=True)
+                if icon_resp.status_code == 200:
+                    icon_path = os.path.join(_ROLE_CARDS_DIR, f"{item_id}_icon.svg")
+                    with open(icon_path, "wb") as f:
+                        f.write(icon_resp.content)
+                    icon_downloaded = True
+            except Exception as icon_err:
+                logger.warning(f"Role icon download failed for '{item_id}': {icon_err}")
 
         total_size_kb = total_size / 1024
         logger.info(
@@ -1130,10 +1135,10 @@ async def market_list_collabs(
 ):
     """Fetch collab card index.json from GitHub in real-time, paginate locally"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(COLLAB_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(COLLAB_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
 
         likes_data, _ = await _get_likes_data("collabs")
         likes_map: dict = likes_data.get("plugins", {})
@@ -1194,10 +1199,10 @@ async def market_install_collab(
 ):
     """Directly download collab card .md file and write to collab_cards/{id}.md"""
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.get(COLLAB_REGISTRY_URL)
-            resp.raise_for_status()
-            items = resp.json()
+        client = _http()
+        resp = await client.get(COLLAB_REGISTRY_URL)
+        resp.raise_for_status()
+        items = resp.json()
         meta = next((p for p in items if p.get("id") == item_id), None)
         if not meta:
             raise HTTPException(status_code=404, detail="Collab not found in registry")
@@ -1212,28 +1217,28 @@ async def market_install_collab(
 
     os.makedirs(_COLLAB_CARDS_DIR, exist_ok=True)
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True, verify=_SSL_VERIFY) as client:
-            md_resp = await client.get(download_url)
-            md_resp.raise_for_status()
-            text = md_resp.text
-            text_size_kb = len(text.encode("utf-8")) / 1024
-            dest_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}.md")
-            with open(dest_path, "w", encoding="utf-8") as f:
-                f.write(text)
+        client = _http()
+        md_resp = await client.get(download_url, follow_redirects=True)
+        md_resp.raise_for_status()
+        text = md_resp.text
+        text_size_kb = len(text.encode("utf-8")) / 1024
+        dest_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}.md")
+        with open(dest_path, "w", encoding="utf-8") as f:
+            f.write(text)
 
-            # Also download icon if index.json has icon_url
-            icon_url = meta.get("icon_url")
-            icon_downloaded = False
-            if icon_url:
-                try:
-                    icon_resp = await client.get(icon_url)
-                    if icon_resp.status_code == 200:
-                        icon_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}_icon.svg")
-                        with open(icon_path, "wb") as f:
-                            f.write(icon_resp.content)
-                        icon_downloaded = True
-                except Exception as icon_err:
-                    logger.warning(f"Collab icon download failed for '{item_id}': {icon_err}")
+        # Also download icon if index.json has icon_url
+        icon_url = meta.get("icon_url")
+        icon_downloaded = False
+        if icon_url:
+            try:
+                icon_resp = await client.get(icon_url, follow_redirects=True)
+                if icon_resp.status_code == 200:
+                    icon_path = os.path.join(_COLLAB_CARDS_DIR, f"{item_id}_icon.svg")
+                    with open(icon_path, "wb") as f:
+                        f.write(icon_resp.content)
+                    icon_downloaded = True
+            except Exception as icon_err:
+                logger.warning(f"Collab icon download failed for '{item_id}': {icon_err}")
 
         logger.info(f"[Install] Collab '{item_id}': {text_size_kb:.1f} KB → collab_cards/{item_id}.md")
         return {
@@ -1420,9 +1425,9 @@ async def _post_github_pr_comment(repo: str, pr_number: int, github_token: str, 
         "X-GitHub-Api-Version": "2022-11-28",
     }
     try:
-        async with httpx.AsyncClient(timeout=15, verify=_SSL_VERIFY) as client:
-            resp = await client.post(url, headers=headers, json={"body": body})
-            resp.raise_for_status()
+        client = _http()
+        resp = await client.post(url, headers=headers, json={"body": body})
+        resp.raise_for_status()
     except Exception as e:
         logger.warning(f"Failed to post GitHub PR comment: {e}")
 

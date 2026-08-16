@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import os as _os
@@ -173,6 +174,67 @@ def do_plugin_reload() -> dict:
         "unloaded": reload_result.get("unloaded", []),
         "active_tools": new_tool_names,
     }
+
+
+# Precompiled XML / native-token cleanup (hot path; tags are a fixed set).
+_RE_TOOL_CALLS_SECTION = re.compile(
+    r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>",
+    re.DOTALL,
+)
+_RE_PIPE_TOKENS = re.compile(r"<\|[^|>]*\|>")
+_RE_FUNCTIONS_CALL = re.compile(
+    r"\bfunctions\.[a-zA-Z0-9_]+:\d+\{(?:[^{}]|\{[^{}]*\})*\}",
+    re.DOTALL,
+)
+_RE_BARE_TOOL_CALL = re.compile(r'tool_call\s+name="[^"]+"\s*>', re.IGNORECASE)
+_RE_TO_USER_KEEP = re.compile(r"<to_user\b[^>]*>(.*?)</to_user>", re.DOTALL | re.IGNORECASE)
+_RE_ANY_TAG = re.compile(r"<[^>]+>")
+_RE_ORPHAN_CLOSE = re.compile(r"</[a-zA-Z0-9_]+>")
+_RE_STRAY_BRACKET_LINE = re.compile(r"^\s*[<>]\s*$", re.MULTILINE)
+_RE_MANY_NEWLINES = re.compile(r"\n{4,}")
+_RE_TOOL_CALL_OPEN = re.compile(r"<tool_call", re.IGNORECASE)
+_RE_TAGS_EXCEPT_TOOL_CALL = re.compile(r"<(?!tool_call)[^>]+>")
+
+_SILENT_XML_TAGS = (
+    "thought",
+    "plan",
+    "think",
+    "tool_call",
+    "tool_result",
+    "to_system",
+    "state",
+    "wake",
+    "sleep",
+    "title",
+    "option",
+    "arguments",
+)
+_SILENT_TAG_RES = tuple(
+    (
+        re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.DOTALL | re.IGNORECASE),
+        re.compile(rf"<{tag}\b[^>]*/>", re.IGNORECASE),
+    )
+    for tag in _SILENT_XML_TAGS
+)
+
+
+@functools.lru_cache(maxsize=64)
+def _compiled_remove_tag_patterns(tag: str) -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
+    return (
+        re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.DOTALL | re.IGNORECASE),
+        re.compile(rf"<{tag}\b[^>]*/>", re.IGNORECASE),
+        re.compile(rf"<{tag}\b[^>]*>.*", re.DOTALL | re.IGNORECASE),
+    )
+
+
+@functools.lru_cache(maxsize=64)
+def _compiled_extract_tag_patterns(tag: str) -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
+    escaped = re.escape(tag)
+    return (
+        re.compile(rf"<{escaped}\b[^>]*>(.*?)</{escaped}>", re.DOTALL | re.IGNORECASE),
+        re.compile(rf"<{escaped}\b[^>]*>(.*)", re.IGNORECASE | re.DOTALL),
+        re.compile(rf"{escaped}\s*>\s*(.*?)\s*</{escaped}>", re.IGNORECASE),
+    )
 
 
 class AgentRunner:
@@ -448,11 +510,12 @@ class AgentRunner:
 
     @chat_api.setter
     def chat_api(self, value):
-        self._root_chat_api = value
-        self._root_tl.chat_api = value
         tl = get_turn_local()
         if tl is not None:
             tl.chat_api = value
+            return
+        self._root_chat_api = value
+        self._root_tl.chat_api = value
 
     @property
     def _turn_sid(self) -> str:
@@ -608,10 +671,181 @@ class AgentRunner:
     def _streamed_user_tag(self, value):
         self._active_tl().streamed_user_tag = value
 
-    async def _emit(self, etype, data):
-        """Event push with session_id (uses the sid captured at turn start to avoid routing errors on session switch)"""
-        sid = self._turn_sid
-        await bus.emit_async(etype, {"sid": sid, "data": data})
+    @property
+    def _current_group_id(self):
+        return self._active_tl().group_id
+
+    @_current_group_id.setter
+    def _current_group_id(self, value):
+        self._active_tl().group_id = value or ""
+
+    @property
+    def _in_task(self):
+        return self._active_tl().in_task
+
+    @_in_task.setter
+    def _in_task(self, value):
+        self._active_tl().in_task = bool(value)
+
+    @property
+    def _awaiting_user_reply(self):
+        return self._active_tl().awaiting_user_reply
+
+    @_awaiting_user_reply.setter
+    def _awaiting_user_reply(self, value):
+        self._active_tl().awaiting_user_reply = bool(value)
+
+    @property
+    def _last_user_msg_from_to_user(self):
+        return self._active_tl().last_user_msg_from_to_user
+
+    @_last_user_msg_from_to_user.setter
+    def _last_user_msg_from_to_user(self, value):
+        self._active_tl().last_user_msg_from_to_user = bool(value)
+
+    @property
+    def _auto_continue_retries(self):
+        return self._active_tl().auto_continue_retries
+
+    @_auto_continue_retries.setter
+    def _auto_continue_retries(self, value):
+        self._active_tl().auto_continue_retries = int(value or 0)
+
+    @property
+    def _tool_result_generated(self):
+        return self._active_tl().tool_result_generated
+
+    @_tool_result_generated.setter
+    def _tool_result_generated(self, value):
+        self._active_tl().tool_result_generated = bool(value)
+
+    @property
+    def _parallel_scheduled_mode(self):
+        return self._active_tl().parallel_scheduled_mode
+
+    @_parallel_scheduled_mode.setter
+    def _parallel_scheduled_mode(self, value):
+        self._active_tl().parallel_scheduled_mode = bool(value)
+
+    @property
+    def _sched_any_tool(self):
+        return self._active_tl().sched_any_tool
+
+    @_sched_any_tool.setter
+    def _sched_any_tool(self, value):
+        self._active_tl().sched_any_tool = bool(value)
+
+    @property
+    def _sched_continue_count(self):
+        return self._active_tl().sched_continue_count
+
+    @_sched_continue_count.setter
+    def _sched_continue_count(self, value):
+        self._active_tl().sched_continue_count = int(value or 0)
+
+    def _turn_trace_id(self, sid: str | None = None) -> str:
+        from opensquad.turn_trace import make_trace_id
+
+        return make_trace_id(
+            self._agent_id, sid if sid is not None else self._turn_sid, self._current_round, self._current_turn
+        )
+
+    def _session_stop_requested(self) -> bool:
+        sid = self._turn_sid or ""
+        try:
+            if sid and input_hub.is_session_stop_requested(sid):
+                return True
+            return bool(input_hub.is_stop_requested())
+        except Exception:
+            return False
+
+    async def _emit(self, etype, data, *, sid: str | None = None):
+        """Event push with session + turn identity (sid captured at turn start)."""
+        from opensquad.turn_trace import make_trace_id
+
+        emit_sid = self._turn_sid if sid is None else sid
+        turn_id = int(self._current_turn or 0)
+        round_id = int(self._current_round or 0)
+        agent_id = self._agent_id or ""
+        await bus.emit_async(
+            etype,
+            {
+                "sid": emit_sid,
+                "data": data,
+                "turn_id": turn_id,
+                "round_id": round_id,
+                "agent_id": agent_id,
+                "trace_id": make_trace_id(agent_id, emit_sid, round_id, turn_id),
+            },
+        )
+
+    async def _maybe_emit_idle(self) -> None:
+        """Do not paint the agent idle while another parallel pane is still busy."""
+        sched = getattr(self, "_parallel_scheduler", None)
+        if sched is not None:
+            others = set(sched.busy_sessions) - {self._turn_sid}
+            if others:
+                return
+        await self._emit("state", "idle")
+
+    async def _emit_turn_cancelled(
+        self,
+        *,
+        reason: str,
+        sid: str | None = None,
+        open_tool_ids: list | None = None,
+        partial_persisted: bool = False,
+    ) -> None:
+        emit_sid = sid if sid is not None else self._turn_sid
+        payload = {
+            "sid": emit_sid,
+            "turn_id": int(self._current_turn or 0),
+            "round_id": int(self._current_round or 0),
+            "reason": reason,
+            "open_tool_ids": list(open_tool_ids or []),
+            "partial_persisted": bool(partial_persisted),
+            "trace_id": self._turn_trace_id(emit_sid),
+        }
+        await self._emit("turn_cancelled", payload, sid=emit_sid)
+
+    async def _finalize_user_stop(self, *, reason: str = "user_stop") -> dict:
+        """Seal LLM history, emit turn_cancelled, persist a turn_summary."""
+        from opensquad.turn_trace import append_turn_summary_file, seal_cancelled_history
+
+        sealed = seal_cancelled_history(self.chat_api)
+        ended_ms = int(datetime.now().timestamp() * 1000)
+        started = int(getattr(self, "_workflow_started_ms", 0) or ended_ms)
+        elapsed_ms = max(0, ended_ms - started)
+        summary = {
+            "trace_id": self._turn_trace_id(),
+            "sid": self._turn_sid,
+            "turn_id": int(self._current_turn or 0),
+            "round_id": int(self._current_round or 0),
+            "elapsed_ms": elapsed_ms,
+            "reason": reason,
+            "open_tool_ids": sealed.get("open_tool_ids") or [],
+            "partial_persisted": sealed.get("partial_persisted", False),
+        }
+        try:
+            _get_session_manager().add_event(
+                "turn_summary",
+                summary,
+                turn_id=self._current_turn,
+                round_id=self._current_round,
+                sid=self._turn_sid,
+            )
+        except Exception:
+            logger.debug("[Runner] turn_summary event skipped", exc_info=True)
+        try:
+            append_turn_summary_file(self._agent_dir, summary)
+        except Exception:
+            logger.debug("[Runner] turn_summaries.json skipped", exc_info=True)
+        await self._emit_turn_cancelled(
+            reason=reason,
+            open_tool_ids=summary["open_tool_ids"],
+            partial_persisted=summary["partial_persisted"],
+        )
+        return summary
 
     def _load_history(self, sid: str | None = None):
         """Load history session into the active chat_api (optionally for a specific sid)."""
@@ -730,7 +964,8 @@ class AgentRunner:
         await bus.emit_async("history_sync", history_data)
         await self._broadcast_token_stats()
         await self._emit("info", "Turn withdrawn")
-        await self._emit("state", "idle")
+        await self._finalize_user_stop(reason="withdraw")
+        await self._maybe_emit_idle()
         now_ms = int(datetime.now().timestamp() * 1000)
         await self._emit("turn_elapsed", {"started_ms": now_ms, "ended_ms": now_ms})
 
@@ -877,9 +1112,13 @@ class AgentRunner:
             "busy_sessions",
             {"sessions": sorted(busy), "agent_id": self._agent_id},
         )
-        # Also mirror to gateway registry via status when any busy
+        # Agent-wide chrome only — do not stamp the finishing session's sid
+        # (this is often called after reset_turn_local).
         try:
-            await self._emit("status", "busy" if busy else "online")
+            await bus.emit_async(
+                "status",
+                {"sid": "", "data": "busy" if busy else "online", "agent_id": self._agent_id},
+            )
         except Exception:
             pass
 
@@ -1200,7 +1439,9 @@ class AgentRunner:
         token = set_turn_local(tl)
         try:
             content = str(item.get("content") or "")
-            # Fresh user message: clear any prior Stop latch so a new turn can run.
+            # Fresh user message: clear THIS sid's Stop latch so a new turn can run.
+            # Do not clear other panes' session stops (clear_stop_request is agent-wide
+            # latch only — it no longer wipes _stop_sessions).
             input_hub.clear_session_stop(sid)
             if content and not content.startswith("__"):
                 input_hub.clear_stop_request()
@@ -1287,6 +1528,9 @@ class AgentRunner:
 
             stopped = False
             turn_failed = False
+            from opensquad.structured_log import set_trace_id
+            from opensquad.turn_trace import has_unclosed_tool_call
+
             for turn in range(max_turns):
                 if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
                     logger.info("[Runner] Stop during parallel turn sid=%s", sid)
@@ -1295,6 +1539,15 @@ class AgentRunner:
 
                 self._current_turn = turn + 1
                 self._turn_started_ms = datetime.now().timestamp() * 1000
+                set_trace_id(self._turn_trace_id(sid))
+                logger.info(
+                    "[Runner] turn_start agent=%s sid=%s round=%s turn=%s trace=%s",
+                    self._agent_id,
+                    sid,
+                    self._current_round,
+                    self._current_turn,
+                    self._turn_trace_id(sid),
+                )
                 await self._emit(
                     "turn_start",
                     {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)},
@@ -1355,7 +1608,7 @@ class AgentRunner:
                 if input_hub.is_session_stop_requested(sid) or input_hub.is_stop_requested():
                     logger.info("[Runner] Stop after LLM (parallel) sid=%s — skipping tools", sid)
                     _partial = "".join(getattr(self, "_streamed_user_text", []) or [])
-                    if _partial.strip():
+                    if _partial.strip() and not has_unclosed_tool_call(_partial):
                         try:
                             _get_session_manager().add_message("assistant", _partial.strip(), sid=sid)
                         except Exception:
@@ -1441,8 +1694,9 @@ class AgentRunner:
                 {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms},
             )
             if stopped:
+                await self._finalize_user_stop(reason="user_stop")
                 await self._emit("status", "Task stopped")
-            await self._emit("state", "idle")
+            await self._maybe_emit_idle()
             await self._broadcast_token_stats()
             # Explicit lifecycle for scheduled-task fires (Gateway marks exec done).
             _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
@@ -1467,8 +1721,9 @@ class AgentRunner:
                         "ended_ms": _wf_ended_ms,
                     },
                 )
+                await self._finalize_user_stop(reason="user_stop")
                 await self._emit("status", "Task stopped")
-                await self._emit("state", "idle")
+                await self._maybe_emit_idle()
                 _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
                 if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
                     await self._emit(
@@ -1489,7 +1744,7 @@ class AgentRunner:
                 await self._emit("error", {"message": _turn_err})
                 # Emit as a final user-visible message so the web always sees it.
                 await self._emit("to_user_final", f"[Error] {_turn_err}")
-                await self._emit("state", "idle")
+                await self._maybe_emit_idle()
                 _uid = str(item.get("user_id") or getattr(self, "_current_user_id", "") or "")
                 if _uid.startswith("scheduled-task:") and _uid.split(":", 1)[1]:
                     await self._emit(
@@ -2416,6 +2671,17 @@ class AgentRunner:
                 logger.debug(f"[Runner] --- Turn {turn + 1}/{max_turns} ---")
                 self._current_turn = turn + 1
                 self._turn_started_ms = datetime.now().timestamp() * 1000
+                from opensquad.structured_log import set_trace_id as _set_trace_id
+
+                _set_trace_id(self._turn_trace_id())
+                logger.info(
+                    "[Runner] turn_start agent=%s sid=%s round=%s turn=%s trace=%s",
+                    self._agent_id,
+                    self._turn_sid,
+                    self._current_round,
+                    self._current_turn,
+                    self._turn_trace_id(),
+                )
                 await self._emit("turn_start", {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)})
 
                 # Per-turn repetition rewind counter — only allow ONE rewind per turn.
@@ -2447,6 +2713,7 @@ class AgentRunner:
                             input_hub.clear_stop_request()
                             task_finished = True
                             initial_query = None
+                            await self._finalize_user_stop(reason="user_stop")
                             await self._emit("status", "Task stopped by user")
                             break
                         elif content.startswith("__WITHDRAW_TURN__:"):
@@ -2596,11 +2863,13 @@ class AgentRunner:
                         logger.info(f"[Runner] Collected {len(queue_images)} images from mid-turn queue")
 
                 # ========== Safety interrupt checkpoint 2: Before sending request ==========
-                if input_hub.is_stop_requested():
+                if self._session_stop_requested():
                     logger.info("[Runner] Stop requested before API call")
+                    input_hub.clear_session_stop(self._turn_sid)
                     input_hub.clear_stop_request()
                     task_finished = True
                     initial_query = None
+                    await self._finalize_user_stop(reason="user_stop")
                     await self._emit("status", "Task stopped")
                     break
 
@@ -3059,18 +3328,20 @@ class AgentRunner:
                     response_text = _hook_ctx.get("response", response_text)
 
                 # ========== Safety interrupt checkpoint 3: After API response ==========
-                if input_hub.is_stop_requested():
+                if self._session_stop_requested():
                     logger.info("[Runner] Stop requested after API response")
+                    input_hub.clear_session_stop(self._turn_sid)
                     input_hub.clear_stop_request()
-                    # Save partially streamed content to session to ensure it's not lost on refresh.
-                    # _streamed_user_text is accumulated by stream_parser in real time for to_user content;
-                    # it is the most reliable source of user-visible text.
+                    # Save partially streamed content unless it is a dangling tool_call.
+                    from opensquad.turn_trace import has_unclosed_tool_call as _unclosed_tc
+
                     _partial = "".join(getattr(self, "_streamed_user_text", []))
-                    if _partial.strip():
+                    if _partial.strip() and not _unclosed_tc(_partial):
                         _get_session_manager().add_message("assistant", _partial.strip())
                         logger.info(f"[Runner] Saved partial response on stop ({len(_partial)} chars)")
                     task_finished = True
                     initial_query = None
+                    await self._finalize_user_stop(reason="user_stop")
                     await self._emit("status", "Task stopped")
                     break
 
@@ -3462,7 +3733,8 @@ class AgentRunner:
                 await self._setup_prompt()
 
                 if stop:
-                    was_user_stop = input_hub.is_stop_requested()
+                    was_user_stop = self._session_stop_requested()
+                    input_hub.clear_session_stop(self._turn_sid)
                     input_hub.clear_stop_request()
                     await (
                         self._broadcast_token_stats()
@@ -3472,6 +3744,8 @@ class AgentRunner:
                     await self._emit(
                         "turn_elapsed", {"started_ms": int(self._workflow_started_ms), "ended_ms": _wf_ended_ms}
                     )
+                    if was_user_stop:
+                        await self._finalize_user_stop(reason="user_stop")
                     await self._emit("status", "Task stopped" if was_user_stop else "Response complete")
                     # Notify frontend that agent is idle so send button is restored
                     await _get_state_manager().set_state("idle")
@@ -3535,14 +3809,14 @@ class AgentRunner:
         # --- Format 1: <|...|> format (Qwen3/DeepSeek) ---
         if "<|" in text:
             # First remove the entire tool_calls_section block
-            text = re.sub(r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>", "", text, flags=re.DOTALL)
+            text = _RE_TOOL_CALLS_SECTION.sub("", text)
             # Fallback: remove all remaining <|...|> tokens
-            text = re.sub(r"<\|[^|>]*\|>", "", text)
+            text = _RE_PIPE_TOKENS.sub("", text)
 
         # --- Format 2: functions.<name>:<id>{...} format (Kimi/Moonshot) ---
         # Match functions.tool_name:index{...}, supporting at most one level of nested JSON
         if "functions." in text:
-            text = re.sub(r"\bfunctions\.[a-zA-Z0-9_]+:\d+\{(?:[^{}]|\{[^{}]*\})*\}", "", text, flags=re.DOTALL)
+            text = _RE_FUNCTIONS_CALL.sub("", text)
 
         return text
 
@@ -3551,47 +3825,31 @@ class AgentRunner:
         if not text:
             return ""
 
-        import re
-
         result = text
 
         # 0a. Filter native tool call tokens (<|...|> format)
         result = self._filter_native_tokens(result)
 
         # 0. Special handling: remove possibly missing-'<' tool_call markers
-        result = re.sub(r'tool_call\s+name="[^"]+"\s*>', "", result, flags=re.IGNORECASE)
+        result = _RE_BARE_TOOL_CALL.sub("", result)
 
         # 1. Thoroughly remove these blocks and their content
-        silent_blocks = [
-            "thought",
-            "plan",
-            "think",
-            "tool_call",
-            "tool_result",
-            "to_system",
-            "state",
-            "wake",
-            "sleep",
-            "title",
-            "option",
-            "arguments",
-        ]
-        for tag in silent_blocks:
-            result = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", result, flags=re.DOTALL | re.IGNORECASE)
-            result = re.sub(rf"<{tag}\b[^>]*/>", "", result, flags=re.IGNORECASE)
+        for paired, self_closing in _SILENT_TAG_RES:
+            result = paired.sub("", result)
+            result = self_closing.sub("", result)
 
         # 2. Special handling for to_user tag: keep its content
-        result = re.sub(r"<to_user\b[^>]*>(.*?)</to_user>", r"\1", result, flags=re.DOTALL | re.IGNORECASE)
+        result = _RE_TO_USER_KEEP.sub(r"\1", result)
 
         # 3. Remove remaining tag names but keep content (if any)
-        result = re.sub(r"<[^>]+>", "", result)
+        result = _RE_ANY_TAG.sub("", result)
 
         # 4. Thoroughly clean up remaining orphaned closing tags (e.g. </thought>) and stray brackets
-        result = re.sub(r"</[a-zA-Z0-9_]+>", "", result)
-        result = re.sub(r"^\s*[<>]\s*$", "", result, flags=re.MULTILINE)  # Remove lines containing only < or >
+        result = _RE_ORPHAN_CLOSE.sub("", result)
+        result = _RE_STRAY_BRACKET_LINE.sub("", result)  # Remove lines containing only < or >
 
         # 5. Clean up extra blank lines while preserving necessary single and double line breaks for Markdown
-        result = re.sub(r"\n{4,}", "\n\n\n", result)
+        result = _RE_MANY_NEWLINES.sub("\n\n\n", result)
 
         return result.strip()
 
@@ -3601,7 +3859,7 @@ class AgentRunner:
             return None
 
         # Find the position of the first tool_call tag
-        tool_match = re.search(r"<tool_call", text, re.IGNORECASE)
+        tool_match = _RE_TOOL_CALL_OPEN.search(text)
         if not tool_match:
             return None
 
@@ -3609,7 +3867,7 @@ class AgentRunner:
         text_before = text[: tool_match.start()]
 
         # Clean up text: remove other XML tags but keep plain text
-        text_before = re.sub(r"<(?!tool_call)[^>]+>", "", text_before)
+        text_before = _RE_TAGS_EXCEPT_TOOL_CALL.sub("", text_before)
         text_before = text_before.strip()
 
         # If there is meaningful content after cleaning, return it
@@ -3643,16 +3901,13 @@ class AgentRunner:
             return ""
         result = text
         for tag in tags:
+            paired, self_closing, incomplete = _compiled_remove_tag_patterns(tag)
             # Support open tags with attributes, e.g. <tool_call name="filesystem.list_directory">
-            pattern = rf"<{tag}\b[^>]*>.*?</{tag}>"
-            result = re.sub(pattern, "", result, flags=re.DOTALL | re.IGNORECASE)
-            # Self-closing tags
-            pattern = rf"<{tag}\b[^>]*/>"
-            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+            result = paired.sub("", result)
+            result = self_closing.sub("", result)
             # Fallback: if no closing tag (incomplete model output), truncate from open tag to end
             # This prevents JSON content from leaking when <tool_call name="..."> has no </tool_call>
-            pattern = rf"<{tag}\b[^>]*>.*"
-            result = re.sub(pattern, "", result, flags=re.DOTALL | re.IGNORECASE)
+            result = incomplete.sub("", result)
         return result.strip()
 
     def _is_leaked_tool_params(self, text: str) -> bool:
@@ -3795,17 +4050,17 @@ class AgentRunner:
         if tag.lower() not in ("think", "thought"):
             search = ResponseParser.strip_reasoning_blocks(search)
 
+        paired, unclosed, lazy = _compiled_extract_tag_patterns(tag)
+
         # Match <tag ...>content</tag>
-        pattern = rf"<{re.escape(tag)}\b[^>]*>(.*?)</{re.escape(tag)}>"
-        match = re.search(pattern, search, re.DOTALL | re.IGNORECASE)
+        match = paired.search(search)
         if match:
             val = match.group(1).strip()
             logger.info(f"[Extractor] Found tag <{tag}>: {val}")
             return val
 
         # Fallback 1: if no closing tag, try extracting up to the next < symbol
-        pattern_fallback = rf"<{re.escape(tag)}\b[^>]*>(.*)"
-        match_fb = re.search(pattern_fallback, search, re.IGNORECASE | re.DOTALL)
+        match_fb = unclosed.search(search)
         if match_fb:
             val = match_fb.group(1).split("<")[0].strip()  # Extract up to next tag start
             logger.info(f"[Extractor] Found unclosed tag <{tag}>: {val}")
@@ -3813,8 +4068,7 @@ class AgentRunner:
 
         # Fallback 2: support possibly missing < (for lazy AI output patterns)
         if tag in ["state", "wake", "sleep"]:
-            pattern_lazy = rf"{re.escape(tag)}\s*>\s*(.*?)\s*</{re.escape(tag)}>"
-            match_lazy = re.search(pattern_lazy, search, re.IGNORECASE)
+            match_lazy = lazy.search(search)
             if match_lazy:
                 val = match_lazy.group(1).strip()
                 logger.info(f"[Extractor] Found lazy tag {tag}: {val}")
@@ -4273,19 +4527,24 @@ class AgentRunner:
             req = self._req_for_token_stats(chat_api, sid)
 
             tools = self._tools_for_token_stats()
-            total = chat_api._count_tokens(req, tools)
             # `tool` = real tool IO (tool_call args, tool_result / functionResponse).
             # `tool_defs` = OpenAI tools JSON schema sent via the API `tools` param.
             encoding = getattr(chat_api, "encoding", None)
-            # PERF-5: token re-encoding (tiktoken, 200-800ms on long sessions)
-            # must not block the event loop — offload to a worker thread.
-            stats = await asyncio.to_thread(
-                compute_token_breakdown,
-                req,
-                tools,
-                encoding=encoding,
-                total=total,
-            )
+            count_tokens = chat_api._count_tokens
+
+            def _recompute():
+                # Full-history tiktoken (200–800ms on long sessions) must not
+                # run on the event loop — count + breakdown share one worker.
+                total_n = count_tokens(req, tools)
+                breakdown = compute_token_breakdown(
+                    req,
+                    tools,
+                    encoding=encoding,
+                    total=total_n,
+                )
+                return total_n, breakdown
+
+            total, stats = await asyncio.to_thread(_recompute)
 
             # Cumulative totals (history + current session).
             # chat_api.total_* only records the current session; runner._hist_*
@@ -4351,13 +4610,16 @@ class AgentRunner:
 
             # Write stats file to the agent data directory (for Launcher to read)
             try:
-                import os
-
                 data_dir = getattr(chat_api, "history_dir", None)
                 if data_dir:
                     stats_file = os.path.join(data_dir, "token_stats.json")
-                    with open(stats_file, "w", encoding="utf-8") as f:
-                        json.dump(token_data, f, ensure_ascii=False)
+                    payload = json.dumps(token_data, ensure_ascii=False)
+
+                    def _write_stats() -> None:
+                        with open(stats_file, "w", encoding="utf-8") as f:
+                            f.write(payload)
+
+                    await asyncio.to_thread(_write_stats)
             except Exception:
                 pass
             self._token_stats_cache[cache_key] = (time.monotonic(), token_data)

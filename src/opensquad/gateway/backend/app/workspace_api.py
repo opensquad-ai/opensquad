@@ -8,6 +8,7 @@ Gateway itself does not directly operate any workspace file system.
 
 import os
 import sys
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -17,9 +18,46 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
+from app.http_clients import get_local_http_client
 from opensquad.system_config import syscfg
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
+
+_GET_CACHE_TTL_S = 5.0
+_GET_CACHE_MAX = 32
+_GET_CACHE: dict[str, tuple[float, dict]] = {}
+_GET_CACHEABLE = frozenset(
+    {
+        "/api/workspace/list",
+        "/api/workspace/detect-legacy",
+    }
+)
+
+
+def _cache_get(path: str) -> dict | None:
+    if path not in _GET_CACHEABLE:
+        return None
+    entry = _GET_CACHE.get(path)
+    if entry is None:
+        return None
+    expires_at, result = entry
+    if expires_at <= time.monotonic():
+        _GET_CACHE.pop(path, None)
+        return None
+    return result
+
+
+def _cache_set(path: str, result: dict) -> None:
+    if path not in _GET_CACHEABLE:
+        return
+    if len(_GET_CACHE) >= _GET_CACHE_MAX:
+        now = time.monotonic()
+        expired = [k for k, (exp, _) in _GET_CACHE.items() if exp <= now]
+        for k in expired:
+            _GET_CACHE.pop(k, None)
+        if len(_GET_CACHE) >= _GET_CACHE_MAX:
+            _GET_CACHE.clear()
+    _GET_CACHE[path] = (time.monotonic() + _GET_CACHE_TTL_S, result)
 
 
 # ==================== Pydantic Models ====================
@@ -46,10 +84,13 @@ class MigrationRequest(BaseModel):
 
 async def _proxy_get(path: str, timeout: float = 10.0) -> dict:
     """Send a GET request to Launcher"""
+    cached = _cache_get(path)
+    if cached is not None:
+        return cached
     launcher_url = syscfg.launcher_url()
+    client = get_local_http_client()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{launcher_url}{path}")
+        resp = await client.get(f"{launcher_url}{path}", timeout=timeout)
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503, detail="Cannot connect to Launcher node, please confirm Launcher is running"
@@ -64,15 +105,17 @@ async def _proxy_get(path: str, timeout: float = 10.0) -> dict:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
-    return resp.json()
+    result = resp.json()
+    _cache_set(path, result)
+    return result
 
 
 async def _proxy_post(path: str, body: dict, timeout: float = 10.0) -> dict:
     """Send a POST request to Launcher"""
     launcher_url = syscfg.launcher_url()
+    client = get_local_http_client()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{launcher_url}{path}", json=body)
+        resp = await client.post(f"{launcher_url}{path}", json=body, timeout=timeout)
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503, detail="Cannot connect to Launcher node, please confirm Launcher is running"
@@ -87,6 +130,8 @@ async def _proxy_post(path: str, body: dict, timeout: float = 10.0) -> dict:
             detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
+    if path.startswith("/api/workspace"):
+        _GET_CACHE.clear()
     return resp.json()
 
 

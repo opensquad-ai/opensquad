@@ -163,6 +163,43 @@ export function collectHtmlEmbedsPrecedingMessage(
   return collected;
 }
 
+/**
+ * One forward pass over a timeline: assistant-message index → embeds since
+ * the previous user turn. Same semantics as calling
+ * collectHtmlEmbedsPrecedingMessage at every assistant row.
+ */
+export function indexHtmlEmbedsByAssistantMessage(
+  entries: TimelineEntry[],
+): Map<number, HtmlEmbedPayload[]> {
+  const map = new Map<number, HtmlEmbedPayload[]>();
+  if (!entries.length) return map;
+  let pending: HtmlEmbedPayload[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (entry.kind === 'message' && entry.data.role === 'user') {
+      pending = [];
+      seen.clear();
+      continue;
+    }
+    if (entry.kind === 'workflow') {
+      const embeds = collectHtmlEmbedsFromEvents(entry.data.events);
+      for (const emb of embeds) {
+        const key = embedDedupeKey(emb);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pending.push(emb);
+      }
+      continue;
+    }
+    if (entry.kind === 'message' && entry.data.role === 'assistant' && pending.length) {
+      map.set(i, pending.slice());
+    }
+  }
+  return map;
+}
+
 function clampHeight(h?: number): number {
   if (typeof h !== 'number' || Number.isNaN(h)) return DEFAULT_HEIGHT;
   return Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, Math.round(h)));

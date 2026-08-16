@@ -19,6 +19,7 @@ import { AvatarImg } from './components/AvatarImg';
 import { OpenSquadLoader } from './components/OpenSquadLoader';
 import { setLanguage } from './i18n';
 import { isSettingsAppView } from './utils/appNavItems';
+import { flushHostUiPrefs, schedulePushHostUiPrefs } from './utils/hostUiPrefs';
 
 // First-launch wizard — driven by the BACKEND, not localStorage.
 //
@@ -114,11 +115,13 @@ const App: React.FC = () => {
       if (prev.has(currentView)) return prev;
       return new Set([...prev, currentView]);
     });
+    schedulePushHostUiPrefs();
   }, [currentView]);
 
   useEffect(() => {
     if (selectedAgentId) {
       localStorage.setItem('nexus_selected_agent', selectedAgentId);
+      schedulePushHostUiPrefs();
     }
   }, [selectedAgentId]);
 
@@ -180,6 +183,7 @@ const App: React.FC = () => {
   // 连接池；POST refresh 无法复用 GET 缓存，提前发只会挤占关键路径。
   useEffect(() => {
     if (!currentUser) return;
+    flushHostUiPrefs();
     preloadSystemConfig();
     const t = setTimeout(() => {
       fetch('/api/ai-web/model-presets/refresh', { method: 'POST' }).catch(() => {});

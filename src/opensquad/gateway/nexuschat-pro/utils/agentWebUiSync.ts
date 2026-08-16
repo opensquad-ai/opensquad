@@ -14,6 +14,8 @@ import {
 import {
   loadWorkspaceStoreResolved,
   saveWorkspaceStore,
+  mergeWorkspaceSnapshots,
+  isEmptyWorkspaceSnapshot,
   WORKSPACES_CHANGED_EVENT,
   type WorkspaceStoreSnapshot,
 } from './workspaceStore';
@@ -74,8 +76,9 @@ function applyServerState(
     Array.isArray((remoteWs as WorkspaceStoreSnapshot).workspaces);
 
   const localSnap = loadWorkspaceStoreResolved(storageAgentId, aliases);
-  const localEmpty = !localSnap.workspaces?.length;
-  const shouldApplyWs = hasRemoteWs && (remoteAt > localAt || localEmpty);
+  // Always merge when the host has workspaces: a freshly seeded origin must
+  // not replace host chrome, and extra local folders should still be kept.
+  const shouldApplyWs = !!hasRemoteWs;
 
   const remoteMeta =
     remote.session_project_meta && typeof remote.session_project_meta === 'object'
@@ -92,10 +95,10 @@ function applyServerState(
   applyingServer = true;
   try {
     if (shouldApplyWs && hasRemoteWs) {
-      const snap = remoteWs as WorkspaceStoreSnapshot;
+      const merged = mergeWorkspaceSnapshots(localSnap, remoteWs as WorkspaceStoreSnapshot);
       saveWorkspaceStore(storageAgentId, {
-        ...snap,
-        savedAt: remoteAt || Date.now(),
+        ...merged,
+        savedAt: Math.max(remoteAt, Number(merged.savedAt) || 0, Date.now()),
       });
     }
     if (shouldApplyMeta) {
@@ -133,6 +136,10 @@ async function pushNow(): Promise<void> {
   pushInFlight = true;
   try {
     let snap = loadWorkspaceStoreResolved(target.storageAgentId, target.aliases);
+    if (isEmptyWorkspaceSnapshot(snap)) {
+      // Never push an empty origin over host chrome (dev vs packaged ports).
+      return;
+    }
     const meta = loadSessionProjectMeta(target.storageAgentId);
     const savedAt = Number(snap.savedAt) || Date.now();
     if (!snap.savedAt) {

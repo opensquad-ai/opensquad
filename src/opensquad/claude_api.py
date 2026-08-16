@@ -163,7 +163,7 @@ class ClaudeAPI:
         self.total_cache_read_tokens = 0
         self.total_cache_creation_tokens = 0
         # ── Per-message token cache (P3 perf optimization) ──
-        self._msg_token_cache: dict[int, int] = OrderedDict()  # PERF-10: LRU eviction
+        self._msg_token_cache: OrderedDict = OrderedDict()  # PERF-10: LRU eviction
         self._msg_token_cache_max_size = 5000
 
         try:
@@ -612,13 +612,15 @@ class ClaudeAPI:
             return len(str(messages)) // 3
 
     def _count_message_tokens(self, message: dict) -> int:
-        """Count tokens for a single message with content-hash cache."""
+        """Count tokens for a single message with identity+shape cache."""
+        from opensquad.token_breakdown import message_token_cache_key
+
         try:
-            msg_key = hash(json.dumps(message, sort_keys=True, ensure_ascii=False))
+            msg_key = message_token_cache_key(message)
             if msg_key in self._msg_token_cache:
                 self._msg_token_cache.move_to_end(msg_key)  # PERF-10: LRU touch
                 return self._msg_token_cache[msg_key]
-        except (TypeError, ValueError):
+        except (TypeError, AttributeError, ValueError):
             msg_key = None
 
         num_tokens = 4

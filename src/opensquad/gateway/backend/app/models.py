@@ -142,7 +142,7 @@ class Attachment(Base):
     __tablename__ = "attachments"
 
     id = Column(String, primary_key=True, index=True)
-    message_id = Column(String, ForeignKey("messages.id"), nullable=False)
+    message_id = Column(String, ForeignKey("messages.id"), nullable=False, index=True)
     name = Column(String, nullable=False)
     size = Column(String, nullable=False)
     url = Column(String, nullable=False)

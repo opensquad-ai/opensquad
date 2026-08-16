@@ -49,6 +49,7 @@ _AGENT_OUTPUT_BROADCAST_TYPES = frozenset(
         "status",
         "turn_start",
         "turn_elapsed",
+        "turn_cancelled",
         "token_stats",
         "current_session",
         "history_sync",
@@ -189,13 +190,39 @@ class AgentWebSocketHandler:
         except WebSocketDisconnect:
             logger.info(f"Agent {agent_id} disconnected")
             if agent_id:
-                registry.unregister(agent_id)
+                await self._unregister_agent(agent_id)
         except Exception as e:
             logger.error(f"Agent register error: {e}")
             if agent_id:
-                registry.unregister(agent_id)
+                await self._unregister_agent(agent_id)
             with contextlib.suppress(Exception):
                 await websocket.close()
+
+    async def _unregister_agent(self, agent_id: str) -> None:
+        """Drop the agent and tell UIs to seal any in-flight turns."""
+        busy = list(registry.get_busy_sessions(agent_id) or [])
+        for sid in busy:
+            try:
+                await user_handler.broadcast_to_agent(
+                    agent_id,
+                    {
+                        "type": "turn_cancelled",
+                        "sid": sid,
+                        "content": {
+                            "sid": sid,
+                            "reason": "agent_crash",
+                            "open_tool_ids": [],
+                            "partial_persisted": False,
+                        },
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "[Gateway] turn_cancelled agent_crash skipped sid=%s",
+                    sid,
+                    exc_info=True,
+                )
+        registry.unregister(agent_id)
 
     async def _agent_message_loop(self, agent_id: str, websocket: WebSocket):
         """Agent message loop"""
@@ -337,7 +364,7 @@ class AgentWebSocketHandler:
                             if isinstance(info_payload, dict):
                                 evt = info_payload.get("event")
                                 trace_id = info_payload.get("trace_id")
-                                if evt and str(evt).startswith("context_compress"):
+                                if (evt and str(evt).startswith("context_compress")) or trace_id:
                                     logger.info(
                                         "[Gateway] Forward info event=%s trace_id=%s user_id=%s agent_id=%s",
                                         evt,
@@ -512,10 +539,10 @@ class AgentWebSocketHandler:
 
         except WebSocketDisconnect:
             logger.info(f"Agent {agent_id} disconnected")
-            registry.unregister(agent_id)
+            await self._unregister_agent(agent_id)
         except Exception as e:
             logger.error(f"Agent message loop error: {e}")
-            registry.unregister(agent_id)
+            await self._unregister_agent(agent_id)
 
 
 class UserWebSocketHandler:
@@ -839,6 +866,9 @@ class UserWebSocketHandler:
                             "message_id": f"user_{int(time.time() * 1000)}_{user_id[:8]}",
                             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                         }
+                        if _sid:
+                            broadcast_msg["sid"] = _sid
+                            broadcast_msg["session_id"] = _sid
                         conns = self.user_connections.get(f"{user_id}:{agent_id}", [])
 
                         async def _bcast(ws):

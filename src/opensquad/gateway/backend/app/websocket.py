@@ -6,7 +6,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy import and_, select
 
 from app.database import AsyncSessionLocal
-from app.json_utils import make_json_safe
+from app.json_utils import dumps_json_safe
 from app.models import Message, User, UserGroupSettings, UserStatus, beijing_now, beijing_timestamp
 
 
@@ -103,13 +103,11 @@ class ConnectionManager:
         if user_id not in self.active_connections:
             return
 
-        # Send the message to all connections of the user
+        payload = dumps_json_safe(message)
         disconnected = []
         for websocket in self.active_connections[user_id]:
             try:
-                # Ensure the message can be JSON serialized
-                safe_message = make_json_safe(message)
-                await websocket.send_json(safe_message)
+                await websocket.send_text(payload)
             except Exception:
                 disconnected.append(websocket)
 
@@ -123,6 +121,7 @@ class ConnectionManager:
             return
 
         user_ids = list(self.group_subscriptions[group_id])
+        payload = dumps_json_safe(message)
 
         for user_id in user_ids:
             if user_id == exclude_user:
@@ -131,10 +130,9 @@ class ConnectionManager:
             if user_id in self.active_connections:
                 conns = self.active_connections[user_id]
                 disconnected = []
-                for _i, websocket in enumerate(conns):
+                for websocket in conns:
                     try:
-                        safe_message = make_json_safe(message)
-                        await websocket.send_json(safe_message)
+                        await websocket.send_text(payload)
                     except Exception:
                         disconnected.append(websocket)
 

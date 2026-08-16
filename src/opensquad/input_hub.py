@@ -582,6 +582,7 @@ class InputHub:
             if sched is not None:
                 for sid in list(getattr(sched, "busy_sessions", set()) or set()):
                     try:
+                        self._stop_sessions.add(sid)
                         sched.request_stop_session(sid)
                     except Exception:
                         pass
@@ -629,8 +630,14 @@ class InputHub:
                 sched.request_stop_session(sid)
         except Exception:
             logger.debug("[InputHub] session turn cancel on stop skipped", exc_info=True)
-        # Do NOT abort_all_tool_processes here — that kills shell/HTTP children for
-        # every parallel session. Agent-wide stop (request_stop) still aborts all.
+        # Session-scoped: abort Jobs tagged with this chat sid. Do not kill
+        # sibling panes' shells / child processes (agent-wide stop still does).
+        try:
+            from opensquad.tools.system import abort_all_tool_processes
+
+            abort_all_tool_processes("stop_session", session_id=sid)
+        except Exception:
+            logger.debug("[InputHub] abort session tool processes skipped", exc_info=True)
 
     def clear_session_stop(self, session_id: str) -> None:
         self._stop_sessions.discard(session_id or "")
@@ -639,9 +646,12 @@ class InputHub:
         return (session_id or "") in self._stop_sessions or self._stop_requested
 
     def clear_stop_request(self):
-        """Clear the stop request."""
+        """Clear the agent-wide stop latch only.
+
+        Per-session latches stay until ``clear_session_stop(sid)`` so a new
+        message on pane A cannot resume a Stop still in flight on pane B.
+        """
         self._stop_requested = False
-        self._stop_sessions.clear()
 
     def is_stop_requested(self) -> bool:
         """Check whether a stop has been requested."""

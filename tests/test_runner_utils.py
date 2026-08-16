@@ -122,6 +122,45 @@ class TestRemoveAllTags:
         assert result == "Just some text without tags."
 
 
+# ── _remove_tags / _extract_tag ─────────────────────────────────────────
+
+
+class TestRemoveTags:
+    """Test _remove_tags — strip named XML blocks including incomplete tags."""
+
+    @staticmethod
+    def _target(text: str, tags: list) -> str:
+        runner = _make_runner()
+        return runner._remove_tags(text, tags)
+
+    def test_remove_named_block(self):
+        result = self._target("Keep <plan>secret</plan> me", ["plan"])
+        assert result == "Keep  me"
+
+    def test_incomplete_tag_truncated(self):
+        result = self._target('Hello <tool_call name="x">{"a": 1}', ["tool_call"])
+        assert result == "Hello"
+        assert "a" not in result
+
+
+class TestExtractTag:
+    """Test _extract_tag — pull inner text from a named XML tag."""
+
+    @staticmethod
+    def _target(text: str, tag: str):
+        runner = _make_runner()
+        return runner._extract_tag(text, tag)
+
+    def test_extract_closed_tag(self):
+        assert self._target("<state>idle</state>", "state") == "idle"
+
+    def test_extract_unclosed_tag(self):
+        assert self._target("<title>Hello world", "title") == "Hello world"
+
+    def test_missing_tag_returns_none(self):
+        assert self._target("no tags here", "state") is None
+
+
 # ── _extract_text_before_tool ────────────────────────────────────────────
 
 

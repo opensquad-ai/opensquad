@@ -9,12 +9,63 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Hashable
 
 _THOUGHT_RE = re.compile(r"<(thought|think)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
 _TOOL_CALL_RE = re.compile(r"<tool_call[^>]*>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
 _TOOL_RESULT_RE = re.compile(r"<tool_result[^>]*>(.*?)</tool_result>", re.DOTALL | re.IGNORECASE)
 _SUMMARIZE_TOOL_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] Tool ['\"]")
+
+
+def _shape_id(value: Any) -> tuple[int, int, int, int]:
+    """Identity + length + first/last nested ids for cheap cache invalidation."""
+    if value is None:
+        return (0, 0, 0, 0)
+    if isinstance(value, str):
+        return (id(value), len(value), 0, 0)
+    if isinstance(value, dict):
+        nested = value.get("text")
+        if not isinstance(nested, str):
+            nested = value.get("content")
+        nested_id = id(nested) if isinstance(nested, (str, list, dict)) else 0
+        nested_len = len(nested) if isinstance(nested, (str, list, dict)) else 0
+        return (id(value), len(value), nested_id, nested_len)
+    if isinstance(value, list):
+        first = value[0] if value else None
+        last = value[-1] if value else None
+        return (id(value), len(value), _nested_payload_id(first), _nested_payload_id(last))
+    return (id(value), 0, 0, 0)
+
+
+def _nested_payload_id(item: Any) -> int:
+    if isinstance(item, dict):
+        nested = item.get("text")
+        if isinstance(nested, str):
+            return id(nested)
+        nested = item.get("content")
+        if isinstance(nested, (str, list, dict)):
+            return id(nested)
+        return id(item)
+    if item is None or isinstance(item, (int, float, bool)):
+        return 0
+    return id(item)
+
+
+def message_token_cache_key(message: dict) -> Hashable:
+    """Cheap identity+shape key for per-message token LRU caches.
+
+    Messages are treated as immutable after they enter the request list.
+    Using object identity and container shape avoids json.dumps on every recount.
+    """
+    return (
+        id(message),
+        message.get("role"),
+        message.get("name"),
+        message.get("tool_call_id"),
+        _shape_id(message.get("content")),
+        _shape_id(message.get("tool_calls")),
+        _shape_id(message.get("reasoning_content")),
+    )
 
 
 def _as_dict(obj: Any) -> dict:

@@ -16,6 +16,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Reques
 from fastapi.responses import JSONResponse
 
 from app.api import get_current_user_dep
+from app.http_clients import close_shared_http_clients, get_local_http_client
 from app.models import User
 from opensquad.system_config import syscfg
 
@@ -25,30 +26,16 @@ from ..websocket import launcher_handler
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = syscfg.project_root()
-_SSL_VERIFY = os.environ.get("OPENQUAD_SSL_VERIFY", "1") != "0"
-
-# PERF-9: one shared AsyncClient instead of a fresh one per proxy request so
-# keep-alive connections are reused.  Created lazily (an event loop must be
-# running); closed via ``close_shared_http_client`` on application shutdown.
-_shared_http_client: httpx.AsyncClient | None = None
 
 
-def _get_shared_client(timeout: float = 5.0) -> httpx.AsyncClient:
-    global _shared_http_client
-    if _shared_http_client is None or _shared_http_client.is_closed:
-        _shared_http_client = httpx.AsyncClient(timeout=timeout)
-    return _shared_http_client
+def _get_shared_client(_timeout: float = 5.0) -> httpx.AsyncClient:
+    """Launcher HTTP fallback — shared loopback client (timeout is per-request)."""
+    return get_local_http_client()
 
 
 async def close_shared_http_client() -> None:
-    """Close the module-level HTTP client (call from FastAPI lifespan shutdown)."""
-    global _shared_http_client
-    if _shared_http_client is not None:
-        try:
-            await _shared_http_client.aclose()
-        except Exception:
-            logger.warning("[admin_routes] error closing shared http client", exc_info=True)
-        _shared_http_client = None
+    """Close shared gateway httpx clients (call from FastAPI lifespan shutdown)."""
+    await close_shared_http_clients()
 
 
 def _launcher_url() -> str:
@@ -154,7 +141,7 @@ async def _proxy_get(
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
     client = _get_shared_client(timeout=timeout)
     try:
-        resp = await client.get(f"{base}{path}", params=params)
+        resp = await client.get(f"{base}{path}", params=params, timeout=timeout)
         if resp.status_code >= 400:
             err = resp.json().get("error", f"Launcher returned {resp.status_code}")
             raise HTTPException(resp.status_code, err)
@@ -187,7 +174,7 @@ async def _proxy_post(
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
     client = _get_shared_client(timeout=timeout)
     try:
-        resp = await client.post(f"{base}{path}", json=json)
+        resp = await client.post(f"{base}{path}", json=json, timeout=timeout)
         if resp.status_code >= 400:
             err = resp.json().get("error", f"Launcher returned {resp.status_code}")
             raise HTTPException(resp.status_code, err)
@@ -218,7 +205,7 @@ async def _proxy_put(
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
     client = _get_shared_client(timeout=5.0)
     try:
-        resp = await client.put(f"{base}{path}", json=json_body)
+        resp = await client.put(f"{base}{path}", json=json_body, timeout=5.0)
         if resp.status_code >= 400:
             err = resp.json().get("error", f"Launcher returned {resp.status_code}")
             raise HTTPException(resp.status_code, err)
@@ -247,7 +234,7 @@ async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
     client = _get_shared_client(timeout=5.0)
     try:
-        resp = await client.delete(f"{base}{path}")
+        resp = await client.delete(f"{base}{path}", timeout=5.0)
         if resp.status_code >= 400:
             err = resp.json().get("error", f"Launcher returned {resp.status_code}")
             raise HTTPException(resp.status_code, err)

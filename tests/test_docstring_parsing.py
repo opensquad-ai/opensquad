@@ -209,6 +209,19 @@ class TestParametersSchemaWithDocstring:
         assert schema["properties"]["b"]["description"] == "Parameter b"
         assert schema["properties"]["c"]["description"] == "参数C的描述。"
 
+    def test_schema_uses_cached_type_hints(self):
+        from opensquad.registry import _cached_type_hints
+
+        def typed(x: str, y: int = 1):
+            pass
+
+        _cached_type_hints.cache_clear()
+        self.registry._extract_parameters_schema(typed)
+        self.registry._extract_parameters_schema(typed)
+        info = _cached_type_hints.cache_info()
+        assert info.hits >= 1
+        assert info.misses >= 1
+
 
 class TestOpenAIToolsGenerationWithDocstring:
     """测试 generate_openai_tools() 使用 docstring 描述"""

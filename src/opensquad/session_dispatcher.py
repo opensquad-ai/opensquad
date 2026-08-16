@@ -298,12 +298,9 @@ async def run_parallel_dispatcher(runner: AgentRunner, initial_query: str | None
             continue
 
         if hub.is_session_stop_requested(sid) and not str(content).startswith("__"):
-            # Stale latch from a prior Stop — clear and process this message.
+            # Stale latch from a prior Stop on THIS sid. Do not clear other
+            # panes' session stops or a live agent-wide latch belonging to them.
             hub.clear_session_stop(sid)
-            try:
-                hub.clear_stop_request()
-            except Exception:
-                pass
 
         # Same session already running → leave in queue (re-push) wait_any already popped
         if scheduler.is_session_busy(sid):

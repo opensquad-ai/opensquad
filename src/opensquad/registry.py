@@ -552,15 +552,13 @@ class ToolRegistry:
         Returns:
             JSON Schema object for function parameters
         """
-        from typing import get_type_hints
-
         sig = inspect.signature(func)
         properties = {}
         required = []
 
-        # Get type annotations
+        # Get type annotations (cached; same helper as call())
         try:
-            hints = get_type_hints(func)
+            hints = _cached_type_hints(func)
         except Exception:
             hints = {}
 

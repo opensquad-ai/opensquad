@@ -58,6 +58,7 @@ if sys.platform == "win32":
                 _s.reconfigure(encoding="utf-8", errors="replace")
 
 from opensquad.system_config import syscfg
+from opensquad.ui_prefs import snapshot_has_workspaces
 
 
 def _ensure_frozen_utils() -> None:
@@ -1851,6 +1852,25 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     {
                         "status": "skipped",
                         "message": "stale client state",
+                        "savedAt": existing_at,
+                        "workspaces": existing.get("workspaces"),
+                        "session_project_meta": existing.get("session_project_meta") or {},
+                    }
+                )
+
+            # A fresh origin (packaged :9555 vs Vite :5173) may migrate an
+            # empty chrome with a *newer* savedAt. Never let that wipe a
+            # host snapshot that already has workspaces.
+            incoming_ws = body.get("workspaces")
+            if (
+                incoming_ws is not None
+                and not snapshot_has_workspaces(incoming_ws)
+                and snapshot_has_workspaces(existing.get("workspaces"))
+            ):
+                return self._send_json(
+                    {
+                        "status": "skipped",
+                        "message": "empty client chrome must not replace host workspaces",
                         "savedAt": existing_at,
                         "workspaces": existing.get("workspaces"),
                         "session_project_meta": existing.get("session_project_meta") or {},

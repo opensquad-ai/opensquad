@@ -372,7 +372,7 @@ class BaseAgent:
         elif command == "shutdown":
             await self.on_shutdown()
 
-    async def send_response(self, content: str, msg_type: str = "message", sid: str = ""):
+    async def send_response(self, content: str, msg_type: str = "message", sid: str = "", **meta):
         """Send a reply to the user (with sequence number for deduplication)."""
         if self.ws and self.connected:
             self._send_seq += 1
@@ -385,9 +385,13 @@ class BaseAgent:
             }
             if sid:
                 payload["sid"] = sid
+            for key in ("turn_id", "round_id", "agent_id", "trace_id"):
+                val = meta.get(key)
+                if val is not None and val != "":
+                    payload[key] = val
             await self.ws.send(json.dumps(payload))
 
-    async def send_response_to_user(self, user_id: str, content: str, msg_type: str = "message", sid: str = ""):
+    async def send_response_to_user(self, user_id: str, content: str, msg_type: str = "message", sid: str = "", **meta):
         """Send a reply to a specific user (with sequence number for deduplication)."""
         if self.ws and self.connected:
             self._send_seq += 1
@@ -401,6 +405,10 @@ class BaseAgent:
             }
             if sid:
                 payload["sid"] = sid
+            for key in ("turn_id", "round_id", "agent_id", "trace_id"):
+                val = meta.get(key)
+                if val is not None and val != "":
+                    payload[key] = val
             await self.ws.send(json.dumps(payload))
 
     async def send_thought(self, content: str):

@@ -115,6 +115,89 @@ function emptySnapshot(): WorkspaceStoreSnapshot {
   return { workspaces: [], chrome: emptyChrome(), migrated: false };
 }
 
+export function isEmptyWorkspaceSnapshot(
+  snap: WorkspaceStoreSnapshot | null | undefined,
+): boolean {
+  return !snap || !Array.isArray(snap.workspaces) || snap.workspaces.length === 0;
+}
+
+/**
+ * Union workspace registries by root path and pick chrome from the richer
+ * snapshot. Packaged (:9555) and Vite (:5173) must not clobber each other
+ * when one origin auto-seeds an empty chrome with a newer savedAt.
+ */
+export function mergeWorkspaceSnapshots(
+  local: WorkspaceStoreSnapshot | null | undefined,
+  remote: WorkspaceStoreSnapshot | null | undefined,
+): WorkspaceStoreSnapshot {
+  const localSnap = local && Array.isArray(local.workspaces) ? local : emptySnapshot();
+  const remoteSnap = remote && Array.isArray(remote.workspaces) ? remote : emptySnapshot();
+  const byPath = new Map<string, Workspace>();
+  const idMap = new Map<string, string>();
+
+  for (const w of remoteSnap.workspaces) {
+    if (!w?.rootPath) continue;
+    byPath.set(normPath(w.rootPath).toLowerCase(), w);
+  }
+  for (const w of localSnap.workspaces) {
+    if (!w?.rootPath) continue;
+    const key = normPath(w.rootPath).toLowerCase();
+    const existing = byPath.get(key);
+    if (existing) {
+      if (w.id && existing.id && w.id !== existing.id) idMap.set(w.id, existing.id);
+    } else {
+      byPath.set(key, w);
+    }
+  }
+  const workspaces = [...byPath.values()];
+  const remoteScore = chromeTabScore(remoteSnap);
+  const localScore = chromeTabScore(localSnap);
+  const remoteAt = Number(remoteSnap.savedAt) || 0;
+  const localAt = Number(localSnap.savedAt) || 0;
+  const preferRemoteChrome =
+    remoteSnap.workspaces.length > 0 &&
+    (localSnap.workspaces.length === 0 ||
+      remoteScore > localScore ||
+      (remoteScore === localScore && remoteAt >= localAt));
+  const chromeSrc = preferRemoteChrome ? remoteSnap.chrome : localSnap.chrome;
+  let chrome = normalizeChrome(chromeSrc || emptyChrome());
+  const remap = (id: string | null | undefined): string | null => {
+    if (!id) return null;
+    return idMap.get(id) || id;
+  };
+  const layoutByWorkspace: Record<string, SplitNode> = {};
+  for (const [wsId, layout] of Object.entries(chrome.layoutByWorkspace || {})) {
+    const nextId = remap(wsId) || wsId;
+    layoutByWorkspace[nextId] = layout;
+  }
+  chrome = {
+    ...chrome,
+    openWorkspaceIds: chrome.openWorkspaceIds.map((id) => remap(id) || id).filter(Boolean),
+    activeWorkspaceId: remap(chrome.activeWorkspaceId),
+    layoutByWorkspace,
+  };
+  const known = new Set(workspaces.map((w) => w.id));
+  chrome.openWorkspaceIds = Array.from(
+    new Set(chrome.openWorkspaceIds.filter((id) => known.has(id))),
+  );
+  if (chrome.activeWorkspaceId && !known.has(chrome.activeWorkspaceId)) {
+    chrome.activeWorkspaceId = chrome.openWorkspaceIds[0] || workspaces[0]?.id || null;
+  }
+  if (!chrome.activeWorkspaceId && workspaces[0]) {
+    chrome.activeWorkspaceId = workspaces[0].id;
+    if (!chrome.openWorkspaceIds.includes(workspaces[0].id)) {
+      chrome.openWorkspaceIds = [workspaces[0].id, ...chrome.openWorkspaceIds];
+    }
+  }
+  chrome = normalizeChrome(chrome);
+  return {
+    workspaces,
+    chrome,
+    migrated: !!(localSnap.migrated || remoteSnap.migrated) || workspaces.length > 0,
+    savedAt: Math.max(localAt, remoteAt, Date.now()),
+  };
+}
+
 /** Read-only walk — never mints ids (safe for React render). */
 export function collectLeaves(node: SplitNode): Array<{ id: string; tabs: PaneTabs }> {
   if (!node || typeof node !== 'object') return [];
@@ -539,6 +622,21 @@ export function ensureWorkspace(
   return ws;
 }
 
+/** Register ``rootPath`` and open it when this origin has no active workspace. */
+export function ensureActiveWorkspaceFromRoot(
+  agentId: string,
+  rootPath: string,
+): Workspace | null {
+  const path = (rootPath || '').trim();
+  if (!agentId || !path) return null;
+  const ws = ensureWorkspace(agentId, path);
+  const snap = loadWorkspaceStore(agentId);
+  if (!snap.chrome.activeWorkspaceId) {
+    openWorkspaceTab(agentId, ws.id);
+  }
+  return ws;
+}
+
 export function listWorkspaces(agentId: string): Workspace[] {
   return loadWorkspaceStore(agentId).workspaces.slice();
 }
@@ -919,6 +1017,10 @@ export function migrateProjectPathsToWorkspaces(
   }
   const def = (defaultRoot || '').trim();
   if (def) paths.add(normPath(def));
+
+  // Do not persist an empty "migrated" snapshot — a new origin would bump
+  // savedAt and push a wipe over the host chrome used by the other port.
+  if (paths.size === 0) return snap;
 
   for (const p of paths) {
     if (!p) continue;

@@ -636,11 +636,12 @@ class AgentMemory:
         """
         self.ensure_loaded()  # lazy disk load on first use (see ensure_loaded)
         entry_ids = self._date_index.get(date_str, [])
+        by_id = self._store.get_many(entry_ids)
 
         entries = []
         cat_counts = {}
         for eid in entry_ids:
-            entry = self._store.get(eid)
+            entry = by_id.get(eid)
             if entry is None:
                 continue
             category = entry.get("topic")
@@ -698,15 +699,21 @@ class AgentMemory:
         total_count = 0
         all_cat_counts = {}
 
-        # Iterate over every day in the date range
+        day_ids = []
+        all_eids = []
         dt_cur = dt_start
         while dt_cur <= dt_end:
             ds = dt_cur.strftime("%Y-%m-%d")
-            entry_ids = self._date_index.get(ds, [])
+            ids = self._date_index.get(ds, [])
+            day_ids.append((ds, ids))
+            all_eids.extend(ids)
+            dt_cur += datetime.timedelta(days=1)
+        by_id = self._store.get_many(all_eids)
 
+        for ds, entry_ids in day_ids:
             day_entries = []
             for eid in entry_ids:
-                entry = self._store.get(eid)
+                entry = by_id.get(eid)
                 if entry is None:
                     continue
 
@@ -752,8 +759,6 @@ class AgentMemory:
             if day_entries:
                 days[ds] = day_entries
                 total_count += len(day_entries)
-
-            dt_cur += datetime.timedelta(days=1)
 
         return {
             "range": [start_date, end_date],
@@ -1058,8 +1063,9 @@ class AgentMemory:
 
         # Log statistics
         episodic_cats = {}
+        by_id = self._store.get_many(self._episodic_ids)
         for eid in self._episodic_ids:
-            entry = self._store.get(eid)
+            entry = by_id.get(eid)
             if entry and entry.get("topic"):
                 cat = entry["topic"]
                 episodic_cats[cat] = episodic_cats.get(cat, 0) + 1

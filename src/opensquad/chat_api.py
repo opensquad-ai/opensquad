@@ -261,8 +261,8 @@ class ChatAPI:
 
         # ── Per-message token cache (P1 perf optimization) ──
         # Avoids re-encoding the same message content across repeated
-        # _prepare_messages() calls. Keyed by content hash.
-        self._msg_token_cache: OrderedDict[int, int] = OrderedDict()
+        # _prepare_messages() calls. Keyed by identity+shape (not json.dumps).
+        self._msg_token_cache: OrderedDict = OrderedDict()
         self._msg_token_cache_max_size = 5000
 
         # Cumulative token consumption statistics
@@ -466,10 +466,21 @@ class ChatAPI:
     def _emit_with_sid(self, etype, data):
         """Send an event with session_id (obtained via sid_provider injected by Runner)"""
         sid = self._sid_provider() if self._sid_provider else None
+        wrapper: dict = {"data": data}
         if sid:
-            bus.emit(etype, {"sid": sid, "data": data})
-        else:
-            bus.emit(etype, data)
+            wrapper["sid"] = sid
+        try:
+            from opensquad.session_parallel import get_turn_local
+            from opensquad.turn_trace import make_trace_id
+
+            tl = get_turn_local()
+            if tl is not None:
+                wrapper["turn_id"] = int(tl.turn or 0)
+                wrapper["round_id"] = int(tl.round or 0)
+                wrapper["trace_id"] = make_trace_id("", sid or tl.sid, tl.round, tl.turn)
+        except Exception:
+            pass
+        bus.emit(etype, wrapper)
 
     # -- Provider-level Files API --
 
@@ -1595,14 +1606,16 @@ class ChatAPI:
 
     def _count_message_tokens(self, message: dict) -> int:
         """Count tokens for a single message. Used by incremental counter."""
-        # Fast path: content-based cache (messages are immutable once added)
+        # Fast path: identity+shape cache (messages are immutable once added)
+        from opensquad.token_breakdown import message_token_cache_key
+
         try:
-            msg_key = hash(json.dumps(message, sort_keys=True, ensure_ascii=False))
+            msg_key = message_token_cache_key(message)
             if msg_key in self._msg_token_cache:
                 # True LRU: move to end (most recently used)
                 self._msg_token_cache.move_to_end(msg_key)
                 return self._msg_token_cache[msg_key]
-        except (TypeError, ValueError):
+        except (TypeError, AttributeError, ValueError):
             msg_key = None
 
         num_tokens = 4
@@ -2146,6 +2159,7 @@ class ChatAPI:
 
         max_stream_retries = 6  # Increased for rate limit handling
         stream_ok = False
+        stream_stopped = False
         _images_stripped = False  # Track if images were stripped due to unsupported error
 
         # Live tool-arg streaming for Agent Web (write/edit file code blocks).
@@ -2175,6 +2189,15 @@ class ChatAPI:
                         _stop_sid and input_hub.is_session_stop_requested(str(_stop_sid))
                     ):
                         logger.info("[ChatAPI] Stop requested during streaming, breaking")
+                        stream_stopped = True
+                        aclose = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+                        if callable(aclose):
+                            try:
+                                res = aclose()
+                                if hasattr(res, "__await__"):
+                                    await res
+                            except Exception:
+                                logger.debug("[ChatAPI] stream aclose on stop skipped", exc_info=True)
                         break
 
                     if not chunk.choices:
@@ -2285,6 +2308,8 @@ class ChatAPI:
                             if self.stream_parser:
                                 self.stream_parser.feed(transcript)
 
+                if stream_stopped:
+                    break
                 stream_ok = True
                 break
             except Exception as e:
@@ -2361,7 +2386,7 @@ class ChatAPI:
                 full_response.append(f"\n[Error: {type(e).__name__} - {e}]")
                 break
 
-        if not stream_ok and not stream_error:
+        if not stream_ok and not stream_error and not stream_stopped:
             stream_error = True
             full_response.append("\n[Error: Stream interrupted - unknown streaming failure]")
 
@@ -2419,15 +2444,22 @@ class ChatAPI:
             self.total_input_tokens += self._count_tokens(messages, self._last_tools)
             self.total_output_tokens += len(self.encoding.encode(res_text)) if res_text else 0
 
-        self.add_assistant_message(
-            api_content,
-            reasoning_content=api_reasoning,
-            # Bugfix: a native-FC turn may return ONLY tool_calls with empty
-            # content. The assistant message MUST still be recorded (req +
-            # session) so the tool-result continuation has a valid anchor and
-            # the UI workflow does not show a dangling tool step after refresh.
-            force_record=bool(parsed_tool_data) or finish_reason == "tool_calls",
-        )
+        from opensquad.turn_trace import has_unclosed_tool_call
+
+        persist_assistant = True
+        if stream_stopped and has_unclosed_tool_call(api_content or ""):
+            persist_assistant = False
+            logger.info("[ChatAPI] Stop: not persisting unclosed <tool_call> as assistant")
+        if persist_assistant:
+            self.add_assistant_message(
+                api_content,
+                reasoning_content=api_reasoning,
+                # Bugfix: a native-FC turn may return ONLY tool_calls with empty
+                # content. The assistant message MUST still be recorded (req +
+                # session) so the tool-result continuation has a valid anchor and
+                # the UI workflow does not show a dangling tool step after refresh.
+                force_record=bool(parsed_tool_data) or finish_reason == "tool_calls",
+            )
 
         # CRITICAL FIX: Remove the premature tool_calls injection into self.req.
         # The fix previously added tool_calls to self.req BEFORE the runner called

@@ -786,18 +786,24 @@ def _user_stop_requested() -> bool:
         return False
 
 
-def abort_all_tool_processes(reason: str = "user stop") -> dict[str, Any]:
+def abort_all_tool_processes(reason: str = "user stop", session_id: str | None = None) -> dict[str, Any]:
     """Force-stop Jobs, ShellSessions, and any child OS processes.
 
     Called from ``input_hub.request_stop()`` so UI Stop actually unblocks hung
     tools (git/cmd/shell) instead of waiting for their natural timeout.
+
+    When *session_id* is set, only Jobs tagged with that chat sid are aborted.
+    Sibling panes' shells and OS children are left alone.
     """
     stopped_jobs = 0
     closed_sessions = 0
     killed_children = 0
+    sid_filter = (session_id or "").strip()
 
     for job in list(_JOBS.values()):
         try:
+            if sid_filter and str(getattr(job, "ui_sid", "") or "") != sid_filter:
+                continue
             if job.is_running():
                 job.stop()
                 stopped_jobs += 1
@@ -815,6 +821,35 @@ def abort_all_tool_processes(reason: str = "user stop") -> dict[str, Any]:
                 )
         except Exception:
             logger.debug("[system] abort job failed", exc_info=True)
+
+    if sid_filter:
+        with _JOB_UI_META_LOCK:
+            pending_meta = [
+                (jid, meta) for jid, meta in list(_JOB_UI_META.items()) if str(meta.get("sid") or "") == sid_filter
+            ]
+            for jid, _meta in pending_meta:
+                _JOB_UI_META.pop(jid, None)
+        for jid, meta in pending_meta:
+            call_id = meta.get("call_id") or ""
+            if not call_id:
+                continue
+            emit_job_event(
+                "job_status",
+                {
+                    "sid": meta.get("sid", ""),
+                    "call_id": call_id,
+                    "job_id": jid,
+                    "command": meta.get("command", ""),
+                    "state": "aborted",
+                },
+            )
+        logger.info(
+            "[system] abort_all_tool_processes(%s, sid=%s): jobs=%d (session-scoped, shells/children kept)",
+            reason,
+            sid_filter,
+            stopped_jobs,
+        )
+        return {"jobs": stopped_jobs, "sessions": 0, "children": 0, "session_id": sid_filter}
 
     for sid in list(_SESSIONS.keys()):
         try:

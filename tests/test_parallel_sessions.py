@@ -204,6 +204,61 @@ async def test_parallel_scheduler_slots():
     assert not sched.is_session_busy("s1")
 
 
+@pytest.mark.asyncio
+async def test_scheduler_finish_idempotent_does_not_double_release():
+    sched = ParallelTurnScheduler(max_parallel=1)
+    hold = asyncio.Event()
+
+    async def linger():
+        await hold.wait()
+
+    assert await sched.acquire_slot("s1")
+    sched.start("s1", linger())
+    sched.finish("s1")
+    sched.finish("s1")
+    assert await sched.acquire_slot("s2", timeout=0.2) is True
+    hold2 = asyncio.Event()
+
+    async def linger2():
+        await hold2.wait()
+
+    sched.start("s2", linger2())
+    assert await sched.acquire_slot("s3", timeout=0.05) is False
+    hold.set()
+    hold2.set()
+    await asyncio.sleep(0.02)
+    sched.reap()
+
+
+def test_clear_stop_request_keeps_other_session_latches():
+    hub = InputHub()
+    hub._stop_requested = True
+    hub._stop_sessions.add("sid-b")
+    hub.clear_stop_request()
+    assert hub.is_stop_requested() is False
+    assert hub.is_session_stop_requested("sid-b") is True
+    hub.clear_session_stop("sid-a")
+    assert hub.is_session_stop_requested("sid-b") is True
+    hub.clear_session_stop("sid-b")
+    assert hub.is_session_stop_requested("sid-b") is False
+
+
+def test_request_stop_session_aborts_only_that_sid(monkeypatch):
+    seen: dict = {}
+
+    def fake_abort(reason: str, session_id: str | None = None):
+        seen["reason"] = reason
+        seen["sid"] = session_id
+        return {}
+
+    monkeypatch.setattr("opensquad.tools.system.abort_all_tool_processes", fake_abort)
+    hub = InputHub()
+    hub.request_stop_session("pane-b")
+    assert "pane-b" in hub._stop_sessions
+    assert seen.get("sid") == "pane-b"
+    assert seen.get("reason") == "stop_session"
+
+
 def test_resolve_primary_session_id(tmp_path: Path):
     save = tmp_path / "sessions"
     hist = tmp_path / "history"

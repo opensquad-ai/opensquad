@@ -108,6 +108,7 @@ from app.websocket import manager, notify_message_update, notify_new_message, no
 # main.py, api.py, and ai_web/routes/_main.py — and so PyInstaller mode
 # (OPENSQUAD_USER_DATA env) is handled in one place. See issue #43.
 from opensquad.system_config import syscfg
+from opensquad.ui_prefs import load_ui_prefs, merge_and_save_ui_prefs
 
 UPLOAD_DIR = syscfg.workspace_uploads_dir()
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -377,6 +378,23 @@ async def registration_status(db: AsyncSession = Depends(get_db)):
         "registration_required": not web_user_exists,
         "language": lang,
     }
+
+
+@router.get("/ui-prefs")
+async def get_ui_prefs():
+    """Public read of host UI prefs (theme / lang / last agent).
+
+    Vite (:5173) and packaged Gateway (:9555) do not share localStorage.
+    The login screen needs theme/lang before a token exists.
+    """
+    return load_ui_prefs()
+
+
+@router.put("/ui-prefs")
+async def put_ui_prefs(body: dict = Body(default={}), current_user: User = Depends(get_current_user_dep)):
+    """Persist host UI prefs. Empty fields do not wipe existing values."""
+    _ = current_user
+    return merge_and_save_ui_prefs(body if isinstance(body, dict) else {})
 
 
 @router.post("/auth/login", response_model=Token)
