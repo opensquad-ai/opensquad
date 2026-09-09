@@ -1,4 +1,4 @@
-import React, { type CSSProperties, type ReactNode, type RefObject, type UIEventHandler } from 'react';
+import React, { useLayoutEffect, type CSSProperties, type ReactNode, type RefObject, type UIEventHandler } from 'react';
 import {
   layoutTimelineWindow,
   useTimelineVirtualRange,
@@ -20,6 +20,8 @@ export function ChatTimeline<T extends TimelineKeyed>({
   columnClass,
   header,
   footer,
+  unpinRef,
+  freezeRef,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   entries: T[];
@@ -30,6 +32,10 @@ export function ChatTimeline<T extends TimelineKeyed>({
   columnClass?: string;
   header?: ReactNode;
   footer?: ReactNode;
+  /** When true, skip stick-to-bottom (user scrolled away). */
+  unpinRef?: RefObject<boolean>;
+  /** When true, skip stick-to-bottom (text selection freeze). */
+  freezeRef?: RefObject<boolean>;
 }) {
   const virt = useTimelineVirtualRange(scrollRef, entries.length);
   const layout = layoutTimelineWindow(entries.length, virt);
@@ -37,28 +43,44 @@ export function ChatTimeline<T extends TimelineKeyed>({
 
   if (layout.padTopPx > 0) {
     nodes.push(
-      <div key="virt-pad-top" className="timeline-row" style={{ height: layout.padTopPx }} aria-hidden />,
+      <div key="virt-pad-top" className="timeline-virt-pad" style={{ height: layout.padTopPx }} aria-hidden />,
     );
   }
   for (let i = layout.midStart; i <= layout.midEnd; i++) {
     const entry = entries[i];
+    if (!entry) continue;
     const entryKey = entry._uid || `entry-${i}`;
     nodes.push(renderEntry(entry, i, entryKey));
   }
   if (layout.padMidPx > 0) {
     nodes.push(
-      <div key="virt-pad-mid" className="timeline-row" style={{ height: layout.padMidPx }} aria-hidden />,
+      <div key="virt-pad-mid" className="timeline-virt-pad" style={{ height: layout.padMidPx }} aria-hidden />,
     );
   }
   for (let i = layout.tailStart; i < entries.length; i++) {
     if (i <= layout.midEnd) continue;
     const entry = entries[i];
+    if (!entry) continue;
     const entryKey = entry._uid || `entry-${i}`;
     nodes.push(renderEntry(entry, i, entryKey));
   }
 
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (freezeRef?.current) return;
+    if (unpinRef?.current) return;
+    if (el.querySelector('[data-tool-expanded]')) return;
+    el.scrollTop = el.scrollHeight;
+  });
+
   return (
-    <div ref={scrollRef} className={className} style={style} onScroll={onScroll}>
+    <div
+      ref={scrollRef}
+      className={['os-chat-scroll', className].filter(Boolean).join(' ')}
+      style={{ overflowAnchor: 'none', ...style }}
+      onScroll={onScroll}
+    >
       <div className={columnClass}>
         {header}
         {nodes}

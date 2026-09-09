@@ -32,6 +32,16 @@ def _get_mm():
     return _memory_manager
 
 
+_NOT_INIT_MSG = (
+    "Long-term memory system not initialized. "
+    "Usual causes: (1) agent config tools lacks 'long_memory'; "
+    "(2) init still running in background right after boot — retry in a few seconds; "
+    "(3) missing pip deps for the long_memory plugin: "
+    "numpy scipy jieba networkx (check boot log for 'Long-term memory init failed'). "
+    "Fix: install those packages into the agent/runtime Python, then restart the agent."
+)
+
+
 def get_memory_manager():
     """Public interface: allows plugins (long_memory plugin) to obtain the running MemoryManager instance during hot reload."""
     return _memory_manager
@@ -70,7 +80,7 @@ def memory_write(
     """
     mm = _get_mm()
     if mm is None:
-        return {"status": "error", "message": "Long-term memory system not initialized"}
+        return {"status": "error", "message": _NOT_INIT_MSG}
 
     return mm.write_memory(
         topic=topic,
@@ -107,7 +117,7 @@ def memory_query(
     """
     mm = _get_mm()
     if mm is None:
-        return {"status": "error", "message": "Long-term memory system not initialized"}
+        return {"status": "error", "message": _NOT_INIT_MSG}
 
     return mm.query_deep(
         query_text=query_text,
@@ -143,7 +153,7 @@ def memory_log(
     """
     mm = _get_mm()
     if mm is None:
-        return {"status": "error", "message": "Long-term memory system not initialized"}
+        return {"status": "error", "message": _NOT_INIT_MSG}
 
     return mm.log_memory(
         content=content,
@@ -170,6 +180,6 @@ def memory_find_chain(anchor_words: list[str]) -> dict[str, Any]:
     """
     mm = _get_mm()
     if mm is None:
-        return {"status": "error", "message": "Long-term memory system not initialized"}
+        return {"status": "error", "message": _NOT_INIT_MSG}
 
     return mm.find_chain(anchor_words)

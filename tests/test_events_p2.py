@@ -86,6 +86,20 @@ def test_event_pipeline_push_drain():
     assert ep.drain_sync() == []
 
 
+def test_event_pipeline_session_isolation():
+    ep = EventPipeline()
+    ep.push_nowait("web", "for-a", session_id="sid-a")
+    ep.push_nowait("web", "for-b", session_id="sid-b")
+    assert ep.size_for("sid-a") == 1
+    assert ep.size_for("sid-b") == 1
+    drained_a = ep.drain_sync(session_id="sid-a")
+    assert [e.content for e in drained_a] == ["for-a"]
+    assert ep.size_for("sid-a") == 0
+    assert ep.size_for("sid-b") == 1
+    drained_b = ep.drain_sync(session_id="sid-b")
+    assert [e.content for e in drained_b] == ["for-b"]
+
+
 # ── _check_mention does not text-match user_id ────────────────────────────
 
 

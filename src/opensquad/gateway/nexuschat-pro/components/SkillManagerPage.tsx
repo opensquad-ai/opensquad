@@ -20,6 +20,14 @@ interface SkillManagerPageProps {
 const LAYOUT_KEY = 'skill_manager_layout';
 type SkillLayoutMode = 'grid' | 'list';
 
+function skillUninstallId(skill: SkillInfo): string {
+  return skill.dir || skill.name;
+}
+
+function canDeleteSkill(_skill: SkillInfo): boolean {
+  return true;
+}
+
 function loadLayoutMode(): SkillLayoutMode {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
@@ -96,21 +104,33 @@ const SkillCard: React.FC<{
           className="flex-1 min-w-0 select-text cursor-text"
           onClick={(e) => e.stopPropagation()}
         >
-          <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
-            {skill.display_name || skill.name}
-          </h3>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
+              {skill.display_name || skill.name}
+            </h3>
+            {skill.bundled && (
+              <span
+                className="text-[9px] font-semibold px-1 py-0 rounded bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0"
+                title={t('skillManager.cannotDeleteBundled')}
+              >
+                {t('skillManager.bundledBadge')}
+              </span>
+            )}
+          </div>
           {skill.description && (
             <p className="text-[11px] text-textMuted truncate leading-tight mt-0.5">{skill.description}</p>
           )}
         </div>
         {levelToggle}
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete(skill.name); }}
-          className="p-1 rounded text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors shrink-0"
-          title={t('common.delete')}
-        >
-          <Trash2 size={13} />
-        </button>
+        {canDeleteSkill(skill) && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(skillUninstallId(skill)); }}
+            className="p-1 rounded text-textMuted hover:bg-red-500/10 hover:text-red-400 transition-colors shrink-0"
+            title={t('common.delete')}
+          >
+            <Trash2 size={13} />
+          </button>
+        )}
         <ChevronRight size={14} className="text-textMuted opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
       </div>
     );
@@ -133,6 +153,14 @@ const SkillCard: React.FC<{
         >
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="font-bold text-textMain text-sm">{skill.display_name || skill.name}</h3>
+            {skill.bundled && (
+              <span
+                className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0"
+                title={t('skillManager.cannotDeleteBundled')}
+              >
+                {t('skillManager.bundledBadge')}
+              </span>
+            )}
             {skill.version && (
               <span className="text-xs text-textMuted bg-bgLight border border-border px-1.5 py-0.5 rounded">
                 v{skill.version}
@@ -209,13 +237,15 @@ const SkillCard: React.FC<{
           <span>{skill.author ? `by ${skill.author}` : skill.dir}</span>
           <div className="flex items-center gap-2">
             {skill.license && <span>{skill.license}</span>}
-            <button
-              onClick={(e) => { e.stopPropagation(); onDelete(skill.name); }}
-              className="p-1 rounded hover:bg-red-500/10 hover:text-red-400 transition-colors"
-              title={t('common.delete')}
-            >
-              <Trash2 size={14} />
-            </button>
+            {canDeleteSkill(skill) && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(skillUninstallId(skill)); }}
+                className="p-1 rounded hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                title={t('common.delete')}
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -308,6 +338,14 @@ const SkillDetailView: React.FC<{
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="font-bold text-textMain text-base">{skill.display_name || skill.name}</h2>
+            {skill.bundled && (
+              <span
+                className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0"
+                title={t('skillManager.cannotDeleteBundled')}
+              >
+                {t('skillManager.bundledBadge')}
+              </span>
+            )}
             {skill.version && (
               <span className="text-xs text-textMuted bg-bgLight border border-border px-1.5 py-0.5 rounded">
                 v{skill.version}
@@ -318,13 +356,15 @@ const SkillDetailView: React.FC<{
             <p className="text-xs text-textMuted mt-0.5 line-clamp-1">{skill.description}</p>
           )}
         </div>
-        <button
-          onClick={() => onDelete(skill.name)}
-          className="p-1.5 rounded-lg text-textMuted hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
-          title={t('common.delete')}
-        >
-          <Trash2 size={16} />
-        </button>
+        {canDeleteSkill(skill) && (
+          <button
+            onClick={() => onDelete(skillUninstallId(skill))}
+            className="p-1.5 rounded-lg text-textMuted hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
+            title={t('common.delete')}
+          >
+            <Trash2 size={16} />
+          </button>
+        )}
       </div>
 
       {/* Meta info bar */}
@@ -639,7 +679,7 @@ export const SkillManagerPage: React.FC<SkillManagerPageProps> = ({
       await skillAPI.deleteSkill(deleteConfirm);
       setDeleteConfirm(null);
       // If we were viewing this skill, go back to list
-      if (viewingSkill && viewingSkill.name === deleteConfirm) {
+      if (viewingSkill && (viewingSkill.dir === deleteConfirm || viewingSkill.name === deleteConfirm)) {
         setViewingSkill(null);
       }
       loadSkills();

@@ -165,6 +165,13 @@ def discover_all_plugin_services() -> list[dict]:
             pid = info["plugin_id"]
             if pid in seen:
                 continue
+            try:
+                from opensquad._syscfg._workspace import is_locally_uninstalled
+
+                if is_locally_uninstalled("plugins", pid):
+                    continue
+            except Exception:
+                pass
             seen.add(pid)
             result.append(info)
     return result
@@ -181,21 +188,163 @@ def _collect_plugin_dirs() -> dict[str, str]:
     return collect_plugin_dirs()
 
 
+def _abspath_under(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(root)
+    return abs_path == abs_root or abs_path.startswith(abs_root + os.sep)
+
+
+def _same_abs(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
+def _is_bundled_resource(path: str, workspace_root: str, builtin_root: str) -> bool:
+    """True when ``path`` is the shipped seed, not a user workspace overlay."""
+    if not path:
+        return False
+    if _same_abs(workspace_root, builtin_root):
+        return _abspath_under(path, builtin_root)
+    return _abspath_under(path, builtin_root) and not _abspath_under(path, workspace_root)
+
+
+def _workspace_overlay_dir(workspace_root: str, builtin_root: str, dir_name: str) -> str | None:
+    """Return a workspace directory that is safe to rmtree, or None."""
+    if not dir_name or _same_abs(workspace_root, builtin_root):
+        return None
+    candidate = os.path.join(workspace_root, dir_name)
+    if not os.path.isdir(candidate) or not _abspath_under(candidate, workspace_root):
+        return None
+    builtin_copy = os.path.join(builtin_root, dir_name)
+    if os.path.isdir(builtin_copy) and _same_abs(candidate, builtin_copy):
+        return None
+    return candidate
+
+
+def _resolve_plugin_dir(name: str) -> tuple[str | None, str | None]:
+    """Resolve plugin.json name or directory name to (plugin_dir, dir_name).
+
+    Uses an unfiltered directory scan so uninstall still resolves after the
+    plugin has already been hidden in this workspace.
+    """
+    from opensquad.resource_uninstall import _iter_plugin_dirs, resolve_plugin_dir_name
+
+    collected = _iter_plugin_dirs()
+    for cand_name, plugin_dir in _collect_plugin_dirs().items():
+        collected.setdefault(cand_name, plugin_dir)
+    dir_name = resolve_plugin_dir_name(name)
+    if dir_name and dir_name in collected:
+        return collected[dir_name], dir_name
+    if name in collected:
+        return collected[name], name
+    for cand_name, plugin_dir in collected.items():
+        manifest = os.path.join(plugin_dir, "plugin.json") if plugin_dir else ""
+        if not os.path.isfile(manifest):
+            continue
+        try:
+            with open(manifest, encoding="utf-8") as f:
+                meta = json.load(f)
+            if meta.get("name") == name:
+                return plugin_dir, cand_name
+        except Exception:
+            pass
+    if dir_name:
+        for root in _plugin_search_dirs():
+            plugin_dir = os.path.join(root, dir_name)
+            if os.path.isdir(plugin_dir):
+                return plugin_dir, dir_name
+        return None, dir_name
+    return None, None
+
+
+def _skill_declared_name(skill_dir: str, fallback: str) -> str:
+    skill_json = os.path.join(skill_dir, "skill.json")
+    if os.path.isfile(skill_json):
+        try:
+            with open(skill_json, encoding="utf-8") as f:
+                meta = json.load(f)
+            declared = str(meta.get("name") or "").strip()
+            if declared:
+                return declared
+        except Exception:
+            pass
+    return fallback
+
+
 def _find_skill_dir(name: str) -> str | None:
+    dirs = _collect_skill_dirs()
+    if name in dirs:
+        return dirs[name]
+    for dir_name, skill_dir in dirs.items():
+        if _skill_declared_name(skill_dir, dir_name) == name:
+            return skill_dir
     for root in _skill_search_dirs():
         skill_dir = os.path.join(root, name)
         if os.path.isdir(skill_dir):
+            from opensquad._syscfg._workspace import is_locally_uninstalled
+
+            if is_locally_uninstalled("skills", os.path.basename(os.path.abspath(skill_dir))):
+                continue
             return skill_dir
     return None
 
 
+def plan_resource_uninstall(resource_type: str, name: str) -> tuple[str | None, str | None, int, str]:
+    """Resolve an uninstall request to an optional workspace overlay + dir_name.
+
+    Bundled seeds under src/plugins or src/skills are never rmtree'd. The
+    caller should ``mark_locally_uninstalled`` so they disappear from this
+    workspace. System plugins listed in builtin_plugins.json cannot be removed.
+    """
+    if resource_type == "plugins":
+        _plugin_dir, dir_name = _resolve_plugin_dir(name)
+        if not dir_name:
+            from opensquad.resource_uninstall import resolve_plugin_dir_name
+
+            dir_name = resolve_plugin_dir_name(name)
+        if not dir_name:
+            return None, None, 404, f"Plugin '{name}' not found"
+        protected = set(_BUILTIN_PLUGINS.keys())
+        if dir_name in protected or name in protected:
+            return None, None, 400, (f"Plugin '{name}' is a system plugin and cannot be uninstalled.")
+        overlay = _workspace_overlay_dir(PLUGINS_DIR, BUILTIN_PLUGINS_DIR, dir_name)
+        return overlay, dir_name, 200, ""
+    if resource_type == "skills":
+        skill_dir = _find_skill_dir(name)
+        if not skill_dir:
+            return None, None, 404, f"Skill '{name}' not found"
+        dir_name = os.path.basename(os.path.abspath(skill_dir))
+        overlay = _workspace_overlay_dir(SKILLS_DIR, BUILTIN_SKILLS_DIR, dir_name)
+        return overlay, dir_name, 200, ""
+    return None, None, 400, "Invalid resource type"
+
+
+def resolve_workspace_delete(resource_type: str, name: str) -> tuple[str | None, int, str]:
+    """Backward-compatible helper used by tests.
+
+    Overlay-only deletes still return the workspace path. Bundled-only
+    uninstalls return status 200 with ``target_dir is None`` (tombstone).
+    """
+    overlay, _dir_name, status, err = plan_resource_uninstall(resource_type, name)
+    if status != 200:
+        return None, status, err
+    return overlay, 200, ""
+
+
 def _collect_skill_dirs() -> dict[str, str]:
     """Map skill dir_name -> path; workspace overrides builtin."""
+    from opensquad._syscfg._workspace import is_locally_uninstalled
+
     out: dict[str, str] = {}
     for root in (BUILTIN_SKILLS_DIR, SKILLS_DIR):
         if not os.path.isdir(root):
             continue
         for entry in os.listdir(root):
+            if is_locally_uninstalled("skills", entry):
+                continue
             skill_dir = os.path.join(root, entry)
             if os.path.isdir(skill_dir):
                 out[entry] = skill_dir
@@ -501,7 +650,10 @@ def _start_launcher_ws_tunnel(management_port: int):
                             # several seconds on large DBs — keep above Gateway's
                             # 60s plugin-data proxy timeout.
                             _admin_timeout = 60
-                            if "/api/plugins/" in path and path.rstrip("/").endswith("/data"):
+                            if path == "/api/system/pick-directory":
+                                # Native folder dialog can stay open for minutes.
+                                _admin_timeout = 600
+                            elif "/api/plugins/" in path and path.rstrip("/").endswith("/data"):
                                 _admin_timeout = 90
 
                             def _http_relay():
@@ -2133,7 +2285,16 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "enabled": True,
                             "command": "npx",
                             "args": ["-y", "@playwright/mcp"],
-                            "timeout": 30,
+                            "timeout": 60,
+                            "autoApprove": [
+                                "browser_navigate",
+                                "browser_snapshot",
+                                "browser_click",
+                                "browser_screenshot",
+                                "browser_type",
+                                "browser_evaluate",
+                                "browser_take_screenshot",
+                            ],
                         },
                         "chrome-devtools": {
                             "enabled": False,
@@ -2305,6 +2466,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                 _log.warning(f"[Launcher] Warning: Failed to write .reload_ts: {e}")
 
             action = "updated" if existing_version else "installed"
+            try:
+                from opensquad._syscfg._workspace import clear_locally_uninstalled
+
+                clear_locally_uninstalled("plugins", plugin_id)
+            except Exception:
+                pass
             _log.info(f"[Launcher] Plugin '{plugin_id}' {action} via broadcast zip install")
             return self._send_json({"ok": True, "action": action, "plugin_id": plugin_id})
 
@@ -2318,23 +2485,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
 
             Returns (plugin_dir, dir_name) tuple, or (None, None) if not found.
             """
-            collected = _collect_plugin_dirs()
-            if name in collected and os.path.isdir(collected[name]):
-                return collected[name], name
-            for dir_name, plugin_dir in collected.items():
-                if not os.path.isdir(plugin_dir):
-                    continue
-                manifest = os.path.join(plugin_dir, "plugin.json")
-                if not os.path.isfile(manifest):
-                    continue
-                try:
-                    with open(manifest, encoding="utf-8") as f:
-                        meta = json.load(f)
-                    if meta.get("name") == name:
-                        return plugin_dir, dir_name
-                except Exception:
-                    pass
-            return None, None
+            return _resolve_plugin_dir(name)
 
         def _writable_plugin_json_path(self, name: str) -> tuple[str, str] | tuple[None, None]:
             """Return (plugin_json_path, dir_name) under workspace for writes."""
@@ -2369,6 +2520,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     meta = {}
 
                 is_builtin = name in builtin_reg
+                bundled = _is_bundled_resource(plugin_dir, PLUGINS_DIR, BUILTIN_PLUGINS_DIR)
 
                 # For built-in plugins without a plugin.json, enforce default enabled state
                 if is_builtin and not meta:
@@ -2397,6 +2549,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                         "service_only": meta.get("service_only", False),
                         "service_toggle": meta.get("service_toggle", False),
                         "builtin": is_builtin,
+                        "bundled": bundled,
                     }
                 )
 
@@ -2736,6 +2889,12 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     with open(target_path, "wb") as out_f:
                         out_f.write(base64.b64decode(content_b64))
 
+                if resource_names:
+                    from opensquad._syscfg._workspace import clear_locally_uninstalled
+
+                    for resource_name in resource_names:
+                        clear_locally_uninstalled(resource_type, resource_name)
+
                 # Trigger reload for plugins
                 if resource_type == "plugins" and resource_names:
                     reload_ts_path = os.path.join(base_dir, ".reload_ts")
@@ -2755,35 +2914,26 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
         def _handle_delete_resource(self, resource_type: str, name: str):
             """
             DELETE /api/resources/{type}/{name}
-            Deletes a resource (skill or plugin) directory.
-            """
-            if resource_type == "skills":
-                base_dir = SKILLS_DIR
-            elif resource_type == "plugins":
-                base_dir = PLUGINS_DIR
-            else:
-                return self._send_json({"error": "Invalid resource type"}, 400)
 
-            # Validate name to prevent path traversal
-            # Allow alphanumeric, underscore, hyphen, dot
+            Removes a workspace overlay when present, then hides the resource in
+            this workspace. Bundled seeds under src/plugins or src/skills are
+            not deleted. The UI may pass plugin.json ``name`` (whisper_transcribe)
+            which differs from the on-disk folder (whisper).
+            """
             if not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
                 return self._send_json({"error": "Invalid resource name"}, 400)
 
-            target_dir = os.path.join(base_dir, name)
+            overlay, dir_name, status, err = plan_resource_uninstall(resource_type, name)
+            if status != 200 or not dir_name:
+                return self._send_json({"error": err}, status)
 
-            # Double check that we are staying within base_dir
-            if not os.path.abspath(target_dir).startswith(os.path.abspath(base_dir)):
-                return self._send_json({"error": "Path traversal detected"}, 400)
-
-            if not os.path.isdir(target_dir):
-                return self._send_json({"error": f"{resource_type[:-1].capitalize()} '{name}' not found"}, 404)
+            base_dir = PLUGINS_DIR if resource_type == "plugins" else SKILLS_DIR
+            if overlay:
+                if not _abspath_under(overlay, base_dir):
+                    return self._send_json({"error": "Path traversal detected"}, 400)
 
             try:
-                # On Windows, .git/objects/pack/*.idx files are often locked
-                # by AV software (360, Defender) or have read-only attributes
-                # that cause WinError 5 (Access Denied). Use a custom onerror
-                # handler that clears read-only flags and retries, then falls
-                # back to renaming the directory out of the way.
+
                 def _rmtree_onerror(func, path, exc_info):
                     import stat as _stat
 
@@ -2794,29 +2944,39 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                     try:
                         func(path)
                     except Exception:
-                        # Last resort: rename the stubborn file/dir so the
-                        # outer rmtree can continue. The renamed leftover
-                        # will be cleaned up on next restart or manually.
                         try:
                             import uuid as _uuid
 
                             dead_name = path + ".dead_" + _uuid.uuid4().hex[:8]
                             os.rename(path, dead_name)
                         except Exception:
-                            pass  # Give up on this single entry
+                            pass
 
-                shutil.rmtree(target_dir, onerror=_rmtree_onerror)
+                if overlay:
+                    shutil.rmtree(overlay, onerror=_rmtree_onerror)
 
-                # Trigger reload for plugins
+                from opensquad._syscfg._workspace import mark_locally_uninstalled
+
+                mark_locally_uninstalled(
+                    "plugins" if resource_type == "plugins" else "skills",
+                    dir_name,
+                )
+
                 if resource_type == "plugins":
                     reload_ts_path = os.path.join(base_dir, ".reload_ts")
                     try:
                         with open(reload_ts_path, "w") as rf:
                             rf.write(str(time.time()))
                     except Exception:
-                        pass  # Ignore reload signal failure
+                        pass
 
-                return self._send_json({"ok": True, "message": f"{resource_type[:-1].capitalize()} '{name}' deleted"})
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "message": f"{resource_type[:-1].capitalize()} '{name}' uninstalled",
+                        "dir_name": dir_name,
+                    }
+                )
             except Exception as e:
                 return self._send_json({"error": f"Failed to delete {resource_type}: {e}"}, 500)
 
@@ -3477,6 +3637,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "entry": meta.get("entry", {}),
                             "has_skill_json": True,
                             "dir": skill_name,
+                            "bundled": _is_bundled_resource(skill_dir, SKILLS_DIR, BUILTIN_SKILLS_DIR),
                         }
                     )
                 elif os.path.isfile(skill_md_path):
@@ -3509,6 +3670,7 @@ def _start_management_server(port: int = MANAGEMENT_PORT):
                             "entry": {},
                             "has_skill_json": False,
                             "dir": skill_name,
+                            "bundled": _is_bundled_resource(skill_dir, SKILLS_DIR, BUILTIN_SKILLS_DIR),
                         }
                     )
 

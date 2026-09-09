@@ -267,6 +267,7 @@ export function applyThemePrefs(prefs?: ThemePrefs): ThemePrefs {
   root.style.setProperty('--color-primary', hexToRgbTriplet(palette.primary));
   root.style.setProperty('--color-on-primary', hexToRgbTriplet(palette.onPrimary));
   root.style.setProperty('--color-bg', hexToRgbTriplet(palette.bg));
+  root.style.setProperty('--boot-bg', palette.bg);
   root.style.setProperty('--color-rail', hexToRgbTriplet(palette.rail));
   root.style.setProperty('--color-nest', hexToRgbTriplet(palette.nest));
   root.style.setProperty('--color-stage', hexToRgbTriplet(palette.stage));

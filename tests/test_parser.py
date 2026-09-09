@@ -113,10 +113,16 @@ class TestNormalizeToolName:
     def test_system_tool(self):
         assert self._target("system.echo") == "system.echo"
 
-    def test_mcp_tool_doublescore_to_single(self):
-        # No dot -> _normalize_key collapses __ to _
+    def test_mcp_tool_preserves_double_underscore(self):
+        # MCP / Native FC separators must stay as __ (registry routes on mcp__)
         name = "mcp__filesystem__read_file"
-        assert self._target(name) == "mcp_filesystem_read_file"
+        assert self._target(name) == "mcp__filesystem__read_file"
+
+    def test_native_fc_preserves_double_underscore(self):
+        assert self._target("Filesystem__Read_File") == "filesystem__read_file"
+
+    def test_mcp_tool_case_normalized_per_segment(self):
+        assert self._target("mcp__Playwright__Browser_Navigate") == "mcp__playwright__browser_navigate"
 
     def test_colon_unchanged(self):
         # No dot -> _normalize_key does not replace colon
@@ -184,3 +190,110 @@ class TestExtractTagIgnoresReasoningMentions:
         text = "<think>reasoning here</think>\n<plan>\nstep1\n</plan>"
         assert ResponseParser.extract_tag(text, "think") == "reasoning here"
         assert ResponseParser.extract_tag(text, "plan") == "step1"
+
+
+class TestParseDsmlToolCalls:
+    """DSML tool-call variants must be executed, not shown as plain text."""
+
+    @staticmethod
+    def _parse(text: str):
+        from opensquad.parser import ResponseParser
+
+        return ResponseParser.parse_tool_calls(text)
+
+    def test_spaced_calls_wrapper_and_arguments_json(self):
+        # Exact shape the agent sometimes emits (space after delimiter, wrapper `calls`).
+        fw = "\uff5c\uff5c"
+        text = (
+            f"<{fw}DSML{fw} calls>\n"
+            f'<{fw}DSML{fw} invoke name="shell">\n'
+            f'<{fw}DSML{fw} parameter name="arguments" string="true">'
+            '{"command": "dir foo /b"}'
+            f"</{fw}DSML{fw} parameter>\n"
+            f"</{fw}DSML{fw} invoke>\n"
+            f"</{fw}DSML{fw} calls>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "shell"
+        assert args.get("command") == "dir foo /b"
+
+    def test_user_sample_unescaped_quotes_in_command(self):
+        fw = "\uff5c\uff5c"
+        text = (
+            f"<{fw}DSML{fw} calls>\n"
+            f'<{fw}DSML{fw} invoke name="shell">\n'
+            f'<{fw}DSML{fw} parameter name="arguments" string="true">'
+            '{"command": "dir "c:\\\\users\\\\adminuser\\\\desktop\\\\aigame2" /b"}'
+            f"</{fw}DSML{fw} parameter>\n"
+            f"</{fw}DSML{fw} invoke>\n"
+            f"</{fw}DSML{fw} calls>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "shell"
+        assert "command" in args
+        assert "aigame2" in str(args["command"])
+
+    def test_canonical_dsml_tool_calls_no_space(self):
+        fw = "\uff5c\uff5c"
+        text = (
+            f"<{fw}DSML{fw}tool_calls>"
+            f'<{fw}DSML{fw}invoke name="filesystem.list_directory">'
+            f'<{fw}DSML{fw}parameter name="path" string="true">C:\\\\tmp</{fw}DSML{fw}parameter>'
+            f"</{fw}DSML{fw}invoke>"
+            f"</{fw}DSML{fw}tool_calls>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "filesystem.list_directory"
+        assert "tmp" in str(args.get("path", ""))
+
+    def test_delimiter_only_invoke_without_dsml_token(self):
+        fw = "\uff5c\uff5c"
+        text = f'<{fw}invoke name="web.search">\n<{fw}parameter name="query">福州天气</{fw}parameter>\n</{fw}invoke>'
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "web.search"
+        assert args.get("query") == "福州天气"
+
+    def test_halfwidth_dsml_still_parses(self):
+        text = (
+            "<||DSML||tool_calls>"
+            '<||DSML||invoke name="system.echo">'
+            '<||DSML||parameter name="text">hi</||DSML||parameter>'
+            "</||DSML||invoke>"
+            "</||DSML||tool_calls>"
+        )
+        result = self._parse(text)
+        assert result == [("system.echo", {"text": "hi"})]
+
+    def test_xml_tool_call_still_works(self):
+        text = "<tool_call>\n<func>im.send</func>\n<to>user@ai.com</to>\n</tool_call>"
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "im.send"
+        assert args.get("to") == "user@ai.com"
+
+    def test_strip_dsml_removes_inner_json(self):
+        from opensquad.parser import strip_dsml_tool_markup
+
+        fw = "\uff5c\uff5c"
+        text = (
+            f"hello <{fw}DSML{fw} calls>"
+            f'<{fw}DSML{fw} invoke name="shell">'
+            f'<{fw}DSML{fw} parameter name="arguments">{{"command": "dir foo"}}'
+            f"</{fw}DSML{fw} parameter>"
+            f"</{fw}DSML{fw} invoke>"
+            f"</{fw}DSML{fw} calls> world"
+        )
+        out = strip_dsml_tool_markup(text)
+        assert "dir foo" not in out
+        assert "invoke" not in out.lower()
+        assert "hello" in out
+        assert "world" in out

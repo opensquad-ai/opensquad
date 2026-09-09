@@ -2224,7 +2224,7 @@ class SessionManager:
             """Extract the last user message as preview."""
             for m in reversed(messages):
                 if m.get("role") == "user":
-                    content = m.get("content", "").strip()
+                    content = (m.get("content") or "").strip()
                     if content:
                         # Remove image markers and other special content
                         content = re.sub(r"<image>.*?</image>", "[image]", content)

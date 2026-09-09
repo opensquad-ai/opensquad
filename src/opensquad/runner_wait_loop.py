@@ -145,16 +145,17 @@ class RunnerWaitLoop:
 
         event_pipeline = get_event_pipeline()
 
-        if event_pipeline.size <= 0:
+        if event_pipeline.size_for(getattr(self.runner, "_turn_sid", "") or None) <= 0:
             return None
 
         await self.runner._emit("status", "working")
         await self.runner._setup_prompt()
-        raw_events = event_pipeline.drain_sync()
+        raw_events = event_pipeline.drain_sync(session_id=getattr(self.runner, "_turn_sid", "") or None)
         if raw_events:
+            _turn_sid = getattr(self.runner, "_turn_sid", "") or None
             for event in raw_events:
                 if event.source in ("web", "gateway", "group", "dm") and event.content and event.content.strip():
-                    self.runner._session_manager.add_message("user", event.content)
+                    self.runner._session_manager.add_message("user", event.content, sid=_turn_sid)
                     await self.runner._emit("user_msg", event.content)
 
             lines = ["", "--- External Events (arrived during processing) ---"]

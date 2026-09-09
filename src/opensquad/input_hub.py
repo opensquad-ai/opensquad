@@ -638,6 +638,14 @@ class InputHub:
             abort_all_tool_processes("stop_session", session_id=sid)
         except Exception:
             logger.debug("[InputHub] abort session tool processes skipped", exc_info=True)
+        try:
+            from opensquad.sub_agent_runner import job_manager
+
+            n = job_manager.cancel_by_sid(sid, "stop_session")
+            if n:
+                logger.info("[InputHub] cancelled %d sub-agent job(s)/runner(s) for session %s", n, sid)
+        except Exception:
+            logger.debug("[InputHub] sub-agent cancel_by_sid on stop skipped", exc_info=True)
 
     def clear_session_stop(self, session_id: str) -> None:
         self._stop_sessions.discard(session_id or "")

@@ -659,8 +659,11 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
     ? <XCircle size={12} className="text-red-500 flex-shrink-0" />
     : <OpenSquadLoader size={12} className="flex-shrink-0" />;
 
-  // Build raw diff lines — always call hooks unconditionally (Rules of Hooks)
+  const showDiffBody = embedded || isOpen;
+  // Skip Myers/LCS until the fold is actually visible (collapsed header only
+  // needs the cheap added/removed counts from extractFileEditInfo).
   const rawDiffLines = useMemo<RawDiffLine[]>(() => {
+    if (!showDiffBody || info.kind === 'read') return [];
     let lines: RawDiffLine[];
     // write with a real before/after (from server diff_old) → unified red/green
     if (info.kind === 'write' && (info.oldStr == null || info.oldStr === '')) {
@@ -698,7 +701,7 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
       oldNo: l.oldNo != null ? l.oldNo + offset : null,
       newNo: l.newNo != null ? l.newNo + offset : null,
     }));
-  }, [info]);
+  }, [info, showDiffBody]);
 
   // Build hunk entries
   const hunkEntries = useMemo(() => buildHunks(rawDiffLines), [rawDiffLines]);
@@ -713,8 +716,14 @@ export const FileDiffBlock: React.FC<FileDiffBlockProps> = ({ info, status, note
   };
 
   // Count actual added/removed from diff
-  const actualAdded = useMemo(() => rawDiffLines.filter(l => l.kind === 'added').length, [rawDiffLines]);
-  const actualRemoved = useMemo(() => rawDiffLines.filter(l => l.kind === 'removed').length, [rawDiffLines]);
+  const actualAdded = useMemo(() => {
+    if (rawDiffLines.length === 0 && typeof info.addedLines === 'number') return info.addedLines;
+    return rawDiffLines.filter(l => l.kind === 'added').length;
+  }, [rawDiffLines, info.addedLines]);
+  const actualRemoved = useMemo(() => {
+    if (rawDiffLines.length === 0 && typeof info.removedLines === 'number') return info.removedLines;
+    return rawDiffLines.filter(l => l.kind === 'removed').length;
+  }, [rawDiffLines, info.removedLines]);
 
   const OpIcon = info.kind === 'write' ? FilePlus : FilePen;
   const opLabel = info.kind === 'write' ? t('aiChat.writeFile') : t('aiChat.editFile');

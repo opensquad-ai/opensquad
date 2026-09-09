@@ -182,7 +182,14 @@ class NativeToolCallStrategy(ToolCallStrategy):
             return
         tc = self._tool_calls_buffer[index]
         name = tc.get("function", {}).get("name") or ""
-        if not name or not self._should_stream_args(name):
+        if not name:
+            return
+        stream_args = self._should_stream_args(name)
+        # File write/edit stream every arg chunk. Other tools still emit a
+        # header (name first seen) and a final flush so Agent Web can show
+        # the tool row instead of hanging on an empty thought fold until
+        # finish_reason — websearch/bocha used to be invisible until then.
+        if not force and not stream_args:
             return
         import time
 

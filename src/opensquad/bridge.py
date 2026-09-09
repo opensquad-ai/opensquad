@@ -50,6 +50,16 @@ class ChatProBridge:
         self._group_cache = {}  # {group_id: {"name": ..., "members": {user_id: name}}}
         self._group_cache_ts = 0.0  # Timestamp of last cache refresh (time.monotonic)
 
+    def _internal_headers(self) -> dict:
+        """Headers for trusted internal gateway calls (agent @ai registration, etc.)."""
+        secret = syscfg.node_secret() or ""
+        if secret and secret not in (
+            "YOUR_NODE_SECRET_HERE",
+            "opensquad-gateway-simple-token",
+        ):
+            return {"X-Node-Secret": secret}
+        return {}
+
     def login(self) -> bool:
         """Login and obtain a Token. If the account does not exist (401), auto-register and retry."""
         try:
@@ -61,9 +71,12 @@ class ChatProBridge:
             # Auto-register if account does not exist
             if r.status_code == 401:
                 logger.info(f"[Bridge] Login 401, attempting auto-register for {self.email}...")
+                # Agent @ai accounts must use the internal registration path
+                # (web /auth/register rejects *@ai without X-Node-Secret).
                 reg = requests.post(
                     f"{self.base_url}/api/auth/register",
                     json={"email": self.email, "password": self.password, "name": self.agent_name},
+                    headers=self._internal_headers(),
                     timeout=5,
                 )
                 if reg.status_code in (200, 201):
@@ -74,8 +87,15 @@ class ChatProBridge:
                         timeout=5,
                     )
                 elif reg.status_code == 400:
-                    # Email already registered -- password mismatch.
-                    # Attempt force-reset password via admin endpoint, then retry login.
+                    try:
+                        reg_detail = str(reg.json().get("detail", reg.text[:200]) or "")
+                    except Exception:
+                        reg_detail = reg.text[:200]
+                    # Only reset when the email truly already exists; other 400s
+                    # (e.g. *@ai blocked without node_secret) must not be treated as "exists".
+                    if "already registered" not in reg_detail.lower():
+                        logger.error(f"[Bridge] Auto-register failed (400): {reg_detail}")
+                        return False
                     logger.info("[Bridge] Auto-register 400 (email exists), attempting password reset...")
                     try:
                         reset = requests.post(
@@ -123,6 +143,16 @@ class ChatProBridge:
         except Exception as e:
             logger.error(f"[Bridge] Login failed: {e}")
             return False
+
+    def apply_credentials(self, email: str, password: str, agent_name: str | None = None) -> bool:
+        """Switch bridge login credentials and obtain a fresh token."""
+        self.email = email
+        self.password = password
+        if agent_name:
+            self.agent_name = agent_name
+        self.token = None
+        self.user_id = None
+        return self.login()
 
     async def reconnect(self) -> bool:
         """
@@ -326,6 +356,36 @@ class ChatProBridge:
             logger.error(f"[Bridge] Failed to join group {group_id}: {e}")
             return {"ok": False, "detail": str(e)}
 
+    def leave_group_api(self, group_id: str) -> dict:
+        """Leave a group. Returns {"ok": bool, "detail": str}."""
+        try:
+            if not self._ensure_token():
+                return {"ok": False, "detail": "Bridge not logged in and auto-login failed"}
+
+            def _leave(gid: str):
+                return requests.post(f"{self.base_url}/api/groups/{gid}/leave", params={"token": self.token}, timeout=5)
+
+            r = _leave(group_id)
+            if r.status_code == 401:
+                logger.info("[Bridge] Token expired, re-logging in...")
+                if self.login():
+                    r = _leave(group_id)
+            if r.status_code == 200:
+                self._subscriptions.discard(group_id)
+                self._group_cache.pop(group_id, None)
+                logger.info(f"[Bridge] Left group {group_id}")
+                return {"ok": True, "detail": "success"}
+            try:
+                err_body = r.json()
+                err_detail = err_body.get("detail", err_body.get("message", r.text[:200]))
+            except Exception:
+                err_detail = r.text[:200]
+            logger.warning(f"[Bridge] Leave group {group_id} returned {r.status_code}: {err_detail}")
+            return {"ok": False, "detail": f"HTTP {r.status_code}: {err_detail}"}
+        except Exception as e:
+            logger.error(f"[Bridge] Failed to leave group {group_id}: {e}")
+            return {"ok": False, "detail": str(e)}
+
     def _ws_subscribe_group(self, group_id: str):
         """Send a WebSocket subscribe message for *group_id* if the WS is connected.
 
@@ -479,7 +539,7 @@ class ChatProBridge:
                 msg_data["_image_paths"] = image_paths
 
             # Fix issue where content is empty due to voice/file: if content is empty but attachments exist, manually fill in filename and local path
-            content = msg_data.get("content", "").strip()
+            content = (msg_data.get("content") or "").strip()
             attachments = msg_data.get("attachments", [])
             if attachments:
                 att_info = []
@@ -510,7 +570,7 @@ class ChatProBridge:
             if reply_to_msg and not reply_to_msg.get("is_deleted"):
                 reply_sender = reply_to_msg.get("sender_name", "Unknown")
                 reply_type = reply_to_msg.get("type", "TEXT")
-                reply_content = reply_to_msg.get("content", "").strip()
+                reply_content = (reply_to_msg.get("content") or "").strip()
                 reply_atts = reply_to_msg.get("attachments", [])
 
                 # Build a human-readable description of the quoted content
@@ -560,7 +620,7 @@ class ChatProBridge:
             image_paths = await self._download_attachments(msg_data)
 
             # Fix case where content is empty but attachments exist, and include local paths
-            content = msg_data.get("content", "").strip()
+            content = (msg_data.get("content") or "").strip()
             attachments = msg_data.get("attachments", [])
             if attachments:
                 att_info = []

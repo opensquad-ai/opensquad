@@ -198,6 +198,13 @@ def discover_skills(skills_base_dir: str) -> list[str]:
     for entry in os.listdir(skills_base_dir):
         entry_path = os.path.join(skills_base_dir, entry)
         if os.path.isdir(entry_path):
+            try:
+                from opensquad._syscfg._workspace import is_locally_uninstalled
+
+                if is_locally_uninstalled("skills", entry):
+                    continue
+            except Exception:
+                pass
             skill_md = os.path.join(entry_path, "SKILL.md")
             if os.path.exists(skill_md):
                 found.append(entry)

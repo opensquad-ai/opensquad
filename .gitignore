@@ -1,5 +1,8 @@
 # ── Build artifacts (all go to build/ at project root) ────────
 build/
+# Misplaced electron-builder / local release trees under the Python package
+# (must never be collect_data_files'd into run.exe _internal/)
+src/opensquad/build/
 
 # ── Python ────────────────────────────────────────────────────
 __pycache__/
@@ -109,6 +112,7 @@ model_cards/
 # ── Playwright MCP runtime output (screenshots, snapshots, logs) ──
 .playwright-mcp/
 .playwright-cli/
+**/data/mcp_browser_profiles/
 
 # ── AI assistant local settings (contain auth tokens / plans) ──
 .codebuddy/
@@ -318,10 +322,15 @@ docs/方案讨论*/
 docs/优化修复方案_*.md
 plan_fix_*.md
 
-# ===== Private plugin: news2theme (not for public repo) =====
+# ===== Private plugins / skills (not for public repo) =====
 src/plugins/news2theme/
 src/skills/news2theme/
+src/skills/news2theme-ops/
+src/skills/zt2theme/
 docs/new2theme_agent_role.md
 docs/new2theme_plugin_design.md
 scripts/cfg_news2theme_agent.py
-src/skills/news2theme-ops/
+.cursor/skills/
+tests/test_n2t_*.py
+tests/test_z2t.py
+tests/test_ds_web_answer_clean.py

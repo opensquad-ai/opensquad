@@ -108,6 +108,12 @@ def collect_plugin_dirs() -> dict[str, str]:
             out[name] = loc or name
     except Exception:
         logger.debug("[PluginManager] pkgutil plugin scan skipped", exc_info=True)
+    try:
+        from opensquad._syscfg._workspace import is_locally_uninstalled
+
+        out = {k: v for k, v in out.items() if not is_locally_uninstalled("plugins", k)}
+    except Exception:
+        logger.debug("[PluginManager] local-uninstall filter skipped", exc_info=True)
     return out
 
 

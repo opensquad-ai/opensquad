@@ -184,10 +184,10 @@ class TurnLoop:
         # coda inside, upgrade to compose_user_visible_message (preamble+coda).
         from opensquad._runner._tag_utils import compose_user_visible_message
 
-        streamed = "".join(getattr(self.runner, "_streamed_user_text", []))
+        streamed = "".join(getattr(self.runner, "_streamed_user_text", []) or [])
         user_msg_from_tag = None
         self.runner._last_user_msg_from_to_user = False
-        composed, composed_tag = compose_user_visible_message(full_response)
+        composed, composed_tag = compose_user_visible_message(full_response or "")
         if streamed.strip():
             user_msg = streamed.strip()
             user_msg_from_tag = getattr(self.runner, "_streamed_user_tag", None) or "to_user"
@@ -204,9 +204,12 @@ class TurnLoop:
                     user_msg_from_tag = composed_tag
             self.runner._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
         else:
-            user_msg = composed
+            user_msg = composed or ""
             user_msg_from_tag = composed_tag
             self.runner._last_user_msg_from_to_user = user_msg_from_tag == "to_user"
+
+        if not isinstance(user_msg, str):
+            user_msg = "" if user_msg is None else str(user_msg)
 
         if user_msg_from_tag == "to_user_reply":
             self.runner._awaiting_user_reply = True
@@ -266,12 +269,13 @@ class TurnLoop:
             is_repetitive = self.runner._is_repeated_content(user_msg) or self.runner._is_repeated_content(thought_text)
 
         if is_repetitive:
-            if self.runner._repetition_rewind_count >= 1:
+            rewind_count = getattr(self.runner, "_repetition_rewind_count", 0)
+            if rewind_count >= 1:
                 logger.warning(
                     "[Runner] Repetition rewind already used once this turn, allowing it through to avoid infinite loop"
                 )
             else:
-                self.runner._repetition_rewind_count += 1
+                self.runner._repetition_rewind_count = rewind_count + 1
                 logger.warning(
                     "[Runner] Detected repetitive output (stuttering) -- performing context rewind and requesting re-output"
                 )
@@ -502,6 +506,7 @@ class TurnLoop:
                                     "images": _imgs,
                                     "attachments": _atts,
                                 },
+                                session_id=getattr(self.runner, "_turn_sid", "") or None,
                             )
 
                 # Collaboration board auto-sync
@@ -599,11 +604,15 @@ class TurnLoop:
                 # Drain event pipeline (per-tool, may contain events that arrived during execution)
                 from opensquad.event_pipeline import event_pipeline
 
-                _raw_events = event_pipeline.drain_sync()
+                _raw_events = event_pipeline.drain_sync(session_id=getattr(self.runner, "_turn_sid", "") or None)
 
                 for evt in _raw_events:
                     if evt.source in ("web", "gateway", "group", "dm") and evt.content and evt.content.strip():
-                        _get_session_manager().add_message("user", evt.content)
+                        _get_session_manager().add_message(
+                            "user",
+                            evt.content,
+                            sid=getattr(self.runner, "_turn_sid", "") or None,
+                        )
                         await self.runner._emit("user_msg", evt.content)
                     if evt.source == "vision_tool" and evt.metadata.get("action") == "inject_images":
                         img_paths = evt.metadata.get("image_paths", [])
@@ -635,14 +644,41 @@ class TurnLoop:
                 # Prefer human message for LLM history; keep diff_* for UI emit
                 _ui_extras: dict = {}
                 if isinstance(result, dict):
-                    for _k in ("diff_old", "diff_new", "diff_start_line"):
-                        if _k in result and result[_k] is not None:
-                            _ui_extras[_k] = result[_k]
-                    _display = result.get("message")
-                    if isinstance(_display, str) and _display.strip():
-                        _tool_result_text = _display
+                    # MCP Playwright screenshots etc. — stash base64 for next LLM turn
+                    if result.get("__mcp_multimodal__"):
+                        _mcp_imgs = result.get("images") or []
+                        if _mcp_imgs:
+                            _existing = list(getattr(self.runner, "_tool_result_images", None) or [])
+                            _existing.extend(_mcp_imgs)
+                            self.runner._tool_result_images = _existing
+                            logger.info(
+                                "[Runner] Queued %d MCP screenshot(s) for next vision turn",
+                                len(_mcp_imgs),
+                            )
+                        _tool_result_text = result.get("text") or "Tool executed successfully."
+                        if _mcp_imgs:
+                            _tool_result_text = f"{_tool_result_text} [+{len(_mcp_imgs)} screenshot(s) attached]"
                     else:
-                        _tool_result_text = str(result) if result else "(empty result)"
+                        for _k in ("diff_old", "diff_new", "diff_start_line"):
+                            if _k in result and result[_k] is not None:
+                                _ui_extras[_k] = result[_k]
+                        _display = result.get("message")
+                        if isinstance(_display, str) and _display.strip():
+                            _tool_result_text = _display
+                        else:
+                            _tool_result_text = str(result) if result else "(empty result)"
+                        # vision.read_image returns image_paths — inject even if
+                        # event_pipeline push was skipped / drained elsewhere.
+                        _vision_paths = result.get("image_paths")
+                        if isinstance(_vision_paths, list) and _vision_paths:
+                            already = set(self.runner._current_images or [])
+                            new_paths = [p for p in _vision_paths if p and p not in already]
+                            if new_paths:
+                                self.runner._current_images = list(self.runner._current_images or []) + new_paths
+                                logger.info(
+                                    "[Runner] Injected %d vision.read_image path(s) for next turn",
+                                    len(new_paths),
+                                )
                 else:
                     _tool_result_text = str(result) if result else "(empty result)"
 

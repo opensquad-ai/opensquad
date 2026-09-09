@@ -19,11 +19,15 @@ cd src/opensquad/gateway/nexuschat-pro
 npm install
 npm run electron:dev
 
-# Build an installer for the current platform
-npm run electron:build
-# → build/release/   (Windows .exe, macOS .dmg, Linux .AppImage / .deb)
+# Recommended one-shot desktop build (repo root)
+# Windows:
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
+# macOS / Linux:
+bash scripts/build_desktop.sh
+# → build/backend-*/run/  then  build/release/
 
-# Build a specific platform
+# Or build Electron only after scripts/build_backend.* already ran:
+cd src/opensquad/gateway/nexuschat-pro
 npm run electron:win     # Windows .exe (NSIS + portable)
 npm run electron:mac     # macOS .dmg + .zip (x64 + arm64)
 npm run electron:linux   # Linux .AppImage + .deb
@@ -31,7 +35,8 @@ npm run electron:linux   # Linux .AppImage + .deb
 
 The build pipeline has **two stages**: a Python backend (PyInstaller) and the
 Electron wrapper. Both need to succeed; the Electron stage glues the right
-backend into the right installer per OS.
+backend into the right installer per OS. Never write release trees under
+`src/opensquad/build/` — they must stay at repo-root `build/release/`.
 
 ---
 

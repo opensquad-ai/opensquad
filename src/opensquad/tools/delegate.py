@@ -164,12 +164,18 @@ def _build_runner(depth: int, task_preview: str):
     sub_cfg["prompt"] = _build_sub_prompt(parent_prompt)
 
     # Dynamically resolve the current session_id so sub-agent events are routed to the
-    # frontend session that triggered this tool call (session_manager is always up-to-date).
-    current_sid = _parent_sid  # fall back to boot-time value if session_manager unavailable
+    # frontend session that triggered this tool call (TurnLocal wins over focused session).
+    current_sid = _parent_sid
     try:
-        from opensquad import session_manager as _sm_module
+        from opensquad.session_parallel import get_turn_local
 
-        current_sid = _sm_module.session_manager.get_current_session_id() or _parent_sid
+        tl = get_turn_local()
+        if tl and tl.sid:
+            current_sid = tl.sid
+        else:
+            from opensquad import session_manager as _sm_module
+
+            current_sid = _sm_module.session_manager.get_current_session_id() or _parent_sid
     except Exception:
         pass
 

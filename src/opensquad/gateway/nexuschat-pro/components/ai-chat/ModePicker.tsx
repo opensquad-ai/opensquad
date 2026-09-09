@@ -3,6 +3,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
+import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 export type AgentMode = 'plan' | 'build';
 
@@ -60,7 +61,7 @@ export const ModePicker: React.FC<ModePickerProps> = ({
 
       {open && (
         <div
-          className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[200px] rounded-xl border border-border bg-panel shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden"
+          className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[200px] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}
           role="listbox"
         >
           <div className="py-1">

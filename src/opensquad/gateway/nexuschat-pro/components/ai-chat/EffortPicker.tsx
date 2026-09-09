@@ -4,6 +4,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
+import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 export type ReasoningEffort = 'low' | 'medium' | 'high';
 
@@ -81,7 +82,7 @@ export const EffortPicker: React.FC<EffortPickerProps> = ({
 
       {open && (
         <div
-          className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[180px] rounded-xl border border-border bg-panel shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden"
+          className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[180px] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}
           role="listbox"
         >
           <div className="px-3 pt-2.5 pb-1 text-[10px] font-medium uppercase tracking-wide text-textMuted/55">

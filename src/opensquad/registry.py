@@ -775,6 +775,27 @@ class ToolRegistry:
                 return None
         return f"{best_ns}.{bare}"
 
+    def resolve_namespace_default_call(self, ns: str) -> str | None:
+        """If *ns* is a registered namespace, default to search/query/run.
+
+        Cheap models (Ling/Qwen) emit ``<tool_call>websearch`` without ``.search``.
+        """
+        name = (ns or "").strip()
+        if not name or "." in name or "__" in name:
+            return None
+        with self._lock:
+            info = self._tools.get(name)
+        if not info:
+            return None
+        module = self._ensure_module(info)
+        if module is None:
+            return None
+        for cand in ("search", "query", "run"):
+            fn = getattr(module, cand, None)
+            if callable(fn):
+                return f"{name}.{cand}"
+        return None
+
     async def call(self, tool_name: str, args: str | dict[str, Any]) -> Any:
         """
         Dispatch a tool call
@@ -810,6 +831,8 @@ class ToolRegistry:
             and tool_name not in ("event_pipeline", "help.get_tool_help")
         ):
             resolved_early = self.resolve_bare_tool_name(tool_name)
+            if not resolved_early:
+                resolved_early = self.resolve_namespace_default_call(tool_name)
             if resolved_early:
                 ns0, fn0 = resolved_early.split(".", 1)
                 tc_log.info(

@@ -1415,6 +1415,8 @@ export interface PluginInfo {
   service_toggle?: boolean;
   /** 内置插件标记：内置插件随 OpenSquad 分发，不可卸载 */
   builtin?: boolean;
+  /** 随包种子（src/plugins 或安装目录），不是工作区 overlay，不可卸载 */
+  bundled?: boolean;
 }
 
 /** plugin.json service 字段结构 */
@@ -1518,9 +1520,9 @@ export const pluginAPI = {
   },
 
   /** Uninstall a plugin (removes its directory permanently) */
-  uninstall: async (name: string) => {
+    uninstall: async (name: string) => {
     return apiRequest<{ ok: boolean; plugin_id: string; message: string }>(
-      `/ai-web/admin/plugins/${name}`,
+      `/ai-web/admin/plugins/${encodeURIComponent(name)}`,
       { method: 'DELETE' }
     );
   },
@@ -1737,6 +1739,8 @@ export interface SkillInfo {
   entry: Record<string, string>;
   has_skill_json: boolean;
   dir: string;
+  /** 随包技能（src/skills 或安装目录），不是工作区 overlay，不可卸载 */
+  bundled?: boolean;
 }
 
 

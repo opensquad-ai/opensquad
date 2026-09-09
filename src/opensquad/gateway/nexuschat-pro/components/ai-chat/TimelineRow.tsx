@@ -2,7 +2,7 @@ import React from 'react';
 
 /**
  * Off-screen timeline rows skip layout/paint via CSS content-visibility.
- * Avoids pulling in a virtualization library while long sessions stay scrollable.
+ * Live / tail rows lock native layout so stick-to-bottom streaming does not jitter.
  */
 const ROW_STYLE: React.CSSProperties = {
   contentVisibility: 'auto',
@@ -12,8 +12,16 @@ const ROW_STYLE: React.CSSProperties = {
 export const TimelineRow: React.FC<{
   children: React.ReactNode;
   className?: string;
-}> = ({ children, className }) => (
-  <div className={className ? `timeline-row ${className}` : 'timeline-row'} style={ROW_STYLE}>
+  lockLayout?: boolean;
+}> = ({ children, className, lockLayout }) => (
+  <div
+    className={[
+      'timeline-row',
+      lockLayout ? 'timeline-row-live' : '',
+      className,
+    ].filter(Boolean).join(' ')}
+    style={lockLayout ? undefined : ROW_STYLE}
+  >
     {children}
   </div>
 );

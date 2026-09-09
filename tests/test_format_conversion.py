@@ -117,5 +117,23 @@ async def test_ambiguous_bare_name_without_priority_errors():
     assert "Ambiguous tool name" in result
 
 
+async def test_namespace_only_name_defaults_to_search():
+    registry = ToolRegistry()
+
+    class WebSearchTools:
+        @staticmethod
+        def search(query: str = ""):
+            return f"hit:{query}"
+
+        @staticmethod
+        def fetch(url: str = ""):
+            return f"page:{url}"
+
+    registry.register(WebSearchTools, "websearch", level="core")
+    assert registry.resolve_namespace_default_call("websearch") == "websearch.search"
+    result = await registry.call("websearch", {"query": "福州天气"})
+    assert result == "hit:福州天气"
+
+
 if __name__ == "__main__":
     asyncio.run(test_format_conversion())

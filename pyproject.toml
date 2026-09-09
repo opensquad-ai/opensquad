@@ -52,6 +52,10 @@ dependencies = [
     "mcp>=1.0",
     "prompt_toolkit>=3.0.36",
     "textual>=8.2.8",
+    "numpy>=2.4.6",
+    "scipy>=1.17.1",
+    "jieba>=0.42.1",
+    "networkx>=3.6.1",
 ]
 
 [project.optional-dependencies]
@@ -102,6 +106,7 @@ target-version = "py310"
 line-length = 120
 exclude = [
     "src/opensquad/gateway/nexuschat-pro/resources",
+    "src/skills/j-space",
 ]
 
 [tool.ruff.lint]

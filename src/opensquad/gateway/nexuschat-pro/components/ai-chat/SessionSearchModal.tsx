@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { SoftOverlay } from '../SoftOverlay';
 import { agentSessionAPI, type AgentSession } from '../../services/api';
+import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 type SearchMatch = {
   role: 'user' | 'assistant';
@@ -434,7 +435,7 @@ export const SessionSearchModal: React.FC<SessionSearchModalProps> = ({
     <SoftOverlay
       open={open}
       onBackdrop={onCancel}
-      panelClassName="w-[min(560px,94vw)] max-h-[80vh] flex flex-col rounded-2xl bg-bgLight border border-border shadow-2xl overflow-hidden"
+      panelClassName={`w-[min(560px,94vw)] max-h-[80vh] flex flex-col rounded-2xl ${POPOVER_SURFACE_CLASS} border border-border shadow-2xl overflow-hidden`}
       durationMs={150}
     >
       <div className="flex items-center gap-2 px-4 h-12 border-b border-border/60 shrink-0">
@@ -464,7 +465,7 @@ export const SessionSearchModal: React.FC<SessionSearchModalProps> = ({
 
       <div
         ref={listRef}
-        className="flex-1 min-h-0 overflow-y-auto os-depth-nest os-depth-nest--flush"
+        className="flex-1 min-h-0 overflow-y-auto"
         role="listbox"
       >
         {/* Always-on "新建对话" action so the user has a quick way out even

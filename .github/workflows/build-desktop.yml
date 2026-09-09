@@ -92,6 +92,9 @@ jobs:
       - name: Verify PyInstaller bundle is Python 3.11
         run: python scripts/check_build_python.py --bundle build/${{ matrix.artifact }}/run
 
+      - name: Check backend bundle for nested build pollution
+        run: python scripts/check_backend_bundle.py --bundle build/${{ matrix.artifact }}/run
+
       - name: Check macOS deployment target (backend)
         if: runner.os == 'macOS'
         shell: bash

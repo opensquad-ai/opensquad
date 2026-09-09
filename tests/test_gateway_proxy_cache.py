@@ -87,6 +87,43 @@ async def test_non_cacheable_endpoint_not_cached(monkeypatch):
     assert len(calls) == 2  # live session data must never be cached
 
 
+def test_shared_client_accepts_timeout_kwarg(monkeypatch):
+    """http_only proxies pass timeout= into _get_shared_client; a mismatch 500s the UI."""
+
+    class _FakeClient:
+        pass
+
+    monkeypatch.setattr(admin, "get_local_http_client", lambda: _FakeClient())
+    client = admin._get_shared_client(timeout=60.0)
+    assert isinstance(client, _FakeClient)
+
+
+async def test_http_only_proxy_get_reaches_launcher(monkeypatch):
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"entries": [{"path": "a.py", "name": "a.py", "type": "file"}]}
+
+    class FakeClient:
+        def __init__(self):
+            self.urls = []
+
+        async def get(self, url, params=None, timeout=5.0):
+            self.urls.append((url, params, timeout))
+            return FakeResp()
+
+    fake = FakeClient()
+    monkeypatch.setattr(admin, "get_local_http_client", lambda: fake)
+    monkeypatch.setattr(admin, "_launcher_url", lambda: "http://127.0.0.1:9600")
+    monkeypatch.setattr(admin.launcher_handler, "has_connections", lambda: True)
+
+    result = await admin._proxy_get("/api/agents/a1/fs/tree?max=100", http_only=True, timeout=60.0)
+    assert result["entries"][0]["path"] == "a.py"
+    assert fake.urls, "http_only must use HTTP even when a WS tunnel exists"
+    assert fake.urls[0][2] == 60.0
+
+
 async def test_ttl_expiry_revalidates(monkeypatch):
     calls = []
 

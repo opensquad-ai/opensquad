@@ -1128,7 +1128,7 @@ async def get_available_agents(
 ):
     """Get all users who have agent-like accounts and are NOT in this group.
     Returns user list suitable for adding as group members."""
-    # Get current member IDs
+    # Get current member IDs (ChatPro User.id values — often numeric, not agent_id)
     member_result = await db.execute(select(group_members.c.user_id).where(group_members.c.group_id == group_id))
     member_ids = {row[0] for row in member_result.all()}
 
@@ -1141,12 +1141,30 @@ async def get_available_agents(
         launcher_data = {"agents": []}
     launcher_agents = launcher_data.get("agents", [])
 
-    # Build result: only agents not in group
+    # Build result: only agents not in group (match by resolved IM user id / email)
     results = []
     for agent in launcher_agents:
         agent_id = str(agent.get("agent_id", ""))
-        if not agent_id or agent_id in member_ids:
+        if not agent_id:
             continue
+        cfg = agent.get("config") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        gc = cfg.get("group_chat") or {}
+        if not isinstance(gc, dict):
+            gc = {}
+        email = str(gc.get("email") or "").strip()
+
+        # Membership is keyed by ChatPro user.id, which often differs from agent_id
+        # (e.g. user.id=838168 vs agent_id=agent305-001). Resolve via email first.
+        already_member = agent_id in member_ids
+        if not already_member and email:
+            chat_user = await get_user_by_email(db, email)
+            if chat_user and chat_user.id in member_ids:
+                already_member = True
+        if already_member:
+            continue
+
         chat_profile = agent.get("chat_profile") or {}
         name = chat_profile.get("chat_user_name") or chat_profile.get("name") or agent.get("agent_name", "")
         avatar = chat_profile.get("chat_user_avatar") or chat_profile.get("avatar") or ""
@@ -1160,10 +1178,70 @@ async def get_available_agents(
                 "name": name,
                 "avatar": avatar,
                 "dir_name": agent.get("dir_name", ""),
+                "chat_email": email or None,
             }
         )
 
     return {"agents": results}
+
+
+async def _resolve_or_create_agent_chat_user(
+    db: AsyncSession,
+    *,
+    agent_id: str,
+    agent: dict[str, Any],
+) -> User:
+    """Map launcher agent -> ChatPro User for group membership.
+
+    Preference order:
+      1. User.id == agent_id (unified identity for newly created agents)
+      2. User.email == group_chat.email
+      3. Create user from group_chat email/password when password is available
+    """
+    user = await get_user_by_id(db, agent_id)
+    if user:
+        return user
+
+    cfg = agent.get("config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    gc = cfg.get("group_chat") or {}
+    if not isinstance(gc, dict):
+        gc = {}
+    email = str(gc.get("email") or "").strip()
+    password = str(gc.get("password") or "").strip()
+    display_name = str(agent.get("agent_name") or agent.get("dir_name") or agent_id)
+
+    if email:
+        user = await get_user_by_email(db, email)
+        if user:
+            return user
+
+    # Create IM account when credentials look usable (not the redacted placeholder).
+    if email and password and password != "********" and email.lower() != "ai@ai":
+        try:
+            user = await create_user(
+                db,
+                UserCreate(email=email, password=password, name=display_name),
+            )
+            _log.info("[add-agent] Created IM user %s <%s> for agent %s", user.id, email, agent_id)
+            return user
+        except ValueError as e:
+            # Race: another request created the same email
+            user = await get_user_by_email(db, email)
+            if user:
+                return user
+            raise HTTPException(400, detail=f"Could not create IM account for agent {agent_id}: {e}") from e
+
+    raise HTTPException(
+        404,
+        detail=(
+            f"Agent user {agent_id} not found. "
+            f"No ChatPro account for email={email or '(missing)'}. "
+            "Have the agent call im.register_account(email='<unique>@ai', password='...') first, "
+            "or set group_chat.email/password in its config.json."
+        ),
+    )
 
 
 @router.post("/groups/{group_id}/add-agent")
@@ -1190,31 +1268,45 @@ async def add_agent_to_group(
     if group.created_by != current_user.id:
         raise HTTPException(403, detail="Only group creator can add members")
 
-    # Verify user exists
-    user = await get_user_by_id(db, agent_id)
-    if not user:
-        raise HTTPException(404, detail=f"Agent user {agent_id} not found")
+    # Load agent metadata from launcher (config includes group_chat.email)
+    from app.ai_web.routes import _proxy_get, _proxy_put
+
+    agent_meta: dict[str, Any] = {}
+    try:
+        launcher_data = await _proxy_get("/api/agents")
+        for a in launcher_data.get("agents", []) or []:
+            if str(a.get("agent_id", "")) == str(agent_id) or str(a.get("dir_name", "")) == str(agent_id):
+                agent_meta = a if isinstance(a, dict) else {}
+                break
+    except Exception as e:
+        _log.warning("[add-agent] Failed to list agents for %s: %s", agent_id, e)
+
+    if not agent_meta:
+        agent_meta = {"agent_id": agent_id, "agent_name": agent_id, "config": {}}
+
+    user = await _resolve_or_create_agent_chat_user(db, agent_id=str(agent_id), agent=agent_meta)
+    chat_user_id = user.id
 
     # Check if already a member
     member_check = await db.execute(
-        select(group_members).where(and_(group_members.c.user_id == agent_id, group_members.c.group_id == group_id))
+        select(group_members).where(and_(group_members.c.user_id == chat_user_id, group_members.c.group_id == group_id))
     )
     if member_check.scalar_one_or_none():
         raise HTTPException(400, detail="Already a member")
 
-    # Add as member
-    await db.execute(group_members.insert().values(user_id=agent_id, group_id=group_id))
+    # Add as member (ChatPro user.id, not necessarily agent_id)
+    await db.execute(group_members.insert().values(user_id=chat_user_id, group_id=group_id))
 
     # Create settings
     settings_res = await db.execute(
         select(UserGroupSettings).where(
-            and_(UserGroupSettings.user_id == agent_id, UserGroupSettings.group_id == group_id)
+            and_(UserGroupSettings.user_id == chat_user_id, UserGroupSettings.group_id == group_id)
         )
     )
     settings = settings_res.scalar_one_or_none()
     if not settings:
         settings = UserGroupSettings(
-            user_id=agent_id,
+            user_id=chat_user_id,
             group_id=group_id,
             unread_count=0,
             has_unread_mention=False,
@@ -1228,10 +1320,10 @@ async def add_agent_to_group(
     await db.commit()
 
     # Update agent config: add group_id to group_chat.groups
+    # Prefer launcher dir_name for config path; fall back to agent_id.
+    config_key = str(agent_meta.get("dir_name") or agent_id)
     try:
-        from app.ai_web.routes import _proxy_get, _proxy_put
-
-        config_data = await _proxy_get(f"/api/agents/{agent_id}/config")
+        config_data = await _proxy_get(f"/api/agents/{config_key}/config")
         agent_config = config_data.get("config", config_data) if isinstance(config_data, dict) else {}
 
         # Ensure group_chat section exists
@@ -1244,14 +1336,19 @@ async def add_agent_to_group(
         if group_id not in agent_config["group_chat"]["groups"]:
             agent_config["group_chat"]["groups"].append(group_id)
             agent_config.setdefault("group_chat", {})["enabled"] = True
-            await _proxy_put(f"/api/agents/{agent_id}/config", {"config": agent_config})
+            await _proxy_put(f"/api/agents/{config_key}/config", {"config": agent_config})
     except Exception as e:
         _log.warning(f"[add-agent] Config update skipped for agent {agent_id}: {e}")
 
     # Notify via WebSocket
-    await notify_unread_update(agent_id, group_id, 0, False)
+    await notify_unread_update(chat_user_id, group_id, 0, False)
 
-    return {"message": "Agent added to group successfully"}
+    return {
+        "message": "Agent added to group successfully",
+        "agent_id": agent_id,
+        "chat_user_id": chat_user_id,
+        "chat_email": getattr(user, "email", None),
+    }
 
 
 # ========== Messages ==========

@@ -308,6 +308,7 @@
     "categoryOther": "Other",
     "saveFailedMsg": "Save failed: {{error}}",
     "uninstallFailedMsg": "Uninstall failed: {{error}}",
+    "uninstallNeedsRestart": "Uninstall did not take effect: Gateway/Launcher is still an old process that looks up the plugin JSON name as a folder. Fully quit OpenSquad and reopen it (a browser refresh is not enough), then try again.",
     "searchMobile": "Search",
     "filterAll": "All",
     "filterBuiltin": "Built-in",
@@ -318,6 +319,9 @@
     "saved": "Saved",
     "save": "Save",
     "builtinBadge": "Built-in",
+    "bundledBadge": "Bundled",
+    "bundledHint": "Shipped with OpenSquad. Uninstall hides it in this workspace without deleting install files.",
+    "cannotUninstallBundled": "System plugins cannot be uninstalled",
     "serviceOnlyTitle": "Service-only plugin, no toggle needed",
     "removeFromAgent": "Remove this plugin from Agent",
     "addToAgent": "Enable this plugin for Agent",
@@ -525,6 +529,8 @@
     "deleteFailed": "Delete failed",
     "deleteConfirmTitle": "Confirm Delete",
     "deleteConfirmDesc": "Are you sure you want to delete this skill? This action cannot be undone.",
+    "bundledBadge": "Bundled",
+    "cannotDeleteBundled": "Shipped with OpenSquad; uninstall hides it in this workspace",
     "injectLevel": "Injection Level",
     "fullTooltip": "full: full injection",
     "summaryTooltip": "summary: summary injection",
@@ -1427,7 +1433,8 @@
     "kindSleep": "Sleep",
     "kindWake": "Wake",
     "kindStateChange": "State Change",
-    "kindOverhead": "Overhead"
+    "kindOverhead": "Overhead",
+    "sessionUsage": "This session"
   },
   "toolCall": {
     "deliveryWarning": "File uploaded but not delivered to any online web client. Please confirm you have opened the agent's AI Chat page and kept the connection active, then try again."

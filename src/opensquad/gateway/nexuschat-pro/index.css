@@ -497,6 +497,20 @@
   transform: translate3d(0, 0, 0);
 }
 
+/* Composer / chat floating menus. Solid panel fill — never bg-bgLight.
+   Hex fallback stays if a triplet has not been applied yet. */
+.os-popover-surface {
+  background: #ffffff !important;
+  color: #1f2a24;
+  isolation: isolate;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.dark .os-popover-surface {
+  background: #18181b !important;
+  color: #e8ede8;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
 .os-soft-pop {
   opacity: 0;
   transform: translate3d(0, 3px, 0);
@@ -572,7 +586,7 @@
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  z-index: 2;
+  z-index: 40;
   transform: translate3d(0, 0, 0);
   transition: transform var(--duration-composer-dock) var(--ease-composer-dock);
   will-change: transform;
@@ -673,8 +687,27 @@
     0 4px 24px rgba(0, 0, 0, 0.35);
 }
 
+/* Stick-to-bottom chat: disable overflow anchoring so growing tool rows
+   cannot fight programmatic scrollTop (the main scrollbar "shake"). */
+.os-chat-scroll {
+  overflow-anchor: none;
+}
+
+/* Virtualization spacers must NOT use content-visibility — skipped layout
+   would replace an explicit several-thousand-px height with ~88px. */
+.timeline-virt-pad {
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
 /* Off-screen chat rows skip layout/paint (see TimelineRow.tsx). */
 .timeline-row {
   content-visibility: auto;
   contain-intrinsic-size: auto 88px;
+}
+
+/* Live / tail rows keep native height so stick-to-bottom does not jitter. */
+.timeline-row.timeline-row-live {
+  content-visibility: visible;
+  contain-intrinsic-size: unset;
 }

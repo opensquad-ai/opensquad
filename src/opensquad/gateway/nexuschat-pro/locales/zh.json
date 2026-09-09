@@ -308,6 +308,7 @@
     "categoryOther": "其他",
     "saveFailedMsg": "保存失败: {{error}}",
     "uninstallFailedMsg": "卸载失败: {{error}}",
+    "uninstallNeedsRestart": "卸载未生效：当前 Gateway / Launcher 还是旧进程，仍按插件 JSON 名查找目录。请完全退出 OpenSquad 后重新打开（不要只刷新浏览器），再试一次。",
     "searchMobile": "搜索",
     "filterAll": "全部",
     "filterBuiltin": "内置",
@@ -318,6 +319,9 @@
     "saved": "已保存",
     "save": "保存",
     "builtinBadge": "内置",
+    "bundledBadge": "随包",
+    "bundledHint": "随产品分发；卸载后从当前工作区隐藏，不会删除安装目录",
+    "cannotUninstallBundled": "系统插件无法卸载",
     "serviceOnlyTitle": "仅服务插件，无需启用",
     "removeFromAgent": "从该 Agent 移除此插件",
     "addToAgent": "为该 Agent 启用此插件",
@@ -525,6 +529,8 @@
     "deleteFailed": "删除失败",
     "deleteConfirmTitle": "确认删除",
     "deleteConfirmDesc": "确定要删除此技能吗？此操作不可撤销。",
+    "bundledBadge": "随包",
+    "cannotDeleteBundled": "随产品分发；卸载后从当前工作区隐藏",
     "injectLevel": "注入级别",
     "fullTooltip": "full：全量注入",
     "summaryTooltip": "summary：简介注入",
@@ -1427,7 +1433,8 @@
     "kindSleep": "睡眠",
     "kindWake": "唤醒",
     "kindStateChange": "状态变更",
-    "kindOverhead": "开销"
+    "kindOverhead": "其它",
+    "sessionUsage": "本轮用量"
   },
   "toolCall": {
     "deliveryWarning": "文件已上传但未投递到任何在线 Web 客户端。请确认已打开该 agent 的 AI Chat 页面并保持连接后重试。"

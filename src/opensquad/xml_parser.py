@@ -4,6 +4,36 @@ from collections.abc import Callable
 # Streaming tags: content dispatched character-by-character in real time; no nested tag recognition inside
 _STREAMING_TAGS = frozenset({"to_user", "to_user_reply", "to_user_end_task", "thought", "think"})
 
+# Commit-type tool tags. Unclosed buffers must NOT leak as chat text; Agent Web
+# peeks them so a tool row appears before </tool_call>.
+_TOOL_COMMIT_TAGS = frozenset(
+    {
+        "tool_call",
+        "tool_calls",
+        "function_calls",
+        "calls",
+        "invoke",
+        "arguments",
+        "func",
+        "parameter",
+    }
+)
+
+# DSML / invoke tool-call tags. Register as no-op handlers so the stream parser
+# swallows them instead of leaking the markup as plain chat text.
+DSML_TOOL_TAG_NAMES = ("tool_calls", "function_calls", "calls", "invoke", "parameter")
+
+_FW_BAR = "\uff5c"
+_RE_DSML_HEAD = re.compile(
+    r"<("
+    rf"(?:{_FW_BAR}{{1,2}}|\|{{1,2}})"
+    rf"(?:(?:DSML|mcp)(?:{_FW_BAR}{{1,2}}|\|{{1,2}}))?"
+    r"\s*"
+    r"(tool_calls|function_calls|calls|invoke|parameter)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 class StreamingTagParser:
     """
@@ -39,7 +69,11 @@ class StreamingTagParser:
         self._state: str = "OUT"
         self._head_buf: str = ""
         self._tag_name: str = ""
+        self._handler_key: str = ""
         self._buffer: str = ""  # complete content buffer for commit-type tags
+        self._tag_attrs: dict[str, str] = {}
+        self._unclosed_commit: dict | None = None
+        self._commit_progress_callback: Callable[[str, str, dict[str, str]], None] | None = None
 
         # Sliding window: used only for end-tag detection
         self._cycle_len: int = 0
@@ -55,10 +89,10 @@ class StreamingTagParser:
 
     def _update_cycle_len(self):
         if not self._handlers:
-            self._cycle_len = 20
+            self._cycle_len = 40
         else:
             end_tags = [f"</{k}>" for k in self._handlers]
-            self._cycle_len = max(map(len, end_tags)) + 5
+            self._cycle_len = max(map(len, end_tags)) + 20
         self._cycle = [""] * self._cycle_len
         self._cycle_head = 0
 
@@ -66,7 +100,9 @@ class StreamingTagParser:
         self._state = "OUT"
         self._head_buf = ""
         self._tag_name = ""
+        self._handler_key = ""
         self._buffer = ""
+        self._tag_attrs = {}
         self._in_protected_tag = False
         self._update_cycle_len()
 
@@ -75,6 +111,42 @@ class StreamingTagParser:
     def feed(self, data: str):
         for ch in data:
             self._feed(ch)
+        self._fire_commit_progress()
+
+    def set_commit_progress_callback(self, callback: Callable[[str, str, dict[str, str]], None] | None) -> None:
+        """Called once per feed() while a tool commit-tag is open (live UI preview)."""
+        self._commit_progress_callback = callback
+
+    def peek_commit_state(self) -> tuple[str, str, dict[str, str]] | None:
+        """Return (handler_key, buffer, attrs) when IN_CONTENT on a commit-type tag."""
+        if self._state != "IN_CONTENT" or self._is_streaming_tag():
+            return None
+        key = (self._handler_key or self._tag_name or "").split(":")[-1]
+        if not key:
+            return None
+        return key, self._buffer, dict(self._tag_attrs or {})
+
+    def take_unclosed_commit(self) -> dict | None:
+        data = self._unclosed_commit
+        self._unclosed_commit = None
+        return data
+
+    def _is_tool_commit_tag(self) -> bool:
+        key = (self._handler_key or self._tag_name or "").split(":")[-1].lower()
+        raw = (self._tag_name or "").split(":")[-1].lower()
+        return key in _TOOL_COMMIT_TAGS or raw in _TOOL_COMMIT_TAGS
+
+    def _fire_commit_progress(self) -> None:
+        cb = self._commit_progress_callback
+        if not cb or self._state != "IN_CONTENT" or self._is_streaming_tag():
+            return
+        if not self._is_tool_commit_tag():
+            return
+        key = (self._handler_key or self._tag_name or "").split(":")[-1]
+        try:
+            cb(key, self._buffer, dict(self._tag_attrs or {}))
+        except Exception:
+            pass
 
     def finish(self):
         """
@@ -87,16 +159,28 @@ class StreamingTagParser:
         - IN_TAG_HEAD: emit the incomplete tag head as plain text.
         """
         if self._state == "IN_CONTENT":
-            if self._tag_name in _STREAMING_TAGS:
+            if self._is_streaming_tag():
                 # Streaming tag truncated: emit remaining cycle buffer
                 remaining = self._cycle_drain()
-                if remaining:
-                    self._handlers[self._tag_name](remaining)
+                handler = self._lookup_handler()
+                if remaining and handler:
+                    handler(remaining)
             else:
-                # Commit-type tag false-positive/truncation: restore as plain text
-                recovery = f"<{self._tag_name}>" + self._buffer
-                self._emit_default(recovery)
-                self._buffer = ""
+                # Unclosed tool tags are parsed as live/final tool calls — leaking
+                # them as chat text is what made Agent Web show `websearch / query
+                # / 福州天气` as a plain bubble after refresh.
+                if self._is_tool_commit_tag():
+                    self._unclosed_commit = {
+                        "tag": (self._handler_key or self._tag_name or "").split(":")[-1],
+                        "raw": self._tag_name,
+                        "buffer": self._buffer,
+                        "attrs": dict(self._tag_attrs or {}),
+                    }
+                    self._buffer = ""
+                else:
+                    recovery = f"<{self._tag_name}>" + self._buffer
+                    self._emit_default(recovery)
+                    self._buffer = ""
 
         elif self._state == "IN_TAG_HEAD":
             self._emit_default(self._head_buf)
@@ -143,6 +227,51 @@ class StreamingTagParser:
                 chars.append(self._cycle[idx])
         return "".join(chars)
 
+    def _is_streaming_tag(self) -> bool:
+        return self._handler_key in _STREAMING_TAGS or self._tag_name in _STREAMING_TAGS
+
+    def _lookup_handler(self):
+        return self._handlers.get(self._handler_key) or self._handlers.get(self._tag_name)
+
+    def _begin_content_tag(self, raw_tag_name: str, handler_key: str, head_buf: str = "") -> None:
+        self._tag_name = raw_tag_name
+        self._handler_key = handler_key
+        self._state = "IN_CONTENT"
+        self._buffer = ""
+        self._tag_attrs = {}
+        for m in re.finditer(r'([a-zA-Z_][\w:-]*)\s*=\s*"([^"]*)"', head_buf or ""):
+            self._tag_attrs[m.group(1).lower()] = m.group(2)
+        end_tag = f"</{raw_tag_name}>"
+        needed = len(end_tag) + 8
+        if needed > self._cycle_len:
+            self._cycle_len = needed
+        self._cycle = [""] * self._cycle_len
+        self._cycle_head = 0
+
+    def _resolve_open_tag(self) -> tuple[str, str] | None:
+        """Return (raw_tag_name, handler_key) if this open tag has a registered handler."""
+        match = re.match(r"<([a-zA-Z0-9_]+(?::[a-zA-Z0-9_]+)?)", self._head_buf)
+        if match:
+            raw_tag_name = match.group(1)
+            tag_name = raw_tag_name.split(":")[-1] if ":" in raw_tag_name else raw_tag_name
+            if tag_name in self._handlers:
+                return raw_tag_name, tag_name
+            return None
+        dsml = _RE_DSML_HEAD.match(self._head_buf)
+        if not dsml:
+            return None
+        raw_tag_name = dsml.group(1)
+        tag_name = (dsml.group(2) or "").lower()
+        aliases = [tag_name]
+        if tag_name in ("calls", "function_calls"):
+            aliases.append("tool_calls")
+        elif tag_name == "tool_calls":
+            aliases.extend(["calls", "function_calls"])
+        for key in aliases:
+            if key in self._handlers:
+                return raw_tag_name, key
+        return None
+
     # -- Core state machine --
 
     def _feed(self, ch: str):
@@ -180,36 +309,24 @@ class StreamingTagParser:
             self._head_buf += ch
 
             if ch == ">":
-                # Support namespaced tags like <minimax:tool_call>
-                match = re.match(r"<([a-zA-Z0-9_]+(?::[a-zA-Z0-9_]+)?)", self._head_buf)
-                if match:
-                    raw_tag_name = match.group(1)
-                    # Map namespaced tag to base handler name (e.g. minimax:tool_call -> tool_call)
-                    tag_name = raw_tag_name.split(":")[-1] if ":" in raw_tag_name else raw_tag_name
-                    if tag_name in self._handlers:
-                        self._tag_name = raw_tag_name  # use raw name for correct end-tag matching
-                        if self._head_buf.strip().endswith("/>"):
-                            self._handlers[tag_name]("")
-                            self._state = "OUT"
-                        else:
-                            # BUGFIX: keep raw_tag_name (e.g. "minimax:tool_call")
-                            # so end-tag detection at line ~225 matches f"</{self._tag_name}>" correctly
-                            self._tag_name = raw_tag_name
-                            self._state = "IN_CONTENT"
-                            self._buffer = ""
-                            self._cycle = [""] * self._cycle_len
-                            self._cycle_head = 0
-                        self._head_buf = ""
-                    else:
-                        self._emit_default(self._head_buf)
-                        self._head_buf = ""
+                resolved = self._resolve_open_tag()
+                if resolved:
+                    raw_tag_name, handler_key = resolved
+                    if self._head_buf.strip().endswith("/>"):
+                        self._handlers[handler_key]("")
                         self._state = "OUT"
+                    else:
+                        self._begin_content_tag(raw_tag_name, handler_key, self._head_buf)
+                    self._head_buf = ""
                 else:
                     self._emit_default(self._head_buf)
                     self._head_buf = ""
                     self._state = "OUT"
 
-            elif len(self._head_buf) > 100 or ch == "\n":
+            elif ch == "\n" and len(self._head_buf) <= 240 and re.match(r"<[A-Za-z0-9_:\uFF5C|]", self._head_buf):
+                # Pretty-printed open tags: <tool_call\n name="websearch.search">
+                return
+            elif len(self._head_buf) > 240 or ch == "\n":
                 self._emit_default(self._head_buf)
                 self._head_buf = ""
                 self._state = "OUT"
@@ -223,18 +340,20 @@ class StreamingTagParser:
         #
         if self._state == "IN_CONTENT":
             end_tag = f"</{self._tag_name}>"
+            handler = self._lookup_handler()
 
-            if self._tag_name in _STREAMING_TAGS:
+            if self._is_streaming_tag():
                 # -- Streaming tag: dispatch overflow character-by-character --
                 overflow = self._cycle_push(ch)
-                if overflow:
-                    self._handlers[self._tag_name](overflow)
+                if overflow and handler:
+                    handler(overflow)
 
                 if self._cycle_tail(len(end_tag)) == end_tag:
                     remaining = self._cycle_content_before_end(end_tag)
-                    if remaining:
-                        self._handlers[self._tag_name](remaining)
+                    if remaining and handler:
+                        handler(remaining)
                     self._state = "OUT"
+                    self._handler_key = ""
                     self._in_protected_tag = False
 
             else:
@@ -244,9 +363,10 @@ class StreamingTagParser:
 
                 if self._cycle_tail(len(end_tag)) == end_tag:
                     content = self._buffer[: -len(end_tag)]
-                    if content:
-                        self._handlers[self._tag_name](content)
+                    if content and handler:
+                        handler(content)
                     self._buffer = ""
                     self._state = "OUT"
+                    self._handler_key = ""
 
             return

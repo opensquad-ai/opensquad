@@ -159,10 +159,11 @@ class ContextBuilder:
         # letting one pane's prompt snapshot suppress another pane's first emit.
         self._has_prompt_snapshot_by_sid: set[str] = set()
 
-    def _state_sid(self) -> str:
+    def _state_sid(self, chat_api=None) -> str:
         """Best-effort session id for per-session prompt cache state."""
+        api = chat_api if chat_api is not None else self.chat_api
         try:
-            provider = getattr(self.chat_api, "_sid_provider", None)
+            provider = getattr(api, "_sid_provider", None)
             if provider:
                 return str(provider() or "").strip()
         except Exception:
@@ -175,6 +176,8 @@ class ContextBuilder:
         current_input_source: str,
         current_turn: int,
         current_round: int,
+        *,
+        chat_api=None,
     ) -> tuple[str, str, dict[str, Any], bool]:
         """Build the system prompt and dynamic context for this turn.
 
@@ -184,8 +187,9 @@ class ContextBuilder:
             llm_params: Dict with "tools" and "tool_choice" for the LLM call
             is_changed: Whether the system prompt changed vs previous turn
         """
+        api = chat_api if chat_api is not None else self.chat_api
         # Start from template
-        base = self.chat_api.get_template()
+        base = api.get_template()
         dynamic_parts: dict[str, Any] = {}
 
         # Layer 1: Engine built-in injection (tool call strategy)
@@ -238,11 +242,11 @@ class ContextBuilder:
         context = {
             "query": last_user_input,
             "source": current_input_source,
-            "chat_api": self.chat_api,
+            "chat_api": api,
             "tool_registry": getattr(self, "_tool_registry", None),
             "task_manager": self.task_manager,
             "memory_manager": self.memory_manager,
-            "recent_messages": self.chat_api.req[-4:] if self.chat_api.req else [],
+            "recent_messages": api.req[-4:] if api.req else [],
             "current_state": current_state,
             "current_wake": current_wake,
         }
@@ -385,10 +389,10 @@ class ContextBuilder:
                 final += plan_reminder
 
         # Change detection
-        prev_prompt = self.chat_api.get_system_prompt()
+        prev_prompt = api.get_system_prompt()
         is_changed = final != prev_prompt
         if is_changed:
-            self.chat_api.update_system_prompt(final)
+            api.update_system_prompt(final)
 
         # Build dynamic prefix
         dynamic_prefix = build_context_prefix(dynamic_parts)

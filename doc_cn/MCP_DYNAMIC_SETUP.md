@@ -169,7 +169,26 @@ Agent 的工具列表是动态生成的，新 MCP 工具会自动以 `mcp__{serv
 }
 ```
 
-## 五、常用 MCP 服务器推荐
+## 五、Playwright 浏览器登录态持久化
+
+OpenSquad 在连接 Playwright MCP 时，会自动为工作区注入持久化浏览器配置目录（除非你在 `mcp_config.json` 里已显式配置 `--user-data-dir` 或 `--isolated`）：
+
+**`data/mcp_browser_profiles/playwright/`**
+
+该目录保存 Cookie、localStorage 等登录态。首次用 Playwright 打开站点并登录后，**同一工作区内所有 Agent 共享**这份登录态；重启 Agent 或重连 MCP 后一般无需再次登录。
+
+### 使用建议
+
+1. 用 Playwright MCP 打开目标站点（如 DeepSeek），完成一次登录。
+2. 之后在同一工作区继续用 `mcp__playwright__browser_navigate` 等工具即可复用会话。
+3. 若要清除登录态，删除 `data/mcp_browser_profiles/playwright/` 目录后重连 MCP。
+
+### 注意事项
+
+- **同一时刻只能有一个浏览器实例**占用该 profile；多个 Agent 并行调用 Playwright 可能冲突。需要并行时请为额外实例配置不同的 `--user-data-dir`，或使用 `--isolated`（不持久化）。
+- 若你手动在 `args` 中写了 `--user-data-dir=...`，系统不会覆盖你的配置。
+
+## 六、常用 MCP 服务器推荐
 
 | MCP 服务器 | 安装命令 | 功能 |
 |-----------|---------|------|
@@ -180,7 +199,7 @@ Agent 的工具列表是动态生成的，新 MCP 工具会自动以 `mcp__{serv
 | **puppeteer** | `@modelcontextprotocol/server-puppeteer` | 浏览器自动化 |
 | **sequential-thinking** | `@langgpt/sequential-thinking-mcp` | 思维链 |
 
-## 六、故障排查
+## 七、故障排查
 
 ### 服务器连接失败
 1. 检查命令是否正确安装：`npx -v` 或 `python --version`

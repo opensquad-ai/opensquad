@@ -207,6 +207,36 @@ const SYSTEM_TOOLS = [
   'websearch', 'reminder', 'vision', 'mcp_query', 'plugin_admin',
 ];
 
+function canUninstallPlugin(plugin: PluginInfo): boolean {
+  return !plugin.builtin;
+}
+
+/** plugin.json name may differ from the on-disk folder (whisper_transcribe → whisper). */
+const PLUGIN_DIR_ALIASES: Record<string, string> = {
+  whisper_transcribe: 'whisper',
+};
+
+function pluginUninstallId(plugin: PluginInfo): string {
+  return plugin.dir_name || PLUGIN_DIR_ALIASES[plugin.name] || plugin.name;
+}
+
+const PluginOriginBadge: React.FC<{ plugin: PluginInfo; compact?: boolean }> = ({ plugin, compact }) => {
+  const { t: tr } = useTranslation();
+  const isSystem = !!plugin.builtin && SYSTEM_TOOLS.includes(plugin.name);
+  if (!isSystem && !plugin.bundled) return null;
+  return (
+    <span
+      className={`inline-flex items-center gap-0.5 rounded font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0 ${
+        compact ? 'px-1 py-0 text-[9px]' : 'px-1.5 py-0 text-[9px]'
+      }`}
+      title={tr('pluginManager.bundledHint')}
+    >
+      <Shield size={compact ? 8 : 9} />
+      {isSystem ? tr('pluginManager.builtinBadge') : tr('pluginManager.bundledBadge')}
+    </span>
+  );
+};
+
 // ---- Main Component ----
 
 export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
@@ -417,13 +447,16 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
 
   // ---- Data loading ----
 
-  const fetchPlugins = useCallback(async () => {
+  const fetchPlugins = useCallback(async (): Promise<PluginInfo[]> => {
     try {
       setError(null);
       const data = await pluginAPI.getPlugins();
-      setPlugins(data.plugins || []);
+      const list = data.plugins || [];
+      setPlugins(list);
+      return list;
     } catch (e: any) {
       setError(e.message || 'Failed to load plugins');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -461,18 +494,35 @@ export const PluginManagerPage: React.FC<PluginManagerPageProps> = ({
 
   const confirmUninstall = useCallback(async () => {
     if (!uninstallTarget) return;
+    const target = uninstallTarget;
     setUninstalling(true);
     try {
-      await pluginAPI.uninstall(uninstallTarget.name);
+      try {
+        await pluginAPI.uninstall(pluginUninstallId(target));
+      } catch (e: any) {
+        const status = Number(e?.status);
+        const msg = String(e?.message || '');
+        const notFound = status === 404 || /not found/i.test(msg);
+        if (!notFound) throw e;
+      }
       setUninstallTarget(null);
       setLoading(true);
-      await fetchPlugins();
+      const list = await fetchPlugins();
+      const gone = !list.some(
+        (p) =>
+          p.name === target.name ||
+          (target.dir_name && p.dir_name === target.dir_name) ||
+          p.dir_name === pluginUninstallId(target)
+      );
+      if (!gone) {
+        alert(tr('pluginManager.uninstallNeedsRestart'));
+      }
     } catch (e: any) {
       alert(tr('pluginManager.uninstallFailedMsg', { error: e.message }));
     } finally {
       setUninstalling(false);
     }
-  }, [uninstallTarget, fetchPlugins]);
+  }, [uninstallTarget, fetchPlugins, tr]);
 
   // ---- Filter + search + sort ----
 
@@ -1013,7 +1063,7 @@ const PluginCard: React.FC<PluginCardProps> = ({
         </button>
       )}
 
-      {!plugin.builtin && (
+      {!canUninstallPlugin(plugin) ? null : (
         <button
           onClick={onUninstall}
           title={tr('pluginManager.uninstallTitle')}
@@ -1076,12 +1126,7 @@ const PluginCard: React.FC<PluginCardProps> = ({
               <h3 className="text-[13px] font-semibold text-textMain truncate leading-tight">
                 {plugin.display_name || plugin.name}
               </h3>
-              {plugin.builtin && SYSTEM_TOOLS.includes(plugin.name) && (
-                <span className="inline-flex items-center gap-0.5 px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0">
-                  <Shield size={8} />
-                  {tr('pluginManager.builtinBadge')}
-                </span>
-              )}
+              <PluginOriginBadge plugin={plugin} compact />
               <span className={`inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-medium border shrink-0 ${typeClass}`}>
                 {TYPE_LABELS[plugin.type] ? tr(TYPE_LABELS[plugin.type]) : plugin.type}
               </span>
@@ -1116,12 +1161,7 @@ const PluginCard: React.FC<PluginCardProps> = ({
               {plugin.display_name || plugin.name}
             </h3>
             <span className="text-xs text-textMuted shrink-0">v{plugin.version}</span>
-              {plugin.builtin && SYSTEM_TOOLS.includes(plugin.name) && (
-                <span className="inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/25 shrink-0">
-                  <Shield size={9} />
-                  {tr('pluginManager.builtinBadge')}
-                </span>
-              )}
+              <PluginOriginBadge plugin={plugin} />
           </div>
           {plugin.author && (
             <p className="text-xs text-textMuted">by {plugin.author}</p>

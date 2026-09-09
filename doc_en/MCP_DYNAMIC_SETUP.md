@@ -172,7 +172,26 @@ Even though the Agent manages MCP dynamically, the configuration is actually sto
 }
 ```
 
-## 5. Recommended MCP Servers
+## 5. Playwright persistent login
+
+When OpenSquad connects to Playwright MCP, it automatically injects a workspace-local browser profile directory (unless you already set `--user-data-dir` or `--isolated` in `mcp_config.json`):
+
+**`data/mcp_browser_profiles/playwright/`**
+
+This directory stores cookies, localStorage, and other session data. After you log in once via Playwright MCP, **all agents in the same workspace share** that session; you usually do not need to log in again after restarting the agent or reconnecting MCP.
+
+### Usage
+
+1. Open the target site (e.g. DeepSeek) with Playwright MCP and complete login once.
+2. Continue using `mcp__playwright__browser_navigate` and related tools in the same workspace.
+3. To clear login state, delete `data/mcp_browser_profiles/playwright/` and reconnect MCP.
+
+### Notes
+
+- **Only one browser instance** can use this profile at a time; parallel Playwright calls from multiple agents may conflict. For parallel runs, use a distinct `--user-data-dir` per instance, or `--isolated` (no persistence).
+- If you set `--user-data-dir=...` manually in `args`, OpenSquad will not override it.
+
+## 6. Recommended MCP Servers
 
 | MCP server | Install command | Function |
 |------------|-----------------|----------|
@@ -183,7 +202,7 @@ Even though the Agent manages MCP dynamically, the configuration is actually sto
 | **puppeteer** | `@modelcontextprotocol/server-puppeteer` | Browser automation |
 | **sequential-thinking** | `@langgpt/sequential-thinking-mcp` | Chain-of-thought |
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 ### Server failed to connect
 1. Verify the command is installed: `npx -v` or `python --version`

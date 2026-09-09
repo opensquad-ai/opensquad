@@ -775,7 +775,7 @@ class UserWebSocketHandler:
                     continue
 
                 if msg_type == "chat":
-                    content = message.get("content", "").strip()
+                    content = (message.get("content") or "").strip()
                     images = message.get("images", [])
                     attachments = message.get("attachments", [])
                     logger.info(

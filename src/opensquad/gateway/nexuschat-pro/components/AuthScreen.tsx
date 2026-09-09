@@ -103,7 +103,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
           {/* Name field for Sign Up */}
           {!isLogin && (
             <div className="space-y-1">
@@ -126,16 +126,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <label className="text-xs font-semibold text-textMuted ml-1">{t('auth.emailLabel')}</label>
             <div className="relative">
               <Mail className="absolute left-3 top-3 text-textMuted" size={18} />
-              <input
-                type="email"
-                data-testid="auth-email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 bg-bgLight border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all text-sm text-textMain placeholder:text-textMuted/50"
-                placeholder={t('auth.emailPlaceholder')}
-                required
-                autoFocus
-              />
+                <input
+                  type="text"
+                  inputMode="email"
+                  autoComplete="username"
+                  data-testid="auth-email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 bg-bgLight border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all text-sm text-textMain placeholder:text-textMuted/50"
+                  placeholder={t('auth.emailPlaceholder')}
+                  required
+                  autoFocus
+                />
             </div>
           </div>
 

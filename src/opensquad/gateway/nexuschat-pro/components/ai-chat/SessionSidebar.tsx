@@ -817,7 +817,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           onClick={() => onNewSession(workspaceRootPath || undefined)}
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
-          <MessageSquarePlus size={16} className="text-sky-500" />
+          <MessageSquarePlus size={16} className="text-textMuted/70" />
           {t('aiChat.newChat')}
         </button>
         <button
@@ -825,7 +825,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           onClick={() => onOpenSearch?.()}
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive"
         >
-          <Search size={16} className="text-emerald-500" />
+          <Search size={16} className="text-textMuted/70" />
           <span className="flex-1 text-left">{t('aiChat.search.title')}</span>
         </button>
         <button
@@ -834,7 +834,7 @@ const SessionSidebarInner: React.FC<SessionSidebarProps> = ({
           onClick={() => onOpenScheduledTasks?.()}
           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[14px] font-normal text-textMain os-interactive disabled:opacity-40"
         >
-          <Clock size={16} className="text-violet-500" />
+          <Clock size={16} className="text-textMuted/70" />
           {t('aiChat.scheduledTasks')}
         </button>
         <button

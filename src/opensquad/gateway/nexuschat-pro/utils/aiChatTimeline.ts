@@ -71,32 +71,203 @@ export function composeAssistantDisplayContent(content: string): string {
 /**
  * Remove DSML / native tool-call markup blocks that leak into the assistant
  * body. Supports both the fullwidth `｜｜` and halfwidth `||` DSML delimiters
- * plus plain `<tool_calls>` / `<invoke>` / `<parameter>` wrappers.
+ * plus plain `<tool_calls>` / `<tool_call>` / `<invoke>` / `<parameter>` wrappers.
+ * Unclosed blocks (stream truncated mid-call) are stripped through end-of-string.
  */
-function stripToolCallMarkup(content: string): string {
+export function stripToolCallMarkup(content: string): string {
   if (!content || typeof content !== 'string') return content;
-  // DSML delimiters: fullwidth `｜｜` (U+FF5C) or halfwidth `||`.
-  const pipe = '\uFF5C\uFF5C';
-  const dsml = `(?:${pipe}|\\|\\|)`;
+  // DSML delimiters: one or two fullwidth `｜` (U+FF5C) or halfwidth `|`,
+  // optional `DSML`/`mcp` token, optional space before the tag name.
+  // Also covers `<｜｜DSML｜｜ calls>` (short wrapper) and `<｜｜invoke>`.
+  const bar = '(?:\uFF5C{1,2}|\\|{1,2})';
+  const prefix = `(?:${bar}(?:(?:DSML|mcp)${bar})?\\s*)`;
+  const names = '(?:tool_calls|function_calls|calls|invoke|parameter)';
   let out = content;
-  // Whole DSML tool_calls wrapper + invoke/parameter bodies.
   out = out.replace(
-    new RegExp(`<${dsml}tool_calls>[\\s\\S]*?</${dsml}tool_calls>`, 'gi'),
+    new RegExp(`<${prefix}${names}\\b[^>]*>[\\s\\S]*?</${prefix}${names}\\s*>`, 'gi'),
     '',
   );
-  out = out.replace(
-    new RegExp(`<${dsml}invoke\\b[^>]*>[\\s\\S]*?</${dsml}invoke>`, 'gi'),
-    '',
-  );
-  out = out.replace(
-    new RegExp(`<${dsml}parameter\\b[^>]*>[\\s\\S]*?</${dsml}parameter>`, 'gi'),
-    '',
-  );
-  // Plain (halfwidth) tool-call wrappers.
+  // Plain (halfwidth) tool-call wrappers (plural and singular).
   out = out.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, '');
+  out = out.replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, '');
   out = out.replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, '');
   out = out.replace(/<(?:func|function|parameter)\b[^>]*>[\s\S]*?<\/(?:func|function|parameter)>/gi, '');
+  // Truncated / unclosed blocks — the stream hung before </tool_call>.
+  out = out.replace(new RegExp(`<${prefix}${names}\\b[^>]*>[\\s\\S]*$`, 'gi'), '');
+  out = out.replace(/<tool_calls?\b[^>]*>[\s\S]*$/gi, '');
+  out = out.replace(/<invoke\b[^>]*>[\s\S]*$/gi, '');
+  out = stripLeakedToolCallSkeleton(out);
   return out;
+}
+
+export type LiveMarkupToolCall = {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown> | string;
+  partial: boolean;
+};
+
+/**
+ * Pull a live tool name (+ optional args) out of in-flight assistant
+ * stream / thought text. Cheap models often emit XML Native-FC markup
+ * into `content` instead of `delta.tool_calls`; the timeline must still
+ * grow a tool row before `</tool_call>`.
+ */
+export function extractLiveToolCallFromMarkup(text: string): LiveMarkupToolCall | null {
+  if (!text || typeof text !== 'string') return null;
+  const src = text.length > 12000 ? text.slice(-12000) : text;
+
+  const attr = src.match(/<tool_call\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*)$/i);
+  if (attr) {
+    const name = attr[1].trim();
+    if (name) {
+      return {
+        id: `xml-live-${name}`,
+        name,
+        arguments: parseMarkupToolArgs(attr[2]),
+        partial: true,
+      };
+    }
+  }
+
+  const invoke = src.match(/<invoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*)$/i);
+  if (invoke) {
+    const name = invoke[1].trim();
+    if (name) {
+      return {
+        id: `xml-live-${name}`,
+        name,
+        arguments: parseMarkupToolArgs(invoke[2]),
+        partial: true,
+      };
+    }
+  }
+
+  const func = src.match(/<tool_call\b[^>]*>([\s\S]*?)<func\s*>([^<]{1,120})(?:<\/func\s*>|$)/i);
+  if (func) {
+    const name = func[2].trim();
+    if (name) {
+      const after = src.slice(src.toLowerCase().lastIndexOf('<func'));
+      return {
+        id: `xml-live-${name}`,
+        name,
+        arguments: parseMarkupToolArgs(after),
+        partial: true,
+      };
+    }
+  }
+
+  const funcOnly = src.match(/<func\s*>([^<]{1,120})(?:<\/func\s*>|$)/i);
+  if (funcOnly && /<tool_call\b/i.test(src)) {
+    const name = funcOnly[1].trim();
+    if (name) {
+      return {
+        id: `xml-live-${name}`,
+        name,
+        arguments: parseMarkupToolArgs(src),
+        partial: true,
+      };
+    }
+  }
+
+  // Qwen / Ling: <tool_call>websearch\n<arg_key>query</arg_key><arg_value>...
+  const qwen = src.match(/<tool_call\b[^>]*>([\s\S]*)$/i);
+  if (qwen) {
+    const inner = qwen[1];
+    const nameMatch = inner.match(/^\s*([A-Za-z][\w.]{0,80})(?:\s|<|$)/);
+    const name = nameMatch?.[1]?.trim() || '';
+    const deny = /^(func|function|arg_key|arg_value|parameter|arguments|invoke|thought|think)$/i;
+    const looksTool =
+      /^(websearch|bocha|filesystem|anysearch|browser|mcp__|system|im|vision)/i.test(name)
+      || name.includes('.')
+      || name.includes('__');
+    const hasArgs = /<arg_key\b|<query\b|<arguments\b|<parameter\b/i.test(inner);
+    if (name && !deny.test(name) && (looksTool || hasArgs)) {
+      return {
+        id: `xml-live-${name}`,
+        name,
+        arguments: parseMarkupToolArgs(inner),
+        partial: true,
+      };
+    }
+  }
+
+  const skeleton = extractLeakedToolCallSkeleton(src);
+  if (skeleton) return skeleton;
+  return null;
+}
+
+function parseMarkupToolArgs(inner: string): Record<string, unknown> | string {
+  if (!inner) return {};
+  const pairedKv: Record<string, unknown> = {};
+  const kvRe = /<arg_key\s*>([\s\S]*?)<\/arg_key\s*>\s*<arg_value\s*>([\s\S]*?)(?:<\/arg_value\s*>|$)/gi;
+  for (const m of inner.matchAll(kvRe)) {
+    const key = (m[1] || '').trim();
+    const val = (m[2] || '').trim().replace(/^["']|["']$/g, '');
+    if (key && val) pairedKv[key] = val;
+  }
+  if (Object.keys(pairedKv).length) return pairedKv;
+  const jsonTag = inner.match(/<arguments\s*>([\s\S]*?)(?:<\/arguments\s*>|$)/i);
+  if (jsonTag) {
+    const raw = jsonTag[1].trim();
+    if (raw.startsWith('{') && raw.endsWith('}')) {
+      try {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj;
+      } catch { /* incomplete JSON */ }
+    }
+    const q = raw.match(/"(query|q|url|path|command)"\s*:\s*"([^"]*)/);
+    if (q) return { [q[1]]: q[2] };
+  }
+  const args: Record<string, unknown> = {};
+  const paired = inner.matchAll(/<([a-zA-Z_][a-zA-Z0-9_]*)\s*>([\s\S]*?)<\/\1\s*>/gi);
+  for (const m of paired) {
+    const key = m[1];
+    if (/^(func|function|tool_call|invoke)$/i.test(key)) continue;
+    args[key] = String(m[2] ?? '').trim().replace(/^["']|["']$/g, '');
+  }
+  const unclosed = inner.match(/<([a-zA-Z_][a-zA-Z0-9_]*)\s*>([^<]*)$/);
+  if (unclosed && !/^(func|function|tool_call|invoke)$/i.test(unclosed[1])) {
+    const val = unclosed[2].trim().replace(/^["']|["']$/g, '');
+    if (val && !(unclosed[1] in args)) args[unclosed[1]] = val;
+  }
+  return args;
+}
+
+function extractLeakedToolCallSkeleton(text: string): LiveMarkupToolCall | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const lines = trimmed.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2 || lines.length > 12) return null;
+  const name = lines[0];
+  const nameKey = name.toLowerCase().replace(/\./g, '__');
+  const looksTool =
+    /^(websearch|bocha|filesystem|anysearch|browser|mcp__|websearch__|bocha__)/.test(nameKey)
+    || /__(search|fetch|read|write|query|run|browse)/.test(nameKey)
+    || nameKey === 'bocha_search';
+  const looksArg = /^(query|q|url|path|command|name|arguments?|input|text|search)$/i.test(lines[1]);
+  if (!looksTool || !looksArg) return null;
+  const args: Record<string, unknown> = {};
+  for (let i = 1; i + 1 < lines.length; i += 2) {
+    args[lines[i]] = lines[i + 1];
+  }
+  return { id: `xml-live-${name}`, name, arguments: args, partial: true };
+}
+
+/** Bare Native-FC leak: `websearch` / `query` / `福州天气` with the tags already gone. */
+function stripLeakedToolCallSkeleton(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+  const lines = trimmed.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2 || lines.length > 12) return text;
+  const name = lines[0].toLowerCase().replace(/\./g, '__');
+  const looksTool =
+    /^(websearch|bocha|filesystem|anysearch|browser|mcp__|websearch__|bocha__)/.test(name)
+    || /__(search|fetch|read|write|query|run|browse)/.test(name)
+    || name === 'bocha_search';
+  const looksArg = /^(query|q|url|path|command|name|arguments?|input|text|search)$/i.test(lines[1]);
+  if (looksTool && looksArg) return '';
+  return text;
 }
 
 /**
@@ -518,6 +689,144 @@ export type TimelineEntry =
       collapsed: boolean;
     }; _uid: string };
 
+/**
+ * Seal incomplete workflows that sit before a later chat message.
+ * Stops a stale "Working" fold from swallowing tools that belong below the reply.
+ */
+export function sealWorkflowsFollowedByMessages(timeline: TimelineEntry[]): TimelineEntry[] {
+  let lastMessageIdx = -1;
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    if (timeline[i].kind === 'message') {
+      lastMessageIdx = i;
+      break;
+    }
+  }
+  if (lastMessageIdx < 0) return timeline;
+  let changed = false;
+  const next = timeline.map((entry, i) => {
+    if (i >= lastMessageIdx || entry.kind !== 'workflow' || entry.data.completed) return entry;
+    changed = true;
+    return {
+      ...entry,
+      data: { ...entry.data, completed: true, status: null },
+    };
+  });
+  return changed ? next : timeline;
+}
+
+function appendNewIncompleteWorkflow(
+  prev: TimelineEntry[],
+  event: WorkflowEvent,
+  status: string | null,
+): TimelineEntry[] {
+  const sealed = sealWorkflowsFollowedByMessages(prev);
+  return [
+    ...sealed,
+    {
+      kind: 'workflow',
+      data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
+      _uid: genTimelineUID(),
+    },
+  ];
+}
+
+/**
+ * Complete the trailing incomplete workflow (if any) and append an assistant
+ * bubble so later tool_calls land *below* the visible reply.
+ */
+export function sealWorkflowAndAppendAssistantMessage(
+  prev: TimelineEntry[],
+  msg: ChatMessage,
+): TimelineEntry[] {
+  const text = typeof msg.content === 'string' ? msg.content.trim() : '';
+  if (!text) return prev;
+  const updated = [...prev];
+
+  for (let i = updated.length - 1; i >= 0; i--) {
+    const entry = updated[i];
+    if (entry.kind !== 'message') continue;
+    const existing = entry.data;
+    if (existing.role === 'user') break;
+    if (existing.role === 'assistant' && existing.content === msg.content) {
+      for (let j = updated.length - 1; j >= 0; j--) {
+        const wf = updated[j];
+        if (wf.kind === 'workflow' && !wf.data.completed) {
+          updated[j] = {
+            ...wf,
+            data: { ...wf.data, status: null, completed: true },
+          };
+          break;
+        }
+      }
+      return updated;
+    }
+    break;
+  }
+
+  for (let i = updated.length - 1; i >= 0; i--) {
+    const entry = updated[i];
+    if (entry.kind === 'workflow' && !entry.data.completed) {
+      updated[i] = {
+        ...entry,
+        data: { ...entry.data, status: null, completed: true },
+      };
+      break;
+    }
+  }
+
+  updated.push({ kind: 'message', data: msg, _uid: genTimelineUID() });
+  return updated;
+}
+
+/**
+ * When stream text was already committed before later tools, upgrade that
+ * bubble in place instead of appending the final reply *after* those tools.
+ * Returns null when the caller should append a new assistant message.
+ */
+export function absorbAssistantFinalText(
+  prev: TimelineEntry[],
+  text: string,
+  messageId?: string,
+): TimelineEntry[] | null {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return null;
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const entry = prev[i];
+    if (entry.kind !== 'message') continue;
+    const existing = entry.data;
+    if (existing.role === 'user') return null;
+    if (existing.role !== 'assistant') continue;
+    const patch = (content: string): TimelineEntry[] =>
+      prev.map((e, idx) =>
+        idx === i && e.kind === 'message'
+          ? {
+              ...e,
+              data: {
+                ...e.data,
+                content,
+                ...(messageId ? { message_id: messageId } : {}),
+              },
+            }
+          : e,
+      );
+    if (messageId && existing.message_id && existing.message_id === messageId) {
+      return existing.content === trimmed ? prev : patch(trimmed);
+    }
+    if (existing.content === trimmed) return prev;
+    // Require a meaningful prefix so a short prior reply ("OK") cannot absorb
+    // a later, unrelated to_user_final.
+    if (
+      existing.content.length >= 8 &&
+      (trimmed.startsWith(existing.content) || existing.content.startsWith(trimmed))
+    ) {
+      const longer = trimmed.length >= existing.content.length ? trimmed : existing.content;
+      return patch(longer);
+    }
+    return null;
+  }
+  return null;
+}
+
 /** Prefer the timeline with more workflow activity (not just top-level entry count). */
 export function timelineRichness(entries: TimelineEntry[]): number {
   let n = 0;
@@ -743,12 +1052,7 @@ export function upsertPartialToolCall(
   const updated = [...prev];
   let targetIdx = findLastIncompleteWorkflowIdx(updated);
   if (targetIdx < 0) {
-    updated.push({
-      kind: 'workflow',
-      data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
-      _uid: genTimelineUID(),
-    });
-    return updated;
+    return appendNewIncompleteWorkflow(updated, event, status);
   }
 
   const entry = updated[targetIdx] as Extract<TimelineEntry, { kind: 'workflow' }>;
@@ -1161,14 +1465,7 @@ export function appendWorkflowEvent(
     }
 
     // No matching tool_call found anywhere — create new workflow block as fallback
-    return [
-      ...updated,
-      {
-        kind: 'workflow',
-        data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
-        _uid: genTimelineUID(),
-      },
-    ];
+    return appendNewIncompleteWorkflow(updated, event, status);
   }
 
   if (targetIdx >= 0) {
@@ -1181,12 +1478,7 @@ export function appendWorkflowEvent(
       data: { events: newEvents, status, completed: false },
     } as TimelineEntry;
   } else {
-    // Create new workflow block
-    updated.push({
-      kind: 'workflow',
-      data: { events: [{ ...event, _uid: genTimelineUID() }], status, completed: false },
-      _uid: genTimelineUID(),
-    });
+    return appendNewIncompleteWorkflow(updated, event, status);
   }
 
   return updated;
@@ -1201,6 +1493,34 @@ export function appendWorkflowEvents(
     next = appendWorkflowEvent(next, item.event, item.status);
   }
   return next;
+}
+
+/**
+ * Live WS batch: parent tool_call while the stream footer still has text.
+ *
+ * Models that do not emit native `thought` (reasoning in `content`) dump that
+ * CoT into the footer. Committing it as an assistant bubble seals the activity
+ * fold and hides the tool. Fold the leftover stream into the same thought
+ * step, then append the tool so it stays in the live tool stream.
+ */
+export function appendLiveWorkflowBatch(
+  prev: TimelineEntry[],
+  items: Array<{ event: WorkflowEvent; status: string | null }>,
+  opts?: { commitAssistantText?: string },
+): TimelineEntry[] {
+  let next = prev;
+  const text = (opts?.commitAssistantText || '').trim();
+  const hasParentTool = items.some(
+    (it) => it.event.type === 'tool_call' && !it.event.subAgent,
+  );
+  if (hasParentTool && text) {
+    next = appendWorkflowEvent(
+      next,
+      { type: 'thought', content: text, timestamp: Date.now() },
+      'Thinking...',
+    );
+  }
+  return appendWorkflowEvents(next, items);
 }
 
 export function toWebMediaUrl(input: any): string {

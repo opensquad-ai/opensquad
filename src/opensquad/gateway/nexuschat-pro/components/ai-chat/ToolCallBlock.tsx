@@ -201,13 +201,6 @@ export const ToolCallBlock: React.FC<ToolCallBlockProps> = ({
     });
   }, [toolName, parsedArgs, diffOld, diffNew, diffStartLine]);
 
-  // Auto-expand while a file write/edit is still streaming/running.
-  React.useEffect(() => {
-    if (status === 'running' && fileEditInfo && (fileEditInfo.kind === 'write' || fileEditInfo.kind === 'edit')) {
-      setIsOpen(true);
-    }
-  }, [status, fileEditInfo]);
-
   // ---- Derived strings (needed before early return) ----
   const argsStr = args
     ? typeof args === 'string' ? args : JSON.stringify(args, null, 2)

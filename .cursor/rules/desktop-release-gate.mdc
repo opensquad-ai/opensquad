@@ -1,6 +1,6 @@
 ---
 description: Desktop app fixes must pass a local packaged build smoke test before pushing release tags or CI desktop builds.
-globs: src/opensquad/gateway/nexuschat-pro/**,src/opensquad/gateway/backend/**,scripts/build_backend.*
+globs: src/opensquad/gateway/nexuschat-pro/**,src/opensquad/gateway/backend/**,scripts/build_backend.*,scripts/build_desktop.*,scripts/check_backend_bundle.py
 alwaysApply: false
 ---
 
@@ -15,11 +15,18 @@ backend, tray/icons, startup, auto-update):
 2. **Local backend build + frozen smokes** (Windows; ~5 min + ~30 s):
    ```powershell
    scripts\build_backend.bat
+   uv run python scripts\check_backend_bundle.py
    uv run python scripts\smoke_frozen_all.py
    ```
-   This catches import-time writes and workspace path bugs **without** waiting for Electron/Setup.
-3. **Full packaged build** when changing Electron/UI/installer (optional for backend-only fixes):
+   This catches import-time writes, nested `opensquad/build` pollution, and
+   workspace path bugs **without** waiting for Electron/Setup.
+3. **Full packaged build** when changing Electron/UI/installer (preferred one-shot):
    ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\build_desktop.ps1
+   ```
+   Or backend-only then Electron:
+   ```powershell
+   scripts\build_backend.bat
    cd src\opensquad\gateway\nexuschat-pro
    npm ci
    npm run electron:win
@@ -38,26 +45,24 @@ verification step for desktop startup/UI bugs.
 From repo root:
 
 ```powershell
-pip install -e .
-pip install pyinstaller pillow playwright
-playwright install chromium
-
-scripts\build_backend.bat
-
-cd src\opensquad\gateway\nexuschat-pro
-npm ci
-npm run electron:win
+uv sync --python 3.11
+powershell -ExecutionPolicy Bypass -File scripts\build_desktop.ps1
 ```
 
 Installers land in `build/release/` (e.g. `OpenSquad-*-win-x64-Setup.exe` or
 `*-Portable.exe`). Run one and confirm the above smoke checks.
 
+**Never** place Electron/`release*` trees under `src/opensquad/build/` — PyInstaller
+`collect_data_files("opensquad")` used to nest them into `run.exe` (~400MB+).
+Official output is always repo-root `build/release/`.
+
 ## Faster iteration (code-only, not a release gate)
 
 - `npm run build && node scripts/compile-electron.mjs` — compile frontend + main process
 - `npm run electron:dev:fast` — needs pre-built backend in `resources/` or `build/backend-win/`
+- Dev stack hygiene: `scripts\dev_stack.ps1` (dedupe 9555/9600, verify editable `src/opensquad`)
 
-Use full `electron:win` before any release/tag push.
+Use full `scripts\build_desktop.ps1` (or `electron:win` after `build_backend.bat`) before any release/tag push.
 
 ## CI after local pass
 

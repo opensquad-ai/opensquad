@@ -20,7 +20,7 @@ def _make_runner():
     runner._agent_id = "test-agent"
     runner._turn_sid = "sess-1"
     runner._resolve_token_stats_sid = lambda: "sess-1"
-    runner._chat_api_for_token_stats = lambda sid: MagicMock(
+    api = MagicMock(
         req=[],
         total_input_tokens=0,
         total_output_tokens=0,
@@ -28,8 +28,17 @@ def _make_runner():
         total_cache_read_tokens=0,
         token_max=8000,
         history_dir=None,
-        _count_tokens=lambda req, tools: 10,
         encoding=None,
+    )
+    api._count_tokens = lambda req, tools: 10
+    runner._chat_api = api
+    runner._chat_api_for_token_stats = lambda sid: api
+    runner._token_stats_usage_stamp = lambda chat_api: (
+        id(chat_api),
+        int(getattr(chat_api, "total_requests", 0) or 0),
+        int(getattr(chat_api, "total_input_tokens", 0) or 0),
+        int(getattr(chat_api, "total_output_tokens", 0) or 0),
+        len(getattr(chat_api, "req", None) or []),
     )
     runner._tools_for_token_stats = lambda: []
     runner._req_for_token_stats = lambda chat_api, sid: []

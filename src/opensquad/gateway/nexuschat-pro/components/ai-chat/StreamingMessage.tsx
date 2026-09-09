@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AI_MARKDOWN_CLASS, renderFencedMarkdown } from '../../utils/fencedMarkdown';
 import { useMermaidHydration } from '../../hooks/useMermaidHydration';
+import { FollowScrollBox } from './FollowScrollBox';
 
 interface StreamingMessageProps {
   content: string;
@@ -80,21 +81,36 @@ export const StreamingMessage: React.FC<StreamingMessageProps> = ({
 
   if (!visibleContent) return null;
 
+  const body = (
+    <div className="text-[15px] leading-7 text-textMain w-full min-w-0">
+      <div
+        ref={mermaidRef}
+        className={AI_MARKDOWN_CLASS}
+        dangerouslySetInnerHTML={{ __html: renderedHtml }}
+      />
+      {!isComplete && (
+        <span className="inline-block w-1.5 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
+      )}
+    </div>
+  );
+
   return (
     <div className="mb-6 w-full">
       <div className="text-[11px] font-medium text-textMuted/70 mb-2">
         {senderName || 'Agent'}
       </div>
-      <div className="text-[15px] leading-7 text-textMain w-full min-w-0">
-        <div
-          ref={mermaidRef}
-          className={AI_MARKDOWN_CLASS}
-          dangerouslySetInnerHTML={{ __html: renderedHtml }}
-        />
-        {!isComplete && (
-          <span className="inline-block w-1.5 h-4 bg-primary/60 animate-pulse ml-0.5 align-middle" />
-        )}
-      </div>
+      {/* Cap in-progress stream height so live tool rows above the footer stay on screen. */}
+      {isComplete ? (
+        body
+      ) : (
+        <FollowScrollBox
+          contentKey={visibleContent.length}
+          follow
+          className="max-h-[min(40vh,280px)] overflow-y-auto"
+        >
+          {body}
+        </FollowScrollBox>
+      )}
     </div>
   );
 };

@@ -305,6 +305,31 @@ class TestNativeFCToolCallParsing:
         assert name == "websearch.search"
         assert args == {"query": "test"}
 
+    def test_emits_delta_for_websearch_when_name_first_seen(self):
+        """Non-file tools must still emit a tool_call_delta header so Agent Web
+        can render the row before finish_reason (otherwise the UI hangs on thoughts)."""
+        mock_registry = Mock()
+        strategy = NativeToolCallStrategy(mock_registry)
+        seen: list[dict] = []
+        strategy.set_delta_callback(lambda p: seen.append(dict(p)))
+
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta = MagicMock()
+        tc = MagicMock()
+        tc.index = 0
+        tc.id = "call_ws"
+        tc.function = MagicMock()
+        tc.function.name = "websearch.search"
+        tc.function.arguments = ""
+        chunk.choices[0].delta.tool_calls = [tc]
+        chunk.choices[0].finish_reason = None
+
+        assert strategy.parse_response(chunk) is None
+        assert seen, "websearch should emit a live tool_call_delta when the name arrives"
+        assert seen[0]["name"] == "websearch.search"
+        assert seen[0]["partial"] is True
+
     def test_preserve_skills_and_mcp_sections(self):
         """Test that Skills and MCP sections are preserved in Native FC mode"""
         mock_registry = Mock()

@@ -335,6 +335,8 @@ class AgentRunner:
 
         # Streaming metadata (tracks tag that produced the streamed user text)
         self._streamed_user_tag = None
+        # Per-turn repetition rewind counter (serial + parallel turn loops reset each turn)
+        self._repetition_rewind_count = 0
 
         # Vision config: {"is_img_mode": bool}
         # is_img_mode=true: main model supports images natively (controlled by config.json model.is_image), passed directly
@@ -418,8 +420,9 @@ class AgentRunner:
         # Token-stats TTL cache: full-history tiktoken re-encoding costs
         # 200-800ms on long sessions and runs on the event loop; the frontend
         # polls every 12s and turn internals emit frequently, so recomputes
-        # collapse to at most one per TTL per session.
-        self._token_stats_cache: dict[str, tuple[float, dict]] = {}
+        # collapse to at most one per TTL per session. Value is
+        # (cached_at, usage_stamp, payload) so a new LLM turn busts the cache.
+        self._token_stats_cache: dict[str, tuple[float, tuple, dict]] = {}
         self._hist_output_tokens: int = 0
         self._hist_requests: int = 0
         self._hist_cache_read_tokens: int = 0
@@ -1517,8 +1520,6 @@ class AgentRunner:
                 else {sid}
             )
 
-            self._context_builder.chat_api = self.chat_api
-
             current_input = content
             max_turns = 200
             try:
@@ -1553,6 +1554,9 @@ class AgentRunner:
                     {"turn": turn + 1, "started_ms": int(self._workflow_started_ms)},
                 )
 
+                # Per-turn repetition rewind counter — only allow ONE rewind per turn.
+                self._repetition_rewind_count = 0
+
                 await self._setup_prompt()
 
                 # Dynamic context (RUNTIME_STATE / MCP state / recalled memory)
@@ -1565,8 +1569,48 @@ class AgentRunner:
                 if turn == 0 and self._dynamic_context_prefix:
                     current_input = self._dynamic_context_prefix + current_input
 
-                _native_images = self._current_images if turn == 0 else None
-                _b64_images = self._tool_result_images or None
+                # Vision: pass images every turn (not only turn 0).
+                # read_image / vision_tool inject into _current_images mid-loop;
+                # MCP screenshots land in _tool_result_images. Old turn==0 gate
+                # dropped both after the first tool round → "paths registered
+                # but model never sees the image".
+                _native_images = None
+                _b64_images = None
+                if self._current_images:
+                    _images = list(self._current_images)
+                    self._current_images = []
+                    if self._is_img_mode:
+                        _native_images = _images
+                        logger.info(
+                            "[Runner] [VISION] parallel native images turn=%s count=%d paths=%s",
+                            turn,
+                            len(_images),
+                            _images,
+                        )
+                    else:
+                        import os as _os
+
+                        _basenames = [_os.path.basename(p) for p in _images]
+                        current_input = (current_input or "") + (
+                            f"\n\n[System notice] {len(_images)} image(s) were registered "
+                            f"({', '.join(_basenames)}), but the current model does not support "
+                            f"image input (model.is_image=false). You cannot see the pixels."
+                        )
+                        logger.warning(
+                            "[Runner] [VISION] parallel: is_image=false, skipped %d image(s)",
+                            len(_images),
+                        )
+                if self._tool_result_images:
+                    if self._is_img_mode:
+                        _b64_images = list(self._tool_result_images)
+                        logger.info(
+                            "[Runner] [VISION] parallel MCP images turn=%s count=%d",
+                            turn,
+                            len(_b64_images),
+                        )
+                    else:
+                        logger.warning("[Runner] [VISION] parallel: MCP images skipped (is_image=false)")
+                    self._tool_result_images = []
                 _is_first_turn = turn == 0
                 self._setup_event_dispatch() if hasattr(self, "_setup_event_dispatch") else None
 
@@ -2149,8 +2193,6 @@ class AgentRunner:
                         if not (forced_sid and forced_sid != "unknown"):
                             sm = _get_session_manager()
                             forced_sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                        if forced_sid and forced_sid != "unknown":
-                            self._turn_sid = forced_sid
                     except Exception:
                         pass
                     await self._broadcast_token_stats(forced_sid or None)
@@ -2843,6 +2885,7 @@ class AgentRunner:
                                 "images": _sup_imgs,
                                 "attachments": _sup_atts,
                             },
+                            session_id=self._turn_sid,
                         )
 
                 # Check message pipeline
@@ -2925,7 +2968,7 @@ class AgentRunner:
                 if _is_first_turn:
                     from opensquad.event_pipeline import event_pipeline
 
-                    drained = event_pipeline.drain_formatted_sync()
+                    drained = event_pipeline.drain_formatted_sync(session_id=self._turn_sid)
                     if drained:
                         logger.info(
                             f"[Runner] Pre-chat event_pipeline drain: {len(drained)} chars (prevents role=user + role=tool duplication)"
@@ -3595,8 +3638,11 @@ class AgentRunner:
                         # the tool execution path drains them.
                         from opensquad.event_pipeline import event_pipeline
 
-                        if event_pipeline.size > 0:
-                            logger.debug(f"[Runner] Pipeline events pending during wait: {event_pipeline.size}")
+                        if event_pipeline.size_for(self._turn_sid) > 0:
+                            logger.debug(
+                                f"[Runner] Pipeline events pending during wait sid={self._turn_sid}: "
+                                f"{event_pipeline.size_for(self._turn_sid)}"
+                            )
                             # New message arrived via event_pipeline from message_queue
                             # (group/DM messages), not through input_hub queue.
                             # Break the wait loop and process it.
@@ -3606,38 +3652,40 @@ class AgentRunner:
                             await self._setup_prompt()
 
                             # Drain event_pipeline and send as role=tool
-                            _raw_events = event_pipeline.drain_sync()
+                            _raw_events = event_pipeline.drain_sync(session_id=self._turn_sid)
                             if _raw_events:
                                 # CRITICAL: Persist user-originated events to session_manager
                                 # so they survive a page refresh. Previously this was missing —
                                 # events existed only in chat_api.req (LLM context) and vanished on reload.
+                                _turn_sid = self._turn_sid
                                 for evt in _raw_events:
                                     if (
                                         evt.source in ("web", "gateway", "group", "dm")
                                         and evt.content
                                         and evt.content.strip()
                                     ):
-                                        _get_session_manager().add_message("user", evt.content)
+                                        _get_session_manager().add_message("user", evt.content, sid=_turn_sid or None)
                                         await self._emit("user_msg", evt.content)
                                         logger.info(
                                             f"[Runner] Persisted event_pipeline event as user message (source={evt.source}): {evt.content[:80]}"
                                         )
 
-                                    # Format for LLM
-                                    lines = ["", "--- External Events (arrived during processing) ---"]
-                                    for evt in _raw_events:
-                                        lines.append(evt.format_for_llm())
-                                    lines.append("--- End External Events ---")
-                                    _pipeline_events = "\n".join(lines)
-                                    if hasattr(self.chat_api, "add_pipeline_events"):
-                                        self.chat_api.add_pipeline_events(_pipeline_events)
-                                    else:
-                                        logger.warning(
-                                            f"[Runner] chat_api has no add_pipeline_events; pipeline events ({len(_pipeline_events)} chars) dropped"
-                                        )
-                                    logger.info(
-                                        f"[Runner] Woke up from wait via event_pipeline, drained {len(_raw_events)} events ({len(_pipeline_events)} chars)"
+                                # Format for LLM
+                                lines = ["", "--- External Events (arrived during processing) ---"]
+                                for evt in _raw_events:
+                                    lines.append(evt.format_for_llm())
+                                lines.append("--- End External Events ---")
+                                _pipeline_events = "\n".join(lines)
+                                if hasattr(self.chat_api, "add_pipeline_events"):
+                                    self.chat_api.add_pipeline_events(_pipeline_events)
+                                else:
+                                    logger.warning(
+                                        f"[Runner] chat_api has no add_pipeline_events; pipeline events ({len(_pipeline_events)} chars) dropped"
                                     )
+                                logger.info(
+                                    f"[Runner] Woke up from wait via event_pipeline sid={_turn_sid}, "
+                                    f"drained {len(_raw_events)} events ({len(_pipeline_events)} chars)"
+                                )
 
                             # Reset counters for next LLM call
                             self._inner_loop_count = 1
@@ -3685,6 +3733,7 @@ class AgentRunner:
                                         "group_name": msg.source_name if msg.type == "group" else "",
                                         "sender_name": msg.sender_name,
                                     },
+                                    session_id=self._turn_sid,
                                 )
                             logger.debug(
                                 f"[Runner] Message queue pushed to pipeline: {len(pending_msgs)} messages (flow through role=tool)"
@@ -3830,6 +3879,11 @@ class AgentRunner:
         # 0a. Filter native tool call tokens (<|...|> format)
         result = self._filter_native_tokens(result)
 
+        # 0a2. Strip DSML / invoke tool-call blocks (including inner JSON args)
+        from opensquad.parser import strip_dsml_tool_markup
+
+        result = strip_dsml_tool_markup(result)
+
         # 0. Special handling: remove possibly missing-'<' tool_call markers
         result = _RE_BARE_TOOL_CALL.sub("", result)
 
@@ -3860,6 +3914,10 @@ class AgentRunner:
 
         # Find the position of the first tool_call tag
         tool_match = _RE_TOOL_CALL_OPEN.search(text)
+        if not tool_match:
+            from opensquad.parser import _RE_ANY_TOOL_CALL_START
+
+            tool_match = _RE_ANY_TOOL_CALL_START.search(text)
         if not tool_match:
             return None
 
@@ -3917,6 +3975,8 @@ class AgentRunner:
         1. JSON format leak: starts with { and ends with }, first key is an ASCII identifier
         2. XML parameter tag leak: tool parameter tags appear without an outer <tool_call>
         """
+        if not isinstance(text, str) or not text:
+            return False
         s = text.strip()
         if not s:
             return False
@@ -4022,7 +4082,8 @@ class AgentRunner:
         last_asst = None
         for msg in reversed(history):
             if msg.get("role") == "assistant":
-                last_asst = msg.get("content", "").strip()
+                # Native FC / tool-only turns persist content=None; never call .strip() on it.
+                last_asst = (msg.get("content") or "").strip()
                 break
 
         if last_asst and current_clean == last_asst:
@@ -4181,6 +4242,7 @@ class AgentRunner:
             current_input_source=self._current_input_source,
             current_turn=self._current_turn,
             current_round=self._current_round,
+            chat_api=self.chat_api,
         )
 
         # Store tools parameter for later use in chat() call
@@ -4264,6 +4326,8 @@ class AgentRunner:
         # Strict separation of streaming vs non-streaming tags.
         # Streaming tags: emitted as they are parsed.
         # Non-streaming tags: empty handler intercepts them to prevent them from flowing to to_user_stream as plain text.
+        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES
+
         self.chat_api.stream_parser._handlers.update(
             {
                 "thought": lambda x: emit_with_sid("thought", x),
@@ -4282,8 +4346,14 @@ class AgentRunner:
                 "sleep": lambda x: None,
                 "to_system": lambda x: None,
                 "option": lambda x: None,
+                **{name: (lambda x: None) for name in DSML_TOOL_TAG_NAMES},
             }
         )
+        if hasattr(self.chat_api.stream_parser, "_update_cycle_len"):
+            self.chat_api.stream_parser._update_cycle_len()
+        from opensquad.xml_tool_preview import attach_xml_tool_preview
+
+        attach_xml_tool_preview(self.chat_api.stream_parser, emit_with_sid)
 
     def _restore_cumulative_stats(self):
         """Restore historical cumulative stats from token_stats.json into _hist_* fields at startup.
@@ -4433,13 +4503,35 @@ class AgentRunner:
                     return api
         return self.chat_api
 
+    def _chat_api_owns_session(self, chat_api, sid: str) -> bool:
+        """True when *chat_api* is the live context for *sid*.
+
+        Root ``self.chat_api`` only owns the focused/current working session.
+        History tabs and other panes must not inherit that live ``req``.
+        """
+        sid = (sid or "").strip()
+        if not sid or chat_api is None:
+            return False
+        apis = getattr(self, "_session_chat_apis", None)
+        if isinstance(apis, dict) and apis.get(sid) is chat_api:
+            return True
+        if chat_api is not getattr(self, "chat_api", None):
+            return False
+        try:
+            sm = _get_session_manager()
+            current = (sm.get_current_session_id() or "").strip()
+            focused = (sm.get_focused_session_id() or "").strip()
+            return sid in (current, focused)
+        except Exception:
+            return False
+
     def _req_for_token_stats(self, chat_api, sid: str = ""):
         """Messages used for context % / breakdown.
 
-        Prefer the live ChatAPI.req whenever it has content — it includes
-        native tool_calls / role=tool IO. Session disk ``messages`` often omit
-        those (tool IO lives in ``events``); enrich from events when needed.
-        Cold panes with an empty live req fall back to disk + events.
+        Prefer the live ChatAPI.req only when that API actually belongs to
+        *sid*. Using root ``req`` for a history / other-pane sid made every
+        tab show the current working session's context %. Cold panes rebuild
+        from disk messages + tool events.
         """
         from opensquad.token_breakdown import (
             enrich_req_with_session_tool_events,
@@ -4448,6 +4540,7 @@ class AgentRunner:
 
         sid = (sid or "").strip()
         live = list(getattr(chat_api, "req", None) or [])
+        owns = (not sid) or self._chat_api_owns_session(chat_api, sid)
 
         def _events_for_sid() -> list:
             if not sid:
@@ -4459,20 +4552,20 @@ class AgentRunner:
             except Exception:
                 return []
 
-        if live:
+        if live and owns:
             if sid and not req_has_tool_io(live):
                 return enrich_req_with_session_tool_events(live, _events_for_sid())
             return live
         if not sid:
             return live
 
-        # Cold pane / empty live: rebuild from disk messages + tool events.
+        # Other session (or empty live on the owning API): rebuild from disk.
         try:
             sm = _get_session_manager()
             data = sm.ensure_session_loaded(sid) or {}
             msgs = list(data.get("messages") or [])
             if not msgs and not data.get("events"):
-                return live
+                return live if owns else []
             req: list[dict] = []
             for m in msgs:
                 if not isinstance(m, dict):
@@ -4491,10 +4584,25 @@ class AgentRunner:
                 if role == "assistant" and m.get("reasoning_content"):
                     entry["reasoning_content"] = m.get("reasoning_content")
                 req.append(entry)
-            return enrich_req_with_session_tool_events(req, data.get("events") or []) or live
+            rebuilt = enrich_req_with_session_tool_events(req, data.get("events") or [])
+            if rebuilt:
+                return rebuilt
+            return live if owns else []
         except Exception:
             logger.debug("[Runner] _req_for_token_stats disk load failed", exc_info=True)
-            return live
+            return live if owns else []
+
+    def _token_stats_usage_stamp(self, chat_api) -> tuple:
+        """Fingerprint of billed usage + live req so TTL cache cannot hide a new turn."""
+        if chat_api is None:
+            return (0, 0, 0, 0, 0)
+        return (
+            id(chat_api),
+            int(getattr(chat_api, "total_requests", 0) or 0),
+            int(getattr(chat_api, "total_input_tokens", 0) or 0),
+            int(getattr(chat_api, "total_output_tokens", 0) or 0),
+            len(getattr(chat_api, "req", None) or []),
+        )
 
     async def _broadcast_token_stats(self, sid: str | None = None):
         try:
@@ -4502,28 +4610,33 @@ class AgentRunner:
 
             from opensquad.token_breakdown import compute_token_breakdown
 
+            # Do not assign _turn_sid here: a history-tab stats poll must not
+            # retarget the running turn. The emit payload already carries sid.
             forced = (sid or "").strip()
-            if forced and forced != "unknown":
-                self._turn_sid = forced
             sid = forced or self._resolve_token_stats_sid()
-            if sid and not (getattr(self, "_turn_sid", None) or "").strip():
-                self._turn_sid = sid
+
+            chat_api = self._chat_api_for_token_stats(sid)
+            stamp = self._token_stats_usage_stamp(chat_api)
 
             # ── TTL cache: collapse full-history re-encoding (200-800ms on
             # long sessions, runs on the event loop) to at most one recompute
             # per TTL per session. The cached payload is still broadcast on
-            # every call so pollers receive fresh events. ──
+            # every call so pollers receive fresh events. A new LLM turn
+            # changes the usage stamp and must not reuse pre-turn zeros. ──
             cache_key = sid or "default"
             now = time.monotonic()
             cached = self._token_stats_cache.get(cache_key)
-            if cached is not None and now - cached[0] < _TOKEN_STATS_TTL_S:
-                await bus.emit_async(
-                    "token_stats",
-                    {"sid": sid, "agent_id": self._agent_id, "data": cached[1]},
-                )
-                return
+            if cached is not None:
+                cached_at = cached[0]
+                cached_stamp = cached[1] if len(cached) == 3 else None
+                cached_data = cached[-1]
+                if cached_stamp == stamp and now - cached_at < _TOKEN_STATS_TTL_S:
+                    await bus.emit_async(
+                        "token_stats",
+                        {"sid": sid, "agent_id": self._agent_id, "data": cached_data},
+                    )
+                    return
 
-            chat_api = self._chat_api_for_token_stats(sid)
             req = self._req_for_token_stats(chat_api, sid)
 
             tools = self._tools_for_token_stats()
@@ -4622,7 +4735,7 @@ class AgentRunner:
                     await asyncio.to_thread(_write_stats)
             except Exception:
                 pass
-            self._token_stats_cache[cache_key] = (time.monotonic(), token_data)
+            self._token_stats_cache[cache_key] = (time.monotonic(), stamp, token_data)
         except Exception as e:
             logger.error(f"[Runner] _broadcast_token_stats failed: {e}")
 

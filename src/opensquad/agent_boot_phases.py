@@ -5,6 +5,7 @@ import importlib
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,6 +88,14 @@ class AgentBootPhases:
                 continue
             default_level = "core" if name in self.core_tools else "extended"
             level = tool_levels.get(name, default_level)
+            # Hot-reload: if the module was already imported (plugin reload /
+            # config change), refresh from disk so new tool functions appear
+            # without requiring a full agent process restart.
+            if module_path in sys.modules:
+                try:
+                    importlib.reload(sys.modules[module_path])
+                except Exception as exc:
+                    logging.warning(f"[Boot] reload failed for built-in '{name}' ({module_path}): {exc}")
             # Lazy registration: import deferred until first use (tool call /
             # prompt schema build). filesystem needs eager configure
             # (set_allowed_dirs), so it stays eager; everything else defers
@@ -1031,5 +1040,8 @@ class AgentBootPhases:
             agent_logger.info("[Boot] Long-term memory system initialized (MemoryManager)")
             return memory_manager
         except Exception as exc:
-            agent_logger.error(f"[Boot] Long-term memory init failed: {exc}")
+            agent_logger.error(
+                f"[Boot] Long-term memory init failed: {exc}. "
+                "Install plugin deps (numpy scipy jieba networkx) and restart the agent."
+            )
             return None

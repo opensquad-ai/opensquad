@@ -78,6 +78,11 @@ class MessageQueue:
             # Push to event_pipeline for "never stop" inner-loop architecture
             try:
                 from opensquad.event_pipeline import event_pipeline
+                from opensquad.session_manager import get_session_manager
+                from opensquad.session_parallel import resolve_primary_session_id
+
+                sm = get_session_manager()
+                primary_sid = resolve_primary_session_id(sm) or sm.get_primary_session_id() or ""
 
                 event_pipeline.push_nowait(
                     source=msg.type,  # "group" or "dm"
@@ -88,6 +93,7 @@ class MessageQueue:
                         "source_id": msg.source_id,
                         "sender_id": msg.sender_id,
                     },
+                    session_id=primary_sid,
                 )
             except Exception:
                 pass  # event_pipeline not available, no-op

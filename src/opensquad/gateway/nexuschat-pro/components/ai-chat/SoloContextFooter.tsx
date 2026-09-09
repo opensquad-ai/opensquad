@@ -11,6 +11,7 @@ import {
   pickFolder,
   pushCwdRecent,
 } from '../../utils/cwdRecents';
+import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 export interface SoloTokenBreakdown {
   system?: number;
@@ -267,26 +268,20 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
                       />
                       <span className="flex-1 min-w-0 truncate text-textMuted">{s.label}</span>
                       <span className="font-mono text-textMain/80 tabular-nums shrink-0">{fmtTokens(s.val)}</span>
-                      {s.key === 'overhead' && tokenStats?.session && (
-                        <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
-                          · Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
-                          {tokenStats.session.total_requests != null
-                            ? ` · ${tokenStats.session.total_requests} req`
-                            : ''}
-                        </span>
-                      )}
                     </div>
                   ))
                 )}
-                {tokenStats?.session && !segments.some((s) => s.key === 'overhead') && (
+                {tokenStats?.session && (
                   <div className="flex items-center gap-2 text-[12px]">
                     <span className="w-2 h-2 rounded-[3px] shrink-0 bg-slate-500" />
-                    <span className="flex-1 min-w-0 truncate text-textMuted">Other</span>
+                    <span className="flex-1 min-w-0 truncate text-textMuted">
+                      {t('contextViewer.sessionUsage', { defaultValue: 'This session' })}
+                    </span>
+                    <span className="font-mono text-textMain/80 tabular-nums shrink-0">
+                      {fmtTokens(tokenStats.session.total_tokens ?? 0)}
+                    </span>
                     <span className="font-mono text-textMuted tabular-nums shrink-0 text-[11px]">
-                      Total {fmtTokens(tokenStats.session.total_tokens ?? 0)}
-                      {tokenStats.session.total_requests != null
-                        ? ` · ${tokenStats.session.total_requests} req`
-                        : ''}
+                      · {tokenStats.session.total_requests ?? 0} req
                     </span>
                   </div>
                 )}
@@ -383,7 +378,7 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
           </button>
 
           {cwdOpen && canPick && (
-            <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+            <div className={`absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}>
               <div className="px-3 py-2.5 border-b border-border/60">
                 <div className="text-[12px] text-textMain font-medium truncate">{displayName}</div>
                 {cwd ? (
@@ -462,6 +457,11 @@ export const SoloContextFooter: React.FC<SoloContextFooterProps> = ({
           <span className="text-[11px] font-medium text-textMuted tabular-nums">
             {max ? `${pct}%` : '—'}
           </span>
+          {max > 0 ? (
+            <span className="text-[10px] text-textMuted/65 tabular-nums">
+              {fmtTokens(used)}
+            </span>
+          ) : null}
         </button>
       </div>
     </div>

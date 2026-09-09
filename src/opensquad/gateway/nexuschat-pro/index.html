@@ -14,28 +14,30 @@
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Noto+Sans+SC:wght@300;400;500;700&family=Noto+Serif+SC:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap" rel="stylesheet" />
     <style>
       :root {
-        /* Claude-inspired ink-green fallback (overridden by themeStore at runtime) */
-        --color-primary: #3A6B52;
-        --color-bg: #F6F3EC;
-        --color-rail: #EFEBE3;
-        --color-nest: #E8E3DA;
-        --color-stage: #F6F3EC;
-        --color-panel: #FFFEFB;
-        --color-border: #E6DFD2;
-        --color-bubble-self: #E8EDE8;
-        --color-bubble-other: #FFFEFB;
-        --color-text-main: #1F2A24;
-        --color-text-muted: #6B736C;
+        /* Space-separated RGB triplets so Tailwind `rgb(var(--color-*) / α)`
+           and `rgb(var(--color-*))` stay valid. Hex here makes those rules
+           invalid and every `bg-bgLight` / overlay goes transparent. */
+        --color-primary: 58 107 82;
+        --color-on-primary: 255 255 255;
+        --color-bg: 246 243 236;
+        --color-rail: 239 235 227;
+        --color-nest: 232 227 218;
+        --color-stage: 246 243 236;
+        --color-panel: 255 254 251;
+        --color-border: 230 223 210;
+        --color-bubble-self: 232 237 232;
+        --color-bubble-other: 255 254 251;
+        --color-text-main: 31 42 36;
+        --color-text-muted: 107 115 108;
+        --boot-bg: #F6F3EC;
         --chat-font-size: 1;
         --font-chat: "DM Sans", "Noto Sans SC", system-ui, sans-serif;
         --font-ui: "DM Sans", "Noto Sans SC", system-ui, sans-serif;
       }
 
-      /* 注册 --color-bg 为可过渡的颜色属性：
-         否则 initTheme() 同步更新该变量时，boot-loader 背景会瞬间跳变
-         （深色主题下从米白突变成深色，对比度突变让 logo 看起来"缩了一圈"）。
-         注册后 background-color 过渡可以真正对变量插值。 */
-      @property --color-bg {
+      /* Boot-loader only: interpolate a real <color> while themeStore writes
+         triplets into --color-bg (those cannot be @property <color>). */
+      @property --boot-bg {
         syntax: '<color>';
         inherits: true;
         initial-value: #F6F3EC;
@@ -62,7 +64,8 @@
             document.documentElement.classList.add('dark');
             /* 深色主题：让 boot loader 从第一帧就用深色背景，避免 initTheme()
                把背景从默认米白瞬间切成深色——对比度突变会让 logo 看起来"缩了一圈"。 */
-            document.documentElement.style.setProperty('--color-bg', '#1C1C1F');
+            document.documentElement.style.setProperty('--color-bg', '28 28 31');
+            document.documentElement.style.setProperty('--boot-bg', '#1C1C1F');
           }
         } catch (e) {}
       })();
@@ -346,8 +349,8 @@
           display: flex;
           align-items: center;
           justify-content: center;
-          background: var(--color-bg, #F6F3EC);
-          /* initTheme() 会在 React 挂载前同步把 --color-bg 切到用户主题色。
+          background: var(--boot-bg, #F6F3EC);
+          /* initTheme() 会在 React 挂载前同步把 --boot-bg 切到用户主题色。
              若瞬间切换，背景对比度突变会让 logo 看起来"缩了一圈"。
              加过渡让背景平滑渐变到主题色，logo 视觉尺寸保持恒定。 */
           transition: background-color 260ms ease;

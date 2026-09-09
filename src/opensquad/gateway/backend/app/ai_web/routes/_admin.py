@@ -28,9 +28,23 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = syscfg.project_root()
 
 
-def _get_shared_client(_timeout: float = 5.0) -> httpx.AsyncClient:
+def _get_shared_client(timeout: float = 5.0, **_: object) -> httpx.AsyncClient:
     """Launcher HTTP fallback — shared loopback client (timeout is per-request)."""
     return get_local_http_client()
+
+
+def _launcher_http_error(resp: httpx.Response) -> str:
+    """Best-effort error string from a launcher HTTP response body."""
+    try:
+        data = resp.json()
+    except Exception:
+        text = (resp.text or "").strip()
+        return text[:500] if text else f"Launcher returned {resp.status_code}"
+    if isinstance(data, dict):
+        err = data.get("error") or data.get("detail")
+        if err:
+            return str(err)
+    return f"Launcher returned {resp.status_code}"
 
 
 async def close_shared_http_client() -> None:
@@ -139,12 +153,11 @@ async def _proxy_get(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    client = _get_shared_client(timeout=timeout)
     try:
+        client = _get_shared_client(timeout=timeout)
         resp = await client.get(f"{base}{path}", params=params, timeout=timeout)
         if resp.status_code >= 400:
-            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-            raise HTTPException(resp.status_code, err)
+            raise HTTPException(resp.status_code, _launcher_http_error(resp))
         result = resp.json()
         _proxy_cache_set(path, params, result)
         return result
@@ -172,12 +185,11 @@ async def _proxy_post(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    client = _get_shared_client(timeout=timeout)
     try:
+        client = _get_shared_client(timeout=timeout)
         resp = await client.post(f"{base}{path}", json=json, timeout=timeout)
         if resp.status_code >= 400:
-            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-            raise HTTPException(resp.status_code, err)
+            raise HTTPException(resp.status_code, _launcher_http_error(resp))
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
@@ -203,12 +215,11 @@ async def _proxy_put(
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    client = _get_shared_client(timeout=5.0)
     try:
+        client = _get_shared_client(timeout=5.0)
         resp = await client.put(f"{base}{path}", json=json_body, timeout=5.0)
         if resp.status_code >= 400:
-            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-            raise HTTPException(resp.status_code, err)
+            raise HTTPException(resp.status_code, _launcher_http_error(resp))
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
@@ -225,6 +236,8 @@ async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
         node_id = launcher_handler.get_any_node_id()
         try:
             return await launcher_handler.rpc(node_id, "DELETE", path, timeout=5.0)
+        except HTTPException:
+            raise
         except Exception:
             pass
     if launcher_url is None and not _url:
@@ -232,12 +245,11 @@ async def _proxy_delete(path: str, launcher_url: str | None = None) -> dict:
     base = launcher_url or _url
     if not base:
         raise HTTPException(503, "Launcher not available (no WS tunnel and no HTTP URL configured)")
-    client = _get_shared_client(timeout=5.0)
     try:
+        client = _get_shared_client(timeout=5.0)
         resp = await client.delete(f"{base}{path}", timeout=5.0)
         if resp.status_code >= 400:
-            err = resp.json().get("error", f"Launcher returned {resp.status_code}")
-            raise HTTPException(resp.status_code, err)
+            raise HTTPException(resp.status_code, _launcher_http_error(resp))
         return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, f"Launcher is not running (cannot connect to {base})")
@@ -456,18 +468,19 @@ async def admin_fs_tree(
     name: str,
     root: str = "",
     max: int = 10000,
+    depth: int | None = None,
     current_user: User = Depends(get_current_user_dep),
 ):
     """List full project tree (metadata only, capped)."""
     from urllib.parse import quote
 
-    r = (
-        f"?root={quote(root, safe='')}&max={int(max) if max else 10000}"
-        if root
-        else f"?max={int(max) if max else 10000}"
-    )
+    qs = [f"max={int(max) if max else 10000}"]
+    if root:
+        qs.append(f"root={quote(root, safe='')}")
+    if depth:
+        qs.append(f"depth={int(depth)}")
     # Full tree walk can take a few seconds on large projects.
-    return await _proxy_get(f"/api/agents/{name}/fs/tree{r}", http_only=True, timeout=60.0)
+    return await _proxy_get(f"/api/agents/{name}/fs/tree?{'&'.join(qs)}", http_only=True, timeout=60.0)
 
 
 @admin_router.get("/admin/agents/{name}/fs/read")
@@ -943,7 +956,14 @@ async def admin_delete_agent(name: str, current_user: User = Depends(get_current
 @admin_router.get("/admin/plugins")
 async def admin_list_plugins(current_user: User = Depends(get_current_user_dep)):
     """Get all plugins list with metadata"""
-    return await _proxy_get("/api/plugins")
+    data = await _proxy_get("/api/plugins")
+    try:
+        from opensquad.resource_uninstall import filter_plugin_list
+
+        plugins = filter_plugin_list(list(data.get("plugins") or []))
+        return {**data, "plugins": plugins}
+    except Exception:
+        return data
 
 
 @admin_router.post("/admin/plugins/report-view-error")
@@ -1000,18 +1020,50 @@ async def admin_uninstall_plugin(
     current_user: User = Depends(get_current_user_dep),
 ):
     """
-    Uninstall (delete) a plugin. Proxied to Launcher to delete from agent machine.
+    Uninstall a plugin. Resolves plugin.json name vs directory name, hides
+    bundled seeds in this workspace, then asks Launcher to delete any overlay.
     """
-    # Sanitize: only allow simple directory names (prevent path traversal)
-    # Allow dot for plugin names like "my.plugin" (launcher also allows dot)
-    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
-        raise HTTPException(status_code=400, detail="Invalid plugin name")
+    from opensquad.resource_uninstall import plugin_tombstone_ids, prepare_plugin_uninstall
 
-    try:
-        return await _proxy_delete(f"/api/resources/plugins/{name}")
-    except Exception as e:
-        logger.error(f"Plugin delete proxy error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    ok, value = prepare_plugin_uninstall(name)
+    if not ok:
+        raise HTTPException(status_code=400, detail=value)
+    dir_name = value
+
+    # Hide first so a Launcher 404 (json name ≠ folder, or bundled seed) is not
+    # user-facing. Overlay delete is best-effort.
+    for cand in plugin_tombstone_ids(name) or [dir_name, name]:
+        try:
+            result = await _proxy_delete(f"/api/resources/plugins/{cand}")
+            if isinstance(result, dict):
+                result.setdefault("ok", True)
+                result.setdefault("dir_name", dir_name)
+                return result
+            return {
+                "ok": True,
+                "message": f"Plugin '{name}' uninstalled",
+                "dir_name": dir_name,
+            }
+        except HTTPException as e:
+            if e.status_code == 400:
+                raise
+            logger.info(
+                "Launcher uninstall of plugin %s returned %s; workspace hide stands",
+                cand,
+                e.detail,
+            )
+        except Exception:
+            logger.info(
+                "Launcher uninstall of plugin %s failed; workspace hide stands",
+                cand,
+                exc_info=True,
+            )
+
+    return {
+        "ok": True,
+        "message": f"Plugin '{name}' uninstalled",
+        "dir_name": dir_name,
+    }
 
 
 # ============================================================
@@ -1123,7 +1175,14 @@ async def admin_disable_mcp_server_global(server_name: str, current_user: User =
 @admin_router.get("/admin/skills")
 async def admin_list_skills(current_user: User = Depends(get_current_user_dep)):
     """Get all skills list"""
-    return await _proxy_get("/api/skills")
+    data = await _proxy_get("/api/skills")
+    try:
+        from opensquad.resource_uninstall import filter_skill_list
+
+        skills = filter_skill_list(list(data.get("skills") or []))
+        return {**data, "skills": skills}
+    except Exception:
+        return data
 
 
 @admin_router.get("/admin/skills/{skill_name}/source")
@@ -1184,15 +1243,47 @@ async def admin_upload_plugin(files: list[UploadFile] = File(...), current_user:
 
 @admin_router.delete("/admin/skills/{skill_name}")
 async def admin_delete_skill(skill_name: str, current_user: User = Depends(get_current_user_dep)):
-    """Delete a skill by name - proxied to Launcher to delete from agent machine"""
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", skill_name):
-        return JSONResponse({"success": False, "error": "Invalid skill name"})
+    """Delete a skill by name. Hide bundled seeds locally if Launcher 404s."""
+    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", skill_name):
+        raise HTTPException(status_code=400, detail="Invalid skill name")
 
-    try:
-        return await _proxy_delete(f"/api/resources/skills/{skill_name}")
-    except Exception as e:
-        logger.error(f"Skill delete proxy error: {e}")
-        return JSONResponse({"success": False, "error": str(e)})
+    from opensquad.resource_uninstall import hide_resource, resolve_skill_dir_name
+
+    dir_name = resolve_skill_dir_name(skill_name) or skill_name
+    hide_resource("skills", dir_name)
+
+    for cand in dict.fromkeys([dir_name, skill_name]):
+        try:
+            result = await _proxy_delete(f"/api/resources/skills/{cand}")
+            if isinstance(result, dict):
+                result.setdefault("ok", True)
+                result.setdefault("dir", dir_name)
+                return result
+            return {
+                "ok": True,
+                "message": f"Skill '{skill_name}' uninstalled",
+                "dir": dir_name,
+            }
+        except HTTPException as e:
+            if e.status_code == 400:
+                raise
+            logger.info(
+                "Launcher uninstall of skill %s returned %s; workspace hide stands",
+                cand,
+                e.detail,
+            )
+        except Exception:
+            logger.info(
+                "Launcher uninstall of skill %s failed; workspace hide stands",
+                cand,
+                exc_info=True,
+            )
+
+    return {
+        "ok": True,
+        "message": f"Skill '{skill_name}' uninstalled",
+        "dir": dir_name,
+    }
 
 
 # ============================================================

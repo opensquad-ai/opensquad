@@ -54,11 +54,31 @@ _BUILD_ARTIFACT_PATTERNS = (
     os.sep + "node_modules",
     ".tsbuildinfo",
 )
+# Accidental / leftover desktop build trees under the opensquad package
+# (e.g. src/opensquad/build/release-new/win-unpacked) must never ship inside
+# run.exe — they previously inflated _internal by ~400MB+.
+_NESTED_BUILD_MARKERS = (
+    "/build/",
+    "/.pyinstaller-work/",
+    "/win-unpacked/",
+    "/mac-unpacked/",
+    "/linux-unpacked/",
+)
 _BUILD_METADATA_SUFFIXES = (".map", ".d.ts", ".d.ts.map")
 
 def _is_runtime_data(src):
     norm = src.replace("\\", "/")
     if any(p in norm for p in _BUILD_ARTIFACT_PATTERNS):
+        return False
+    # Exclude nested Electron/PyInstaller outputs that may sit under the
+    # package tree (misplaced release dirs, local electron-builder runs).
+    if any(m in norm for m in _NESTED_BUILD_MARKERS):
+        return False
+    # Path segments named exactly "build" or "release*" at package depth.
+    parts = [p for p in norm.split("/") if p]
+    if "build" in parts:
+        return False
+    if any(p.startswith("release") for p in parts):
         return False
     # nexuschat-pro/resources/ is the electron-builder extraResources staging
     # area (PyInstaller backend binaries copied here for local electron:dev:fast
@@ -78,8 +98,34 @@ def _is_runtime_data(src):
         return False
     return True
 
-datas += [pair for pair in collect_data_files("opensquad") if _is_runtime_data(pair[0])]
-print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build metadata excluded)")
+_opensquad_data_all = collect_data_files("opensquad")
+_opensquad_excluded = [pair[0] for pair in _opensquad_data_all if not _is_runtime_data(pair[0])]
+# Only warn about misplaced package-local release trees (not node_modules/*/build).
+_nested_hits = []
+for _p in _opensquad_excluded:
+    _n = _p.replace("\\", "/")
+    if "node_modules" in _n or "/nexuschat-pro/" in _n:
+        continue
+    if (
+        "/opensquad/build/" in _n
+        or any(m in _n for m in ("/win-unpacked/", "/mac-unpacked/", "/linux-unpacked/", "/.pyinstaller-work/"))
+        or "/opensquad/release" in _n
+    ):
+        _nested_hits.append(_p)
+if _nested_hits:
+    _warned = set()
+    for _p in _nested_hits:
+        _n = _p.replace("\\", "/")
+        for _marker in ("/opensquad/build", "/win-unpacked", "/mac-unpacked", "/linux-unpacked"):
+            _i = _n.find(_marker)
+            if _i >= 0:
+                _warned.add(_n[: _i + len(_marker)])
+                break
+    print(f"[spec] WARNING: excluded {len(_nested_hits)} nested desktop build path(s) under opensquad package:")
+    for _w in sorted(_warned)[:12]:
+        print(f"[spec]   - {_w}")
+datas += [pair for pair in _opensquad_data_all if _is_runtime_data(pair[0])]
+print(f"[spec] Filtered to {len(datas)} runtime data files (node_modules + build artifacts excluded)")
 
 # launcher.py — the standalone launcher module (opensquad/launcher.py, ~3.4k
 # lines, holds main()). It is shadowed by the opensquad/launcher/ PACKAGE, so

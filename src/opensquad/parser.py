@@ -70,6 +70,11 @@ def _normalize_tool_name(name: str) -> str:
         - strip
         - if there's a dot (namespace.func), preserve but normalize each side:
             "Filesystem.Read_File" -> "filesystem.read_file"
+        - if there's a double-underscore (Native FC / MCP), preserve segments:
+            "mcp__Playwright__Browser_Navigate" -> "mcp__playwright__browser_navigate"
+            "Filesystem__Read_File" -> "filesystem__read_file"
+          (must NOT collapse ``__`` to ``_`` — registry routes MCP on ``mcp__``
+          and Native FC on ``namespace__function``)
         - else: just lower-case + collapse separators.
     """
     if not name:
@@ -79,7 +84,84 @@ def _normalize_tool_name(name: str) -> str:
         parts = n.split(".")
         parts = [_normalize_key(p) for p in parts if p]
         return ".".join(parts)
+    if "__" in n:
+        parts = [_normalize_key(p) for p in n.split("__") if p]
+        return "__".join(parts)
     return _normalize_key(n)
+
+
+_BARE_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,80}$")
+_BARE_TOOL_NAME_DENY = frozenset(
+    {
+        "arg_key",
+        "arg_value",
+        "parameter",
+        "arguments",
+        "func",
+        "function",
+        "invoke",
+        "thought",
+        "think",
+        "tool_call",
+        "tool_calls",
+        "plan",
+        "to_user",
+    }
+)
+_KNOWN_TOOL_PREFIX_RE = re.compile(
+    r"^(websearch|bocha|filesystem|anysearch|browser|mcp__|system|im|vision|"
+    r"reminder|help|agent_|workspace|grep|memory|quick_note|external_api|"
+    r"feishu|whisper|sensevoice|long_memory|step_voice)",
+    re.IGNORECASE,
+)
+_ARG_KEY_VALUE_PAIR_RE = re.compile(
+    r"<arg_key\s*>(.*?)</arg_key\s*>\s*<arg_value\s*>(.*?)</arg_value\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_ARG_KEY_VALUE_OPEN_RE = re.compile(
+    r"<arg_key\s*>(.*?)</arg_key\s*>\s*<arg_value\s*>([^<]*)$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _looks_like_xml_tool_name(name: str, blob: str = "") -> bool:
+    """True for Qwen/Ling first-line names like ``websearch`` / ``mcp__x__y``."""
+    cand = (name or "").strip()
+    if not cand or not _BARE_TOOL_NAME_RE.match(cand):
+        return False
+    if cand.lower() in _BARE_TOOL_NAME_DENY:
+        return False
+    if "." in cand or "__" in cand or _KNOWN_TOOL_PREFIX_RE.match(cand):
+        return True
+    return bool(re.search(r"<arg_key\b|<query\b|<arguments\b|<parameter\b", blob, re.IGNORECASE))
+
+
+def _first_line_tool_name(xml_content: str) -> str:
+    """Extract a bare tool name sitting on the first line of a <tool_call> body."""
+    if not xml_content:
+        return ""
+    first = xml_content.lstrip().split("\n", 1)[0].strip()
+    first = re.split(r"<", first, maxsplit=1)[0].strip()
+    return first if _looks_like_xml_tool_name(first, xml_content) else ""
+
+
+def _parse_arg_key_value_pairs(xml_content: str) -> dict[str, Any]:
+    """Qwen / Ling / GLM: <arg_key>query</arg_key><arg_value>福州天气</arg_value>."""
+    if not xml_content:
+        return {}
+    result: dict[str, Any] = {}
+    for match in _ARG_KEY_VALUE_PAIR_RE.finditer(xml_content):
+        key = match.group(1).strip()
+        if not key or key.lower() in _BARE_TOOL_NAME_DENY:
+            continue
+        result[key] = ResponseParser.parse_param_value(match.group(2).strip())
+    open_m = _ARG_KEY_VALUE_OPEN_RE.search(xml_content)
+    if open_m:
+        key = open_m.group(1).strip()
+        val = open_m.group(2).strip()
+        if key and val and key not in result:
+            result[key] = ResponseParser.parse_param_value(val)
+    return result
 
 
 # Mapping of Python escape sequences that must be restored to literal backslash + char
@@ -112,6 +194,109 @@ def _restore_windows_path_escapes(value: str) -> str:
     for escaped_char, literal_form in _ESCAPE_RESTORE_MAP.items():
         result = result.replace(escaped_char, literal_form)
     return result
+
+
+# ---------------------------------------------------------------------------
+# DSML (DeepSeek Markup Language) tag normalization
+# ---------------------------------------------------------------------------
+# Models emit several near-equivalent forms, including extra spaces and a
+# wrapper named `calls` instead of `tool_calls`:
+#   <｜｜DSML｜｜tool_calls>     canonical (no space)
+#   <｜｜DSML｜｜ calls>         space after delimiter, short wrapper
+#   <｜｜invoke name="...">     delimiter only, no "DSML" token
+#   <|mcp|invoke>               mcp delimiter
+#   <｜DSML｜invoke>            single-bar DeepSeek special-token style
+_FW_BAR = "\uff5c"
+_DSML_BARS = rf"(?:{_FW_BAR}{{1,2}}|\|{{1,2}})"
+_DSML_PREFIX = rf"(?:{_DSML_BARS}(?:DSML|mcp){_DSML_BARS}|{_FW_BAR}{{2}}|\|{{2}})"
+_DSML_TAG_NAMES = r"(?:tool_calls|function_calls|calls|invoke|parameter)"
+_RE_DSML_TAG = _re_norm.compile(
+    rf"<(/?){_DSML_PREFIX}\s*({_DSML_TAG_NAMES})\b([^>]*)>",
+    _re_norm.IGNORECASE,
+)
+_DSML_WRAPPER_ALIASES = {"calls": "tool_calls", "function_calls": "tool_calls"}
+_RE_ANY_TOOL_CALL_START = _re_norm.compile(
+    r"<tool_call\b" rf"|<{_DSML_PREFIX}\s*(?:tool_calls|function_calls|calls|invoke)\b",
+    _re_norm.IGNORECASE,
+)
+
+
+def _canonicalize_dsml(text: str) -> str:
+    """Rewrite DSML tag variants to ``<||DSML||tag ...>`` with no extra spaces."""
+    if not text:
+        return text
+    if "DSML" not in text and "mcp" not in text.lower() and _FW_BAR not in text and "||" not in text:
+        return text
+
+    def _repl(m: _re_norm.Match) -> str:
+        slash = m.group(1)
+        tag = (m.group(2) or "").lower()
+        rest = m.group(3) or ""
+        tag = _DSML_WRAPPER_ALIASES.get(tag, tag)
+        return f"<{slash}||DSML||{tag}{rest}>"
+
+    return _RE_DSML_TAG.sub(_repl, text)
+
+
+def strip_dsml_tool_markup(text: str) -> str:
+    """Remove DSML / invoke tool-call blocks (including inner content) from display text."""
+    if not text:
+        return text
+    t = _canonicalize_dsml(text)
+    for tag in ("tool_calls", "invoke", "parameter"):
+        t = _re_norm.sub(
+            rf"<\|\|DSML\|\|{tag}\b[^>]*>.*?</\|\|DSML\|\|{tag}\s*>",
+            "",
+            t,
+            flags=_re_norm.DOTALL | _re_norm.IGNORECASE,
+        )
+    return t
+
+
+def _parse_jsonish_object(value: str) -> dict[str, Any] | None:
+    """Parse a JSON/Python dict, recovering common LLM quote/escape mistakes."""
+    s = (value or "").strip()
+    if not s.startswith("{") or not s.endswith("}"):
+        return None
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    try:
+        obj = ast.literal_eval(s)
+        if isinstance(obj, dict):
+            return obj
+    except (ValueError, SyntaxError, TypeError, MemoryError):
+        pass
+    # Single-key object whose string value contains unescaped quotes
+    # e.g. {"command": "dir "c:\users\foo" /b"}
+    m = _re_norm.match(r'\{\s*"([^"\\]+)"\s*:\s*"(.*)"\s*\}\s*$', s, _re_norm.DOTALL)
+    if m:
+        return {m.group(1): m.group(2)}
+    return None
+
+
+def _expand_dsml_arguments(args: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap a DSML ``parameter name="arguments"`` JSON blob into tool args."""
+    if not args or "arguments" not in args:
+        return args
+    blob = args.get("arguments")
+    parsed: Any = blob
+    if isinstance(blob, str):
+        parsed = _parse_jsonish_object(blob)
+        if parsed is None:
+            return args
+    if not isinstance(parsed, dict):
+        return args
+    if set(args.keys()) <= {"arguments"}:
+        return parsed
+    merged = dict(parsed)
+    for k, v in args.items():
+        if k != "arguments" and k not in merged:
+            merged[k] = v
+    return merged
 
 
 class ResponseParser:
@@ -221,6 +406,10 @@ class ResponseParser:
             return {}
 
         result = {}
+        # Qwen/Ling: <arg_key>query</arg_key><arg_value>...</arg_value>
+        # must be paired before treating those tags as argument names.
+        result.update(_parse_arg_key_value_pairs(xml_content))
+
         # Match all <key>value</key> tags (standard format)
         # CDATA support: <key><![CDATA[value]]></key>
         pattern = r"<([a-zA-Z_][a-zA-Z0-9_]*)\s*>(.*?)</\1\s*>"
@@ -230,7 +419,8 @@ class ResponseParser:
             value_raw = match.group(2)
 
             # Skip the <func> tag (this is the tool name, not a parameter)
-            if key == "func":
+            # arg_key/arg_value are paired above, not standalone args.
+            if key.lower() in {"func", "arg_key", "arg_value"}:
                 continue
 
             # Handle CDATA
@@ -279,7 +469,7 @@ class ResponseParser:
         # match. Recover by matching the OPEN tag against the halfwidth form
         # only and the CLOSE tag against either style.
         delim = ResponseParser._DSML_DELIM
-        dsml_close_param = r"</" + delim + r"DSML" + delim + r"parameter(?:\s*)>"
+        dsml_close_param = r"</" + delim + r"DSML" + delim + r"\s*parameter(?:\s*)>"
         # Match cross-style parameter tags (opening tag is plain <key>, closing
         # tag is </parameter> or DSML-style). Use a negative-lookbehind with
         # separate fixed-width alternatives to avoid the variable-width
@@ -314,6 +504,7 @@ class ResponseParser:
         1. Standard: <func>tool_name</func> <param>value</param>
         2. Lenient: <function=name> <parameter=key>value</parameter> (with closing tags)
         3. JSON-inside: {"name": "...", "arguments": {...}} inside <tool_call>
+        4. Qwen/Ling: first-line name + <arg_key>/<arg_value> pairs
         """
         tc_log = get_tool_call_debug_logger()
 
@@ -364,6 +555,23 @@ class ResponseParser:
                             return tool_name, raw_args
                 except json.JSONDecodeError:
                     pass
+
+        # --- Strategy D: first-line tool name + <arg_key>/<arg_value> (Qwen/Ling) ---
+        if not tool_name:
+            bare = _first_line_tool_name(xml_content)
+            if bare:
+                tool_name = bare
+                rest = xml_content.lstrip()
+                split_at = rest.find("\n")
+                glued = re.match(re.escape(bare) + r"(\s*<)", rest)
+                if glued:
+                    strip_for_args = rest[len(bare) :]
+                elif split_at >= 0 and rest[:split_at].strip() == bare:
+                    strip_for_args = rest[split_at + 1 :]
+                elif rest.startswith(bare):
+                    strip_for_args = rest[len(bare) :]
+                else:
+                    strip_for_args = xml_content
 
         if not tool_name:
             tc_log.error("[parse_single_tool_call] No func/function tag found. Content: %s", xml_content[:200])
@@ -524,11 +732,13 @@ class ResponseParser:
     # fullwidth </｜｜DSML｜｜invoke> (and likewise for the opening tag).
     # This way mixed halfwidth / fullwidth combinations are tolerated.
     _DSML_INVOKE_PATTERN = re.compile(
-        rf'<(?:invoke|{_DSML_DELIM}DSML{_DSML_DELIM}invoke)\s+name="([^"]+)"\s*>(.*?)</(?:invoke|{_DSML_DELIM}DSML{_DSML_DELIM}invoke)>',
+        rf'<(?:invoke|{_DSML_DELIM}DSML{_DSML_DELIM}\s*invoke)\s+name\s*=\s*"([^"]+)"\s*>'
+        rf"(.*?)</(?:invoke|{_DSML_DELIM}DSML{_DSML_DELIM}\s*invoke)\s*>",
         re.DOTALL | re.IGNORECASE,
     )
     _DSML_PARAM_PATTERN = re.compile(
-        rf'<(?:parameter|{_DSML_DELIM}DSML{_DSML_DELIM}parameter)\s+name="([^"]+)"(?:\s+\w+="[^"]*")*\s*>(.*?)</(?:parameter|{_DSML_DELIM}DSML{_DSML_DELIM}parameter)>',
+        rf'<(?:parameter|{_DSML_DELIM}DSML{_DSML_DELIM}\s*parameter)\s+name\s*=\s*"([^"]+)"'
+        rf'(?:\s+\w+\s*=\s*"[^"]*")*\s*>(.*?)</(?:parameter|{_DSML_DELIM}DSML{_DSML_DELIM}\s*parameter)\s*>',
         re.DOTALL | re.IGNORECASE,
     )
     # Plain XML form for invoke / parameter (so an opening <parameter> paired
@@ -546,7 +756,12 @@ class ResponseParser:
             </｜｜DSML｜｜invoke>
           </｜｜DSML｜｜tool_calls>
 
-        Also supports standalone <｜｜DSML｜｜invoke> without outer wrapper.
+        Also supports:
+          - standalone <｜｜DSML｜｜invoke> without outer wrapper
+          - spaced tags: <｜｜DSML｜｜ calls> / <｜｜DSML｜｜ invoke>
+          - short wrapper name ``calls`` / ``function_calls``
+          - delimiter-only tags: <｜｜invoke>
+          - ``parameter name="arguments"`` JSON blobs (unwrapped into tool args)
 
         Lenient mode (tolerance for malformed LLM output):
           - If no <invoke> was found, scan for orphaned <parameter> tokens anywhere
@@ -558,16 +773,14 @@ class ResponseParser:
             downstream schema matching forgiving (e.g. startLine -> start_line).
         """
         tc_log = get_tool_call_debug_logger()
-        # Coerce the model's `<|mcp|...>` DSML delimiter (single bar + "mcp" +
-        # bar, used by some coding models) into the parser's expected
-        # `<||DSML||...>` form so their tool calls parse correctly.
-        text = re.sub(r"\|mcp\|", "||DSML||", text)
+        text = _canonicalize_dsml(text)
         delim = ResponseParser._DSML_DELIM
         # Wrapper accepts BOTH <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
         # and <tool_calls>...</tool_calls> as outer container. The opening tag
         # and closing tag are matched INDEPENDENTLY so halfwidth / fullwidth
-        # mixing across the two is also tolerated.
-        dsml_tool_calls = f"{delim}DSML{delim}tool_calls"
+        # mixing across the two is also tolerated. `(?:tool_)?calls` covers the
+        # short wrapper name some models emit after canonicalize.
+        dsml_tool_calls = rf"{delim}DSML{delim}\s*(?:tool_)?calls"
         # Plain (halfwidth) form: <tool_call>...</tool_call> (note: NO trailing 's')
         plain_open = r"<tool_call(?:\s*)>"
         plain_close = r"</tool_call(?:\s*)>"
@@ -592,6 +805,7 @@ class ResponseParser:
                 value_raw = pm.group(2).strip()
                 norm_key = _normalize_arg_key(key)
                 args[norm_key] = ResponseParser.parse_param_value(value_raw)
+            args = _expand_dsml_arguments(args)
             if name:
                 norm_name = _normalize_tool_name(name)
                 tc_log.info("[_parse_dsml] DSML-invoke name=%r -> %r, args=%r", name, norm_name, args)
@@ -608,6 +822,7 @@ class ResponseParser:
                     value_raw = pm.group(2).strip()
                     norm_key = _normalize_arg_key(key)
                     args[norm_key] = ResponseParser.parse_param_value(value_raw)
+                args = _expand_dsml_arguments(args)
                 if name:
                     norm_name = _normalize_tool_name(name)
                     tc_log.info("[_parse_dsml] plain-invoke name=%r -> %r, args=%r", name, norm_name, args)
@@ -615,8 +830,12 @@ class ResponseParser:
 
         # ---- Pass 3: recover orphan <parameter> tokens (no <invoke> wrapper) ----
         if not results:
-            # Both DSML and plain halfwidth variants, value runs up to next '<' or newline.
-            orphan_pat = re.compile(r'<(?:%s|%s)parameter\s+name="([^"]+)"(?:\s+\w+="[^"]*")*\s*([^<\r\n]*)')
+            # Both DSML and plain halfwidth variants.
+            orphan_pat = re.compile(
+                rf'<(?:parameter|{delim}DSML{delim}\s*parameter)\s+name="([^"]+)"'
+                rf'(?:\s+\w+\s*=\s*"[^"]*")*\s*>([^<]*)',
+                re.DOTALL | re.IGNORECASE,
+            )
             recovered_args: dict[str, Any] = {}
             for m in orphan_pat.finditer(text):
                 key = m.group(1)
@@ -625,6 +844,7 @@ class ResponseParser:
                     continue
                 norm_key = _normalize_arg_key(key)
                 recovered_args[norm_key] = ResponseParser.parse_param_value(value_raw)
+            recovered_args = _expand_dsml_arguments(recovered_args)
             if recovered_args:
                 tc_log.warning(
                     "[_parse_dsml] Lenient fallback: recovered %d orphan <parameter> tokens",
@@ -738,7 +958,7 @@ class ResponseParser:
         # halfwidth </tool_call> OR fullwidth </｜｜DSML｜｜tool_calls> when the
         # model drifts between the two styles within a single response).
         delim = ResponseParser._DSML_DELIM
-        dsml_tool_calls = f"{delim}DSML{delim}tool_calls"
+        dsml_tool_calls = rf"{delim}DSML{delim}\s*(?:tool_)?calls"
         xml_open_close_pat = re.compile(
             rf"<tool_call(?:\s*)>(.*?)</(?:tool_call|{dsml_tool_calls})(?:\s*)>",
             re.DOTALL | re.IGNORECASE,
@@ -767,8 +987,128 @@ class ResponseParser:
         if json_results:
             return ResponseParser._normalize_results(json_results)
 
+        # Strategy 6: truncated / unclosed <tool_call> (cheap models hang mid-tag)
+        unclosed = ResponseParser.parse_unclosed_tool_calls(text)
+        with_args = [p for p in unclosed if p[1]]
+        if with_args:
+            tc_log.info("[parse_tool_calls] Found %d unclosed tool call(s)", len(with_args))
+            return ResponseParser._normalize_results(with_args)
+
         tc_log.debug("[parse_tool_calls] No tool call found in response (len=%d)", len(text))
         return []
+
+    @staticmethod
+    def parse_partial_tool_preview(
+        tag: str,
+        buf: str,
+        attrs: dict[str, str] | None = None,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Best-effort name+args from an in-flight (possibly unclosed) tool tag.
+
+        Used for live Agent Web ``tool_call_delta`` while ``</tool_call>`` has
+        not arrived yet. Returns None until a tool name is recognizable.
+        """
+        del tag  # tag is the commit-buffer kind; name lives in attrs / inner XML
+        attrs = attrs or {}
+        name = (attrs.get("name") or "").strip()
+        blob = buf or ""
+
+        if not name:
+            m = re.search(
+                r"<func\s*>([^<]{1,200}?)(?:</func\s*>|$)",
+                blob,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if m:
+                cand = m.group(1).strip()
+                if cand and "\n" not in cand and len(cand) < 120:
+                    name = cand
+        if not name:
+            m = re.search(
+                r'<(?:invoke|[^\s<>]*invoke)\b[^>]*\bname\s*=\s*"([^"]+)"',
+                blob,
+                re.IGNORECASE,
+            )
+            if m:
+                name = m.group(1).strip()
+        if not name:
+            m = re.search(r'<function\s*=\s*"?([a-zA-Z0-9_.]+)', blob, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+        if not name:
+            name = _first_line_tool_name(blob)
+        if not name:
+            return None
+
+        args: dict[str, Any] = {}
+        if re.search(r"</func\s*>", blob, re.IGNORECASE) or "<arguments" in blob.lower() or "<arg_key" in blob.lower():
+            parsed = ResponseParser.parse_single_tool_call(blob)
+            if parsed:
+                name = parsed[0] or name
+                args = parsed[1] or {}
+        if not args:
+            args = ResponseParser.parse_xml_arguments(blob)
+        if not args:
+            m = re.search(r"<([a-zA-Z_][a-zA-Z0-9_]*)\s*>([^<]*)$", blob)
+            if m and m.group(1).lower() not in ("func", "function", "tool_call", "invoke"):
+                val = m.group(2).strip().strip('"').strip("'")
+                if val:
+                    args = {m.group(1): val}
+        if not args:
+            m = re.search(r"<arguments\s*>([\s\S]*)$", blob, re.IGNORECASE)
+            if m:
+                raw = re.sub(r"</arguments\s*>", "", m.group(1), flags=re.IGNORECASE).strip()
+                obj = _parse_jsonish_object(raw) if raw.endswith("}") else None
+                if obj:
+                    args = obj
+                elif raw:
+                    qm = re.search(r'"(query|q|url|path|command)"\s*:\s*"([^"]*)', raw)
+                    if qm:
+                        args = {qm.group(1): qm.group(2)}
+        return name, args
+
+    @staticmethod
+    def parse_unclosed_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+        """Parse a truncated ``<tool_call>`` / invoke block (no closing tag)."""
+        if not text or not isinstance(text, str):
+            return []
+        stripped = re.sub(r"<thought\b[^>]*>.*?</thought>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+        stripped = re.sub(r"<think\b[^>]*>.*?</think>", " ", stripped, flags=re.IGNORECASE | re.DOTALL)
+        if not re.search(r"<tool_call\b|invoke\b", stripped, re.IGNORECASE):
+            return []
+
+        results: list[tuple[str, dict[str, Any]]] = []
+
+        attr = None
+        for m in re.finditer(r'<tool_call\s+name\s*=\s*"([^"]+)"\s*>', stripped, re.IGNORECASE):
+            attr = m
+        if attr and "</tool_call>" not in stripped[attr.start() :].lower():
+            inner = re.split(r"</tool_call>", stripped[attr.end() :], flags=re.IGNORECASE)[0]
+            parsed = ResponseParser.parse_partial_tool_preview("tool_call", inner, {"name": attr.group(1)})
+            if parsed:
+                results.append(parsed)
+
+        if not results:
+            open_m = None
+            for m in re.finditer(r"<tool_call\b[^>]*>", stripped, re.IGNORECASE):
+                open_m = m
+            if open_m and "</tool_call>" not in stripped[open_m.start() :].lower():
+                parsed = ResponseParser.parse_partial_tool_preview("tool_call", stripped[open_m.end() :], {})
+                if parsed and parsed[1]:
+                    results.append(parsed)
+
+        if not results:
+            inv = None
+            for m in re.finditer(r'<invoke\b[^>]*\bname\s*=\s*"([^"]+)"\s*>', stripped, re.IGNORECASE):
+                inv = m
+            if inv:
+                parsed = ResponseParser.parse_partial_tool_preview(
+                    "invoke", stripped[inv.end() :], {"name": inv.group(1)}
+                )
+                if parsed:
+                    results.append(parsed)
+
+        return results
 
     @staticmethod
     def _normalize_results(results: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, dict[str, Any]]]:

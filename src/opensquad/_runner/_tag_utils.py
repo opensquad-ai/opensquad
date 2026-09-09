@@ -58,6 +58,11 @@ def remove_all_tags(text: str) -> str:
     # 0a. Filter native tool call tokens (<|...|> format)
     result = filter_native_tokens(result)
 
+    # 0a2. Strip DSML / invoke tool-call blocks (including inner JSON args)
+    from opensquad.parser import strip_dsml_tool_markup
+
+    result = strip_dsml_tool_markup(result)
+
     # 0. Special handling: remove possibly missing-'<' tool_call markers
     result = re.sub(r'tool_call\s+name="[^"]+"\s*>', "", result, flags=re.IGNORECASE)
 
@@ -245,6 +250,10 @@ def extract_text_before_tool(text: str) -> str | None:
         return None
 
     tool_match = re.search(r"<tool_call", text, re.IGNORECASE)
+    if not tool_match:
+        from opensquad.parser import _RE_ANY_TOOL_CALL_START
+
+        tool_match = _RE_ANY_TOOL_CALL_START.search(text)
     if not tool_match:
         return None
 

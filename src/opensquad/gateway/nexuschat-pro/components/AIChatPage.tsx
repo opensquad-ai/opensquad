@@ -38,8 +38,12 @@ import { resolveChatAvatar, toAbsoluteMediaUrl } from '../utils/image';
 import { playGentleNotificationSound } from '../utils/sounds';
 import { OpenSquadLoader } from './OpenSquadLoader';
 import {
+  absorbAssistantFinalText,
+  appendLiveWorkflowBatch,
   appendWorkflowEvent,
   appendWorkflowEvents,
+  extractLiveToolCallFromMarkup,
+  stripToolCallMarkup,
   buildTimelineFromSession,
   foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
@@ -49,6 +53,7 @@ import {
   timelineHasVisibleChatContent,
   workflowToolEventKey,
   sealIncompleteWorkflows,
+  sealWorkflowAndAppendAssistantMessage,
   toWebMediaUrl,
   type TimelineEntry,
   type WorkflowBlock,
@@ -67,6 +72,11 @@ import {
   SESSION_HISTORY_PAGE_SIZE,
 } from '../utils/sessionTimelineCache';
 import { pickSessionLiveTimeline } from '../utils/sessionLiveTimeline';
+import {
+  mergeSessionTokenStats,
+  tokenStatsSid,
+  unwrapTokenStatsPayload,
+} from '../utils/sessionTokenStats';
 import { useTextSelectionFreeze } from '../hooks/useTextSelectionFreeze';
 import { useIsCompactAgentWeb, useIsMobileViewport } from '../hooks/useMatchMedia';
 import {
@@ -961,7 +971,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     return first.done ? null : first.value;
   }, []);
   const messagesContainerRef = useRef<HTMLDivElement>(null); // messages scroll container
-  const prevOuterScrollHeightRef = useRef(0); // for smart auto-scroll
   const pendingFilePushesRef = useRef<ChatMessage[]>([]);
   const pendingHydrationMediaRef = useRef<ChatMessage[]>([]); // media history received while hydrating
   /** Workflow WS events buffered while hydrating so they are not double-appended after snapshot replace. */
@@ -1029,7 +1038,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     isFrozenRef: textSelectFrozenRef,
   } = useTextSelectionFreeze(messagesContainerRef, liveSelectView);
   const displayTimeline = selectFrozenView.entries;
-  const displayStreamingText = selectFrozenView.streaming;
+  const displayStreamingText = stripToolCallMarkup(selectFrozenView.streaming || '').trim();
 
   const sessionBootstrapDoneRef = useRef(false); // true after first canonical timeline set on connect
   const sessionReloadSeqRef = useRef(0);
@@ -1815,36 +1824,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     }
   }, [agentId, isLoadingMore, hasMoreHistory]);
 
-  // Smart auto-scroll: only scroll if user was near the bottom before content grew.
-  // When ANY tool call is expanded (data-tool-expanded attribute present),
-  // auto-scroll is completely frozen to avoid jitter while reading details.
-  // Auto-scroll resumes only when all tool calls are collapsed.
-  useLayoutEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    // Selecting / holding a text selection: never move scrollTop.
-    if (textSelectFrozenRef.current) return;
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode)) return;
-
-    const { scrollHeight, scrollTop, clientHeight } = el;
-    const prevH = prevOuterScrollHeightRef.current;
-    prevOuterScrollHeightRef.current = scrollHeight; // always track
-
-    // If any tool call is expanded anywhere, freeze scroll position
-    if (el.querySelector('[data-tool-expanded]')) return;
-
-    const contentDelta = Math.max(0, scrollHeight - prevH);
-    if (contentDelta === 0) return;
-
-    // Reconstruct pre-update distance from bottom
-    const distFromBottom = scrollHeight - scrollTop - clientHeight;
-    const wasAtBottom = (distFromBottom - contentDelta) < 80;
-
-    if (wasAtBottom) {
-      el.scrollTop = scrollHeight - clientHeight; // instant, no smooth jitter
-    }
-  }, [timeline, streamingText]);
+  // Stick-to-bottom is owned by ChatTimeline (unpinRef + overflow-anchor: none).
 
   // Timeline helpers live in utils/aiChatTimeline.ts
 
@@ -1857,48 +1837,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     prev: TimelineEntry[],
     msg: ChatMessage,
   ): TimelineEntry[] {
-    const updated = [...prev];
-
-    // Dedup: if the last message entry has the same content and role, skip adding
-    for (let i = updated.length - 1; i >= 0; i--) {
-      const entry = updated[i];
-      if (entry.kind !== 'message') continue;
-      const existing = entry.data as ChatMessage;
-      if (existing.role === 'user') break; // stop at user message boundary
-      if (existing.role === 'assistant' && existing.content === msg.content) {
-        // Already have this exact message, skip duplicate
-        // Still mark workflow as completed
-        for (let j = updated.length - 1; j >= 0; j--) {
-          const wf = updated[j];
-          if (wf.kind === 'workflow' && !wf.data.completed) {
-            updated[j] = {
-              ...wf,
-              data: { ...wf.data, status: null, completed: true },
-            } as TimelineEntry;
-            break;
-          }
-        }
-        return updated;
-      }
-      break; // only check the last assistant message
-    }
-
-    // Mark last workflow as completed (if exists)
-    for (let i = updated.length - 1; i >= 0; i--) {
-      const entry = updated[i];
-      if (entry.kind === 'workflow' && !entry.data.completed) {
-        updated[i] = {
-          ...entry,
-          data: { ...entry.data, status: null, completed: true },
-        } as TimelineEntry;
-        break;
-      }
-    }
-
-    // Add the assistant message
-    updated.push({ kind: 'message', data: msg, _uid: genUID() });
-
-    return updated;
+    return sealWorkflowAndAppendAssistantMessage(prev, msg);
   }
 
   // ---- WebSocket connection ----
@@ -2014,7 +1953,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const prevSid = eventSidRef.current;
       bySid.forEach((items, sid) => {
         eventSidRef.current = sid;
-        setTimeline((prev) => appendWorkflowEvents(prev, items));
+        const hasParentTool = items.some(
+          (it) => it.event.type === 'tool_call' && !it.event.subAgent,
+        );
+        let commitText = '';
+        if (hasParentTool) {
+          const focused = currentSessionIdRef.current || '';
+          const raw =
+            streamingTextBySessionRef.current[sid]
+            || (sid === focused ? streamingTextRef.current : '')
+            || '';
+          if (String(raw).trim()) {
+            commitText = stripToolCallMarkup(raw).trim();
+            if (streamUiFlushTimerRef.current) {
+              clearTimeout(streamUiFlushTimerRef.current);
+              streamUiFlushTimerRef.current = null;
+            }
+            if (streamingTextBySessionRef.current[sid]) {
+              const st = { ...streamingTextBySessionRef.current };
+              delete st[sid];
+              streamingTextBySessionRef.current = st;
+              setStreamingTextBySession(st);
+            }
+            if (sid === focused) {
+              streamingTextRef.current = '';
+              setStreamingText('');
+            }
+          }
+        }
+        setTimeline((prev) => appendLiveWorkflowBatch(prev, items, {
+          commitAssistantText: commitText,
+        }));
       });
       eventSidRef.current = prevSid;
     };
@@ -2024,6 +1993,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       immediate = false,
     ) => {
       const sid = (eventSidRef.current || currentSessionIdRef.current || '').trim();
+      if (!sid) return;
       pendingLiveWorkflowEvents.push({ event, status, sid });
       if (immediate) {
         flushLiveWorkflowEvents();
@@ -2035,6 +2005,37 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           flushLiveWorkflowEvents();
         });
       }
+    };
+
+    let markupSniffBuf = '';
+    let markupToolSig = '';
+    const sniffMarkupTool = (chunk: string) => {
+      if (!chunk) return;
+      markupSniffBuf += chunk;
+      if (markupSniffBuf.length > 8000) markupSniffBuf = markupSniffBuf.slice(-8000);
+      const parsed = extractLiveToolCallFromMarkup(markupSniffBuf);
+      if (!parsed) return;
+      const argsKey = typeof parsed.arguments === 'string'
+        ? parsed.arguments
+        : JSON.stringify(parsed.arguments);
+      const sig = `${parsed.name}|${argsKey}`;
+      if (markupToolSig === sig) return;
+      markupToolSig = sig;
+      enqueueLiveWorkflowEvent(
+        {
+          type: 'tool_call',
+          content: {
+            id: parsed.id,
+            name: parsed.name,
+            arguments: parsed.arguments,
+            args: parsed.arguments,
+            partial: true,
+            index: 0,
+          },
+          timestamp: Date.now(),
+        },
+        `Calling ${parsed.name}...`,
+      );
     };
 
     // Ready-stage notifications: chat is usable once WS connects; extensions /
@@ -2062,6 +2063,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (!sid || sid === (currentSessionIdRef.current || '')) {
           streamingTextRef.current += text;
         }
+        sniffMarkupTool(text);
         scheduleStreamFlush();
       }
     });
@@ -2107,25 +2109,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         if (finalSid) finalizingBySidRef.current[finalSid] = true;
 
         setTimeline(prev => {
-          // Dedup late final events after refresh/reconnect. Walk backward until
-          // the latest user message boundary so trailing workflow blocks do not
-          // defeat duplicate detection for the already-rendered assistant reply.
-          for (let i = prev.length - 1; i >= 0; i -= 1) {
-            const entry = prev[i];
-            if (entry.kind !== 'message') continue;
-            const existing = entry.data as ChatMessage;
-            if (existing.role === 'user') break;
-            if (existing.role === 'assistant') {
-              if (existing.content === finalText) {
-                console.log('[AIChatPage] handleFinal: recent assistant content already present, skipping');
-                return prev;
-              }
-              if (messageId && existing.message_id && existing.message_id === messageId) {
-                console.log('[AIChatPage] handleFinal: recent assistant message_id already present, skipping');
-                return prev;
-              }
-            }
-          }
+          const absorbed = absorbAssistantFinalText(prev, finalText, messageId);
+          if (absorbed) return absorbed;
           // Broadcast message_id dedup across all entries (not just last)
           if (messageId) {
             const exists = prev.some(e =>
@@ -2253,24 +2238,24 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         }
 
         setTimeline(prev => {
-          for (let i = prev.length - 1; i >= 0; i -= 1) {
-            const entry = prev[i];
-            if (entry.kind !== 'message') continue;
-            const existing = entry.data as ChatMessage;
-            if (existing.role === 'user') break;
-            if (existing.role === 'assistant') {
-              if (existing.content === finalText && existing.end_task) {
-                return foldTaskProcessSinceLastUser(prev);
-              }
-              if (messageId && existing.message_id && existing.message_id === messageId) {
-                const patched = prev.map((e, idx) =>
-                  idx === i && e.kind === 'message'
-                    ? { ...e, data: { ...e.data, end_task: true } }
-                    : e,
-                );
-                return foldTaskProcessSinceLastUser(patched);
+          const absorbed = absorbAssistantFinalText(prev, finalText, messageId);
+          if (absorbed) {
+            const patched = [...absorbed];
+            for (let i = patched.length - 1; i >= 0; i--) {
+              const entry = patched[i];
+              if (entry.kind !== 'message') continue;
+              const existing = entry.data;
+              if (existing.role === 'user') break;
+              if (existing.role === 'assistant') {
+                patched[i] = {
+                  kind: 'message',
+                  data: { ...existing, end_task: true },
+                  _uid: entry._uid,
+                };
+                break;
               }
             }
+            return foldTaskProcessSinceLastUser(patched);
           }
           if (messageId) {
             const exists = prev.some(e =>
@@ -2346,6 +2331,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           return;
         }
         enqueueLiveWorkflowEvent(event, 'Thinking...');
+        sniffMarkupTool(text);
         // Background sub-agents (self-learn / delegate) must not flip the parent
         // chat into "thinking" — otherwise the Stop button stays on and the
         // idle message queue never drains after the sub-agent finishes.
@@ -2375,14 +2361,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
         enqueueLiveWorkflowEvent(event, `Calling ${toolName}...`);
         setShellStreams((prev) => seedShellStreamFromToolCall(prev, event));
       }
-      // 仅主 agent 工具调用时才清空流式文本缓冲区；子 agent 调用不应影响父 agent 的流式输出。
-      // 正常情况下 to_user_final 已在 tool_call 之前到达并清空了缓冲区，此处无副作用。
-      // 异常情况（JSON 参数泄漏）下，后端未发送 to_user_final，泄漏的 JSON 仍留在
-      // streamingTextRef 中——在此强制清空，防止它被拼入下一条正式消息或永久显示。
-      if (!isSubAgent) {
-        streamingTextRef.current = '';
-        setStreamingText('');
-      }
+      // Parent tool_call commits in-flight stream text inside flushLiveWorkflowEvents
+      // so the tool row lands below the reply instead of discarding the buffer.
     });
 
     // Live Native-FC tool arguments (file write/edit code streaming into tool fold)
@@ -2668,22 +2648,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
 
     // Token stats (per-session — parallel panes show their own %)
     const unsubTokenStats = aiWsService.on('token_stats', (msg: AIWSMessage) => {
-      const data = msg.content || msg.data;
-      if (!data || typeof data !== 'object') return;
+      const data = unwrapTokenStatsPayload(msg);
+      if (!data) return;
       const stats: TokenStatsState = {
-        used: Number((data as any).used) || 0,
-        max: Number((data as any).max) || 0,
-        breakdown: (data as any).breakdown,
-        session: (data as any).session,
-        cumulative: (data as any).cumulative,
+        used: Number(data.used) || 0,
+        max: Number(data.max) || 0,
+        breakdown: data.breakdown as TokenStatsState['breakdown'],
+        session: data.session,
+        cumulative: data.cumulative,
       };
+      if (!(stats.max > 0) && !(stats.used > 0)) return;
       // Prefer explicit sid from the payload. Do not attribute another session's
       // broadcast to the focused history tab (currentSessionIdRef).
-      const sid = String(
-        msg.sid
-        || (data as any).session_id
-        || '',
-      ).trim();
+      const sid = tokenStatsSid(msg, data);
       if (!sid) return;
       applyTokenStats(sid, stats);
     });
@@ -3215,12 +3192,6 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       const sid = String((msg as any).sid || eventSidRef.current || '').trim();
       const data = (msg.content || msg.data || {}) as Record<string, unknown>;
       const reason = String(data.reason || 'user_stop');
-      // Late user_stop after this pane already sent a new message — do not
-      // seal the new workflow. Other reasons still close open tools.
-      if (sid && !userStoppedBySidRef.current[sid] && reason === 'user_stop') {
-        clearSessionRunState(sid);
-        return;
-      }
       const cancelText = reason === 'agent_crash'
         ? 'Cancelled: agent disconnected'
         : reason === 'withdraw'
@@ -7128,6 +7099,18 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
     );
   };
 
+  const resolveTokenStatsForSession = (sessionId: string | null | undefined) => {
+    const sid = (sessionId || '').trim();
+    const ws = (sid && tokenStatsBySession[sid]) || agentTokenStats;
+    const live = sid ? pickSessionLiveTimeline(liveTimelinesBySession, sid) : null;
+    const fromLive = live != null && live.length > 0 ? live : null;
+    const cached = sid && !fromLive ? getCachedSessionTimeline(agentId, sid) : null;
+    const raw = fromLive
+      || cached
+      || (sid && sid === currentSessionId ? timeline : []);
+    return mergeSessionTokenStats(ws, flattenArchivedSections(raw || []));
+  };
+
   const makePaneHandlers = (paneId: string): PaneShellHandlers => {
     /** Centered landing until this session has real chat (not draft typing / lifecycle noise). */
     const isSessionComposerLanding = (sessionId: string): boolean => {
@@ -7293,7 +7276,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       return live != null ? flattenArchivedSections(live) : null;
     },
     getSessionTokenStats: (sessionId: string) =>
-      tokenStatsBySession[sessionId] ?? null,
+      resolveTokenStatsForSession(sessionId),
     isSessionBusy: (sessionId: string) => isSessionBusy(sessionId),
     sendToSessionStay: (sessionId, payload) =>
       handlePaneComposerSend(paneId, sessionId, payload, { stay: true }),
@@ -7548,7 +7531,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           wsServiceRef.current?.setReasoningEffort(effort, sessionId);
         }}
         cwd={agentCwd || defaultCwd}
-        tokenStats={tokenStatsBySession[sessionId] ?? null}
+        tokenStats={resolveTokenStatsForSession(sessionId)}
         onViewReport={() => setShowContextViewer(true)}
         onCompressContext={handleCompressContext}
         compressing={isCompressingContext}
@@ -8071,7 +8054,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           apiProtocol={agentApiProtocol}
           model={modelName}
           cwd={agentCwd}
-          tokenStats={tokenStats}
+          tokenStats={resolveTokenStatsForSession(currentSessionId)}
           entries={contextEntries}
           onClose={() => setShowContextViewer(false)}
         />
@@ -8262,6 +8245,8 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           style={{ minHeight: 0 }}
           onScroll={handleMessagesScroll}
           columnClass={soloColumnClass}
+          unpinRef={userScrolledRef}
+          freezeRef={textSelectFrozenRef}
           header={isLoadingMore ? (
             <div className="flex items-center justify-center py-3">
               <OpenSquadLoader size={18} className="mr-2" />
@@ -8270,7 +8255,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
           ) : null}
           footer={(
             <>
-          {(displayStreamingText || isStreaming) && (
+          {(displayStreamingText) && (
             <StreamingMessage
               content={displayStreamingText}
               isComplete={!isStreaming}
@@ -8283,6 +8268,9 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
             </>
           )}
           renderEntry={(entry, i, entryKey) => {
+            const lockLayout =
+              i >= displayTimeline.length - 8
+              || (entry.kind === 'workflow' && !entry.data.completed);
             if (entry.kind === 'message') {
               const msgProps = {
                 message: entry.data,
@@ -8311,7 +8299,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                   : [];
               if (replyEmbeds.length === 0) {
                 return (
-                  <TimelineRow key={entryKey}>
+                  <TimelineRow key={entryKey} lockLayout={lockLayout}>
                     {isSolo
                       ? <SoloMessage {...msgProps} anchorId={entryKey} />
                       : <MessageBubble {...msgProps} anchorId={entryKey} />}
@@ -8319,7 +8307,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 );
               }
               return (
-                <TimelineRow key={entryKey}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout}>
                   {isSolo
                     ? <SoloMessage {...msgProps} anchorId={entryKey} />
                     : <MessageBubble {...msgProps} anchorId={entryKey} />}
@@ -8371,7 +8359,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
                 ? turnStartedMs
                 : (!isSolo && i === lastIncompleteIdx ? turnStartedMs : undefined);
               return (
-                <TimelineRow key={entryKey}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout || groupHasIncomplete}>
                   <SoloActivityRow
                     block={merged}
                     expandLevel={workflowExpandLevel}
@@ -8411,7 +8399,7 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
               const fold = entry.data;
               const foldEmbedIndex = !isSolo ? indexHtmlEmbedsByAssistantMessage(fold.entries) : null;
               return (
-                <TimelineRow key={entryKey}>
+                <TimelineRow key={entryKey} lockLayout={lockLayout}>
                 <TaskFoldBlock
                   title={fold.title}
                   messageCount={fold.messageCount}

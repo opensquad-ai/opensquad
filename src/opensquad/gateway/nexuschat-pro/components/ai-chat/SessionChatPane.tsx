@@ -106,7 +106,6 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
   }, [useLive, liveTimeline, fetched, pollIntervalMs]);
   const {
     displayValue: timeline,
-    isFrozen,
     isFrozenRef,
   } = useTextSelectionFreeze(listRef, liveOrFetched);
 
@@ -354,22 +353,12 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
     listRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  // Auto-follow bottom only when user hasn't scrolled away and isn't selecting
+  // Stick-to-bottom is owned by ChatTimeline (unpinRef). This only refreshes
+  // the jump-button visibility when the live timeline grows.
   useEffect(() => {
     if (loading && timeline.length === 0) return;
-    if (isFrozenRef.current || isFrozen) {
-      updateScrollButtons();
-      return;
-    }
-    if (userScrolledRef.current) {
-      updateScrollButtons();
-      return;
-    }
-    const el = listRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
     updateScrollButtons();
-  }, [timeline.length, timelineSig, loading, useLive, isFrozen, updateScrollButtons]);
+  }, [timeline.length, timelineSig, loading, updateScrollButtons]);
 
   useEffect(() => {
     return () => {
@@ -444,6 +433,8 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           className="h-full min-h-0 overflow-y-auto px-2 sm:px-4 py-3 sm:py-4"
           onScroll={handleScroll}
           columnClass={columnClass}
+          unpinRef={userScrolledRef}
+          freezeRef={isFrozenRef}
           header={
             loading && timeline.length === 0 ? (
               showSpinner ? (
@@ -459,6 +450,9 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
           }
           footer={<div ref={endRef} />}
           renderEntry={(entry, i, entryKey) => {
+                const lockLayout =
+                  i >= timeline.length - 8
+                  || (entry.kind === 'workflow' && !entry.data.completed);
                 if (entry.kind === 'message') {
                   const msgProps = {
                     message: entry.data,
@@ -476,7 +470,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                     anchorId: entryKey,
                   };
                   return (
-                    <TimelineRow key={entryKey}>
+                    <TimelineRow key={entryKey} lockLayout={lockLayout}>
                       {isSolo ? (
                         <SoloMessage {...msgProps} />
                       ) : (
@@ -509,7 +503,7 @@ export const SessionChatPane: React.FC<SessionChatPaneProps> = ({
                   }
                   const merged = blocks.length > 1 ? mergeWorkflowBlocks(blocks) : curBlock;
                   return (
-                    <TimelineRow key={entryKey}>
+                    <TimelineRow key={entryKey} lockLayout={lockLayout}>
                       <SoloActivityRow
                         block={merged}
                         expandLevel={expandLevel}

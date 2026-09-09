@@ -373,7 +373,9 @@ Desktop builds are **not** produced by `release.yml`. They come from
 `.github/workflows/build-desktop.yml`, which runs in parallel on every `v*`
 tag push:
 
-1. **build-backend** — PyInstaller on Windows / macOS / Linux (matrix).
+1. **build-backend** — PyInstaller on Windows / macOS / Linux (matrix), then
+   `scripts/check_backend_bundle.py` (rejects nested `opensquad/build` /
+   Electron `*-unpacked` pollution inside `_internal`).
    macOS uses a **pinned `macos-15` runner** with
    `MACOSX_DEPLOYMENT_TARGET=12.0` so the frozen backend runs on
    **macOS 12 Monterey and newer** (do not use `macos-latest` for this job).
@@ -382,6 +384,15 @@ tag push:
 3. **attach-to-release** — uploads `.exe` / `.dmg` / `.AppImage` / `.deb` to
    the GitHub Release with the same tag name (`overwrite_files: true` replaces
    same-named assets).
+
+**Local one-shot (Windows):** from repo root,
+`powershell -ExecutionPolicy Bypass -File scripts\build_desktop.ps1`
+(runs `build_backend.bat` → bundle check → `npm run electron:win`).
+macOS/Linux: `bash scripts/build_desktop.sh`.
+
+Official installer output is always repo-root `build/release/`. Do **not**
+write Electron trees under `src/opensquad/build/` (gitignored; would be
+pulled into `run.exe` by `collect_data_files`).
 
 `release.yml` creates the Release page and notes first; `build-desktop.yml`
 only **adds/replaces** binary assets (~10–15 minutes later). Do not panic if

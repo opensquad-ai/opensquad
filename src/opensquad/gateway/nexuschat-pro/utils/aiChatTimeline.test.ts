@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   appendWorkflowEvent,
   appendWorkflowEvents,
+  absorbAssistantFinalText,
+  appendLiveWorkflowBatch,
   buildTimelineFromSession,
   composeAssistantDisplayContent,
+  extractLiveToolCallFromMarkup,
   foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
   genTimelineUID,
@@ -246,6 +249,15 @@ describe('composeAssistantDisplayContent', () => {
     expect(out).not.toContain('parameter');
     expect(out).not.toContain('anysearch');
     expect(out).toContain('\u62B1\u6B49');
+  });
+
+  it('strips unclosed <tool_call> and leaked websearch skeletons', () => {
+    const unclosed =
+      'Let me search.\n<tool_call>\n<func>websearch</func>\n<query>\u798F\u5DDE\u5929\u6C14</query>';
+    expect(composeAssistantDisplayContent(unclosed)).toBe('Let me search.');
+    expect(
+      composeAssistantDisplayContent('websearch\nquery\n\u798F\u5DDE\u5929\u6C14'),
+    ).toBe('');
   });
 });
 
@@ -1072,6 +1084,166 @@ describe('appendWorkflowEvents', () => {
       const calls = wf.data.events.filter((e) => e.type === 'tool_call');
       expect(calls).toHaveLength(1);
       expect(calls[0].result).toBe('ok');
+    }
+  });
+});
+
+describe('appendLiveWorkflowBatch / absorbAssistantFinalText', () => {
+  it('appends a parent tool_call into the live thought stream instead of sealing it', () => {
+    let tl: TimelineEntry[] = [];
+    tl = appendWorkflowEvent(
+      tl,
+      { type: 'thought', content: 'thinking', timestamp: Date.now() },
+      'Thinking...',
+    );
+    tl = appendLiveWorkflowBatch(
+      tl,
+      [{ event: toolCall('c1', 'write_file'), status: 'Calling...' }],
+      { commitAssistantText: 'Here is the plan for the next edit.' },
+    );
+    expect(tl.map((e) => e.kind)).toEqual(['workflow']);
+    expect(tl[0].kind === 'workflow' && tl[0].data.completed).toBe(false);
+    const types = tl[0].kind === 'workflow' ? tl[0].data.events.map((e) => e.type) : [];
+    expect(types).toEqual(['thought', 'tool_call']);
+  });
+
+  it('folds leftover stream text into the thought step when a parent tool_call arrives', () => {
+    const tl = appendLiveWorkflowBatch(
+      [],
+      [{ event: toolCall('c1', 'write_file'), status: 'Calling...' }],
+      { commitAssistantText: 'Here is the plan for the next edit.' },
+    );
+    expect(tl.map((e) => e.kind)).toEqual(['workflow']);
+    expect(tl.some((e) => e.kind === 'message')).toBe(false);
+    const events = tl[0].kind === 'workflow' ? tl[0].data.events : [];
+    expect(events.map((e) => e.type)).toEqual(['thought', 'tool_call']);
+    expect(events[0]?.content).toBe('Here is the plan for the next edit.');
+  });
+
+  it('does not commit stream for a sub-agent tool_call', () => {
+    const next = appendLiveWorkflowBatch(
+      [],
+      [{
+        event: { ...toolCall('sub1', 'read_file'), subAgent: true },
+        status: 'Calling...',
+      }],
+      { commitAssistantText: 'Parent reply still streaming.' },
+    );
+    expect(next.some((e) => e.kind === 'message')).toBe(false);
+    expect(next[0]?.kind).toBe('workflow');
+  });
+
+  it('upgrades a committed assistant bubble instead of appending after later tools', () => {
+    const tl: TimelineEntry[] = [
+      {
+        kind: 'message',
+        data: { role: 'assistant', content: 'Hello there, working on it.' },
+        _uid: 'm1',
+      },
+      {
+        kind: 'workflow',
+        data: { events: [toolCall('c1', 'write_file')], status: 'Calling...', completed: false },
+        _uid: 'w1',
+      },
+    ];
+    const absorbed = absorbAssistantFinalText(tl, 'Hello there, working on it. Done.');
+    expect(absorbed).not.toBeNull();
+    const messages = absorbed!.filter((e) => e.kind === 'message');
+    expect(messages).toHaveLength(1);
+    expect(messages[0].kind === 'message' && messages[0].data.content).toBe(
+      'Hello there, working on it. Done.',
+    );
+    const msgIdx = absorbed!.findIndex((e) => e.kind === 'message');
+    const toolIdx = absorbed!.findIndex((e, i) => i > msgIdx && e.kind === 'workflow');
+    expect(toolIdx).toBeGreaterThan(msgIdx);
+  });
+
+  it('does not absorb a short prior reply into a later unrelated final', () => {
+    const tl: TimelineEntry[] = [
+      {
+        kind: 'message',
+        data: { role: 'assistant', content: 'OK' },
+        _uid: 'm1',
+      },
+      {
+        kind: 'workflow',
+        data: { events: [toolCall('c1')], status: null, completed: false },
+        _uid: 'w1',
+      },
+    ];
+    expect(absorbAssistantFinalText(tl, 'OK, I will now rewrite the module.')).toBeNull();
+  });
+});
+
+describe('extractLiveToolCallFromMarkup', () => {
+  it('reads an unclosed <tool_call><func> websearch block', () => {
+    const got = extractLiveToolCallFromMarkup(
+      '<tool_call>\n<func>websearch.search</func>\n<query>福州天气',
+    );
+    expect(got).not.toBeNull();
+    expect(got!.name).toMatch(/websearch/i);
+    expect(JSON.stringify(got!.arguments)).toContain('福州');
+    expect(got!.partial).toBe(true);
+  });
+
+  it('reads attribute-style name before </tool_call>', () => {
+    const got = extractLiveToolCallFromMarkup(
+      '<tool_call name="websearch.search">\n<arguments>{"query": "福州天气"}',
+    );
+    expect(got?.name).toBe('websearch.search');
+  });
+
+  it('reads leaked skeleton without XML tags', () => {
+    const got = extractLiveToolCallFromMarkup('websearch\nquery\n福州天气');
+    expect(got?.name).toMatch(/websearch/i);
+    expect((got!.arguments as Record<string, unknown>).query).toBe('福州天气');
+  });
+
+  it('does not treat prose about calling a tool as a tool row', () => {
+    expect(extractLiveToolCallFromMarkup('Let me use the websearch tool to check Fuzhou weather.')).toBeNull();
+  });
+
+  it('reads Ling/Qwen first-line name + arg_key/arg_value', () => {
+    const got = extractLiveToolCallFromMarkup(
+      '<tool_call>websearch\n<arg_key>query</arg_key>\n<arg_value>福州天气</arg_value>',
+    );
+    expect(got).not.toBeNull();
+    expect(got!.name).toBe('websearch');
+    expect((got!.arguments as Record<string, unknown>).query).toBe('福州天气');
+  });
+
+  it('appends the extracted call into the live thought workflow', () => {
+    const markup = extractLiveToolCallFromMarkup(
+      '<tool_call>\n<func>websearch.search</func>\n<query>福州天气',
+    );
+    expect(markup).not.toBeNull();
+    let tl = appendWorkflowEvent(
+      [],
+      { type: 'thought', content: 'checking weather', timestamp: Date.now() },
+      'Thinking...',
+    );
+    tl = appendLiveWorkflowBatch(tl, [{
+      event: {
+        type: 'tool_call',
+        content: {
+          id: markup!.id,
+          name: markup!.name,
+          arguments: markup!.arguments,
+          args: markup!.arguments,
+          partial: true,
+        },
+        timestamp: Date.now(),
+      },
+      status: 'Calling websearch...',
+    }]);
+    expect(tl).toHaveLength(1);
+    expect(tl[0].kind).toBe('workflow');
+    if (tl[0].kind === 'workflow') {
+      expect(tl[0].data.completed).toBe(false);
+      const types = tl[0].data.events.map((e) => e.type);
+      expect(types).toEqual(['thought', 'tool_call']);
+      const call = tl[0].data.events[1];
+      expect(call.content.name).toMatch(/websearch/i);
     }
   });
 });

@@ -29,6 +29,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
+  const [picking, setPicking] = useState(false);
   const plusBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const byId = new Map(workspaces.map((w) => [w.id, w]));
@@ -64,7 +65,7 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
 
   useEffect(() => {
     if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
+    const onOutside = (e: MouseEvent) => {
       const t = e.target as Node;
       if (menuRef.current?.contains(t)) return;
       if (plusBtnRef.current?.contains(t)) return;
@@ -74,12 +75,12 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
       if (e.key === 'Escape') setMenuOpen(false);
     };
     const onReposition = () => updateMenuPos();
-    document.addEventListener('mousedown', onDown);
+    document.addEventListener('click', onOutside);
     document.addEventListener('keydown', onKey);
     window.addEventListener('resize', onReposition);
     window.addEventListener('scroll', onReposition, true);
     return () => {
-      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('click', onOutside);
       document.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', onReposition);
       window.removeEventListener('scroll', onReposition, true);
@@ -87,10 +88,26 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
   }, [menuOpen]);
 
   const handleOpenFolder = async () => {
+    if (picking) return;
     setMenuOpen(false);
-    const result = await pickFolder(null);
-    if (result.cancelled || !result.path) return;
-    onOpenExisting(result.path);
+    setPicking(true);
+    try {
+      // Let the dropdown unmount before opening a modal folder dialog (Electron focus).
+      await new Promise<void>((r) => window.setTimeout(r, 0));
+      const result = await pickFolder(null);
+      if (result.cancelled) return;
+      if (result.error) {
+        alert(`无法打开本机目录选择器：${result.error}`);
+        return;
+      }
+      if (!result.path) {
+        alert('未能获取所选文件夹的绝对路径，请确认 Launcher 正在本机运行。');
+        return;
+      }
+      onOpenExisting(result.path);
+    } finally {
+      setPicking(false);
+    }
   };
 
   const menu =
@@ -144,11 +161,13 @@ export const WorkspaceTabBar: React.FC<WorkspaceTabBarProps> = ({
             <button
               type="button"
               role="menuitem"
-              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-primary/10"
+              disabled={picking}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-primary/10 disabled:opacity-50"
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => void handleOpenFolder()}
             >
               <Folder size={13} className="text-sky-500" />
-              打开现有文件夹
+              {picking ? '正在打开…' : '打开现有文件夹'}
             </button>
             <button
               type="button"

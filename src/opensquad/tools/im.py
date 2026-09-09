@@ -1,18 +1,290 @@
 """
 IM Chat Tools v1.0
 Allows agents to deeply interact with the ChatPro group chat system.
-Supports joining groups, sending messages, retrieving history, and more.
+Supports account registration, joining/leaving groups, sending messages,
+retrieving history, and more.
+
+Account lifecycle belongs here (mandatory core tool), not only in the optional
+``chat_account`` plugin. Prefer ``im.register_account`` / ``im.join_group`` for
+the current agent's own IM identity; use ``chat_account`` when managing *other*
+accounts (email/password override).
 """
 
+from __future__ import annotations
+
+import json
+import logging
+import os
 from typing import Any
+
+import requests
 
 from .. import bridge as bridge_module
 from ..input_hub import input_hub
+
+logger = logging.getLogger(__name__)
 
 
 def _bridge():
     """Get the currently active bridge instance (supports runtime replacement in boot.py)."""
     return bridge_module.bridge
+
+
+def _agent_config_path() -> str | None:
+    agent_dir = getattr(input_hub, "agent_dir", None) or os.environ.get("OPENSQUAD_AGENT_DIR", "")
+    if not agent_dir:
+        return None
+    path = os.path.join(agent_dir, "config.json")
+    return path if os.path.isfile(path) else None
+
+
+def _load_agent_config() -> dict[str, Any]:
+    path = _agent_config_path()
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _persist_group_chat(
+    *,
+    email: str | None = None,
+    password: str | None = None,
+    enabled: bool | None = None,
+    add_group: str | None = None,
+    remove_group: str | None = None,
+) -> bool:
+    """Write group_chat fields back to the agent's config.json. Returns True on success."""
+    path = _agent_config_path()
+    if not path:
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            return False
+        gc = cfg.setdefault("group_chat", {})
+        if not isinstance(gc, dict):
+            gc = {}
+            cfg["group_chat"] = gc
+        if email is not None:
+            gc["email"] = email
+        if password is not None:
+            gc["password"] = password
+        if enabled is not None:
+            gc["enabled"] = enabled
+        groups = gc.get("groups")
+        if not isinstance(groups, list):
+            groups = []
+            gc["groups"] = groups
+        if add_group and add_group not in groups:
+            groups.append(add_group)
+        if remove_group and remove_group in groups:
+            groups.remove(remove_group)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.warning("[im] Failed to persist group_chat config: %s", e)
+        return False
+
+
+def _schedule_ws_connect(bridge_inst: Any) -> None:
+    """Best-effort: start WS listening after a fresh login."""
+    try:
+        import asyncio
+
+        if getattr(bridge_inst, "_connected", False) and getattr(bridge_inst, "ws", None):
+            return
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(bridge_inst.connect_ws())
+        _ = task
+    except RuntimeError:
+        # No running loop (sync tool path without boot bridge) — reconnect later.
+        pass
+    except Exception as e:
+        logger.debug("[im] WS connect schedule skipped: %s", e)
+
+
+def register_account(email: str, password: str, name: str = "") -> dict[str, Any]:
+    """
+    Register (or ensure) an IM account for this agent, save credentials to config.json,
+    and log the Bridge in so join/send/history work immediately.
+
+    Args:
+        email: Login email. Prefer a unique agent address ending with ``@ai``
+               (e.g. ``news2theme_agent@ai``). Do not reuse the placeholder ``ai@ai``.
+        password: Login password (stored in this agent's config.json).
+        name: Display name. Defaults to config ``agent_name`` when empty.
+    """
+    email = (email or "").strip()
+    password = (password or "").strip()
+    if not email or not password:
+        return {"status": "error", "message": "email and password are required"}
+    if email.lower() == "ai@ai":
+        return {
+            "status": "error",
+            "message": "Refuse to use placeholder email ai@ai. Use a unique address like <agent_folder>@ai.",
+        }
+
+    cfg = _load_agent_config()
+    display_name = (name or "").strip() or str(cfg.get("agent_name") or email.split("@")[0])
+
+    from opensquad.system_config import syscfg
+
+    base_url = syscfg.gateway_http()
+    headers = {}
+    secret = syscfg.node_secret() or ""
+    if secret and secret not in ("YOUR_NODE_SECRET_HERE", "opensquad-gateway-simple-token"):
+        headers["X-Node-Secret"] = secret
+
+    try:
+        reg = requests.post(
+            f"{base_url}/api/auth/register",
+            json={"email": email, "password": password, "name": display_name},
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as e:
+        return {"status": "error", "message": f"Register request failed: {e}"}
+
+    created = False
+    user_id = ""
+    if reg.status_code in (200, 201):
+        created = True
+        user = (reg.json() or {}).get("user") or {}
+        user_id = str(user.get("id") or "")
+    elif reg.status_code == 400:
+        detail = ""
+        try:
+            detail = str((reg.json() or {}).get("detail") or reg.text[:200])
+        except Exception:
+            detail = reg.text[:200]
+        if "already registered" not in detail.lower():
+            return {"status": "error", "message": f"Register failed: {detail}"}
+        # Account exists — verify password via login (or reset with node_secret).
+        login = requests.post(
+            f"{base_url}/api/auth/login",
+            json={"email": email, "password": password},
+            timeout=10,
+        )
+        if login.status_code != 200:
+            reset = requests.post(
+                f"{base_url}/api/auth/reset-password",
+                json={"email": email, "new_password": password, "node_secret": secret},
+                timeout=10,
+            )
+            if reset.status_code not in (200, 201):
+                try:
+                    err = (reset.json() or {}).get("detail", reset.text[:200])
+                except Exception:
+                    err = reset.text[:200]
+                return {"status": "error", "message": f"Account exists but password reset failed: {err}"}
+            login = requests.post(
+                f"{base_url}/api/auth/login",
+                json={"email": email, "password": password},
+                timeout=10,
+            )
+        if login.status_code != 200:
+            return {"status": "error", "message": "Account exists but login failed after password reset"}
+        user_id = str(((login.json() or {}).get("user") or {}).get("id") or "")
+    else:
+        try:
+            detail = str((reg.json() or {}).get("detail") or reg.text[:200])
+        except Exception:
+            detail = reg.text[:200]
+        return {"status": "error", "message": f"Register failed (HTTP {reg.status_code}): {detail}"}
+
+    persisted = _persist_group_chat(email=email, password=password, enabled=True)
+    b = _bridge()
+    login_ok = b.apply_credentials(email, password, agent_name=display_name)
+    if login_ok:
+        _schedule_ws_connect(b)
+        user_id = user_id or str(b.user_id or "")
+
+    return {
+        "status": "success" if login_ok else "error",
+        "created": created,
+        "email": email,
+        "user_id": user_id,
+        "name": display_name,
+        "config_persisted": persisted,
+        "bridge_logged_in": login_ok,
+        "message": (
+            f"IM account ready ({email}). Bridge logged in."
+            if login_ok
+            else f"Account saved but Bridge login failed for {email}."
+        ),
+    }
+
+
+def leave_group(group_id: str) -> dict[str, Any]:
+    """
+    Leave a group by ID. Also removes it from config.json group_chat.groups when possible.
+
+    Args:
+        group_id: Group ID (e.g. g1, gcmsu1).
+    """
+    result = _bridge().leave_group_api(group_id)
+    if isinstance(result, dict) and result.get("ok"):
+        _persist_group_chat(remove_group=group_id)
+        return {"status": "success", "message": f"Left group {group_id}."}
+    detail = result.get("detail", "unknown error") if isinstance(result, dict) else "unknown error"
+    return {"status": "error", "message": f"Failed to leave group {group_id}: {detail}"}
+
+
+def create_group(name: str, description: str = "", is_private: bool = False) -> dict[str, Any]:
+    """
+    Create a new group with the agent's current IM account. Creator is added as a member.
+
+    Args:
+        name: Group name.
+        description: Optional description.
+        is_private: Private groups cannot be joined via public join API.
+    """
+    b = _bridge()
+    if not b._ensure_token():
+        return {
+            "status": "error",
+            "message": "Bridge not logged in. Call im.register_account(...) first with a unique @ai email.",
+        }
+    try:
+        r = requests.post(
+            f"{b.base_url}/api/groups",
+            params={"token": b.token},
+            json={"name": name, "description": description, "is_private": is_private},
+            timeout=10,
+        )
+        if r.status_code == 401 and b.login():
+            r = requests.post(
+                f"{b.base_url}/api/groups",
+                params={"token": b.token},
+                json={"name": name, "description": description, "is_private": is_private},
+                timeout=10,
+            )
+        if r.status_code not in (200, 201):
+            try:
+                detail = (r.json() or {}).get("detail", r.text[:200])
+            except Exception:
+                detail = r.text[:200]
+            return {"status": "error", "message": f"Create group failed: {detail}"}
+        data = r.json() if r.content else {}
+        gid = str((data or {}).get("id") or "")
+        if gid:
+            _persist_group_chat(add_group=gid, enabled=True)
+            b._ws_subscribe_group(gid)
+        return {
+            "status": "success",
+            "group_id": gid,
+            "name": (data or {}).get("name", name),
+            "is_private": (data or {}).get("is_private", is_private),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 def list_groups() -> dict[str, Any]:
@@ -45,6 +317,8 @@ def join_group(group_id: str) -> dict[str, Any]:
     Let the agent join a specific group by group ID.
     After joining, the agent will start listening to messages from that group.
 
+    If Bridge is not logged in, call ``im.register_account`` first with a unique ``@ai`` email.
+
     Args:
         group_id: Unique identifier of the group (e.g. g1, g2).
     """
@@ -52,13 +326,18 @@ def join_group(group_id: str) -> dict[str, Any]:
     # Compatible with both old bool return and new dict return
     if isinstance(result, dict):
         if result.get("ok"):
+            _persist_group_chat(add_group=group_id, enabled=True)
             return {"status": "success", "message": f"Successfully joined group {group_id}."}
         else:
             detail = result.get("detail", "unknown error")
-            return {"status": "error", "message": f"Failed to join group {group_id}: {detail}"}
+            hint = ""
+            if "auto-login failed" in str(detail).lower() or "not logged in" in str(detail).lower():
+                hint = " Call im.register_account(email='<agent>@ai', password='...') first."
+            return {"status": "error", "message": f"Failed to join group {group_id}: {detail}.{hint}"}
     else:
         # Legacy compatibility
         if result:
+            _persist_group_chat(add_group=group_id, enabled=True)
             return {"status": "success", "message": f"Successfully joined group {group_id}."}
         else:
             return {

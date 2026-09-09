@@ -17,11 +17,15 @@ cd src/opensquad/gateway/nexuschat-pro
 npm install
 npm run electron:dev
 
-# 为当前平台构建安装包
-npm run electron:build
-# → build/release/   (Windows .exe、macOS .dmg、Linux .AppImage / .deb)
+# 推荐：仓库根目录一键打桌面包
+# Windows:
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
+# macOS / Linux:
+bash scripts/build_desktop.sh
+# → build/backend-*/run/  然后  build/release/
 
-# 构建指定平台
+# 或在已跑过 scripts/build_backend.* 后只打 Electron：
+cd src/opensquad/gateway/nexuschat-pro
 npm run electron:win     # Windows .exe（NSIS + portable）
 npm run electron:mac     # macOS .dmg + .zip（x64 + arm64）
 npm run electron:linux   # Linux .AppImage + .deb
@@ -29,6 +33,7 @@ npm run electron:linux   # Linux .AppImage + .deb
 
 构建流水线分**两段**：一段 Python 后端（PyInstaller），一段 Electron 外壳。
 两段都要成功；Electron 阶段会按平台把对应的后端塞进对应的安装包。
+安装包输出必须在仓库根目录 `build/release/`，**不要**写到 `src/opensquad/build/`。
 
 ---
 

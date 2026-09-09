@@ -1136,7 +1136,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             onClick={openConnect}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-primary/40 text-primary hover:bg-primary/10 transition-all"
+            className={adminHeaderCta}
             title={t('modelsPage.providerConnect')}
           >
             <KeyRound size={13} /> <span className="hidden md:inline">{t('modelsPage.providerConnect')}</span>
@@ -1144,6 +1144,7 @@ const ModelsPage: React.FC<ModelsPageProps> = ({ onBack }) => {
           <button
             onClick={openCustomProvider}
             className={adminHeaderCta}
+            title={t('modelsPage.newCard')}
           >
             <Plus size={13} /> <span className="hidden md:inline">{t('modelsPage.newCard')}</span>
           </button>

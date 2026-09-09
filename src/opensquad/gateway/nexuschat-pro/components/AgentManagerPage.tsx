@@ -1059,11 +1059,11 @@ export const AgentManagerPage: React.FC<AgentManagerPageProps> = ({ onBack, onCh
             <button
               type="button"
               onClick={onOpenGroupChat}
-              className={`${adminHeaderGhostBtn} gap-1.5 px-2.5 text-xs font-medium`}
+              className={adminHeaderGhostBtn}
               title={t('nav.chats')}
+              aria-label={t('nav.chats')}
             >
               <MessageSquare size={14} />
-              <span className="hidden sm:inline">{t('nav.chats')}</span>
             </button>
           ) : null}
           <div className={`hidden md:flex ${adminHeaderIconBox}`}>

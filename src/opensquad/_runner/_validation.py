@@ -23,6 +23,8 @@ def is_leaked_tool_params(text: str) -> bool:
     1. JSON format leak: starts with { and ends with }, first key is an ASCII identifier
     2. XML parameter tag leak: tool parameter tags appear without an outer <tool_call>
     """
+    if not isinstance(text, str) or not text:
+        return False
     s = text.strip()
     if not s:
         return False
@@ -120,7 +122,8 @@ def is_repeated_content(text: str, get_messages: Callable[[], list[dict[str, Any
         last_asst = None
         for msg in reversed(history):
             if msg.get("role") == "assistant":
-                last_asst = msg.get("content", "").strip()
+                # Tool-only assistant turns may store content=None.
+                last_asst = (msg.get("content") or "").strip()
                 break
 
         if last_asst and current_clean == last_asst:

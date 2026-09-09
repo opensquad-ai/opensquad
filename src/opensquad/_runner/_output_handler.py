@@ -124,6 +124,8 @@ class OutputHandler:
 
         stream_parser._default_handler = emit_user_stream
 
+        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES
+
         stream_parser._handlers.update(
             {
                 "thought": lambda x: emit_with_sid("thought", x),
@@ -148,8 +150,15 @@ class OutputHandler:
                 "tool_result": lambda x: None,
                 "result": lambda x: None,
                 "tool_response": lambda x: None,
+                # DSML / invoke tool calls must not leak as chat text.
+                **{name: (lambda x: None) for name in DSML_TOOL_TAG_NAMES},
             }
         )
+        if hasattr(stream_parser, "_update_cycle_len"):
+            stream_parser._update_cycle_len()
+        from opensquad.xml_tool_preview import attach_xml_tool_preview
+
+        attach_xml_tool_preview(stream_parser, emit_with_sid)
 
         return streamed_user_text
 

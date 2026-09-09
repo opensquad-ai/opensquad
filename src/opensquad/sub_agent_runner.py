@@ -91,6 +91,40 @@ class SubAgentJobManager:
                 logger.warning(f"[JobManager] cancelled job {jid} ({reason})")
         return n
 
+    def cancel_by_sid(self, sid: str, reason: str = "aborted") -> int:
+        """Abort in-flight sub-agents tagged with a parent session id."""
+        sid = (sid or "").strip()
+        if not sid:
+            return 0
+        n = 0
+        for runner in list(self._active_runners):
+            if (getattr(runner, "_sid", "") or "").strip() != sid:
+                continue
+            try:
+                runner.abort(reason)
+                n += 1
+            except Exception:
+                logger.debug("[JobManager] runner.abort by sid failed", exc_info=True)
+        for jid, entry in list(self._jobs.items()):
+            if entry.status in ("done", "error", "cancelled"):
+                continue
+            task = entry._asyncio_task
+            if task is None or task.done():
+                continue
+            runner_sid = ""
+            for runner in self._active_runners:
+                if getattr(runner, "_job_id", None) == jid:
+                    runner_sid = (getattr(runner, "_sid", "") or "").strip()
+                    break
+            if runner_sid != sid:
+                continue
+            entry.status = "cancelled"
+            entry.result = f"Cancelled: {reason}"
+            task.cancel()
+            n += 1
+            logger.warning(f"[JobManager] cancelled job {jid} sid={sid} ({reason})")
+        return n
+
     def submit(self, runner: "SubAgentRunner", task: str) -> str:
         """
         Start a sub-agent in the background and return a job_id immediately.

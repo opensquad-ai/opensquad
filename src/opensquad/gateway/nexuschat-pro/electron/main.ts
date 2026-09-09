@@ -147,6 +147,11 @@ function registerElectronIpc(): void {
 
   ipcMain.handle('electron:pick-workspace-folder', async () => {
     const win = mainWindow ?? BrowserWindow.getFocusedWindow()
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
     const opts = {
       title: 'Select workspace folder',
       properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,

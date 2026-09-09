@@ -57,8 +57,11 @@ uv run --python "$PYTHON_VERSION" pyinstaller "$SPEC_FILE" \
   --workpath "$WORK_PATH" \
   --clean --noconfirm
 
-echo "[6/6] Verify PyInstaller bundle is Python $PYTHON_VERSION..."
+echo "[6/7] Verify PyInstaller bundle is Python $PYTHON_VERSION..."
 uv run --python "$PYTHON_VERSION" python scripts/check_build_python.py --bundle "$DIST_PATH/run"
+
+echo "[7/7] Check backend bundle for nested build pollution..."
+uv run --python "$PYTHON_VERSION" python scripts/check_backend_bundle.py --bundle "$DIST_PATH/run"
 
 # 确保可执行权限
 chmod +x "$DIST_PATH/run/run"
@@ -68,7 +71,8 @@ echo "============================================================"
 echo " Backend built successfully!"
 echo " Binary: $DIST_PATH/run/run"
 echo ""
-echo " Next: cd src/opensquad/gateway/nexuschat-pro"
+echo " Next: scripts/build_desktop.sh   (or build_desktop.ps1 on Windows)"
+echo "     or: cd src/opensquad/gateway/nexuschat-pro"
 if [[ "$(uname)" == "Darwin" ]]; then
   echo "       npm run electron:mac"
 else

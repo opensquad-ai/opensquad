@@ -719,7 +719,7 @@ export const AgentWebComposer = forwardRef<AgentWebComposerHandle, AgentWebCompo
                 landing
                   ? 'shadow-[0_8px_32px_rgba(0,0,0,0.07)]'
                   : 'shadow-[0_4px_24px_rgba(0,0,0,0.06)]'
-              } ${disabled ? 'bg-border/40' : 'bg-bgLight'}`}
+              } ${disabled ? 'bg-border/40' : 'bg-panel'}`}
             >
             {slashMode?.kind === 'commands' ? (
               <SlashMenu

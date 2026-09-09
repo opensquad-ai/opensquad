@@ -2,7 +2,7 @@ import { type RefObject, useEffect, useState } from 'react';
 
 export const DEFAULT_ESTIMATE = 96;
 export const DEFAULT_OVERSCAN = 14;
-export const ALWAYS_RENDER_TAIL = 4;
+export const ALWAYS_RENDER_TAIL = 8;
 export const WINDOW_AFTER = 48;
 
 export type VirtualRange = { start: number; end: number };
@@ -44,6 +44,16 @@ export function useTimelineVirtualRange(
     const update = () => {
       const top = el.scrollTop;
       const h = el.clientHeight || 600;
+      const dist = el.scrollHeight - top - h;
+      // Stick-to-bottom: keep the window locked on the tail so estimate
+      // mismatch cannot remount rows and shake the scrollbar.
+      if (dist < 160) {
+        const visible = Math.ceil(h / estimatePx) + overscan;
+        const start = Math.max(0, count - visible);
+        const end = count - 1;
+        setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+        return;
+      }
       const start = Math.max(0, Math.floor(top / estimatePx) - overscan);
       const end = Math.min(count - 1, Math.ceil((top + h) / estimatePx) + overscan);
       setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
@@ -51,11 +61,8 @@ export function useTimelineVirtualRange(
 
     update();
     el.addEventListener('scroll', update, { passive: true });
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
-    ro?.observe(el);
     return () => {
       el.removeEventListener('scroll', update);
-      ro?.disconnect();
     };
   }, [scrollRef, count, estimatePx, overscan]);
 

@@ -105,6 +105,47 @@ async def _generate_user_id(db) -> str:
     raise RuntimeError("Unable to generate unique user ID after 20 attempts")
 
 
+_LOCAL_WEB_EMAIL = "ss@ss"
+_LOCAL_WEB_PASSWORD = "ssssss"
+_LOCAL_WEB_NAME = "ss"
+
+
+async def _ensure_local_web_login(db) -> None:
+    """Keep the long-standing local account ss@ss / ssssss usable.
+
+    Some workspace DBs only have *@ai agent users, so the login screen
+    appears but ss@ss is missing. Recreate or repair the hash without
+    touching any other web user.
+    """
+    from app.auth import get_password_hash, verify_password
+
+    result = await db.execute(select(User).where(User.email == _LOCAL_WEB_EMAIL))
+    user = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if user is None:
+        uid = await _generate_user_id(db)
+        db.add(
+            User(
+                id=uid,
+                name=_LOCAL_WEB_NAME,
+                email=_LOCAL_WEB_EMAIL,
+                hashed_password=get_password_hash(_LOCAL_WEB_PASSWORD),
+                avatar="",
+                status=UserStatus.OFFLINE,
+                created_at=now,
+                last_seen=now,
+            )
+        )
+        await db.commit()
+        print(f"  Restored local web login: {_LOCAL_WEB_NAME} <{_LOCAL_WEB_EMAIL}>")
+        return
+    if not verify_password(_LOCAL_WEB_PASSWORD, user.hashed_password):
+        user.hashed_password = get_password_hash(_LOCAL_WEB_PASSWORD)
+        user.last_seen = now
+        await db.commit()
+        print(f"  Repaired password hash for {_LOCAL_WEB_EMAIL}")
+
+
 async def init_default_data():
     """Initialize default data: pre-register seed agent comm accounts only.
 
@@ -121,42 +162,41 @@ async def init_default_data():
     async with AsyncSessionLocal() as db:
         # Idempotent guard: only seed an empty DB.
         result = await db.execute(select(User).limit(1))
-        if result.scalar_one_or_none():
-            print("Database already has data, skipping initialization")
-            return
+        if result.scalar_one_or_none() is None:
+            print("Initializing default data (seed agent accounts)...")
 
-        print("Initializing default data (seed agent accounts)...")
+            now = datetime.now(timezone.utc)
 
-        now = datetime.now(timezone.utc)
+            # Discover seed agents and create their comm accounts as OFFLINE
+            # users. These accounts exist before the group is created (on first
+            # login) so agents can be added as group members immediately.
+            seed_agents = _discover_seed_agents()
+            for sa in seed_agents:
+                existing = await db.execute(select(User).where(User.email == sa["email"]))
+                if existing.scalar_one_or_none():
+                    continue
+                uid = await _generate_user_id(db)
+                from opensquad.avatar_utils import local_bot_avatar_data_uri
 
-        # Discover seed agents and create their comm accounts as OFFLINE
-        # users. These accounts exist before the group is created (on first
-        # login) so agents can be added as group members immediately.
-        seed_agents = _discover_seed_agents()
-        for sa in seed_agents:
-            existing = await db.execute(select(User).where(User.email == sa["email"]))
-            if existing.scalar_one_or_none():
-                continue
-            uid = await _generate_user_id(db)
-            from opensquad.avatar_utils import local_bot_avatar_data_uri
+                user = User(
+                    id=uid,
+                    name=sa["name"],
+                    email=sa["email"],
+                    hashed_password=get_password_hash(sa["password"]),
+                    avatar=local_bot_avatar_data_uri(uid),
+                    status=UserStatus.OFFLINE,
+                    created_at=now,
+                    last_seen=now,
+                )
+                db.add(user)
+                print(f"  Created agent account (offline): {sa['name']} <{sa['email']}>")
 
-            user = User(
-                id=uid,
-                name=sa["name"],
-                email=sa["email"],
-                hashed_password=get_password_hash(sa["password"]),
-                avatar=local_bot_avatar_data_uri(uid),
-                status=UserStatus.OFFLINE,
-                created_at=now,
-                last_seen=now,
-            )
-            db.add(user)
-            print(f"  Created agent account (offline): {sa['name']} <{sa['email']}>")
+            await db.commit()
 
-        await db.commit()
+            print("Default data initialization complete.")
+            print("No default web account — register the first user via the web UI.")
 
-        print("Default data initialization complete.")
-        print("No default web account — register the first user via the web UI.")
+        await _ensure_local_web_login(db)
 
 
 if __name__ == "__main__":

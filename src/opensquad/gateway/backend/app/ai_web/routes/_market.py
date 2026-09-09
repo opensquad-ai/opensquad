@@ -609,30 +609,34 @@ async def market_uninstall_plugin(
     Uninstall a plugin by removing its directory from plugins/.
     Triggers hot-reload after removal.
     """
-    # Sanitize plugin_id: must be a simple directory name (no path traversal)
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", plugin_id):
-        raise HTTPException(status_code=400, detail="Invalid plugin id")
+    # Sanitize / protect / resolve plugin.json ``name`` vs on-disk directory
+    # (whisper_transcribe -> whisper). Parity with the launcher/admin paths;
+    # missing alias resolution here caused a 404 when the UI sent the manifest
+    # name instead of the folder name.
+    from opensquad.resource_uninstall import prepare_plugin_uninstall
 
-    plugin_dest = os.path.join(PLUGINS_DIR, plugin_id)
+    ok, dir_name = prepare_plugin_uninstall(plugin_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=dir_name)
+
+    plugin_dest = os.path.join(PLUGINS_DIR, dir_name)
     # Ensure the resolved path is strictly inside PLUGINS_DIR
     if not os.path.abspath(plugin_dest).startswith(os.path.abspath(PLUGINS_DIR) + os.sep):
         raise HTTPException(status_code=400, detail="Invalid plugin id")
 
-    if not os.path.isdir(plugin_dest):
-        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' is not installed")
+    if os.path.isdir(plugin_dest):
+        try:
 
-    try:
+            def _remove_readonly(func, path, exc_info):
+                """Windows: files inside .git directory are often read-only; chmod then retry"""
+                import stat
 
-        def _remove_readonly(func, path, exc_info):
-            """Windows: files inside .git directory are often read-only; chmod then retry"""
-            import stat
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
 
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-
-        shutil.rmtree(plugin_dest, onerror=_remove_readonly)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to uninstall plugin: {e}")
+            shutil.rmtree(plugin_dest, onerror=_remove_readonly)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to uninstall plugin: {e}")
 
     # Trigger hot-reload
     try:
@@ -642,8 +646,13 @@ async def market_uninstall_plugin(
     except Exception as e:
         logger.warning(f"Failed to write .reload_ts after uninstall of '{plugin_id}': {e}")
 
-    logger.info(f"Plugin '{plugin_id}' uninstalled successfully")
-    return {"ok": True, "plugin_id": plugin_id, "message": f"Plugin '{plugin_id}' uninstalled successfully"}
+    logger.info(f"Plugin '{plugin_id}' uninstalled successfully (dir_name={dir_name})")
+    return {
+        "ok": True,
+        "plugin_id": dir_name,
+        "dir_name": dir_name,
+        "message": f"Plugin '{plugin_id}' uninstalled successfully",
+    }
 
 
 class GitInstallRequest(BaseModel):

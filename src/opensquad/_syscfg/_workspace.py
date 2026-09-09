@@ -6,8 +6,10 @@ Extracted from system_config.py.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +152,85 @@ def resource_search_dirs(resource_type: str) -> list[str]:
 def workspace_metadata_dir(*subpaths: str) -> str:
     """Return the workspace metadata directory path."""
     return os.path.join(_WORKSPACE_ROOT, ".opensquad", *subpaths)
+
+
+_UNINSTALLED_LOCK = threading.Lock()
+_UNINSTALLED_KINDS = ("plugins", "skills")
+
+
+def uninstalled_resources_path() -> str:
+    """Workspace file that hides bundled plugins/skills without deleting seed trees."""
+    return workspace_metadata_dir("uninstalled_resources.json")
+
+
+def _empty_uninstalled() -> dict[str, set[str]]:
+    return {"plugins": set(), "skills": set()}
+
+
+def _read_uninstalled_resources() -> dict[str, set[str]]:
+    path = uninstalled_resources_path()
+    empty = _empty_uninstalled()
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return empty
+    if not isinstance(raw, dict):
+        return empty
+    out = _empty_uninstalled()
+    for kind in _UNINSTALLED_KINDS:
+        vals = raw.get(kind) or []
+        if isinstance(vals, list):
+            out[kind] = {str(x) for x in vals if x}
+    return out
+
+
+def _write_uninstalled_resources(data: dict[str, set[str]]) -> None:
+    path = uninstalled_resources_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "plugins": sorted(data.get("plugins") or []),
+        "skills": sorted(data.get("skills") or []),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def is_locally_uninstalled(kind: str, dir_name: str) -> bool:
+    """True when this workspace has uninstalled *kind*/*dir_name*."""
+    if kind not in _UNINSTALLED_KINDS or not dir_name:
+        return False
+    with _UNINSTALLED_LOCK:
+        return dir_name in _read_uninstalled_resources().get(kind, set())
+
+
+def mark_locally_uninstalled(kind: str, dir_name: str) -> None:
+    """Hide a bundled or leftover seed from this workspace's plugin/skill lists."""
+    if kind not in _UNINSTALLED_KINDS or not dir_name:
+        return
+    with _UNINSTALLED_LOCK:
+        data = _read_uninstalled_resources()
+        data.setdefault(kind, set()).add(dir_name)
+        _write_uninstalled_resources(data)
+
+
+def clear_locally_uninstalled(kind: str, dir_name: str) -> None:
+    """Undo a local uninstall, e.g. after re-uploading the same folder."""
+    if kind not in _UNINSTALLED_KINDS or not dir_name:
+        return
+    with _UNINSTALLED_LOCK:
+        data = _read_uninstalled_resources()
+        bucket = data.get(kind) or set()
+        if dir_name not in bucket:
+            return
+        bucket.discard(dir_name)
+        data[kind] = bucket
+        _write_uninstalled_resources(data)
 
 
 def builtin_resources_dir(resource_type: str, *subpaths: str) -> str:

@@ -118,7 +118,11 @@ def read_image(image_path_list: list) -> dict[str, str]:
 
         return {
             "status": "success",
-            "message": f"Image path(s) registered: {valid_paths}. The images will be passed to your vision model for analysis.",
+            "message": (
+                f"Image path(s) registered: {valid_paths}. "
+                "The images will be passed to your vision model on the next turn "
+                "(requires model.is_image=true). Describe what you see after they arrive."
+            ),
             "image_paths": valid_paths,
         }
 

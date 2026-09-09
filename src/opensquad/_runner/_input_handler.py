@@ -74,13 +74,9 @@ class InputHandler:
             if cmd.startswith("__REQUEST_TOKEN_STATS__:"):
                 forced_sid = cmd.split(":", 1)[1].strip()
             try:
-                if forced_sid and forced_sid != "unknown":
-                    runner._turn_sid = forced_sid
-                else:
+                if not (forced_sid and forced_sid != "unknown"):
                     sm = get_session_manager()
-                    sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
-                    if sid and sid != "unknown":
-                        runner._turn_sid = sid
+                    forced_sid = (sm.get_focused_session_id() or sm.get_current_session_id() or "").strip()
             except Exception:
                 pass
             # Prefer sid-aware runner method when available.

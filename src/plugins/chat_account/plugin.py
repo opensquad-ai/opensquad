@@ -10,6 +10,17 @@ Manage accounts and groups in the ChatPro system:
 
 All operations call the ChatPro HTTP API directly, with no coupling to a bridge instance.
 email/password are optional; if omitted, the current agent's group_chat config credentials are used.
+
+Merge note
+----------
+For the *current* agent's own IM identity (register → join → send → history), prefer the
+mandatory core ``im`` tools (``im.register_account``, ``im.join_group``, ``im.send_message``,
+``im.get_history``, ``im.leave_group``). Those also update Bridge/WebSocket state and
+persist ``group_chat`` into config.json.
+
+Keep this plugin when you need to operate on *other* accounts via explicit email/password
+(e.g. an admin agent provisioning teammates). Overlapping join/leave/list remain for that
+multi-account use case.
 """
 
 import logging

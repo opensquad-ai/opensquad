@@ -115,6 +115,59 @@ def _mcp_tool_to_openai(tool, server_name: str) -> dict[str, Any]:
     }
 
 
+def playwright_mcp_profile_dir() -> str:
+    """Workspace-local Chromium profile for Playwright MCP (cookies survive restarts)."""
+    try:
+        from opensquad import system_config as syscfg
+
+        return syscfg.workspace_data_dir("mcp_browser_profiles", "playwright")
+    except ImportError:
+        return os.path.join(_project_root, "data", "mcp_browser_profiles", "playwright")
+
+
+def _is_playwright_mcp_server(server_name: str, cfg: dict) -> bool:
+    if (server_name or "").lower() == "playwright":
+        return True
+    for arg in cfg.get("args") or []:
+        if isinstance(arg, str) and ("@playwright/mcp" in arg or arg.endswith("playwright/mcp")):
+            return True
+    return False
+
+
+def _args_have_user_data_dir(args: list) -> bool:
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        if arg == "--user-data-dir" or arg.startswith("--user-data-dir="):
+            return True
+    return False
+
+
+def _args_have_isolated(args: list) -> bool:
+    return any(isinstance(arg, str) and (arg == "--isolated" or arg.startswith("--isolated")) for arg in args)
+
+
+def _env_has_playwright_user_data_dir(env: dict | None) -> bool:
+    merged = os.environ if env is None else {**os.environ, **env}
+    return bool((merged.get("PLAYWRIGHT_MCP_USER_DATA_DIR") or "").strip())
+
+
+def ensure_playwright_persistent_profile(server_name: str, cfg: dict) -> tuple[list, dict | None]:
+    """Inject --user-data-dir for Playwright MCP when no explicit profile is configured."""
+    args = list(cfg.get("args") or [])
+    env = cfg.get("env")
+    if not _is_playwright_mcp_server(server_name, cfg):
+        return args, env
+    if _args_have_isolated(args) or _args_have_user_data_dir(args) or _env_has_playwright_user_data_dir(env):
+        return args, env
+
+    profile_dir = playwright_mcp_profile_dir()
+    os.makedirs(profile_dir, exist_ok=True)
+    args = [*args, "--user-data-dir", profile_dir]
+    logger.info("[MCP] Playwright persistent profile: %s", profile_dir)
+    return args, env
+
+
 class MCPAdapter:
     """
     MCP Adapter -- manages long-lived connections to multiple MCP servers.
@@ -268,8 +321,7 @@ class MCPAdapter:
     async def _connect_server(self, server_name: str, cfg: dict):
         """Connect to a single MCP server (Custom Implementation avoiding stdio_client generator issues)"""
         command = cfg.get("command", "npx")
-        args = cfg.get("args", [])
-        env = cfg.get("env")
+        args, env = ensure_playwright_persistent_profile(server_name, cfg)
         # Ensure env is a dict if provided, else None
         if env:
             # Merge with system env to ensure basic paths are available
@@ -514,7 +566,8 @@ class MCPAdapter:
 
             for item in result.content:
                 if hasattr(item, "text"):
-                    text_parts.append(item.text)
+                    if item.text is not None:
+                        text_parts.append(str(item.text))
                 elif hasattr(item, "data"):
                     mime = getattr(item, "mimeType", "") or ""
                     if mime.startswith("image/"):

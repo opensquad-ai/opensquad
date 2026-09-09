@@ -11,6 +11,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, Circle, Plus, Search } from 'lucide-react';
 import type { ModelCardInfo } from '../../services/api';
+import { POPOVER_SURFACE_CLASS } from './popoverSurface';
 
 export type SoloModelPickerPlacement = 'up' | 'down';
 
@@ -95,7 +96,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
   placement = 'up',
   usePortal,
 }) => {
-  const portal = usePortal ?? placement === 'down';
+  const portal = usePortal ?? true;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeVendor, setActiveVendor] = useState<string | null>(null);
@@ -318,7 +319,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       ref={menuRef}
       className={
         portal
-          ? 'fixed z-[200]'
+          ? 'fixed z-[220]'
           : placement === 'down'
             ? 'absolute top-[calc(100%+8px)] left-0 z-50'
             : 'absolute bottom-[calc(100%+8px)] right-0 z-50'
@@ -336,7 +337,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       {activeGroup && (
         <div
           ref={flyoutRef}
-          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden ${
+          className={`absolute w-[min(260px,calc(100vw-8rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden ${
             flyoutRight ? 'left-full ml-1.5' : 'right-full mr-1.5'
           }`}
           style={{ top: flyoutTop }}
@@ -380,7 +381,7 @@ export const SoloModelPicker: React.FC<SoloModelPickerProps> = ({
       )}
 
       {/* Level 1: providers */}
-      <div className="w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border bg-bgLight shadow-[0_8px_30px_rgba(0,0,0,0.12)] overflow-hidden">
+      <div className={`w-[min(220px,calc(100vw-3rem))] rounded-xl border border-border ${POPOVER_SURFACE_CLASS} overflow-hidden`}>
         <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/70">
           <Search size={14} className="text-textMuted shrink-0" />
           <input

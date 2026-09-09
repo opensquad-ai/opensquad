@@ -7,7 +7,7 @@
  *   - file edit/write: fold shows +N -M; expand → embedded FileDiffBlock
  *   - other tools (websearch, etc.): expand → light box with Args + Result
  */
-import React, { useEffect, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
@@ -47,6 +47,23 @@ import {
 /** When Solo workflow step count exceeds this, nest lines in a scroll box. */
 const SOLO_STEPS_SCROLL_THRESHOLD = 10;
 const SOLO_STEPS_SCROLL_MAX_CLASS = 'max-h-[280px]';
+/** Window the inner step list so dozens of tool headers stay cheap to paint. */
+const STEP_VIRT_AFTER = 20;
+const STEP_EST_PX = 28;
+const STEP_OVERSCAN = 6;
+
+function stepVirtRange(
+  length: number,
+  atBottom: boolean,
+  stored: { start: number; end: number },
+  clientH: number,
+): { start: number; end: number } {
+  const visible = Math.ceil((clientH || 280) / STEP_EST_PX) + STEP_OVERSCAN * 2;
+  if (atBottom) {
+    return { start: Math.max(0, length - visible), end: length };
+  }
+  return stored;
+}
 
 interface SoloActivityRowProps {
   block: WorkflowBlock;
@@ -154,6 +171,43 @@ interface ActivityLine {
   shellJob?: ShellJobBundle;
   /** Parsed <plan> steps for Solo plan fold */
   planSteps?: PlanStep[];
+}
+
+function fileEditEqual(a?: FileEditInfo | null, b?: FileEditInfo | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  return (
+    a.kind === b.kind
+    && a.filePath === b.filePath
+    && a.fileName === b.fileName
+    && a.newStr === b.newStr
+    && a.oldStr === b.oldStr
+    && a.addedLines === b.addedLines
+    && a.removedLines === b.removedLines
+    && a.lineRange === b.lineRange
+    && a.startLine === b.startLine
+  );
+}
+
+function activityLineEqual(a: ActivityLine, b: ActivityLine): boolean {
+  return (
+    a.key === b.key
+    && a.kind === b.kind
+    && a.primary === b.primary
+    && a.secondary === b.secondary
+    && a.detail === b.detail
+    && a.running === b.running
+    && a.toolName === b.toolName
+    && a.toolResult === b.toolResult
+    && a.toolStatus === b.toolStatus
+    && a.summaryDone === b.summaryDone
+    && a.summaryPending === b.summaryPending
+    && a.delegation === b.delegation
+    && a.shellJob === b.shellJob
+    && a.planSteps === b.planSteps
+    && a.toolArgs === b.toolArgs
+    && fileEditEqual(a.fileEdit, b.fileEdit)
+  );
 }
 
 function eventToLines(evt: WorkflowEvent, key: string, blockCompleted: boolean, t: TFunction): ActivityLine[] {
@@ -417,7 +471,9 @@ function splitToolName(name: string): { ns: string; fn: string } {
   }
   const idx = n.indexOf('__');
   if (idx > 0) return { ns: n.slice(0, idx), fn: n.slice(idx + 2) };
-  return { ns: '', fn: n };
+  const dot = n.indexOf('.');
+  if (dot > 0) return { ns: n.slice(0, dot), fn: n.slice(dot + 1) };
+  return { ns: n, fn: n };
 }
 
 function classifyWorkTool(name: string): WorkToolCategory {
@@ -643,7 +699,7 @@ const TextChevronToggle: React.FC<{
     ? 'color-mix(in srgb, #dc2626 78%, transparent)'
     : depth === 0
       ? 'color-mix(in srgb, rgb(var(--color-text-muted)) 72%, transparent)'
-      : 'color-mix(in srgb, rgb(var(--color-text-muted)) 55%, transparent)';
+      : 'color-mix(in srgb, rgb(var(--color-text-muted)) 70%, transparent)';
 
   const fileIdx = fileLabel && onFileClick ? primary.indexOf(fileLabel) : -1;
   const primaryNode =
@@ -825,14 +881,20 @@ const SoloPlanFold: React.FC<{
   </div>
 );
 
-const SoloEventLine: React.FC<{
+const SoloEventLine = React.memo(function SoloEventLine({
+  line,
+  defaultOpen = false,
+  shellStreamFor,
+  onOpenFile,
+  embedVisualizations: _embedVisualizations = false,
+}: {
   line: ActivityLine;
   defaultOpen?: boolean;
   shellStreamFor?: (callId: string) => ShellStreamState | null | undefined;
   onOpenFile?: (path: string) => void;
   /** @deprecated Embeds render below the assistant reply; tool stream stays a normal tool row. */
   embedVisualizations?: boolean;
-}> = ({ line, defaultOpen = false, shellStreamFor, onOpenFile, embedVisualizations: _embedVisualizations = false }) => {
+}) {
   void _embedVisualizations;
   const { t } = useTranslation();
   const isSummary = line.kind === 'summary';
@@ -852,13 +914,20 @@ const SoloEventLine: React.FC<{
 
   useEffect(() => {
     if (userTouchedRef.current) return;
-    // Preference only seeds defaults: open when asked, never force-close.
     if (defaultOpen) {
       setOpen(true);
       return;
     }
-    if ((isSummary && line.running) || (isFileEdit && line.running)) setOpen(true);
-  }, [defaultOpen, isSummary, isFileEdit, line.running]);
+    // Keep compression summary open while streaming. Do NOT auto-open file
+    // diffs — streaming Myers + highlight on every delta is the main jank source.
+    if (isSummary && line.running) {
+      setOpen(true);
+      return;
+    }
+    // Tools just landed in this stream: collapse thoughts so the tool row
+    // is not pushed out of the 280px step box by an open thought body.
+    if (isThought) setOpen(false);
+  }, [defaultOpen, isSummary, isThought, line.running]);
 
   const toggleOpen = () => {
     userTouchedRef.current = true;
@@ -909,7 +978,10 @@ const SoloEventLine: React.FC<{
   }
 
   return (
-    <div className="w-full select-text">
+    <div
+      className="w-full select-text"
+      data-tool-expanded={open && line.kind === 'tool' ? true : undefined}
+    >
       <TextChevronToggle
         primary={line.primary}
         secondary={line.secondary}
@@ -1029,7 +1101,16 @@ const SoloEventLine: React.FC<{
       )}
     </div>
   );
-};
+}, (prev, next) => {
+  if (prev.defaultOpen !== next.defaultOpen) return false;
+  if (prev.onOpenFile !== next.onOpenFile) return false;
+  if (prev.line !== next.line && !activityLineEqual(prev.line, next.line)) return false;
+  if (next.line.kind === 'shell_job') {
+    const id = next.line.shellJob?.id;
+    if (id && prev.shellStreamFor?.(id) !== next.shellStreamFor?.(id)) return false;
+  }
+  return true;
+});
 
 export function mergeWorkflowBlocks(blocks: WorkflowBlock[]): WorkflowBlock {
   if (blocks.length === 1) return blocks[0];
@@ -1085,8 +1166,12 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   // Treat any incomplete block as live so gaps between tool rounds do not
   // flip the header to "Worked" and auto-collapse while the agent is still going.
   const isLiveTurn = !block.completed || hasLiveCompression || hasRunning;
+  const hasToolSteps = block.events.some(
+    (e) => e.type === 'tool_call' || e.type === 'tool_result',
+  );
 
-  const [outerOpen, setOuterOpen] = useState(isLiveTurn);
+  const [outerOpen, setOuterOpen] = useState(isLiveTurn || hasToolSteps);
+  const [stepVirt, setStepVirt] = useState({ start: 0, end: STEP_VIRT_AFTER });
   const wasLiveRef = useRef(isLiveTurn);
   /** User pin: 'open' | 'closed' | null (follow auto open/collapse). */
   const userOverrideRef = useRef<'open' | 'closed' | null>(null);
@@ -1112,11 +1197,13 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     } else if (isLiveTurn) {
       if (userOverrideRef.current !== 'closed') setOuterOpen(true);
     } else if (userOverrideRef.current !== 'open') {
-      // Turn finished → auto-collapse unless user pinned the fold open
-      setOuterOpen(false);
+      // Thought-only folds collapse when the turn seals. Tool rows must stay
+      // visible: committing the stream mid-turn marks this block completed and
+      // used to hide every tool header behind a closed chevron.
+      if (!hasToolSteps) setOuterOpen(false);
     }
     wasLiveRef.current = isLiveTurn;
-  }, [isLiveTurn]);
+  }, [isLiveTurn, hasToolSteps]);
 
   useEffect(() => {
     if (!isLiveTurn && !hasRunning && !hasLiveCompression) return;
@@ -1132,7 +1219,17 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
 
   // Do NOT put `tick` in buildLines deps — that remounted thought/tool text every
   // 400ms and cleared mouse selections in scheduled-task / live panes.
-  const lines = useMemo(() => buildLines(block, shellStreams, t), [block, shellStreams, t]);
+  const prevLinesRef = useRef<ActivityLine[]>([]);
+  const lines = useMemo(() => {
+    const built = buildLines(block, shellStreams, t);
+    const prevByKey = new Map(prevLinesRef.current.map((l) => [l.key, l]));
+    const next = built.map((line) => {
+      const old = prevByKey.get(line.key);
+      return old && activityLineEqual(old, line) ? old : line;
+    });
+    prevLinesRef.current = next;
+    return next;
+  }, [block, shellStreams, t]);
   const summary = useMemo(
     () => outerSummary(block, lines, turnStartedMs, uiMode, t),
     [block, lines, turnStartedMs, tick, uiMode, t],
@@ -1173,16 +1270,46 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
   }, [lines, thinkingActive]);
 
   const useStepsScrollBox = displayLines.length > SOLO_STEPS_SCROLL_THRESHOLD;
+  const virtSteps = useStepsScrollBox && displayLines.length > STEP_VIRT_AFTER;
 
-  // Live turns: keep the steps box pinned to the bottom while the user hasn't scrolled up.
-  useEffect(() => {
-    if (!outerOpen || !useStepsScrollBox || !isLiveTurn) return;
+  const shellStreamFor = useCallback(
+    (id: string) => shellStreams[id],
+    [shellStreams],
+  );
+
+  // Keep the steps box pinned to the latest tools (thoughts sit above them).
+  // Do this after the turn seals too — otherwise the 280px box stays on the
+  // first thought lines and the tool headers never enter the viewport.
+  useLayoutEffect(() => {
+    if (!outerOpen || !useStepsScrollBox) return;
     const sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
     const el = stepsScrollRef.current;
     if (!el || !stepsAtBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [displayLines.length, outerOpen, useStepsScrollBox, isLiveTurn, tick]);
+  }, [displayLines.length, outerOpen, useStepsScrollBox]);
+
+  useLayoutEffect(() => {
+    if (!virtSteps || !outerOpen) return;
+    const el = stepsScrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const h = el.clientHeight || 280;
+      const n = displayLines.length;
+      let start: number;
+      let end: number;
+      if (stepsAtBottomRef.current) {
+        ({ start, end } = stepVirtRange(n, true, { start: 0, end: 0 }, h));
+      } else {
+        start = Math.max(0, Math.floor(el.scrollTop / STEP_EST_PX) - STEP_OVERSCAN);
+        end = Math.min(n, Math.ceil((el.scrollTop + h) / STEP_EST_PX) + STEP_OVERSCAN);
+      }
+      setStepVirt((p) => (p.start === start && p.end === end ? p : { start, end }));
+    };
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    return () => el.removeEventListener('scroll', update);
+  }, [virtSteps, outerOpen, displayLines.length]);
 
   const hasSettledActivity = displayLines.some(
     (l) =>
@@ -1257,7 +1384,9 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
     .filter((l) => l.kind === 'thought' && l.detail.trim())
     .map((l) => l.detail);
 
-  if (isThoughtOnly) {
+  // Live turns always use the inner step stream so a later tool_call can
+  // appear as a row. Thought-only document layout is for completed folds.
+  if (isThoughtOnly && !isLiveTurn) {
     // Info-only / empty chrome used to render a bare "Activity" fold on new session.
     if (thoughtBodies.length === 0 && !showNextPlanning) return null;
     if (thoughtBodies.length === 0 && showNextPlanning) {
@@ -1418,23 +1547,45 @@ export const SoloActivityRow = React.memo(function SoloActivityRow({
         }
         aria-hidden={!outerOpen}
       >
-        {displayLines.map((line) => (
-          <SoloEventLine
-            key={line.key}
-            line={line}
-            shellStreamFor={(id) => shellStreams[id]}
-            onOpenFile={onOpenFile}
-            embedVisualizations={embedVisualizations}
-            defaultOpen={
-              (line.kind === 'thought' && expand.thoughts) ||
-              (line.kind === 'plan' && expand.plan) ||
-              (line.kind === 'tool' && expand.tools) ||
-              !!(line.kind === 'summary' && line.running) ||
-              !!(line.kind === 'tool' && line.running && line.fileEdit &&
-                (line.fileEdit.kind === 'write' || line.fileEdit.kind === 'edit'))
-            }
-          />
-        ))}
+        {(() => {
+          const range = virtSteps
+            ? stepVirtRange(
+                displayLines.length,
+                stepsAtBottomRef.current,
+                stepVirt,
+                stepsScrollRef.current?.clientHeight || 280,
+              )
+            : { start: 0, end: displayLines.length };
+          const { start, end } = range;
+          const slice = displayLines.slice(start, end);
+          return (
+            <>
+              {virtSteps && start > 0 ? (
+                <div style={{ height: start * STEP_EST_PX }} aria-hidden />
+              ) : null}
+              {slice.map((line) => (
+                <SoloEventLine
+                  key={line.key}
+                  line={line}
+                  shellStreamFor={shellStreamFor}
+                  onOpenFile={onOpenFile}
+                  embedVisualizations={embedVisualizations}
+                  defaultOpen={
+                    (line.kind === 'thought' && expand.thoughts && !hasToolSteps) ||
+                    (line.kind === 'plan' && expand.plan) ||
+                    (line.kind === 'tool' && (
+                      expand.tools || (!!line.running && !line.fileEdit)
+                    )) ||
+                    !!(line.kind === 'summary' && line.running)
+                  }
+                />
+              ))}
+              {virtSteps && end < displayLines.length ? (
+                <div style={{ height: (displayLines.length - end) * STEP_EST_PX }} aria-hidden />
+              ) : null}
+            </>
+          );
+        })()}
         {showNextPlanning ? (
           <NextPlanningPlaceholder classic={embedVisualizations} startedMs={liveStartedMs} />
         ) : null}
