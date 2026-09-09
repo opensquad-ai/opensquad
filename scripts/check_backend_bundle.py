@@ -17,9 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Soft size budget for _internal after pollution removal (MB). Tuned from a
-# clean local build (~70–150MB depending on playwright/plugins); keep headroom.
-DEFAULT_MAX_INTERNAL_MB = 250.0
+# Hard size budget for _internal (MB). A clean local build is often 70–150MB;
+# GitHub Actions installs Playwright Chromium plus plugins and lands around
+# ~390MB. Nested Electron trees add another ~400MB, so 500 still catches
+# pollution while allowing a legitimate CI bundle.
+DEFAULT_MAX_INTERNAL_MB = 500.0
 
 FORBIDDEN_RELATIVE = (Path("opensquad") / "build",)
 
@@ -40,6 +42,23 @@ def _dir_size_mb(path: Path) -> float:
             except OSError:
                 pass
     return total / (1024 * 1024)
+
+
+def _top_entries(internal: Path, n: int = 12) -> list[tuple[str, float]]:
+    rows: list[tuple[str, float]] = []
+    for p in internal.iterdir():
+        try:
+            if p.is_dir():
+                mb = _dir_size_mb(p)
+            elif p.is_file():
+                mb = p.stat().st_size / (1024 * 1024)
+            else:
+                continue
+        except OSError:
+            continue
+        rows.append((p.name, mb))
+    rows.sort(key=lambda item: -item[1])
+    return rows[:n]
 
 
 def check_bundle(bundle_dir: Path, max_internal_mb: float) -> list[str]:
@@ -67,11 +86,10 @@ def check_bundle(bundle_dir: Path, max_internal_mb: float) -> list[str]:
 
     size_mb = _dir_size_mb(internal)
     print(f"[check_backend_bundle] _internal size: {size_mb:.1f} MB (max {max_internal_mb:.0f} MB)")
+    for name, mb in _top_entries(internal):
+        print(f"[check_backend_bundle]   {name}: {mb:.1f} MB")
     if size_mb > max_internal_mb:
-        errors.append(
-            f"_internal is {size_mb:.1f} MB > budget {max_internal_mb:.0f} MB "
-            "(likely nested Electron/release artifacts)"
-        )
+        errors.append(f"_internal is {size_mb:.1f} MB > budget {max_internal_mb:.0f} MB")
     return errors
 
 
