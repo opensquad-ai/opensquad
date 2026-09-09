@@ -10,6 +10,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 | Version                                                                | Date       | Compare to previous                                                                    | Release page                                                                     |
 | ---------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0.8.45]                                                               | 2026-09-09 | [0.8.44 → 0.8.45](https://github.com/opensquad-ai/opensquad/compare/v0.8.44...v0.8.45) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.45) |
 | [0.8.44]                                                               | 2026-08-14 | [0.8.43 → 0.8.44](https://github.com/opensquad-ai/opensquad/compare/v0.8.43...v0.8.44) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.44) |
 | [0.8.43]                                                               | 2026-08-11 | [0.8.42 → 0.8.43](https://github.com/opensquad-ai/opensquad/compare/v0.8.42...v0.8.43) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.43) |
 | [0.8.42]                                                               | 2026-08-10 | [0.8.41 → 0.8.42](https://github.com/opensquad-ai/opensquad/compare/v0.8.41...v0.8.42) | [GitHub Release](https://github.com/opensquad-ai/opensquad/releases/tag/v0.8.42) |
@@ -37,6 +38,45 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ---
 
 ## [Unreleased]
+
+---
+
+## [0.8.45] — 2026-09-09
+
+> Agent Web now shows and runs XML tool calls from cheap models (Ling/Qwen
+> `arg_key` / first-line names) instead of leaking markup as chat text.
+> Stopping one parallel session no longer cancels the others. Desktop CI
+> gets a one-shot packager and a nested-bundle guard.
+
+### Fixed
+
+- **Live XML tool rows.** Streaming `<tool_call>` was commit-on-close, so
+  Agent Web showed thoughts with no tool card; refresh leaked
+  `websearch` / `query` as plain text. The parser now peeks unclosed
+  tags, understands Qwen/Ling first-line names plus `<arg_key>` /
+  `<arg_value>`, and the timeline sniffs markup into a tool row.
+- **Bare tool names.** `<tool_call>websearch` now resolves to
+  `websearch.search` instead of `Invalid format`.
+- **Native-FC prompt.** Cheap models were told XML would not be parsed,
+  so they stalled in thought. XML is an accepted fallback.
+- **Parallel session Stop.** Stopping one session no longer cancelled
+  sibling sessions; recoverable turn traces are attached when a turn is
+  interrupted.
+
+### Added
+
+- **Desktop one-shot packagers** (`scripts/build_desktop.ps1` /
+  `build_desktop.sh`) and `check_backend_bundle.py` so PyInstaller
+  cannot nest Electron trees into `run.exe`.
+- **Playwright** in-process browser skill (no MCP subprocess).
+- **j-space** inner-workspace skill.
+- Plugin/skill uninstall from Gateway, plus session token-stats helpers
+  in Agent Web.
+
+### Changed
+
+- Private `news2theme` / `zt2theme` trees stay gitignored and are not
+  part of the public source or desktop bundle.
 
 ---
 
