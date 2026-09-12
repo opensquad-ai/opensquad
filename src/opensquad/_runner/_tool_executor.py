@@ -96,24 +96,10 @@ class ToolExecutor:
         # Remove possibly orphaned tool_call open tags
         result = re.sub(r'tool_call\s+name="[^"]+"\s*>', "", result, flags=re.IGNORECASE)
 
-        # Silent blocks: remove entirely
-        silent_blocks = [
-            "thought",
-            "plan",
-            "think",
-            "tool_call",
-            "tool_result",
-            "to_system",
-            "state",
-            "wake",
-            "sleep",
-            "title",
-            "option",
-            "arguments",
-        ]
-        for tag in silent_blocks:
-            result = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", "", result, flags=re.DOTALL | re.IGNORECASE)
-            result = re.sub(rf"<{tag}\b[^>]*/>", "", result, flags=re.IGNORECASE)
+        # Silent blocks: remove entirely (including inner text)
+        from opensquad.xml_parser import strip_silent_protocol_blocks
+
+        result = strip_silent_protocol_blocks(result)
 
         # Extract to_user content (keep it)
         result = re.sub(
@@ -198,34 +184,12 @@ class ToolExecutor:
                 return True
 
         # XML leak detection
-        system_tags = {
-            "title",
-            "thought",
-            "think",
-            "plan",
-            "to_user",
-            "to_user_reply",
-            "to_user_end_task",
-            "to_system",
-            "tool_call",
-            "tool_result",
-            "arguments",
-            "state",
-            "wake",
-            "sleep",
-            "option",
-            "forward",
-            "system_reminder",
-            "func",
-            "task_start",
-            "task_complete",
-            "task_failed",
-        }
+        from opensquad.xml_parser import KNOWN_PROTOCOL_XML_TAGS
 
         xml_tags = re.findall(r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE)
 
         if xml_tags and "<tool_call" not in text:
-            leaked_tags = [tag for tag in xml_tags if tag.lower() not in system_tags]
+            leaked_tags = [tag for tag in xml_tags if tag.lower() not in KNOWN_PROTOCOL_XML_TAGS]
             if leaked_tags:
                 logger.warning(
                     "[ToolExecutor] Detected leaked XML parameter tags: %s",

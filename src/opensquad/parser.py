@@ -90,6 +90,51 @@ def _normalize_tool_name(name: str) -> str:
     return _normalize_key(n)
 
 
+_INVOKE_PLACEHOLDERS = frozenset({"tool_call", "tool", "function", "invoke", "call", "llm_recovered"})
+_PREVIEW_NAME_SHORTHAND = frozenset({"websearch", "grep", "glob", "shell", "bash", "read", "ls"})
+
+
+def _is_preview_tool_name_ready(name: str, *, closed: bool) -> bool:
+    """True when a streaming XML tool name is complete enough to show / execute."""
+    n = (name or "").strip()
+    if not n or any(ch.isspace() for ch in n):
+        return False
+    key = n.lower()
+    if key in _INVOKE_PLACEHOLDERS or key in _BARE_TOOL_NAME_DENY:
+        return False
+    if "." in n and not n.endswith("."):
+        return bool(n.split(".", 1)[1])
+    if "__" in n and not n.endswith("__"):
+        return bool(n.rsplit("__", 1)[-1])
+    if key in _PREVIEW_NAME_SHORTHAND:
+        return True
+    return bool(closed and any("\u4e00" <= ch <= "\u9fff" for ch in n) and len(n) >= 2)
+
+
+def _name_from_func_xml(body: str) -> str | None:
+    m = re.search(r"<func\s*>([^<]+)</func\s*>", body or "", re.IGNORECASE)
+    if not m:
+        return None
+    name = (m.group(1) or "").strip()
+    return _normalize_tool_name(name) if name else None
+
+
+def _resolve_parsed_tool_name(name: str, body: str, args: dict[str, Any] | None = None) -> str | None:
+    """Map DSML ``invoke name="tool_call"`` / llm_recovered onto the real func."""
+    args = args or {}
+    norm = _normalize_tool_name(name) if name else ""
+    key = (norm or "").lower()
+    if key in _INVOKE_PLACEHOLDERS:
+        inner = _name_from_func_xml(body)
+        if inner:
+            return inner
+        func_arg = args.get("func") or args.get("function")
+        if func_arg:
+            return _normalize_tool_name(str(func_arg))
+        return None
+    return norm or None
+
+
 _BARE_TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,80}$")
 _BARE_TOOL_NAME_DENY = frozenset(
     {
@@ -173,9 +218,9 @@ _ESCAPE_RESTORE_MAP = {
     "\b": r"\b",  # backspace    -> \b  (e.g., C:\bin)
     "\f": r"\f",  # form feed    -> \f
     "\v": r"\v",  # vertical tab -> \v
-    # Do not restore \n / \t / \r: multiline tool args (file writes) must keep
-    # real newlines. Windows path accidents for those letters are rarer than
-    # intentional content, and GLM-5 already unescapes \\n before parse.
+    # Do not restore \n / \r globally: multiline tool args (file writes) must
+    # keep real newlines. Tabs are restored only for single-line values below
+    # (Windows path accident: docs\\tool_x → docs + TAB + ool_x).
 }
 
 
@@ -193,6 +238,9 @@ def _restore_windows_path_escapes(value: str) -> str:
     result = value
     for escaped_char, literal_form in _ESCAPE_RESTORE_MAP.items():
         result = result.replace(escaped_char, literal_form)
+    # Quoted path "docs\\tool_result.md" becomes a TAB inside a single-line string.
+    if "\t" in result and "\n" not in result and "\r" not in result:
+        result = result.replace("\t", r"\t")
     return result
 
 
@@ -216,7 +264,9 @@ _RE_DSML_TAG = _re_norm.compile(
 )
 _DSML_WRAPPER_ALIASES = {"calls": "tool_calls", "function_calls": "tool_calls"}
 _RE_ANY_TOOL_CALL_START = _re_norm.compile(
-    r"<tool_call\b" rf"|<{_DSML_PREFIX}\s*(?:tool_calls|function_calls|calls|invoke)\b",
+    r"<tool_call\b"
+    r"|<dots_function_call\b"
+    rf"|<{_DSML_PREFIX}\s*(?:tool_calls|function_calls|calls|invoke)\b",
     _re_norm.IGNORECASE,
 )
 
@@ -238,6 +288,36 @@ def _canonicalize_dsml(text: str) -> str:
     return _RE_DSML_TAG.sub(_repl, text)
 
 
+_DSML_ARG_LINE_RE = _re_norm.compile(r'^\s*(?:[\w.\-]+\s*[:=]|<[^>]*>|[}\]"\'],?)$')
+_DSML_ANY_TAG_RE = _re_norm.compile(r"</?(?:\uff5c{1,2}|\|{1,2})[^>]*>")
+
+
+def _dsml_tail_is_arguments(tail: str) -> bool:
+    """Does the text after an unclosed DSML tag look like leaked tool arguments?
+
+    Only then is it safe to drop everything through end-of-string. A model that
+    merely *describes* DSML syntax (e.g. answering "how do I pass a parameter?")
+    leaves ordinary prose behind the tag, and swallowing that prose would erase
+    the user-visible answer.
+    """
+    stripped = (tail or "").strip()
+    if not stripped:
+        return True
+    # Ignore nested DSML wrapper tags — only their inner payload matters.
+    stripped = _DSML_ANY_TAG_RE.sub("", stripped).strip()
+    if not stripped:
+        return True
+    # JSON / array argument payload.
+    if stripped[0] in "{[":
+        return True
+    lines = [ln for ln in stripped.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    # Every remaining line must look like a parameter fragment, wrapper tag, or
+    # stray bracket — a single prose line is enough to keep the text.
+    return all(_DSML_ARG_LINE_RE.match(ln) for ln in lines)
+
+
 def strip_dsml_tool_markup(text: str) -> str:
     """Remove DSML / invoke tool-call blocks (including inner content) from display text."""
     if not text:
@@ -250,6 +330,20 @@ def strip_dsml_tool_markup(text: str) -> str:
             t,
             flags=_re_norm.DOTALL | _re_norm.IGNORECASE,
         )
+        # Unclosed opener (stream hung mid-call). Drop the tag, and drop the
+        # remainder only when it still reads as tool arguments — see
+        # _dsml_tail_is_arguments for why an unconditional `.*$` is unsafe.
+        opener = _re_norm.compile(rf"<\|\|DSML\|\|{tag}\b[^>]*>", _re_norm.IGNORECASE)
+        match = opener.search(t)
+        if match:
+            tail = t[match.end() :]
+            t = t[: match.start()] + ("" if _dsml_tail_is_arguments(tail) else tail)
+    t = _re_norm.sub(
+        r"</?\|\|DSML\|\|(?:tool_calls|function_calls|calls|invoke|parameter)\b[^>]*>",
+        "",
+        t,
+        flags=_re_norm.IGNORECASE,
+    )
     return t
 
 
@@ -806,10 +900,17 @@ class ResponseParser:
                 norm_key = _normalize_arg_key(key)
                 args[norm_key] = ResponseParser.parse_param_value(value_raw)
             args = _expand_dsml_arguments(args)
+            xml_args = ResponseParser.parse_xml_arguments(param_body)
+            for k, v in xml_args.items():
+                args.setdefault(k, v)
             if name:
-                norm_name = _normalize_tool_name(name)
-                tc_log.info("[_parse_dsml] DSML-invoke name=%r -> %r, args=%r", name, norm_name, args)
-                results.append((norm_name, args))
+                resolved = _resolve_parsed_tool_name(name, param_body, args)
+                if not resolved:
+                    continue
+                args.pop("func", None)
+                args.pop("function", None)
+                tc_log.info("[_parse_dsml] DSML-invoke name=%r -> %r, args=%r", name, resolved, args)
+                results.append((resolved, args))
 
         # ---- Pass 2: plain XML invoke (paired with either closing style) ----
         if not results:
@@ -823,10 +924,17 @@ class ResponseParser:
                     norm_key = _normalize_arg_key(key)
                     args[norm_key] = ResponseParser.parse_param_value(value_raw)
                 args = _expand_dsml_arguments(args)
+                xml_args = ResponseParser.parse_xml_arguments(param_body)
+                for k, v in xml_args.items():
+                    args.setdefault(k, v)
                 if name:
-                    norm_name = _normalize_tool_name(name)
-                    tc_log.info("[_parse_dsml] plain-invoke name=%r -> %r, args=%r", name, norm_name, args)
-                    results.append((norm_name, args))
+                    resolved = _resolve_parsed_tool_name(name, param_body, args)
+                    if not resolved:
+                        continue
+                    args.pop("func", None)
+                    args.pop("function", None)
+                    tc_log.info("[_parse_dsml] plain-invoke name=%r -> %r, args=%r", name, resolved, args)
+                    results.append((resolved, args))
 
         # ---- Pass 3: recover orphan <parameter> tokens (no <invoke> wrapper) ----
         if not results:
@@ -846,11 +954,21 @@ class ResponseParser:
                 recovered_args[norm_key] = ResponseParser.parse_param_value(value_raw)
             recovered_args = _expand_dsml_arguments(recovered_args)
             if recovered_args:
-                tc_log.warning(
-                    "[_parse_dsml] Lenient fallback: recovered %d orphan <parameter> tokens",
-                    len(recovered_args),
-                )
-                results.append(("llm_recovered", recovered_args))
+                resolved = _resolve_parsed_tool_name("llm_recovered", text, recovered_args)
+                if not resolved:
+                    if recovered_args.get("path"):
+                        resolved = "filesystem.read_file"
+                    elif recovered_args.get("command") or recovered_args.get("cmd"):
+                        resolved = "system.run_session_job"
+                if resolved:
+                    drop = {"func", "function"}
+                    args = {k: v for k, v in recovered_args.items() if k not in drop}
+                    tc_log.warning(
+                        "[_parse_dsml] Lenient fallback: recovered %d orphan tokens as %s",
+                        len(args),
+                        resolved,
+                    )
+                    results.append((resolved, args))
 
         # ---- Pass 4: <func>name</func> + cross-style <param>... (legacy XML
         # wrapper content embedded inside a DSML or <tool_call> container) ----
@@ -909,8 +1027,13 @@ class ResponseParser:
                     key = pm.group(1)
                     value_raw = pm.group(2).strip()
                     args[key] = ResponseParser.parse_param_value(value_raw)
-                tc_log.info("[_parse_minimax] Namespace format: name=%r, args=%r", name, args)
-                return [(name, args)]
+                resolved = _resolve_parsed_tool_name(name, param_body, args)
+                if not resolved:
+                    return []
+                args.pop("func", None)
+                args.pop("function", None)
+                tc_log.info("[_parse_minimax] Namespace format: name=%r -> %r, args=%r", name, resolved, args)
+                return [(resolved, args)]
 
         # Strategy B: standalone <invoke name="xxx">...</invoke>
         inv_match = ResponseParser._INVOKE_PATTERN.search(text)
@@ -922,10 +1045,62 @@ class ResponseParser:
                 key = pm.group(1)
                 value_raw = pm.group(2).strip()
                 args[key] = ResponseParser.parse_param_value(value_raw)
-            tc_log.info("[_parse_minimax] Standalone invoke: name=%r, args=%r", name, args)
-            return [(name, args)]
+            resolved = _resolve_parsed_tool_name(name, param_body, args)
+            if not resolved:
+                return []
+            args.pop("func", None)
+            args.pop("function", None)
+            tc_log.info("[_parse_minimax] Standalone invoke: name=%r -> %r, args=%r", name, resolved, args)
+            return [(resolved, args)]
 
         return []
+
+    @staticmethod
+    def _parse_dots_function_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+        """Parse Dots Studio ``<dots_function_call>`` bodies (OpenRouter free models).
+
+        Accepts the canonical ``<invoke name="...">`` form and the truncated
+        ``invoke="...">`` / ``<invoke="...">`` variants that still close with
+        ``</invoke>``. Must run *before* DSML orphan-parameter recovery, which
+        would otherwise mis-attribute leftover ``<parameter name="path">`` as
+        ``filesystem.read_file``.
+        """
+        if not text or "dots_function_call" not in text.lower():
+            return []
+        wrapper = re.compile(
+            r"<dots_function_call\b[^>]*>(.*?)</dots_function_call\s*>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        bodies = [m.group(1) for m in wrapper.finditer(text)]
+        if not bodies:
+            bodies = [text]
+        invoke_pat = re.compile(
+            r'(?:<invoke\s+name\s*=\s*"([^"]+)"\s*>'
+            r'|<invoke\s*=\s*"([^"]+)"\s*>'
+            r'|invoke\s*=\s*"([^"]+)"\s*>)'
+            r"(.*?)</invoke>",
+            re.DOTALL | re.IGNORECASE,
+        )
+        results: list[tuple[str, dict[str, Any]]] = []
+        tc_log = get_tool_call_debug_logger()
+        for body in bodies:
+            for inv in invoke_pat.finditer(body):
+                name = (inv.group(1) or inv.group(2) or inv.group(3) or "").strip()
+                param_body = inv.group(4) or ""
+                args: dict[str, Any] = {}
+                for pm in ResponseParser._PARAM_PATTERN.finditer(param_body):
+                    args[pm.group(1)] = ResponseParser.parse_param_value(pm.group(2).strip())
+                xml_args = ResponseParser.parse_xml_arguments(param_body)
+                for k, v in xml_args.items():
+                    args.setdefault(k, v)
+                resolved = _resolve_parsed_tool_name(name, param_body, args)
+                if not resolved:
+                    continue
+                args.pop("func", None)
+                args.pop("function", None)
+                tc_log.info("[_parse_dots] name=%r -> %r args=%r", name, resolved, args)
+                results.append((resolved, args))
+        return results
 
     @staticmethod
     def parse_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
@@ -933,21 +1108,31 @@ class ResponseParser:
         Parse ALL tool_call blocks from text (supports parallel tool calls).
 
         Tries in order:
-        1. DSML format: <｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="xxx">...</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>
-        2. Minimax/namespace format: <namespace:tool_call><invoke name="xxx">...</invoke></namespace:tool_call>
-        3. XML format: <tool_call>...</tool_call>
-        4. Attribute-style: <tool_call name="xxx">...</tool_call>
-        5. Native FC JSON format embedded in text
+        1. Dots ``<dots_function_call>`` (OpenRouter / Dots Studio template)
+        2. DSML format: <｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="xxx">...</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>
+        3. Minimax/namespace format: <namespace:tool_call><invoke name="xxx">...</invoke></namespace:tool_call>
+        4. XML format: <tool_call>...</tool_call>
+        5. Attribute-style: <tool_call name="xxx">...</tool_call>
+        6. Native FC JSON format embedded in text
 
         Returns: List of (tool_name, arguments_dict) tuples. Empty list if none found.
         """
         tc_log = get_tool_call_debug_logger()
 
-        # Strategy 1: DSML format
-        dsml_results = ResponseParser._parse_dsml_tool_calls(text)
-        if dsml_results:
-            tc_log.info("[parse_tool_calls] Found %d DSML tool call(s)", len(dsml_results))
-            return ResponseParser._normalize_results(dsml_results)
+        has_dots = "dots_function_call" in (text or "").lower()
+        if has_dots:
+            dots_results = ResponseParser._parse_dots_function_calls(text)
+            if dots_results:
+                tc_log.info("[parse_tool_calls] Found %d dots_function_call(s)", len(dots_results))
+                return ResponseParser._normalize_results(dots_results)
+
+        # Strategy 1: DSML format (skip when a dots wrapper is present so
+        # orphan <parameter> recovery cannot steal the call as read_file).
+        if not has_dots:
+            dsml_results = ResponseParser._parse_dsml_tool_calls(text)
+            if dsml_results:
+                tc_log.info("[parse_tool_calls] Found %d DSML tool call(s)", len(dsml_results))
+                return ResponseParser._normalize_results(dsml_results)
 
         # Strategy 2: Minimax/namespace format
         minimax_results = ResponseParser._parse_minimax_tool_calls(text)
@@ -1013,7 +1198,7 @@ class ResponseParser:
         name = (attrs.get("name") or "").strip()
         blob = buf or ""
 
-        if not name:
+        if not name or name.lower() in _INVOKE_PLACEHOLDERS:
             m = re.search(
                 r"<func\s*>([^<]{1,200}?)(?:</func\s*>|$)",
                 blob,
@@ -1023,7 +1208,7 @@ class ResponseParser:
                 cand = m.group(1).strip()
                 if cand and "\n" not in cand and len(cand) < 120:
                     name = cand
-        if not name:
+        if not name or name.lower() in _INVOKE_PLACEHOLDERS:
             m = re.search(
                 r'<(?:invoke|[^\s<>]*invoke)\b[^>]*\bname\s*=\s*"([^"]+)"',
                 blob,
@@ -1031,13 +1216,16 @@ class ResponseParser:
             )
             if m:
                 name = m.group(1).strip()
-        if not name:
+        if not name or name.lower() in _INVOKE_PLACEHOLDERS:
             m = re.search(r'<function\s*=\s*"?([a-zA-Z0-9_.]+)', blob, re.IGNORECASE)
             if m:
                 name = m.group(1).strip()
-        if not name:
+        if not name or name.lower() in _INVOKE_PLACEHOLDERS:
             name = _first_line_tool_name(blob)
-        if not name:
+        func_closed = bool(re.search(r"</func\s*>", blob, re.IGNORECASE))
+        attr_complete = bool(attrs.get("name")) and name.lower() not in _INVOKE_PLACEHOLDERS
+        closed = func_closed or attr_complete
+        if not name or not _is_preview_tool_name_ready(name, closed=closed):
             return None
 
         args: dict[str, Any] = {}

@@ -331,6 +331,85 @@ def test_streaming_parser_actual_nested_tool_call():
     print("✓ test_streaming_parser_actual_nested_tool_call passed")
 
 
+def test_streaming_parser_timeout_does_not_leak_to_chat():
+    """<timeout> is runtime protocol; inner seconds must not become chat text."""
+    from opensquad.xml_parser import StreamingTagParser, strip_silent_protocol_blocks
+
+    leaked = []
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed("<timeout>60</timeout>")
+    parser.finish()
+    assert "".join(leaked) == "", f"timeout leaked as chat: {''.join(leaked)!r}"
+
+    leaked.clear()
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed("hello<timeout>60</timeout>")
+    parser.finish()
+    assert "".join(leaked) == "hello"
+
+    leaked.clear()
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed("<timeout>60")
+    parser.finish()
+    assert "".join(leaked) == ""
+
+    assert strip_silent_protocol_blocks("<timeout>60</timeout>") == ""
+    assert "60" not in strip_silent_protocol_blocks("hi <timeout>60</timeout>")
+    assert strip_silent_protocol_blocks("<sleep>5</sleep><to_system>task_complete</to_system>") == ""
+
+    print("✓ test_streaming_parser_timeout_does_not_leak_to_chat passed")
+
+
+def test_streaming_parser_namespaced_tool_does_not_leak_to_chat():
+    """<system.run_session_job> is tool XML; inner command must not become chat."""
+    from opensquad.xml_parser import StreamingTagParser, strip_silent_protocol_blocks
+
+    leaked = []
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed("<system.run_session_job>\ncopy /Y purify.min.js .tmpscratch\\purify.min.js\n</system.run_session_job>")
+    parser.finish()
+    assert "".join(leaked) == "", f"namespaced tool leaked as chat: {''.join(leaked)!r}"
+
+    leaked.clear()
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed("ok<system.run_session_job>git status</system.run_session_job>")
+    parser.finish()
+    assert "".join(leaked) == "ok"
+
+    blob = "<system.run_session_job>\ncopy a b\n</system.run_session_job>\nfindstr foo\n</system.run_session_job>"
+    stripped = strip_silent_protocol_blocks(blob)
+    assert "copy" not in stripped
+    assert "findstr" not in stripped
+    assert "run_session_job" not in stripped
+
+    print("✓ test_streaming_parser_namespaced_tool_does_not_leak_to_chat passed")
+
+
+def test_streaming_parser_dots_function_call_does_not_leak_to_chat():
+    """<dots_function_call> is protocol; invoke/parameter inside must not become chat."""
+    from opensquad.xml_parser import StreamingTagParser, strip_silent_protocol_blocks
+
+    blob = (
+        "<dots_function_call>\n"
+        '<invoke name="mcp__filesystem__directory_tree">\n'
+        '<parameter name="path">.</parameter>\n'
+        "</invoke>\n"
+        "</dots_function_call>"
+    )
+    leaked = []
+    parser = StreamingTagParser(handlers={}, default_handler=leaked.append)
+    parser.feed(blob)
+    parser.finish()
+    assert "".join(leaked) == "", f"dots_function_call leaked as chat: {''.join(leaked)!r}"
+
+    stripped = strip_silent_protocol_blocks(blob)
+    assert stripped.strip() == ""
+    assert "directory_tree" not in stripped
+    assert "dots_function_call" not in stripped
+
+    print("✓ test_streaming_parser_dots_function_call_does_not_leak_to_chat passed")
+
+
 if __name__ == "__main__":
     print("开始运行 XML 解析器单元测试（新 <func> 格式）...\n")
 
@@ -357,6 +436,9 @@ if __name__ == "__main__":
         test_streaming_parser_nested_tags,
         test_streaming_parser_nested_title_in_thought,
         test_streaming_parser_actual_nested_tool_call,
+        test_streaming_parser_timeout_does_not_leak_to_chat,
+        test_streaming_parser_namespaced_tool_does_not_leak_to_chat,
+        test_streaming_parser_dots_function_call_does_not_leak_to_chat,
     ]
 
     passed = 0

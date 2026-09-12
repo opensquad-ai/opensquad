@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +22,15 @@ from opensquad.log_setup import get_tool_call_debug_logger
 from opensquad.messages import parse_tool_calls
 from opensquad.parser import ResponseParser
 
+# Consecutive format_error replies (leak guard) before we stop auto-retrying.
+# Dots / OpenRouter free models re-emit the same template; without a cap the
+# turn loop feeds the XML hint back forever.
+FORMAT_ERROR_MAX_STREAK = 3
+FORMAT_ERROR_STOP_HINT = (
+    "该模型未返回原生 Function Calling，且正文里的工具调用无法按协议执行。"
+    "已停止自动重试。请更换支持 tools 的模型，或检查 tool_call_mode。"
+)
+
 # Helpers that still live on runner.py; imported lazily at call time so the
 # module can be imported independently of runner state.
 from opensquad.runner import _get_session_manager, _get_state_manager
@@ -29,7 +39,19 @@ from opensquad.task_logger import task_logger
 from opensquad.task_supervisor import task_supervisor
 from opensquad.tool import logger
 
-__all__ = ["TurnLoop"]
+__all__ = ["FORMAT_ERROR_MAX_STREAK", "TurnLoop"]
+
+
+def _is_tool_markup_only(text: str) -> bool:
+    """True when visible text is leftover tool XML, not a real chat reply."""
+    s = (text or "").strip()
+    if not s:
+        return True
+    low = s.lower()
+    if "dots_function_call" in low or "<tool_call" in low or low.lstrip().startswith("invoke="):
+        cleaned = re.sub(r"<[^>]+>", "", s).strip()
+        return len(cleaned) < 80
+    return False
 
 
 class TurnLoop:
@@ -37,6 +59,62 @@ class TurnLoop:
 
     def __init__(self, runner: Any) -> None:
         self.runner = runner
+
+    async def _emit_format_error(self, user_msg: str) -> tuple[bool, str, bool]:
+        """Report a leaked-parameter format_error; stop after FORMAT_ERROR_MAX_STREAK."""
+        preview = user_msg.strip()[:120]
+        streak = int(getattr(self.runner, "_format_error_streak", 0) or 0) + 1
+        self.runner._format_error_streak = streak
+        logger.warning(
+            "[Runner] Detected leaked tool parameters in user_msg "
+            "(len=%d, preview=%r, streak=%d/%d) -- sending format error back to model",
+            len(user_msg.strip()),
+            preview,
+            streak,
+            FORMAT_ERROR_MAX_STREAK,
+        )
+        now_str = datetime.now().strftime("%M%S")
+        fe_call_id = f"call_{now_str}_format_error"
+        fe_name = "format_error"
+        fe_detail = (
+            "Detected tool call parameters appearing directly in the response body; "
+            "this indicates a <tool_call> tag was not properly closed or is malformed.\n"
+            "Please strictly follow the XML format and re-output the tool call:\n"
+            "<tool_call>\n"
+            "    <func>tool_name</func>\n"
+            "    <param1>value1</param1>\n"
+            "    <param2>value2</param2>\n"
+            "</tool_call>\n"
+            "Strict rule: all XML tags must come in pairs; never omit the </tool_call> closing tag."
+        )
+        await self.runner._emit("tool_call", {"id": fe_call_id, "name": fe_name, "args": preview})
+        await self.runner._emit(
+            "tool_result", {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"}
+        )
+        _get_session_manager().add_event(
+            "tool_call",
+            {"id": fe_call_id, "name": fe_name, "args": preview},
+            turn_id=self.runner._current_turn,
+            round_id=self.runner._current_round,
+        )
+        _get_session_manager().add_event(
+            "tool_result",
+            {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"},
+            turn_id=self.runner._current_turn,
+            round_id=self.runner._current_round,
+        )
+        if streak >= FORMAT_ERROR_MAX_STREAK:
+            logger.warning("[Runner] format_error streak=%d — stopping automatic retries", streak)
+            await self.runner._emit("to_user_final", FORMAT_ERROR_STOP_HINT)
+            await self.runner._emit("info", FORMAT_ERROR_STOP_HINT)
+            _get_session_manager().add_event(
+                "info",
+                {"text": FORMAT_ERROR_STOP_HINT},
+                turn_id=self.runner._current_turn,
+                round_id=self.runner._current_round,
+            )
+            return True, "", False
+        return False, self.runner._summarize_result(fe_name, f"Error: {fe_detail}"), False
 
     async def handle_turn_result(
         self,
@@ -214,52 +292,19 @@ class TurnLoop:
         if user_msg_from_tag == "to_user_reply":
             self.runner._awaiting_user_reply = True
 
-        # Guard: detect leaked tool call arguments (JSON or XML leaking as user-visible text).
-        # This happens when the model outputs malformed or unclosed <tool_call> tags.
-        # Report the error back to the model the same way a failed tool execution is reported,
-        # so it appears in the WorkflowContainer and the model can self-correct.
-        if self.runner._is_leaked_tool_params(user_msg):
-            preview = user_msg.strip()[:120]
-            logger.warning(
-                "[Runner] Detected leaked tool parameters in user_msg "
-                "(len=%d, preview=%r) -- sending format error back to model",
-                len(user_msg.strip()),
-                preview,
-            )
-            now_str = datetime.now().strftime("%M%S")
-            fe_call_id = f"call_{now_str}_format_error"
-            fe_name = "format_error"
-            fe_detail = (
-                "Detected tool call parameters appearing directly in the response body; "
-                "this indicates a <tool_call> tag was not properly closed or is malformed.\n"
-                "Please strictly follow the XML format and re-output the tool call:\n"
-                "<tool_call>\n"
-                "    <func>tool_name</func>\n"
-                "    <param1>value1</param1>\n"
-                "    <param2>value2</param2>\n"
-                "</tool_call>\n"
-                "Strict rule: all XML tags must come in pairs; never omit the </tool_call> closing tag."
-            )
-            # Notify frontend (WorkflowContainer)
-            await self.runner._emit("tool_call", {"id": fe_call_id, "name": fe_name, "args": preview})
-            await self.runner._emit(
-                "tool_result", {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"}
-            )
-            # Persist to session
-            _get_session_manager().add_event(
-                "tool_call",
-                {"id": fe_call_id, "name": fe_name, "args": preview},
-                turn_id=self.runner._current_turn,
-                round_id=self.runner._current_round,
-            )
-            _get_session_manager().add_event(
-                "tool_result",
-                {"id": fe_call_id, "name": fe_name, "args": preview, "result": f"Error: {fe_detail}"},
-                turn_id=self.runner._current_turn,
-                round_id=self.runner._current_round,
-            )
-            # Feed back to model in same format as a tool execution result
-            return False, self.runner._summarize_result(fe_name, f"Error: {fe_detail}"), False
+        # Parse tools on the *raw* response first. Native FC data wins; otherwise
+        # XML / DSML / dots_function_call / invoke. The leak guard used to run
+        # on streamed leftovers (hollow <dots_function_call> after invoke/parameter
+        # were stripped) and return format_error before this parser could fire.
+        _parsed_tool_calls = parse_tool_calls(full_response, tool_data_from_api)
+        if _parsed_tool_calls:
+            self.runner._format_error_streak = 0
+            if _is_tool_markup_only(user_msg) and user_msg_from_tag in (None, "to_user"):
+                user_msg = ""
+                user_msg_from_tag = None
+                self.runner._last_user_msg_from_to_user = False
+        elif self.runner._is_leaked_tool_params(user_msg):
+            return await self._emit_format_error(user_msg)
 
         # Guard: detect repetitive output (stuttering) from lower-quality models.
         # Only run if enable_repetition_check is True in model config
@@ -364,10 +409,7 @@ class TurnLoop:
         tc_log = get_tool_call_debug_logger()
         tc_log.debug("[runner] full_response len=%d, first 500 chars: %s", len(full_response), full_response[:500])
 
-        # Canonical boundary (opensquad.messages): native-FC data wins, else the
-        # strategy parser (XML -> JSON -> DSML -> Minimax -> attr formats).
-        # tool_calls stays List[(name, args_dict)] for the executor below.
-        _parsed_tool_calls = parse_tool_calls(full_response, tool_data_from_api)
+        # Reuse the parse from above (native-FC data wins, else strategy parser).
         tool_calls = [(tc.name, tc.args) for tc in _parsed_tool_calls]
         if tool_calls:
             tc_log.info(

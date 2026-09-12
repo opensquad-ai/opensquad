@@ -325,9 +325,34 @@ async def apply_model_reload(runner, new_model: dict, *, chat_api=None) -> None:
     if _strip_unsupported_multimodal(chat_api.req, new_model):
         logger.info("[model_switch] Stripped unsupported multimodal content from history (target model is text-only).")
 
+    # reload_model only swaps the HTTP client / model card. Tool-call strategy
+    # (XML vs Native FC) is chosen at runner boot from the *old* model; without
+    # a reselect, dots / unknown openai_compat stay on the previous XML/native
+    # mode and Native FC `tools` never get attached (or XML prompts stay).
+    reselect_tool_call_strategy(runner, new_model)
+
     if session_scoped:
         return chat_api
     return None
+
+
+def reselect_tool_call_strategy(runner, new_model: dict) -> None:
+    """Re-run ToolCallStrategySelector after a live model card change."""
+    registry = getattr(runner, "tool_registry", None)
+    if registry is None or not isinstance(new_model, dict):
+        return
+    from .tool_call_strategy import ToolCallStrategySelector
+
+    strategy = ToolCallStrategySelector.select({"model": new_model}, registry)
+    runner.tool_call_strategy = strategy
+    context_builder = getattr(runner, "_context_builder", None)
+    if context_builder is not None:
+        context_builder.tool_call_strategy = strategy
+    logger.info(
+        "[model_switch] Tool call strategy reselected: %s for %s",
+        strategy.get_strategy_name(),
+        new_model.get("model_name"),
+    )
 
 
 # ---------------------------------------------------------------------------

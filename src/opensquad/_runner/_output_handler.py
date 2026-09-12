@@ -124,33 +124,19 @@ class OutputHandler:
 
         stream_parser._default_handler = emit_user_stream
 
-        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES
+        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES, protocol_silent_handlers
 
         stream_parser._handlers.update(
             {
+                **protocol_silent_handlers(),
                 "thought": lambda x: emit_with_sid("thought", x),
                 "think": lambda x: emit_with_sid("thought", x),
                 "to_user": emit_to_user,
                 "to_user_reply": emit_to_user_reply,
                 "to_user_end_task": emit_to_user_end_task,
-                # Intercept these tags to prevent them from appearing as plain text
-                "title": lambda x: None,
-                "plan": lambda x: None,
-                "tool_call": lambda x: None,
-                "arguments": lambda x: None,
-                "func": lambda x: None,
-                "state": lambda x: None,
-                "wake": lambda x: None,
-                "sleep": lambda x: None,
-                "to_system": lambda x: None,
-                "option": lambda x: None,
-                # PERF-4: tool_result is a machine-readable tag; never surface it
-                # to the chat pane.  It was previously missing from _handlers, so
-                # raw tool JSON leaked via the default handler.
                 "tool_result": lambda x: None,
                 "result": lambda x: None,
                 "tool_response": lambda x: None,
-                # DSML / invoke tool calls must not leak as chat text.
                 **{name: (lambda x: None) for name in DSML_TOOL_TAG_NAMES},
             }
         )

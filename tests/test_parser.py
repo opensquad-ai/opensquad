@@ -44,9 +44,12 @@ class TestParseParamValue:
         assert self._target("") == ""
         assert self._target("   ").strip() == ""
 
-    def test_quoted_string(self):
-        result = self._target('"hello"')
-        assert isinstance(result, str)
+    def test_quoted_windows_path_tab_restored(self):
+        # ast.literal_eval turns \t into TAB; paths like docs\tool_x must survive.
+        assert self._target(r'"docs\tool_result.md"') == r"docs\tool_result.md"
+
+    def test_quoted_windows_path_bell_restored(self):
+        assert "app" in str(self._target(r'"C:\app\file.txt"'))
 
     def test_list_literal(self):
         result = self._target("[1, 2, 3]")
@@ -280,6 +283,44 @@ class TestParseDsmlToolCalls:
         assert name == "im.send"
         assert args.get("to") == "user@ai.com"
 
+    def test_invoke_name_tool_call_uses_inner_func(self):
+        fw = "\uff5c\uff5c"
+        text = (
+            f"<{fw}DSML{fw}tool_calls>"
+            f'<{fw}DSML{fw}invoke name="tool_call">'
+            "<func>filesystem.read_file</func>"
+            "<path>README.md</path>"
+            f"</{fw}DSML{fw}invoke>"
+            f"</{fw}DSML{fw}tool_calls>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "filesystem.read_file"
+        assert args.get("path") == "README.md"
+        assert "func" not in args
+
+    def test_orphan_path_parameter_maps_to_read_file(self):
+        text = '<parameter name="path">README.md</parameter>'
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "filesystem.read_file"
+        assert args.get("path") == "README.md"
+        assert name != "llm_recovered"
+
+    def test_placeholder_invoke_without_func_is_skipped(self):
+        fw = "\uff5c\uff5c"
+        text = (
+            f"<{fw}DSML{fw}tool_calls>"
+            f'<{fw}DSML{fw}invoke name="tool_call">'
+            f'<{fw}DSML{fw}parameter name="unknown_key" string="true">x</{fw}DSML{fw}parameter>'
+            f"</{fw}DSML{fw}invoke>"
+            f"</{fw}DSML{fw}tool_calls>"
+        )
+        result = self._parse(text)
+        assert result == []
+
     def test_strip_dsml_removes_inner_json(self):
         from opensquad.parser import strip_dsml_tool_markup
 
@@ -297,3 +338,87 @@ class TestParseDsmlToolCalls:
         assert "invoke" not in out.lower()
         assert "hello" in out
         assert "world" in out
+
+
+class TestStripDsmlUnclosedSafety:
+    """未闭合的 DSML 标签不应吞掉其后的正常正文。"""
+
+    FW = "\uff5c\uff5c"
+
+    @staticmethod
+    def _strip(text: str) -> str:
+        from opensquad.parser import strip_dsml_tool_markup
+
+        return strip_dsml_tool_markup(text)
+
+    def test_unclosed_tag_with_argument_tail_is_dropped(self):
+        """流被截断时，残缺的 JSON 参数确实应该被丢弃。"""
+        fw = self.FW
+        text = f'<{fw}DSML{fw} invoke name="shell"><{fw}DSML{fw} parameter name="arguments">{{"command": "dir foo"'
+        out = self._strip(text)
+        assert "dir foo" not in out
+        assert "invoke" not in out.lower()
+
+    def test_unclosed_tag_keeps_surrounding_prose(self):
+        """模型只是在解释 DSML 语法时，后面的正文必须保留。"""
+        fw = self.FW
+        text = f"要传参数就写成 <{fw}DSML{fw} parameter> 这种形式，然后按顺序给出即可，不要漏掉收尾标签。"
+        out = self._strip(text)
+        assert "要传参数就写成" in out
+        assert "然后按顺序给出即可，不要漏掉收尾标签。" in out
+        assert "parameter>" not in out
+
+
+class TestParseDotsFunctionCalls:
+    """Dots Studio <dots_function_call> must win over DSML orphan path recovery."""
+
+    @staticmethod
+    def _parse(text: str):
+        from opensquad.parser import ResponseParser
+
+        return ResponseParser.parse_tool_calls(text)
+
+    def test_canonical_invoke_name(self):
+        text = (
+            "<dots_function_call>\n"
+            '<invoke name="mcp__filesystem__directory_tree">\n'
+            '<parameter name="path">.</parameter>\n'
+            "</invoke>\n"
+            "</dots_function_call>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "mcp__filesystem__directory_tree"
+        assert args.get("path") == "."
+        assert name != "filesystem.read_file"
+
+    def test_truncated_invoke_attr_is_not_read_file(self):
+        """OpenRouter dots often emit `invoke="mcp__...">` without `<invoke name=`."""
+        text = (
+            "<dots_function_call>\n"
+            'invoke="mcp__filesystem__directory_tree">\n'
+            '<parameter name="path">.</parameter>\n'
+            "</invoke>\n"
+            "</dots_function_call>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "mcp__filesystem__directory_tree"
+        assert args.get("path") == "."
+        assert name != "filesystem.read_file"
+
+    def test_angle_invoke_equals_form(self):
+        text = (
+            "<dots_function_call>\n"
+            '<invoke="mcp__filesystem__directory_tree">\n'
+            '<parameter name="path">C:\\\\tmp</parameter>\n'
+            "</invoke>\n"
+            "</dots_function_call>"
+        )
+        result = self._parse(text)
+        assert len(result) == 1
+        name, args = result[0]
+        assert name == "mcp__filesystem__directory_tree"
+        assert "tmp" in str(args.get("path", ""))

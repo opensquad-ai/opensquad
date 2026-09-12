@@ -5,15 +5,20 @@ import {
   absorbAssistantFinalText,
   appendLiveWorkflowBatch,
   buildTimelineFromSession,
+  CANCELLED_OPEN_TOOL_RESULT,
   composeAssistantDisplayContent,
+  detectCancelledTurn,
   extractLiveToolCallFromMarkup,
   foldTaskProcessSinceLastUser,
   formatUserSkillDisplayContent,
   genTimelineUID,
+  LIVE_XML_TOOL_ID,
   isToolResultFailure,
   mergeOrphanedToolResultsAcrossWorkflows,
+  rebaseTimelineUids,
   sealIncompleteWorkflows,
   shouldTreatWorkflowComplete,
+  stripToolCallMarkup,
   timelineHasToolEvent,
   timelineHasVisibleChatContent,
   type TimelineEntry,
@@ -259,11 +264,196 @@ describe('composeAssistantDisplayContent', () => {
       composeAssistantDisplayContent('websearch\nquery\n\u798F\u5DDE\u5929\u6C14'),
     ).toBe('');
   });
+
+  it('strips orphan DSML close tags that markdown would render as a table', () => {
+    expect(stripToolCallMarkup('</||DSML||calls>').trim()).toBe('');
+    expect(stripToolCallMarkup('hello\n</||DSML||calls>\n').trim()).toBe('hello');
+    const fw = `</\uFF5C\uFF5CDSML\uFF5C\uFF5C calls>`;
+    const out = composeAssistantDisplayContent(fw);
+    expect(out).not.toMatch(/DSML/i);
+    expect(out).not.toMatch(/\bcalls\b/i);
+  });
+
+  it('strips <plan> checklist so refresh does not dump it as chat', () => {
+    const raw = [
+      '<plan>',
+      '- [x] 摸清项目结构与技术栈',
+      '- [>] 后台跑前端类型检查',
+      '- [ ] 审查 Web 对话渲染',
+      '</plan>',
+      '<to_user>开始执行第二项。</to_user>',
+    ].join('\n');
+    const out = composeAssistantDisplayContent(raw);
+    expect(out).toContain('开始执行第二项');
+    expect(out).not.toContain('摸清项目结构');
+    expect(out).not.toContain('<plan>');
+  });
+
+  it('hides untagged plan-only assistant dumps', () => {
+    const raw = [
+      '- 摸清项目结构与技术栈 [x]',
+      '- 后台跑前端类型检查 + 单测 (tsc / vitest) [>]',
+      '- 审查 Web 对话渲染相关代码 [ ]',
+    ].join('\n');
+    expect(composeAssistantDisplayContent(raw)).toBe('');
+  });
+
+  it('strips protocol tags including inner text so timeout does not become "60"', () => {
+    expect(composeAssistantDisplayContent('<timeout>60</timeout>')).toBe('');
+    expect(composeAssistantDisplayContent('<timeout>60</timeout>\n')).toBe('');
+    expect(composeAssistantDisplayContent('<Timeout>60</Timeout>')).toBe('');
+    expect(composeAssistantDisplayContent('hello\n<timeout>60</timeout>')).toBe('hello');
+    expect(composeAssistantDisplayContent('<to_user>开始执行。</to_user>\n<timeout>60</timeout>')).toBe(
+      '开始执行。',
+    );
+    expect(composeAssistantDisplayContent('<sleep>5</sleep>')).toBe('');
+    expect(composeAssistantDisplayContent('<to_system>task_complete</to_system>')).toBe('');
+    expect(composeAssistantDisplayContent('<wake>now</wake>')).toBe('');
+    expect(composeAssistantDisplayContent('<state>idle</state>')).toBe('');
+    expect(composeAssistantDisplayContent('<timeout>60')).toBe('');
+  });
+
+  it('strips namespaced tool-as-tag XML so refresh does not dump shell commands', () => {
+    const leaked = [
+      '<system.run_session_job>',
+      'copy /Y src\\\\purify.min.js .tmpscratch\\\\purify.min.js',
+      '</system.run_session_job>',
+      'findstr /s /i /m "dangerouslySetInnerHTML" src\\\\components\\\\*.tsx',
+      '</system.run_session_job>',
+    ].join('\n');
+    expect(composeAssistantDisplayContent(leaked)).toBe('');
+    expect(
+      composeAssistantDisplayContent(
+        '<to_user>已完成检查。</to_user>\n<system.run_session_job>git status</system.run_session_job>',
+      ),
+    ).toBe('已完成检查。');
+    expect(
+      composeAssistantDisplayContent('<filesystem.read_file>\npath: foo.ts\n</filesystem.read_file>'),
+    ).toBe('');
+  });
+
+  it('strips dots_function_call blocks so refresh does not dump tool XML', () => {
+    const raw = [
+      '<dots_function_call>',
+      '<invoke name="mcp__filesystem__directory_tree">',
+      '<parameter name="path">.</parameter>',
+      '</invoke>',
+      '</dots_function_call>',
+    ].join('\n');
+    expect(composeAssistantDisplayContent(raw)).toBe('');
+    expect(
+      composeAssistantDisplayContent(`<to_user>开始检查。</to_user>\n${raw}`),
+    ).toBe('开始检查。');
+  });
 });
 
 describe('buildTimelineFromSession', () => {
   it('returns empty timeline for empty session', () => {
     expect(buildTimelineFromSession([], [])).toEqual([]);
+  });
+
+  it('moves persisted <plan> from assistant text into the workflow fold', () => {
+    const messages = [
+      { role: 'user', content: '检查项目', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        role: 'assistant',
+        content:
+          '<plan>\n- [x] 摸清项目结构与技术栈\n- [>] 跑单测\n- [ ] 汇总\n</plan>\n<to_user>已列出计划。</to_user>',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, []);
+    const assistant = tl.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'message' }> =>
+        e.kind === 'message' && e.data.role === 'assistant',
+    );
+    expect(assistant).toHaveLength(1);
+    expect(String(assistant[0].data.content)).toContain('已列出计划');
+    expect(String(assistant[0].data.content)).not.toContain('摸清项目结构');
+    const planEvents = tl
+      .filter((e) => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'plan'));
+    expect(planEvents.length).toBeGreaterThan(0);
+  });
+
+  it('does not render timeout-only assistant messages as chat', () => {
+    const messages = [
+      { role: 'user', content: '继续', timestamp: '2026-09-10T11:09:00.000Z' },
+      {
+        role: 'assistant',
+        content: '<timeout>60</timeout>',
+        timestamp: '2026-09-10T11:10:00.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, []);
+    const assistant = tl.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'message' }> =>
+        e.kind === 'message' && e.data.role === 'assistant',
+    );
+    expect(assistant).toHaveLength(0);
+  });
+
+  it('does not render namespaced tool XML as a chat bubble after refresh', () => {
+    const messages = [
+      { role: 'user', content: '检查', timestamp: '2026-09-11T10:00:00.000Z' },
+      {
+        role: 'assistant',
+        content:
+          '<system.run_session_job>\ncopy /Y purify.min.js .tmp\n</system.run_session_job>\nfindstr foo\n</system.run_session_job>',
+        timestamp: '2026-09-11T10:00:02.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'tool_call',
+        data: { id: 'c1', name: 'system.run_session_job', arguments: 'copy /Y purify.min.js .tmp' },
+        timestamp: '2026-09-11T10:00:01.000Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'c1', name: 'system.run_session_job', result: 'ok' },
+        timestamp: '2026-09-11T10:00:01.500Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const assistant = tl.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'message' }> =>
+        e.kind === 'message' && e.data.role === 'assistant',
+    );
+    expect(assistant).toHaveLength(0);
+    expect(JSON.stringify(assistant)).not.toContain('copy /Y purify');
+    const tools = tl
+      .filter((e) => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
+    expect(tools.length).toBeGreaterThan(0);
+  });
+
+  it('does not duplicate plan when session events already have one', () => {
+    const messages = [
+      { role: 'user', content: '检查项目', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: '- 摸清项目结构 [x]\n- 跑单测 [>]\n- 汇总 [ ]',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'plan',
+        data: { text: '- [x] 摸清项目结构\n- [>] 跑单测\n- [ ] 汇总' },
+        timestamp: '2026-01-01T00:00:01.500Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const planEvents = tl
+      .filter((e) => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'plan'));
+    expect(planEvents.length).toBe(1);
+    const assistant = tl.filter(
+      (e): e is Extract<TimelineEntry, { kind: 'message' }> =>
+        e.kind === 'message' && e.data.role === 'assistant',
+    );
+    expect(assistant.length).toBe(0);
   });
 
   it('skips role=tool messages (tool IO is LLM context, rendered via workflow events)', () => {
@@ -431,6 +621,90 @@ describe('buildTimelineFromSession', () => {
           && e.data.events.some((ev) => String(ev.content || '').includes('late thought')),
       );
     expect(thoughtBefore).toBe(true);
+  });
+
+  it('seals stopped turns after refresh even when tools never returned', () => {
+    const messages = [
+      { role: 'user', content: '搜一下', timestamp: '2026-09-10T08:00:00.000Z' },
+    ];
+    const events = [
+      {
+        type: 'tool_call',
+        data: { id: 't1', name: 'filesystem__search_files', args: '{}' },
+        timestamp: '2026-09-10T08:00:10.000Z',
+      },
+      {
+        type: 'turn_summary',
+        data: { reason: 'user_stop', elapsed_ms: 351000 },
+        timestamp: '2026-09-10T08:05:51.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const wfs = tl.filter((e) => e.kind === 'workflow');
+    expect(wfs.length).toBeGreaterThan(0);
+    expect(wfs.every((e) => e.kind === 'workflow' && e.data.completed)).toBe(true);
+    expect(tl.some((e) => e.kind === 'workflow' && !e.data.completed)).toBe(false);
+    const open = wfs.flatMap((e) =>
+      e.kind === 'workflow'
+        ? e.data.events.filter((ev) => ev.type === 'tool_call' && !ev.result)
+        : [],
+    );
+    expect(open).toHaveLength(0);
+    const cancelled = wfs.flatMap((e) =>
+      e.kind === 'workflow'
+        ? e.data.events.filter(
+          (ev) =>
+            ev.type === 'tool_call'
+            && String(ev.result || '').includes('Cancelled'),
+        )
+        : [],
+    );
+    expect(cancelled.length).toBeGreaterThan(0);
+    expect(cancelled[0].result).toBe(CANCELLED_OPEN_TOOL_RESULT);
+    const elapsed = wfs[0].kind === 'workflow' ? wfs[0].data.elapsed_ms : undefined;
+    expect(elapsed).toBe(351000);
+  });
+
+  it('seals from [Stopped] assistant text when turn_summary is missing', () => {
+    const messages = [
+      { role: 'user', content: '继续', timestamp: '2026-09-10T08:00:00.000Z' },
+      { role: 'assistant', content: '[Stopped]', timestamp: '2026-09-10T08:01:00.000Z' },
+    ];
+    const events = [
+      {
+        type: 'tool_call',
+        data: { id: 't1', name: 'websearch__search', args: '{}' },
+        timestamp: '2026-09-10T08:00:20.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    expect(tl.some((e) => e.kind === 'workflow' && !e.data.completed)).toBe(false);
+    const tools = tl
+      .filter((e) => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
+    expect(tools.every((ev) => !!ev.result)).toBe(true);
+  });
+
+  it('does not seal a new turn from an older user_stop summary', () => {
+    const messages = [
+      { role: 'user', content: '上一轮', timestamp: '2026-09-10T08:00:00.000Z' },
+      { role: 'user', content: '新一轮还在跑', timestamp: '2026-09-10T09:00:00.000Z' },
+    ];
+    const events = [
+      {
+        type: 'turn_summary',
+        data: { reason: 'user_stop', elapsed_ms: 1000 },
+        timestamp: '2026-09-10T08:01:00.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 't2', name: 'websearch__search', args: '{}' },
+        timestamp: '2026-09-10T09:00:10.000Z',
+      },
+    ];
+    expect(detectCancelledTurn(messages, events).cancelled).toBe(false);
+    const tl = buildTimelineFromSession(messages, events);
+    expect(tl.some((e) => e.kind === 'workflow' && !e.data.completed)).toBe(true);
   });
 
   it('interleaves tools between intermediate to_user progress lines (scheduled-task)', () => {
@@ -913,6 +1187,76 @@ describe('sealIncompleteWorkflows (mid-send)', () => {
     expect(tools[1].result).toBe('ok');
     expect(tools[2].result).toBe('Cancelled: stopped by user');
   });
+
+  it('drops streaming xml-live preview rows instead of marking them failed', () => {
+    const uid = () => genTimelineUID();
+    const started = 1_700_000_000_000;
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            {
+              type: 'tool_call',
+              content: { id: LIVE_XML_TOOL_ID, name: 'files', partial: true },
+              timestamp: started,
+            },
+            { type: 'tool_call', content: { id: 'call_real', name: 'shell' }, timestamp: started + 1 },
+          ],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+    ];
+    const sealed = sealIncompleteWorkflows(prev, {
+      nowMs: started + 900,
+      cancelOpenTools: 'Cancelled: still running when the turn stopped',
+    });
+    const tools = sealed
+      .filter((e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
+    expect(tools).toHaveLength(1);
+    expect(tools[0].content.id).toBe('call_real');
+    expect(tools[0].result).toBe('Cancelled: still running when the turn stopped');
+  });
+
+  it('drops backend xml_preview_* prefix rows on cancel', () => {
+    const uid = () => genTimelineUID();
+    const started = 1_700_000_000_000;
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [
+            {
+              type: 'tool_call',
+              content: { id: 'xml_preview_files', name: 'files', partial: true },
+              timestamp: started,
+            },
+            {
+              type: 'tool_call',
+              content: { id: 'xml_preview_get s', name: 'get s', partial: true },
+              timestamp: started + 1,
+            },
+          ],
+          status: 'working',
+          completed: false,
+          started_ms: started,
+        },
+        _uid: uid(),
+      },
+    ];
+    const sealed = sealIncompleteWorkflows(prev, {
+      nowMs: started + 900,
+      cancelOpenTools: 'Cancelled: still running when the turn stopped',
+    });
+    const tools = sealed
+      .filter((e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow')
+      .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
+    expect(tools).toHaveLength(0);
+  });
 });
 
 describe('buildTimelineFromSession in-progress refresh', () => {
@@ -1002,6 +1346,57 @@ describe('buildTimelineFromSession in-progress refresh', () => {
     expect(tools).toHaveLength(1);
     expect(tools[0].content?.id).toBe('call_runner_write_0');
     expect(tools[0].content?.partial).toBeUndefined();
+  });
+
+  it('keeps same-turn tools in one fold when assistant sync is only tool markup', () => {
+    const messages = [
+      { role: 'user', content: '检查仓库', timestamp: '2026-01-01T00:00:00.000Z' },
+      {
+        role: 'assistant',
+        content: '<tool_call>\n<func>filesystem.list_directory</func>\n</tool_call>',
+        timestamp: '2026-01-01T00:00:04.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '<tool_call>\n<func>filesystem.read_file</func>\n</tool_call>',
+        timestamp: '2026-01-01T00:00:07.000Z',
+      },
+    ];
+    const events = [
+      {
+        type: 'tool_call',
+        data: { id: 'a', name: 'filesystem.list_directory', args: '{}' },
+        timestamp: '2026-01-01T00:00:02.000Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'a', result: 'ok' },
+        timestamp: '2026-01-01T00:00:03.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 'b', name: 'filesystem.read_file', args: '{}' },
+        timestamp: '2026-01-01T00:00:05.000Z',
+      },
+      {
+        type: 'tool_result',
+        data: { id: 'b', result: 'ok' },
+        timestamp: '2026-01-01T00:00:06.000Z',
+      },
+      {
+        type: 'tool_call',
+        data: { id: 'c', name: 'filesystem.search_files', args: '{}' },
+        timestamp: '2026-01-01T00:00:08.000Z',
+      },
+    ];
+    const tl = buildTimelineFromSession(messages, events);
+    const wfs = tl.filter((e) => e.kind === 'workflow');
+    expect(wfs).toHaveLength(1);
+    if (wfs[0].kind !== 'workflow') return;
+    const tools = wfs[0].data.events.filter((e) => e.type === 'tool_call');
+    expect(tools).toHaveLength(3);
+    expect(wfs[0].data.completed).toBe(false);
+    expect(tl.some((e) => e.kind === 'message' && e.data.role === 'assistant')).toBe(false);
   });
 });
 
@@ -1203,6 +1598,20 @@ describe('extractLiveToolCallFromMarkup', () => {
     expect(extractLiveToolCallFromMarkup('Let me use the websearch tool to check Fuzhou weather.')).toBeNull();
   });
 
+  it('does not emit a row for a streaming func name prefix', () => {
+    expect(extractLiveToolCallFromMarkup('<func>files')).toBeNull();
+    expect(extractLiveToolCallFromMarkup('<func>filesystem')).toBeNull();
+    expect(extractLiveToolCallFromMarkup('<tool_call>\n<func>start j')).toBeNull();
+    expect(extractLiveToolCallFromMarkup('<tool_call>\n<func>get s')).toBeNull();
+  });
+
+  it('emits one stable live id once the dotted tool name is ready', () => {
+    const got = extractLiveToolCallFromMarkup('<tool_call>\n<func>filesystem.read_file');
+    expect(got).not.toBeNull();
+    expect(got!.id).toBe(LIVE_XML_TOOL_ID);
+    expect(got!.name).toBe('filesystem.read_file');
+  });
+
   it('reads Ling/Qwen first-line name + arg_key/arg_value', () => {
     const got = extractLiveToolCallFromMarkup(
       '<tool_call>websearch\n<arg_key>query</arg_key>\n<arg_value>福州天气</arg_value>',
@@ -1244,6 +1653,111 @@ describe('extractLiveToolCallFromMarkup', () => {
       expect(types).toEqual(['thought', 'tool_call']);
       const call = tl[0].data.events[1];
       expect(call.content.name).toMatch(/websearch/i);
+    }
+  });
+
+  it('merges backend xml_preview_* prefix ids into a single row', () => {
+    let tl = appendWorkflowEvent(
+      [],
+      {
+        type: 'tool_call',
+        content: { id: 'xml_preview_files', name: 'files', partial: true, index: 0 },
+        timestamp: 1,
+      },
+      'Calling files...',
+    );
+    tl = appendWorkflowEvent(
+      tl,
+      {
+        type: 'tool_call',
+        content: { id: 'xml_preview_filesystem', name: 'filesystem.list_directory', partial: true, index: 0 },
+        timestamp: 2,
+      },
+      'Calling filesystem.list_directory...',
+    );
+    expect(tl).toHaveLength(1);
+    if (tl[0].kind !== 'workflow') return;
+    const tools = tl[0].data.events.filter((e) => e.type === 'tool_call');
+    expect(tools).toHaveLength(1);
+    expect(tools[0].content.name).toBe('filesystem.list_directory');
+  });
+});
+
+describe('rebaseTimelineUids', () => {
+  it('keeps matching workflow and tool-call uids across a disk rebuild', () => {
+    const prev: TimelineEntry[] = [{
+      kind: 'workflow',
+      _uid: 'wf-live',
+      data: {
+        events: [{
+          type: 'tool_call',
+          content: { id: 't1', name: 'read_file', args: {} },
+          timestamp: 100,
+          _uid: 'evt-live',
+        }],
+        status: 'Calling...',
+        completed: false,
+        started_ms: 50,
+      },
+    }];
+    const next: TimelineEntry[] = [{
+      kind: 'workflow',
+      _uid: 'wf-disk',
+      data: {
+        events: [{
+          type: 'tool_call',
+          content: { id: 't1', name: 'read_file', args: {} },
+          timestamp: 999,
+          _uid: 'evt-disk',
+        }],
+        status: null,
+        completed: true,
+        started_ms: 50,
+      },
+    }];
+    const rebased = rebaseTimelineUids(prev, next);
+    expect(rebased[0]._uid).toBe('wf-live');
+    expect(rebased[0].kind).toBe('workflow');
+    if (rebased[0].kind === 'workflow') {
+      expect(rebased[0].data.events[0]._uid).toBe('evt-live');
+    }
+  });
+
+  it('matches workflow uid by first-event identity when started_ms differs', () => {
+    const prev: TimelineEntry[] = [{
+      kind: 'workflow',
+      _uid: 'wf-live',
+      data: {
+        events: [{
+          type: 'tool_call',
+          content: { id: 'call-9', name: 'websearch' },
+          timestamp: 1,
+          _uid: 'evt-a',
+        }],
+        status: 'Calling...',
+        completed: false,
+        started_ms: 10,
+      },
+    }];
+    const next: TimelineEntry[] = [{
+      kind: 'workflow',
+      _uid: 'wf-disk',
+      data: {
+        events: [{
+          type: 'tool_call',
+          content: { id: 'call-9', name: 'websearch' },
+          timestamp: 88,
+          _uid: 'evt-b',
+        }],
+        status: null,
+        completed: true,
+        started_ms: 99,
+      },
+    }];
+    const rebased = rebaseTimelineUids(prev, next);
+    expect(rebased[0]._uid).toBe('wf-live');
+    if (rebased[0].kind === 'workflow') {
+      expect(rebased[0].data.events[0]._uid).toBe('evt-a');
     }
   });
 });

@@ -232,3 +232,54 @@ async def test_session_switch_promotes_default_for_other_panes(monkeypatch):
     assert api_a.base_url.startswith("https://api.stepfun.com")
     # New pane clones root which was promoted to the last UI pick.
     assert session_model.current_api_card(api_b) == "stepaudio-2.5-chat"
+
+
+def test_reselect_tool_call_strategy_unknown_dots_is_xml():
+    from opensquad.model_switch import reselect_tool_call_strategy
+
+    registry = MagicMock()
+    context_builder = SimpleNamespace(tool_call_strategy=object())
+    runner = SimpleNamespace(
+        tool_registry=registry,
+        _context_builder=context_builder,
+        tool_call_strategy=object(),
+    )
+    new_model = {
+        "model_name": "dots-studio/dots-3-note-preview:free",
+        "api_protocol": "openai_compat",
+        "tool_call_mode": "native",
+    }
+
+    reselect_tool_call_strategy(runner, new_model)
+
+    assert runner.tool_call_strategy.get_strategy_name() == "XML"
+    assert context_builder.tool_call_strategy is runner.tool_call_strategy
+
+
+@pytest.mark.asyncio
+async def test_apply_model_reload_reselects_strategy(monkeypatch):
+    called = {}
+
+    def fake_reselect(runner, new_model):
+        called["model"] = dict(new_model)
+
+    monkeypatch.setattr(model_switch, "reselect_tool_call_strategy", fake_reselect)
+
+    chat_api = SimpleNamespace(
+        reload_model=AsyncMock(),
+        model_config={"model_name": "deepseek-chat", "api_protocol": "openai_compat"},
+        req=[],
+    )
+    runner = SimpleNamespace(_model_config=dict(chat_api.model_config))
+    new_model = {
+        "model_name": "dots-studio/dots-3-note-preview:free",
+        "api_protocol": "openai_compat",
+        "tool_call_mode": "native",
+        "is_image": False,
+    }
+
+    result = await model_switch.apply_model_reload(runner, new_model, chat_api=chat_api)
+
+    assert result is chat_api
+    chat_api.reload_model.assert_awaited_once_with(new_model)
+    assert called["model"]["model_name"] == new_model["model_name"]

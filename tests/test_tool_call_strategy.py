@@ -182,6 +182,22 @@ class TestToolCallStrategySelector:
         # Unknown model should fall back to XML
         assert isinstance(strategy, XMLToolCallStrategy)
 
+    def test_select_native_unknown_openai_compat_falls_back_xml(self):
+        """dots / OpenRouter free cards are unknown; native still falls back to XML."""
+        config = {
+            "model": {
+                "api_protocol": "openai_compat",
+                "model_name": "dots-studio/dots-3-note-preview:free",
+                "tool_call_mode": "native",
+            }
+        }
+        mock_registry = Mock()
+
+        strategy = ToolCallStrategySelector.select(config, mock_registry)
+
+        assert isinstance(strategy, XMLToolCallStrategy)
+        assert strategy.get_strategy_name() == "XML"
+
     def test_select_default_auto_mode(self):
         """Test default mode is auto when not specified"""
         config = {"model": {"provider": "openai_compat", "model_name": "gpt-4"}}

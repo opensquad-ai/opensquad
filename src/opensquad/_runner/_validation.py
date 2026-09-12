@@ -38,34 +38,12 @@ def is_leaked_tool_params(text: str) -> bool:
             return True
 
     # Detect XML parameter tag leak
-    system_tags = {
-        "title",
-        "thought",
-        "think",
-        "plan",
-        "to_user",
-        "to_user_reply",
-        "to_user_end_task",
-        "to_system",
-        "tool_call",
-        "tool_result",
-        "arguments",
-        "state",
-        "wake",
-        "sleep",
-        "option",
-        "forward",
-        "system_reminder",
-        "func",
-        "task_start",
-        "task_complete",
-        "task_failed",
-    }
+    from opensquad.xml_parser import KNOWN_PROTOCOL_XML_TAGS
 
     xml_tags = re.findall(r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE)
 
     if xml_tags and "<tool_call" not in text:
-        leaked_tags = [tag for tag in xml_tags if tag.lower() not in system_tags]
+        leaked_tags = [tag for tag in xml_tags if tag.lower() not in KNOWN_PROTOCOL_XML_TAGS]
         if leaked_tags:
             logger.warning(
                 "[Validation] Detected leaked XML parameter tags without <tool_call> wrapper: %s", leaked_tags

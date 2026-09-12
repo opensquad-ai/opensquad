@@ -195,27 +195,7 @@ _RE_MANY_NEWLINES = re.compile(r"\n{4,}")
 _RE_TOOL_CALL_OPEN = re.compile(r"<tool_call", re.IGNORECASE)
 _RE_TAGS_EXCEPT_TOOL_CALL = re.compile(r"<(?!tool_call)[^>]+>")
 
-_SILENT_XML_TAGS = (
-    "thought",
-    "plan",
-    "think",
-    "tool_call",
-    "tool_result",
-    "to_system",
-    "state",
-    "wake",
-    "sleep",
-    "title",
-    "option",
-    "arguments",
-)
-_SILENT_TAG_RES = tuple(
-    (
-        re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.DOTALL | re.IGNORECASE),
-        re.compile(rf"<{tag}\b[^>]*/>", re.IGNORECASE),
-    )
-    for tag in _SILENT_XML_TAGS
-)
+from opensquad.xml_parser import strip_silent_protocol_blocks as _strip_silent_protocol_blocks
 
 
 @functools.lru_cache(maxsize=64)
@@ -337,6 +317,8 @@ class AgentRunner:
         self._streamed_user_tag = None
         # Per-turn repetition rewind counter (serial + parallel turn loops reset each turn)
         self._repetition_rewind_count = 0
+        # Consecutive format_error (leak guard) replies within one user turn.
+        self._format_error_streak = 0
 
         # Vision config: {"is_img_mode": bool}
         # is_img_mode=true: main model supports images natively (controlled by config.json model.is_image), passed directly
@@ -872,10 +854,12 @@ class AgentRunner:
 
         history = _get_session_manager().get_messages_for_chat_api(limit=50, sid=target_sid)
         if history:
-            # Add history messages (limit count to avoid exceeding context)
+            # Window is already aligned so we never start on a dangling
+            # role=tool (a second history[-30:] slice used to cut the pair
+            # and trigger DeepSeek 400 on continue / refresh).
             loaded_roles: list[str] = []
             skipped_info: list[str] = []
-            for msg in history[-30:]:  # Last 30 messages
+            for msg in history:
                 role = msg.get("role", "")
                 content = msg.get("content", "")
                 has_tool_calls = isinstance(msg.get("tool_calls"), list) and msg["tool_calls"]
@@ -1000,21 +984,23 @@ class AgentRunner:
         while i < len(req):
             msg = req[i]
             if msg.get("role") == "tool":
-                # Check if previous message is assistant with tool_calls
-                if i == 0:
-                    # No previous message - remove orphan tool message
+                tid = msg.get("tool_call_id") or ""
+                # Leading tool with no id cannot be paired — drop it.
+                # A leading tool that already has a real id must keep that id
+                # (history window cut); inventing synth_* here is what produced
+                # DeepSeek 400 "insufficient tool messages following tool_calls".
+                if i == 0 and not tid:
                     logger.warning("[Runner] Removing orphan role=tool at index 0")
                     req.pop(i)
                     fixed += 1
                     continue
 
-                prev = req[i - 1]
-                if prev.get("role") != "assistant" or not prev.get("tool_calls"):
+                prev = req[i - 1] if i > 0 else None
+                if prev is None or prev.get("role") != "assistant" or not prev.get("tool_calls"):
                     # 该 tool 响应的 tool_call_id 若已被更早的 assistant 声明
                     # （并行/乱序工具结果：上一轮发起的调用，结果在本轮才返回），
                     # 它属于那个 assistant，不应注入 synthetic assistant——
                     # 否则会破坏 tool_calls 配对并污染后续 assistant 消息。
-                    tid = msg.get("tool_call_id")
                     claimed_by_earlier = False
                     if tid:
                         for _lookback in reversed(req[:i]):
@@ -1031,12 +1017,11 @@ class AgentRunner:
                         )
                         i += 1
                         continue
-                    # Previous message doesn't have tool_calls - inject synthetic assistant
-                    synth_id = f"synth_{uuid.uuid4().hex[:8]}"
+                    # Reuse the tool's own id so the following tool message
+                    # actually answers this assistant. After insert the tool
+                    # sits at i+1 (not i+2).
+                    synth_id = tid or f"synth_{uuid.uuid4().hex[:8]}"
                     logger.info(f"[Runner] Injecting synthetic assistant before role=tool (index={i})")
-                    # FIX A: Find the most recent assistant with reasoning_content BEFORE the tool message.
-                    # prev here is NOT an assistant (that's why we entered this branch), so we need
-                    # to scan backward to find the last assistant that had reasoning_content.
                     synth_reasoning = ""
                     for _lookback in reversed(req[:i]):
                         if _lookback.get("role") == "assistant" and _lookback.get("reasoning_content"):
@@ -1050,7 +1035,7 @@ class AgentRunner:
                                 "id": synth_id,
                                 "type": "function",
                                 "function": {
-                                    "name": "restored_session",
+                                    "name": msg.get("name") or "restored_session",
                                     "arguments": "{}",
                                 },
                             }
@@ -1062,13 +1047,11 @@ class AgentRunner:
                             f"[Runner] Copied reasoning_content ({len(synth_reasoning)} chars) to synthetic assistant"
                         )
                     req.insert(i, synth_msg)
-                    # Update tool_call_id on the actual tool message (now at i+2 after insert)
-                    # 防御：只改写真正的 role=tool 消息，避免把 tool_call_id 加到 assistant 上
-                    if i + 2 < len(req) and req[i + 2].get("role") == "tool":
-                        if not req[i + 2].get("tool_call_id") or req[i + 2].get("tool_call_id", "").startswith(
-                            "pipeline_events_"
-                        ):
-                            req[i + 2]["tool_call_id"] = synth_id
+                    tool_idx = i + 1
+                    if tool_idx < len(req) and req[tool_idx].get("role") == "tool":
+                        existing = req[tool_idx].get("tool_call_id") or ""
+                        if not existing or existing.startswith("pipeline_events_"):
+                            req[tool_idx]["tool_call_id"] = synth_id
                     fixed += 1
                     i += 1  # Skip to after the inserted message
                     continue
@@ -1521,6 +1504,7 @@ class AgentRunner:
             )
 
             current_input = content
+            self._format_error_streak = 0
             max_turns = 200
             try:
                 max_turns = int(syscfg.get("max_turns", 200)) if hasattr(syscfg, "get") else 200
@@ -2690,6 +2674,7 @@ class AgentRunner:
                         att_lines.append(str(att))
                 if att_lines:
                     current_input += "\n\n[Attachments]\n" + "\n".join(att_lines)
+            self._format_error_streak = 0
             max_turns = kwargs.get("max_turns", 200)
             task_finished = False
             # round_id monotonically increasing: incremented once per new user message, never resets across the session
@@ -3887,10 +3872,8 @@ class AgentRunner:
         # 0. Special handling: remove possibly missing-'<' tool_call markers
         result = _RE_BARE_TOOL_CALL.sub("", result)
 
-        # 1. Thoroughly remove these blocks and their content
-        for paired, self_closing in _SILENT_TAG_RES:
-            result = paired.sub("", result)
-            result = self_closing.sub("", result)
+        # 1. Thoroughly remove protocol blocks and their content (timeout/plan/sleep/…)
+        result = _strip_silent_protocol_blocks(result)
 
         # 2. Special handling for to_user tag: keep its content
         result = _RE_TO_USER_KEEP.sub(r"\1", result)
@@ -3994,29 +3977,9 @@ class AgentRunner:
 
         # Detect XML parameter tag leak (new)
         # Whitelist of legitimate system tags (these are not tool parameter leaks)
-        system_tags = {
-            "title",
-            "thought",
-            "think",
-            "plan",
-            "to_user",
-            "to_user_reply",
-            "to_user_end_task",
-            "to_system",
-            "tool_call",
-            "tool_result",
-            "arguments",
-            "state",
-            "wake",
-            "sleep",
-            "option",
-            "forward",
-            "system_reminder",
-            "func",
-            "task_start",
-            "task_complete",
-            "task_failed",
-        }
+        from opensquad.xml_parser import KNOWN_PROTOCOL_XML_TAGS
+
+        system_tags = KNOWN_PROTOCOL_XML_TAGS
 
         # Extract all paired XML tags
         xml_tags = re.findall(r"<([a-zA-Z_][a-zA-Z0-9_]*)>.*?</\1>", s, re.DOTALL | re.IGNORECASE)
@@ -4326,26 +4289,16 @@ class AgentRunner:
         # Strict separation of streaming vs non-streaming tags.
         # Streaming tags: emitted as they are parsed.
         # Non-streaming tags: empty handler intercepts them to prevent them from flowing to to_user_stream as plain text.
-        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES
+        from opensquad.xml_parser import DSML_TOOL_TAG_NAMES, protocol_silent_handlers
 
         self.chat_api.stream_parser._handlers.update(
             {
+                **protocol_silent_handlers(),
                 "thought": lambda x: emit_with_sid("thought", x),
                 "think": lambda x: emit_with_sid("thought", x),
                 "to_user": emit_to_user,
                 "to_user_reply": emit_to_user_reply,
                 "to_user_end_task": emit_to_user_end_task,
-                # Intercept the following tags to prevent them from appearing in the content stream
-                "title": lambda x: None,  # Intercept title tag (subject handled elsewhere)
-                "plan": lambda x: None,
-                "tool_call": lambda x: None,
-                "arguments": lambda x: None,
-                "func": lambda x: None,  # Intercept func tag (new tool call format)
-                "state": lambda x: None,
-                "wake": lambda x: None,
-                "sleep": lambda x: None,
-                "to_system": lambda x: None,
-                "option": lambda x: None,
                 **{name: (lambda x: None) for name in DSML_TOOL_TAG_NAMES},
             }
         )

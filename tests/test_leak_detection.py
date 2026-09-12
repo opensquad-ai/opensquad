@@ -46,3 +46,17 @@ def test_plain_text_not_leaked():
     runner = _make_runner()
     assert not runner._is_leaked_tool_params("")
     assert not runner._is_leaked_tool_params("Hello, how can I help?")
+
+
+def test_dots_function_call_not_leaked():
+    runner = _make_runner()
+    hollow = "<dots_function_call>\n\n</dots_function_call>"
+    assert not runner._is_leaked_tool_params(hollow)
+    full = (
+        "<dots_function_call>\n"
+        '<invoke name="mcp__filesystem__directory_tree">\n'
+        '<parameter name="path">.</parameter>\n'
+        "</invoke>\n"
+        "</dots_function_call>"
+    )
+    assert not runner._is_leaked_tool_params(full)

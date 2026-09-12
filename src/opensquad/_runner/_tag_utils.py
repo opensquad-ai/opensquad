@@ -66,29 +66,10 @@ def remove_all_tags(text: str) -> str:
     # 0. Special handling: remove possibly missing-'<' tool_call markers
     result = re.sub(r'tool_call\s+name="[^"]+"\s*>', "", result, flags=re.IGNORECASE)
 
-    # 1. Thoroughly remove these blocks and their content
-    silent_blocks = [
-        "thought",
-        "plan",
-        "think",
-        "tool_call",
-        "tool_result",
-        "to_system",
-        "state",
-        "wake",
-        "sleep",
-        "title",
-        "option",
-        "arguments",
-    ]
-    for tag in silent_blocks:
-        result = re.sub(
-            rf"<{tag}\b[^>]*>.*?</{tag}>",
-            "",
-            result,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        result = re.sub(rf"<{tag}\b[^>]*/>", "", result, flags=re.IGNORECASE)
+    # 1. Thoroughly remove protocol blocks and their content
+    from opensquad.xml_parser import strip_silent_protocol_blocks
+
+    result = strip_silent_protocol_blocks(result)
 
     # 2. Special handling for to_user tag: keep its content
     result = re.sub(
@@ -102,7 +83,7 @@ def remove_all_tags(text: str) -> str:
     result = re.sub(r"<[^>]+>", "", result)
 
     # 4. Thoroughly clean up remaining orphaned closing tags
-    result = re.sub(r"</[a-zA-Z0-9_]+>", "", result)
+    result = re.sub(r"</[a-zA-Z0-9_.]+>", "", result)
     result = re.sub(r"^\s*[<>]\s*$", "", result, flags=re.MULTILINE)
 
     # 5. Clean up extra blank lines while preserving necessary breaks
@@ -191,21 +172,9 @@ def compose_user_visible_message(full_response: str) -> tuple[str, str | None]:
     if not full_response or not str(full_response).strip():
         return "", None
 
-    interfering = [
-        "thought",
-        "think",
-        "plan",
-        "tool_call",
-        "tool_result",
-        "to_system",
-        "state",
-        "wake",
-        "sleep",
-        "option",
-        "title",
-        "func",
-        "arguments",
-    ]
+    from opensquad.xml_parser import PROTOCOL_SILENT_TAGS
+
+    interfering = list(PROTOCOL_SILENT_TAGS)
     clean = remove_tags(full_response, interfering)
 
     chosen_tag: str | None = None

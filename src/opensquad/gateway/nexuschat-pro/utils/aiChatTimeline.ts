@@ -15,6 +15,116 @@ export function genTimelineUID(): string {
   }
 }
 
+const PLAN_STATUS_MARK =
+  /\[(?:x|X|>|done|completed|running|in.?progress|current|failed|error|\s)\]/;
+
+/**
+ * Agent↔runtime protocol XML. Inner text is never user-facing chat
+ * (`<timeout>60</timeout>` must not become a bubble that says "60").
+ * User-visible tags are only `to_user` / `to_user_reply` / `to_user_end_task`.
+ */
+const PROTOCOL_SILENT_TAG_ALT =
+  'timeout|thought|think|plan|tool_call|tool_calls|tool_result|result|tool_response|' +
+  'to_system|state|wake|sleep|title|option|arguments|func|function|forward|' +
+  'system_reminder|task_start|task_complete|task_failed|invoke|parameter|' +
+  'function_calls|calls|dots_function_call';
+
+/** `<system.run_session_job>cmd</…>` — tool-name-as-tag XML, not user chat. */
+const NAMESPACED_TOOL_TAG =
+  '(?:system|filesystem|websearch|browser|mcp|anysearch|bocha|sequential_think)(?:\\.[A-Za-z_][\\w]*)+';
+
+/** Drop `<ns.tool>…</ns.tool>` including inner command text (refresh leak). */
+export function stripNamespacedToolXml(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  const tag = NAMESPACED_TOOL_TAG;
+  let out = content;
+  // Greedy: first open through last same-name close (mismatched extra closers).
+  const greedy = new RegExp(`<(${tag})\\b[^>]*>[\\s\\S]*</\\1\\s*>`, 'gi');
+  for (let i = 0; i < 8 && greedy.test(out); i += 1) {
+    greedy.lastIndex = 0;
+    out = out.replace(greedy, '\n');
+  }
+  out = out.replace(new RegExp(`<(${tag})\\b[^>]*>[\\s\\S]*$`, 'gi'), '\n');
+  out = out.replace(new RegExp(`</?(?:${tag})\\b[^>]*>`, 'gi'), '');
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Remove protocol XML including inner text so Markdown cannot show the leftovers. */
+export function stripSilentProtocolBlocks(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  const names = PROTOCOL_SILENT_TAG_ALT;
+  let out = stripNamespacedToolXml(content);
+  const paired = new RegExp(`<(${names})\\b[^>]*>[\\s\\S]*?</\\1\\s*>`, 'gi');
+  for (let i = 0; i < 8 && paired.test(out); i += 1) {
+    paired.lastIndex = 0;
+    out = out.replace(paired, '\n');
+  }
+  out = out.replace(new RegExp(`<(${names})\\b[^>]*/>`, 'gi'), '');
+  out = out.replace(new RegExp(`<(${names})\\b[^>]*>[\\s\\S]*$`, 'gi'), '\n');
+  out = out.replace(new RegExp(`</?(?:${names})\\b[^>]*>`, 'gi'), '');
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Remove `<plan>...</plan>` including inner checklist so it is not shown as chat. */
+export function stripPlanBlocks(content: string): string {
+  if (!content || typeof content !== 'string') return content;
+  let out = content.replace(/<plan\b[^>]*>[\s\S]*?<\/plan\s*>/gi, '\n');
+  out = out.replace(/<plan\b[^>]*>[\s\S]*$/gi, '\n');
+  out = out.replace(/<\/?plan\b[^>]*>/gi, '');
+  return out.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function extractPlanTextsFromAssistant(content: string): string[] {
+  if (!content || typeof content !== 'string') return [];
+  const texts: string[] = [];
+  const re = /<plan\b[^>]*>([\s\S]*?)<\/plan\s*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    const body = (m[1] || '').trim();
+    if (body) texts.push(body);
+  }
+  if (texts.length === 0 && /<plan\b/i.test(content) && !/<\/plan\s*>/i.test(content)) {
+    const open = content.match(/<plan\b[^>]*>([\s\S]*)$/i);
+    const body = (open?.[1] || '').trim();
+    if (body) texts.push(body);
+  }
+  const remainder = stripPlanBlocks(content);
+  if (texts.length === 0 && isPlanChecklistText(remainder)) texts.push(remainder);
+  return texts;
+}
+
+export function isPlanChecklistText(text: string): boolean {
+  const lines = String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return false;
+  const hits = lines.filter(
+    (l) => l.length <= 240 && PLAN_STATUS_MARK.test(l),
+  );
+  return hits.length >= 2 && hits.length / lines.length >= 0.7;
+}
+
+function dropPlanChecklistDump(text: string): string {
+  if (!text) return text;
+  return isPlanChecklistText(text) ? '' : text;
+}
+
+function absorbPlanFromAssistantMessage(m: { content?: unknown; timestamp?: string }, pendingRaw: any[]) {
+  const raw = typeof m.content === 'string' ? m.content : '';
+  const texts = extractPlanTextsFromAssistant(raw);
+  if (!texts.length) return;
+  if (pendingRaw.some((r) => r?.type === 'plan')) return;
+  for (const text of texts) {
+    if (parsePlanContent(text).length === 0) continue;
+    pendingRaw.push({
+      type: 'plan',
+      data: { text },
+      timestamp: m.timestamp,
+    });
+  }
+}
+
 /**
  * Assistant api_sync / history often stores raw LLM text: body outside
  * `<to_user>` plus a short coda inside. Live UI only shows the coda; on
@@ -26,7 +136,7 @@ export function composeAssistantDisplayContent(content: string): string {
   // assistant body (e.g. `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="...">`).
   // These are LLM tool-call markup, not user-facing text — on refresh they
   // would otherwise leak as raw XML into the chat bubble.
-  const stripped = stripToolCallMarkup(content);
+  const stripped = stripSilentProtocolBlocks(stripPlanBlocks(stripToolCallMarkup(content)));
   const body = stripped;
   const tagNames = ['to_user_end_task', 'to_user_reply', 'to_user'] as const;
   let chosen: { tag: string; inner: string; index: number; full: string } | null = null;
@@ -39,10 +149,11 @@ export function composeAssistantDisplayContent(content: string): string {
     }
   }
   if (!chosen) {
-    return body
-      .replace(/<\/?(?:thought|think|plan|tool_call|tool_result|to_system|state|wake|sleep|title|option|arguments|func)\b[^>]*>/gi, '')
-      .replace(/\n{4,}/g, '\n\n\n')
-      .trim();
+    return dropPlanChecklistDump(
+      stripSilentProtocolBlocks(body)
+        .replace(/\n{4,}/g, '\n\n\n')
+        .trim(),
+    );
   }
 
   let preamble = body;
@@ -52,20 +163,23 @@ export function composeAssistantDisplayContent(content: string): string {
       '',
     );
   }
-  preamble = preamble
-    .replace(/<\/?(?:thought|think|plan|tool_call|tool_result|to_system|state|wake|sleep|title|option|arguments|func)\b[^>]*>/gi, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\n{4,}/g, '\n\n\n')
-    .trim();
-  const inner = (chosen.inner || '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\n{4,}/g, '\n\n\n')
-    .trim();
+  preamble = dropPlanChecklistDump(
+    stripSilentProtocolBlocks(preamble)
+      .replace(/<[^>]+>/g, '')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim(),
+  );
+  const inner = dropPlanChecklistDump(
+    stripSilentProtocolBlocks(chosen.inner || '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim(),
+  );
 
   const parts: string[] = [];
   if (preamble.length >= 40) parts.push(preamble);
   if (inner) parts.push(inner);
-  return (parts.join('\n\n').trim() || inner || preamble || content);
+  return (parts.join('\n\n').trim() || inner || preamble);
 }
 
 /**
@@ -96,9 +210,20 @@ export function stripToolCallMarkup(content: string): string {
   out = out.replace(new RegExp(`<${prefix}${names}\\b[^>]*>[\\s\\S]*$`, 'gi'), '');
   out = out.replace(/<tool_calls?\b[^>]*>[\s\S]*$/gi, '');
   out = out.replace(/<invoke\b[^>]*>[\s\S]*$/gi, '');
+  // Orphan closers / openers left after a mismatched DSML wrapper
+  // (`</||DSML||calls>`). Markdown treats `|` as a table delimiter and
+  // renders this as `</ | | DSML | | calls>`, which splits the tool stream.
+  out = out.replace(new RegExp(`</?${prefix}${names}\\b[^>]*>`, 'gi'), '');
+  out = out.replace(
+    /<\/?(?:tool_calls?|function_calls|invoke|parameter|func|arguments)\b[^>]*>/gi,
+    '',
+  );
+  out = stripNamespacedToolXml(out);
   out = stripLeakedToolCallSkeleton(out);
   return out;
 }
+
+export const LIVE_XML_TOOL_ID = 'xml-live-open';
 
 export type LiveMarkupToolCall = {
   id: string;
@@ -106,6 +231,50 @@ export type LiveMarkupToolCall = {
   arguments: Record<string, unknown> | string;
   partial: boolean;
 };
+
+const LIVE_NAME_DENY =
+  /^(func|function|arg_key|arg_value|parameter|arguments|invoke|thought|think|tool_call|tool|call)$/i;
+const LIVE_NAME_SHORTHAND = /^(websearch|grep|glob|shell|bash|read|ls)$/i;
+
+/** True for in-UI XML preview rows that never became a backend tool_call. */
+export function isLiveXmlToolId(id: unknown): boolean {
+  const s = String(id || '');
+  return (
+    s === LIVE_XML_TOOL_ID ||
+    s.startsWith('xml-live-') ||
+    s.startsWith('xml_preview_')
+  );
+}
+
+function isLiveToolNameReady(name: string, closed: boolean): boolean {
+  const n = (name || '').trim();
+  if (!n || /\s/.test(n) || LIVE_NAME_DENY.test(n)) return false;
+  if (n.includes('.') && !n.endsWith('.')) {
+    return n.split('.').slice(1).join('.').length > 0;
+  }
+  if (n.includes('__') && !n.endsWith('__')) return true;
+  if (LIVE_NAME_SHORTHAND.test(n)) return true;
+  if (closed && /[\u4e00-\u9fff]/.test(n) && n.length >= 2) return true;
+  return false;
+}
+
+function dropOtherLiveXmlPartials(events: WorkflowEvent[], keepIdx: number): WorkflowEvent[] {
+  return events.filter((evt, i) => {
+    if (i === keepIdx) return true;
+    if (evt.type !== 'tool_call' || evt.result) return true;
+    const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    return !(c.partial && isLiveXmlToolId(c.id));
+  });
+}
+
+function liveXmlCall(
+  name: string,
+  args: Record<string, unknown> | string,
+  closed: boolean,
+): LiveMarkupToolCall | null {
+  if (!isLiveToolNameReady(name, closed)) return null;
+  return { id: LIVE_XML_TOOL_ID, name, arguments: args, partial: true };
+}
 
 /**
  * Pull a live tool name (+ optional args) out of in-flight assistant
@@ -119,55 +288,36 @@ export function extractLiveToolCallFromMarkup(text: string): LiveMarkupToolCall 
 
   const attr = src.match(/<tool_call\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*)$/i);
   if (attr) {
-    const name = attr[1].trim();
-    if (name) {
-      return {
-        id: `xml-live-${name}`,
-        name,
-        arguments: parseMarkupToolArgs(attr[2]),
-        partial: true,
-      };
-    }
+    const got = liveXmlCall(attr[1].trim(), parseMarkupToolArgs(attr[2]), true);
+    if (got) return got;
   }
 
   const invoke = src.match(/<invoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*)$/i);
   if (invoke) {
-    const name = invoke[1].trim();
-    if (name) {
-      return {
-        id: `xml-live-${name}`,
-        name,
-        arguments: parseMarkupToolArgs(invoke[2]),
-        partial: true,
-      };
+    let name = invoke[1].trim();
+    const body = invoke[2];
+    if (LIVE_NAME_DENY.test(name)) {
+      const inner = body.match(/<func\s*>([^<]{1,120})(?:<\/func\s*>|$)/i);
+      name = inner?.[1]?.trim() || '';
     }
+    const closed = /<\/func\s*>/i.test(body) || /<\/invoke\s*>/i.test(body);
+    const got = liveXmlCall(name, parseMarkupToolArgs(body), closed);
+    if (got) return got;
   }
 
-  const func = src.match(/<tool_call\b[^>]*>([\s\S]*?)<func\s*>([^<]{1,120})(?:<\/func\s*>|$)/i);
+  const func = src.match(/<tool_call\b[^>]*>([\s\S]*?)<func\s*>([^<]{1,120})(<\/func\s*>|$)/i);
   if (func) {
-    const name = func[2].trim();
-    if (name) {
-      const after = src.slice(src.toLowerCase().lastIndexOf('<func'));
-      return {
-        id: `xml-live-${name}`,
-        name,
-        arguments: parseMarkupToolArgs(after),
-        partial: true,
-      };
-    }
+    const closed = typeof func[3] === 'string' && func[3].startsWith('</');
+    const after = src.slice(src.toLowerCase().lastIndexOf('<func'));
+    const got = liveXmlCall(func[2].trim(), parseMarkupToolArgs(after), closed);
+    if (got) return got;
   }
 
-  const funcOnly = src.match(/<func\s*>([^<]{1,120})(?:<\/func\s*>|$)/i);
+  const funcOnly = src.match(/<func\s*>([^<]{1,120})(<\/func\s*>|$)/i);
   if (funcOnly && /<tool_call\b/i.test(src)) {
-    const name = funcOnly[1].trim();
-    if (name) {
-      return {
-        id: `xml-live-${name}`,
-        name,
-        arguments: parseMarkupToolArgs(src),
-        partial: true,
-      };
-    }
+    const closed = typeof funcOnly[2] === 'string' && funcOnly[2].startsWith('</');
+    const got = liveXmlCall(funcOnly[1].trim(), parseMarkupToolArgs(src), closed);
+    if (got) return got;
   }
 
   // Qwen / Ling: <tool_call>websearch\n<arg_key>query</arg_key><arg_value>...
@@ -176,19 +326,11 @@ export function extractLiveToolCallFromMarkup(text: string): LiveMarkupToolCall 
     const inner = qwen[1];
     const nameMatch = inner.match(/^\s*([A-Za-z][\w.]{0,80})(?:\s|<|$)/);
     const name = nameMatch?.[1]?.trim() || '';
-    const deny = /^(func|function|arg_key|arg_value|parameter|arguments|invoke|thought|think)$/i;
-    const looksTool =
-      /^(websearch|bocha|filesystem|anysearch|browser|mcp__|system|im|vision)/i.test(name)
-      || name.includes('.')
-      || name.includes('__');
     const hasArgs = /<arg_key\b|<query\b|<arguments\b|<parameter\b/i.test(inner);
-    if (name && !deny.test(name) && (looksTool || hasArgs)) {
-      return {
-        id: `xml-live-${name}`,
-        name,
-        arguments: parseMarkupToolArgs(inner),
-        partial: true,
-      };
+    const closed = hasArgs || /<\/tool_call\s*>/i.test(src);
+    if (name && (hasArgs || name.includes('.') || name.includes('__') || LIVE_NAME_SHORTHAND.test(name))) {
+      const got = liveXmlCall(name, parseMarkupToolArgs(inner), closed);
+      if (got) return got;
     }
   }
 
@@ -251,7 +393,7 @@ function extractLeakedToolCallSkeleton(text: string): LiveMarkupToolCall | null 
   for (let i = 1; i + 1 < lines.length; i += 2) {
     args[lines[i]] = lines[i + 1];
   }
-  return { id: `xml-live-${name}`, name, arguments: args, partial: true };
+  return liveXmlCall(name, args, true);
 }
 
 /** Bare Native-FC leak: `websearch` / `query` / `福州天气` with the tags already gone. */
@@ -580,6 +722,176 @@ export function isWorkflowSettled(events: WorkflowEvent[]): boolean {
   return true;
 }
 
+function messageHasVisibleChat(m: any): boolean {
+  if (!m || m.role === 'user') return true;
+  const extra = (m && typeof m.extra === 'object' && m.extra !== null) ? m.extra : {};
+  const hasMedia = (
+    (Array.isArray(m.images) && m.images.length > 0)
+    || (Array.isArray(m.attachments) && m.attachments.length > 0)
+    || (Array.isArray(m.output_images) && m.output_images.length > 0)
+    || (Array.isArray(m.output_audio) && m.output_audio.length > 0)
+    || (Array.isArray(extra.images) && extra.images.length > 0)
+    || (Array.isArray(extra.attachments) && extra.attachments.length > 0)
+  );
+  if (hasMedia) return true;
+  const raw = typeof m.content === 'string' ? m.content : '';
+  if (!raw.trim()) return false;
+  const cleaned = formatUserSkillDisplayContent(
+    composeAssistantDisplayContent(
+      raw
+        .replace(/\n?\s*<image>.*?<\/image>/gis, '')
+        .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
+        .trim(),
+    ),
+  );
+  return cleaned.length > 0;
+}
+
+/** Collapse refresh-split activity chunks so one turn stays one fold (scroll box). */
+export function mergeAdjacentWorkflowEntries(timeline: TimelineEntry[]): TimelineEntry[] {
+  const out: TimelineEntry[] = [];
+  for (const entry of timeline) {
+    const prev = out[out.length - 1];
+    if (entry.kind === 'workflow' && prev?.kind === 'workflow') {
+      const a = prev.data;
+      const b = entry.data;
+      const events = [...a.events, ...b.events];
+      const completed = a.completed && b.completed && isWorkflowSettled(events);
+      const startedNums = [a.started_ms, b.started_ms].filter(
+        (n): n is number => typeof n === 'number',
+      );
+      const elapsedSum =
+        (typeof a.elapsed_ms === 'number' ? a.elapsed_ms : 0)
+        + (typeof b.elapsed_ms === 'number' ? b.elapsed_ms : 0);
+      out[out.length - 1] = {
+        ...prev,
+        data: {
+          events,
+          status: completed ? null : (b.status || a.status || 'working'),
+          completed,
+          started_ms: startedNums.length ? Math.min(...startedNums) : undefined,
+          elapsed_ms: completed && elapsedSum > 0 ? elapsedSum : undefined,
+        },
+      };
+      continue;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+const STOPPED_TURN_REASONS = new Set(['user_stop', 'withdraw', 'agent_crash']);
+const STOPPED_ASSISTANT_RE = /\[Stopped\]/i;
+const STOPPED_STATUS_RE = /task stopped/i;
+export const CANCELLED_OPEN_TOOL_RESULT = 'Cancelled: still running when the turn stopped';
+
+function itemTimestampMs(value: any): number {
+  const ts = value?.timestamp ? new Date(value.timestamp).getTime() : NaN;
+  return Number.isNaN(ts) ? Number.MAX_SAFE_INTEGER : ts;
+}
+
+function lastUserMessageTs(messages: any[] | undefined): number {
+  let last = Number.NEGATIVE_INFINITY;
+  for (const m of messages || []) {
+    if (m?.role === 'user') {
+      const ts = itemTimestampMs(m);
+      if (ts !== Number.MAX_SAFE_INTEGER && ts > last) last = ts;
+    }
+  }
+  return last;
+}
+
+/** True when disk history says the latest user turn was cancelled (Stop). */
+export function detectCancelledTurn(
+  messages: any[] | undefined,
+  events: any[] | undefined,
+): { cancelled: boolean; elapsedMs?: number; endedTs?: number } {
+  const lastUser = lastUserMessageTs(messages);
+  let cancelled = false;
+  let elapsedMs: number | undefined;
+  let endedTs: number | undefined;
+  for (const m of messages || []) {
+    const content = typeof m?.content === 'string' ? m.content : '';
+    if (!STOPPED_ASSISTANT_RE.test(content)) continue;
+    const ts = itemTimestampMs(m);
+    if (ts < lastUser) continue;
+    cancelled = true;
+    endedTs = ts === Number.MAX_SAFE_INTEGER ? endedTs : ts;
+  }
+  for (const raw of events || []) {
+    const ts = itemTimestampMs(raw);
+    if (ts < lastUser) continue;
+    const t = String(raw?.type || '');
+    const data = raw?.data && typeof raw.data === 'object' ? raw.data : {};
+    const reason = String((data as { reason?: string }).reason || '');
+    const text = typeof raw?.data === 'string'
+      ? raw.data
+      : String((data as { text?: string; content?: string }).text
+        || (data as { content?: string }).content
+        || '');
+    const isCancelEvent =
+      ((t === 'turn_summary' || t === 'turn_cancelled') && (STOPPED_TURN_REASONS.has(reason) || /stop/i.test(reason)))
+      || ((t === 'status' || t === 'info') && STOPPED_STATUS_RE.test(text));
+    if (!isCancelEvent) continue;
+    cancelled = true;
+    if (typeof (data as { elapsed_ms?: number }).elapsed_ms === 'number') {
+      elapsedMs = (data as { elapsed_ms: number }).elapsed_ms;
+    }
+    if (ts !== Number.MAX_SAFE_INTEGER) endedTs = ts;
+  }
+  return { cancelled, elapsedMs, endedTs };
+}
+
+function stampCancelledOpenTools(events: WorkflowEvent[], text: string): WorkflowEvent[] {
+  return events.map((evt) => {
+    if (evt.type !== 'tool_call' || evt.result) return evt;
+    const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    if (c.partial && (isLiveXmlToolId(c.id) || /\s/.test(String(c.name || '')))) {
+      return evt;
+    }
+    return { ...evt, result: text, resultStatus: 'error' as const };
+  });
+}
+
+function sealWorkflowAfterUserStop(
+  entry: TimelineEntry,
+  opts: { elapsedMs?: number; endedTs?: number },
+): TimelineEntry {
+  if (entry.kind !== 'workflow') return entry;
+  const wf = entry.data;
+  const events = stampCancelledOpenTools(wf.events, CANCELLED_OPEN_TOOL_RESULT)
+    .filter((evt) => {
+      if (evt.type !== 'tool_call' || evt.result) return true;
+      const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+      return !(c.partial && (isLiveXmlToolId(c.id) || /\s/.test(String(c.name || ''))));
+    });
+  const started =
+    typeof wf.started_ms === 'number'
+      ? wf.started_ms
+      : events[0]?.timestamp;
+  let elapsed = opts.elapsedMs;
+  if (typeof elapsed !== 'number') {
+    if (typeof wf.elapsed_ms === 'number') elapsed = wf.elapsed_ms;
+    else if (typeof started === 'number' && typeof opts.endedTs === 'number') {
+      elapsed = Math.max(0, opts.endedTs - started);
+    } else if (typeof started === 'number') {
+      const lastTs = events[events.length - 1]?.timestamp;
+      elapsed = typeof lastTs === 'number' ? Math.max(0, lastTs - started) : 0;
+    }
+  }
+  return {
+    ...entry,
+    data: {
+      ...wf,
+      events,
+      completed: true,
+      status: null,
+      started_ms: typeof started === 'number' ? started : wf.started_ms,
+      elapsed_ms: elapsed,
+    },
+  };
+}
+
 /**
  * Seal all incomplete workflow blocks (e.g. user inserts a new message mid-turn).
  * Stamps elapsed_ms so Solo shows "Worked for Xs" instead of stuck "Working".
@@ -595,11 +907,13 @@ export function sealIncompleteWorkflows(
     if (entry.kind !== 'workflow' || entry.data.completed) return entry;
     const wf = entry.data;
     const events = cancelText
-      ? wf.events.map((evt) => (
-        evt.type === 'tool_call' && !evt.result
-          ? { ...evt, result: cancelText, resultStatus: 'error' as const }
-          : evt
-      ))
+      ? wf.events.flatMap((evt) => {
+        if (evt.type !== 'tool_call' || evt.result) return [evt];
+        const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+        // Streaming XML prefixes (`files`, `start j`) never executed — drop them.
+        if (c.partial && (isLiveXmlToolId(c.id) || /\s/.test(String(c.name || '')))) return [];
+        return [{ ...evt, result: cancelText, resultStatus: 'error' as const }];
+      })
       : wf.events;
     const started =
       typeof wf.started_ms === 'number'
@@ -990,6 +1304,20 @@ export function workflowToolEventKey(evt: WorkflowEvent): string | null {
   return `tool:${id}`;
 }
 
+/** Stable identity for rebase so disk polls keep React keys on matching events. */
+export function workflowEventIdentity(evt: WorkflowEvent): string {
+  const tool = workflowToolEventKey(evt);
+  if (tool) return tool;
+  const job = evt.jobId ? `:job:${evt.jobId}` : '';
+  const sub = evt.subAgent ? `:sub:${evt.subTaskLabel || ''}` : '';
+  if (evt.type === 'thought') {
+    const text = typeof evt.content === 'string' ? evt.content.slice(0, 48) : '';
+    return `thought:${evt.timestamp}${sub}${job}:${text}`;
+  }
+  if (evt.type === 'plan') return `plan:${evt.timestamp}`;
+  return `${evt.type}:${evt.timestamp}${sub}${job}`;
+}
+
 export function timelineHasToolEvent(timeline: TimelineEntry[], event: WorkflowEvent): boolean {
   const key = workflowToolEventKey(event);
   if (!key) return false;
@@ -1067,6 +1395,10 @@ export function upsertPartialToolCall(
       matchIdx = i;
       break;
     }
+    if (isLiveXmlToolId(callId) && isLiveXmlToolId(c.id) && c.partial) {
+      matchIdx = i;
+      break;
+    }
     if (
       Number.isFinite(streamIndex) &&
       c.partial &&
@@ -1085,9 +1417,14 @@ export function upsertPartialToolCall(
       content: { ...(typeof prevEvt.content === 'object' ? prevEvt.content : {}), ...data, partial: true },
       timestamp: event.timestamp || prevEvt.timestamp,
     };
-  } else {
-    events.push({ ...event, _uid: genTimelineUID() });
+    const nextEvents = dropOtherLiveXmlPartials(events, matchIdx);
+    updated[targetIdx] = {
+      ...entry,
+      data: { ...wf, events: nextEvents, status: status ?? wf.status, completed: false },
+    };
+    return updated;
   }
+  events.push({ ...event, _uid: genTimelineUID() });
 
   updated[targetIdx] = {
     ...entry,
@@ -1120,7 +1457,8 @@ export function promotePartialToolCall(
   for (let i = events.length - 1; i >= 0; i--) {
     const evt = events[i];
     if (!isPartialToolCall(evt) || evt.result) continue;
-    if (toolCallNameOf(evt) === finalName) {
+    const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    if (toolCallNameOf(evt) === finalName || isLiveXmlToolId(c.id)) {
       matchIdx = i;
       break;
     }
@@ -1138,9 +1476,10 @@ export function promotePartialToolCall(
     _uid: prevEvt._uid || event._uid || genTimelineUID(),
     timestamp: event.timestamp || prevEvt.timestamp,
   };
+  const nextEvents = dropOtherLiveXmlPartials(events, matchIdx);
   updated[targetIdx] = {
     ...entry,
-    data: { ...wf, events, status: status ?? wf.status, completed: false },
+    data: { ...wf, events: nextEvents, status: status ?? wf.status, completed: false },
   };
   return updated;
 }
@@ -1722,6 +2061,7 @@ export function buildTimelineFromSession(
     );
   }
 
+  const cancelInfo = detectCancelledTurn(messages, events);
   const timeline: TimelineEntry[] = [];
   // Strict identity dedup: a message_id / client_id must render only once.
   // Optimistic user bubbles echo back from disk with the same client_id, and
@@ -1917,6 +2257,7 @@ export function buildTimelineFromSession(
       if (isLastAssistantInTurn) {
         pullSoftEventsBefore(turnEndTs);
       }
+      absorbPlanFromAssistantMessage(m, pendingRaw);
     }
 
     // Flush workflow before assistant (and other non-user) messages only.
@@ -1934,6 +2275,10 @@ export function buildTimelineFromSession(
       if (onlySummary) {
         flushPendingWorkflow({ completed: true });
       }
+    } else if (m.role === 'assistant' && !messageHasVisibleChat(m)) {
+      // Tool-markup / empty api_sync: do not split the activity fold. Live UI
+      // keeps one scroll box; flushing here made "Worked for 4s" + "Worked for 3s"
+      // chunks that leaked tools onto the page after refresh.
     } else {
       const peek = pendingRaw.filter((r) => r.type !== 'prompt_update');
       const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
@@ -2075,17 +2420,20 @@ export function buildTimelineFromSession(
       ? (m as any).output_audio
       : (Array.isArray((extra as any).output_audio) ? (extra as any).output_audio : []);
 
-    const cleanedContent = typeof m.content === 'string'
-      ? formatUserSkillDisplayContent(
-          composeAssistantDisplayContent(
-            m.content
-              .replace(/\n?\s*<image>.*?<\/image>/gis, '')
-              // Strip both markdown-link and path=/type= forms of [File: ...]
-              .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
-              .trim(),
-          ),
-        )
-      : m.content;
+    // Some providers/plugins emit non-text content (null, or a multimodal
+    // array). Coerce to a string first: every downstream renderer calls string
+    // methods on it, and a non-string used to crash MessageBubble (`.matchAll`
+    // is not a function) and blank the entire timeline.
+    const rawContent = typeof m.content === 'string' ? m.content : '';
+    const cleanedContent = formatUserSkillDisplayContent(
+      composeAssistantDisplayContent(
+        rawContent
+          .replace(/\n?\s*<image>.*?<\/image>/gis, '')
+          // Strip both markdown-link and path=/type= forms of [File: ...]
+          .replace(/\n?\s*\[File:\s*.+?\((?:[^)]*)\)(?:\s*path=[^\s\]]+)?(?:\s*type=(?:audio|video|voice|file))?\](?:\([^)\n]+\))?/g, '')
+          .trim(),
+      ),
+    );
 
     // CRITICAL: Skip creating a message entry if the cleaned content is empty AND there's no
     // media/attachments. This prevents empty white dialogs from being rendered when a
@@ -2205,10 +2553,15 @@ export function buildTimelineFromSession(
     const peekWf = peek.length > 0 ? convertSessionEventsToWorkflow(peek) : [];
     const hasStartedOnly = peek.some((r) => workflowStartedMsFromRaw(r) != null);
     const inProgress =
-      (peekWf.length > 0 && !isWorkflowSettled(peekWf))
-      || (peekWf.length === 0 && hasStartedOnly);
+      !cancelInfo.cancelled
+      && (
+        (peekWf.length > 0 && !isWorkflowSettled(peekWf))
+        || (peekWf.length === 0 && hasStartedOnly)
+      );
     let elapsedMs: number | undefined;
-    if (!inProgress && peekWf.length > 0) {
+    if (cancelInfo.cancelled && typeof cancelInfo.elapsedMs === 'number') {
+      elapsedMs = cancelInfo.elapsedMs;
+    } else if (!inProgress && peekWf.length > 0) {
       const start = peekWf[0]?.timestamp;
       const end = peekWf[peekWf.length - 1]?.timestamp;
       if (typeof start === 'number' && typeof end === 'number') {
@@ -2247,7 +2600,23 @@ export function buildTimelineFromSession(
   // This post-processing pass merges them back into the nearest unmatched
   // tool_call across workflow block boundaries, so the UI shows a complete
   // tool_call card instead of a permanently "running" one.
-  const mergedTimeline = mergeOrphanedToolResultsAcrossWorkflows(timeline);
+  const mergedTimeline = mergeAdjacentWorkflowEntries(
+    mergeOrphanedToolResultsAcrossWorkflows(timeline),
+  );
+
+  // Stop / crash already ended the turn. Do not reopen unsettled tools as
+  // "Working" — refresh used to keep the spinner because results never arrived.
+  if (cancelInfo.cancelled) {
+    const sealed = mergedTimeline.map((entry) => {
+      if (entry.kind !== 'workflow') return entry;
+      if (entry.data.completed && isWorkflowSettled(entry.data.events)) return entry;
+      return sealWorkflowAfterUserStop(entry, {
+        elapsedMs: cancelInfo.elapsedMs,
+        endedTs: cancelInfo.endedTs,
+      });
+    });
+    return applyEndTaskFolds(sealed);
+  }
 
   // Never leave open tools inside a sealed "Worked" fold — hydrate soft-refresh
   // used to freeze long Agent Web turns that way.
@@ -2306,8 +2675,15 @@ export function rebaseTimelineUids(prev: TimelineEntry[], next: TimelineEntry[])
       }
       return undefined;
     };
+    const prevById = new Map<string, string>();
+    for (const pe of prevEvents) {
+      if (!pe._uid) continue;
+      const id = workflowEventIdentity(pe);
+      if (!prevById.has(id)) prevById.set(id, pe._uid);
+    }
     return nextEvents.map((ne, i) => {
-      let uid = takeEvt(prevEvents[i]?._uid);
+      let uid = takeEvt(prevById.get(workflowEventIdentity(ne)));
+      if (!uid) uid = takeEvt(prevEvents[i]?._uid);
       if (!uid) {
         for (const pe of prevEvents) {
           if (!pe._uid || evtUsed.has(pe._uid)) continue;
@@ -2333,12 +2709,23 @@ export function rebaseTimelineUids(prev: TimelineEntry[], next: TimelineEntry[])
       uid = take(prev[i]._uid);
     }
     if (!uid && entry.kind === 'workflow') {
+      const started = entry.data.started_ms;
+      if (typeof started === 'number') {
+        for (const p of prev) {
+          if (p.kind !== 'workflow' || !p._uid || used.has(p._uid)) continue;
+          if (p.data.started_ms === started) {
+            uid = take(p._uid);
+            break;
+          }
+        }
+      }
       const ne0 = entry.data.events?.[0];
-      if (ne0) {
+      if (!uid && ne0) {
+        const nid = workflowEventIdentity(ne0);
         for (const p of prev) {
           if (p.kind !== 'workflow' || !p._uid || used.has(p._uid)) continue;
           const pe0 = p.data.events?.[0];
-          if (pe0 && pe0.timestamp === ne0.timestamp && pe0.type === ne0.type) {
+          if (pe0 && workflowEventIdentity(pe0) === nid) {
             uid = take(p._uid);
             break;
           }
@@ -2432,6 +2819,10 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           matchIdx = i;
           break;
         }
+        if (isLiveXmlToolId(callId) && isLiveXmlToolId(c.id) && c.partial) {
+          matchIdx = i;
+          break;
+        }
         if (
           Number.isFinite(streamIndex) &&
           c.partial &&
@@ -2477,7 +2868,7 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
           if (evt.type !== 'tool_call' || evt.result) continue;
           const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
           if (!c.partial) continue;
-          if (String(c.name || '') === String(toolName)) {
+          if (String(c.name || '') === String(toolName) || isLiveXmlToolId(c.id)) {
             promoteIdx = i;
             break;
           }
@@ -2597,5 +2988,21 @@ export function convertSessionEventsToWorkflow(rawEvents: any[]): WorkflowEvent[
     // Skip other event types (option, etc.) — or add handling as needed
   }
 
-  return result;
+  return result.filter((evt) => !isDisposableXmlPreview(evt));
+}
+
+function isDisposableXmlPreview(evt: WorkflowEvent): boolean {
+  if (evt.type !== 'tool_call') return false;
+  const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+  const name = String(c.name || '');
+  if (/\s/.test(name)) return true;
+  if (!isLiveXmlToolId(c.id)) return false;
+  if (/^Cancelled:/i.test(String(evt.result || ''))) return true;
+  if (!c.partial) return false;
+  const ready =
+    (name.includes('.') && !name.endsWith('.')) ||
+    name.includes('__') ||
+    /^(websearch|grep|glob|shell|bash|read|ls)$/i.test(name) ||
+    /[\u4e00-\u9fff]/.test(name);
+  return !ready;
 }
