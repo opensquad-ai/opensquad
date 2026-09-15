@@ -38,6 +38,7 @@ import {
   genTimelineUID,
   timelineHasVisibleChatContent,
   sealIncompleteWorkflows,
+  sealPendingCompression,
   sealWorkflowAndAppendAssistantMessage,
   toWebMediaUrl,
   type TimelineEntry,
@@ -2571,10 +2572,19 @@ export const AIChatPage: React.FC<AIChatPageProps> = ({ agentId, onBack, current
       content: { id: 'compress_pending', text: 'Generating context summary...', done: false, pending: true },
       timestamp: Date.now(),
     }, 'Summarizing...'));
-    wsServiceRef.current?.compressContext();
-    // Fallback timeout in case backend never responds (e.g. crash).
-    // Normal flow clears this via summary_stream done or context_compressed event.
-    setTimeout(() => setIsCompressingContext(false), 120000);
+    // Compress the pane the user is looking at. The agent runs several parallel
+    // panes; without an explicit sid it can only guess the focused session,
+    // which is often a different pane than the one whose button was clicked.
+    const compressSid = (currentSessionIdRef.current || '').trim();
+    wsServiceRef.current?.compressContext(compressSid || undefined);
+    // Hard fallback: the backend always emits a terminal frame (done / skipped),
+    // so this only fires when the request never reached the agent (agent died,
+    // socket dropped). Seal the optimistic block — leaving it pending is what
+    // makes the button look stuck on "进度中" forever.
+    window.setTimeout(() => {
+      setIsCompressingContext(false);
+      setTimeline(prev => sealPendingCompression(prev, t('aiChat.compressNoResponse', { defaultValue: '压缩没有响应，请重试' })));
+    }, 120000);
   };
 
   const handleNewSession = (projectPath?: string) => {

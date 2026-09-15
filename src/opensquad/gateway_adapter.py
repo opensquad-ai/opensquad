@@ -486,8 +486,12 @@ class GatewayAdapter(BaseAgent):
             return
 
         if command == "compress_context":
-            input_hub.push_urgent("__COMPRESS_CONTEXT__", source="gateway")
-            logger.info("[Adapter] Compress context command sent via urgent queue")
+            # Route to the pane the user is looking at. Without the sid the
+            # dispatcher can only guess the focused session, which is often a
+            # DIFFERENT parallel pane than the one whose button was clicked.
+            _cmp_sid = str(cmd_data.get("session_id") or "").strip()
+            input_hub.push_urgent("__COMPRESS_CONTEXT__", source="gateway", session_id=_cmp_sid)
+            logger.info("[Adapter] Compress context command sent via urgent queue (sid=%s)", _cmp_sid or "-")
             await self._try_wake_agent("urgent-command")
             return
 

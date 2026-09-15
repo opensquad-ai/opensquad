@@ -1404,13 +1404,34 @@ class AgentRunner:
             await self._withdraw_turn(_ts, message_id=_mid or None)
             return
         if content == "__COMPRESS_CONTEXT__":
+            # Parallel panes each own a session. Resolve the target in order of
+            # trust:
+            #   1. `item["session_id"]` — the pane whose button was clicked,
+            #      forwarded by the web UI through the gateway adapter.
+            #   2. turn-local sid — the pane THIS command was dispatched into.
+            #      Race-free, unlike `self._turn_sid` which every parallel turn
+            #      overwrites. Covers old clients that send no session_id.
+            #   3. the focused session — last resort, may be the wrong pane.
+            # Previously this branch dropped the command outright, so the web UI
+            # spun on "Generating context summary..." forever.
             # Do NOT push_urgent(self) — that infinite-loops the parallel dispatcher.
-            # Compression is handled by the serial run loop; for parallel, ignore
-            # until a dedicated compress path exists.
-            logger.warning(
-                "[Runner] __COMPRESS_CONTEXT__ ignored on parallel dispatcher "
-                "(would re-queue forever if pushed urgent again)"
-            )
+            target_sid = str(item.get("session_id") or "").strip()
+            if not target_sid:
+                try:
+                    from opensquad.session_parallel import get_turn_local
+
+                    target_sid = str(getattr(get_turn_local(), "sid", "") or "").strip()
+                except Exception:
+                    target_sid = ""
+            if not target_sid:
+                try:
+                    _sm = _get_session_manager()
+                    target_sid = (_sm.get_focused_session_id() or _sm.get_current_session_id() or "").strip()
+                except Exception:
+                    target_sid = ""
+            from opensquad._runner._manual_compress import compress_session_context
+
+            await compress_session_context(self, sid=target_sid, emit=self._emit)
             return
         # Unknown agent command — ignore
         logger.info("[Runner] Ignoring agent-level command: %s", content[:80])

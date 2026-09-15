@@ -17,6 +17,7 @@ import {
   mergeOrphanedToolResultsAcrossWorkflows,
   rebaseTimelineUids,
   sealIncompleteWorkflows,
+  sealPendingCompression,
   shouldTreatWorkflowComplete,
   stripToolCallMarkup,
   timelineHasToolEvent,
@@ -1284,6 +1285,82 @@ describe('sealIncompleteWorkflows (mid-send)', () => {
       .filter((e): e is Extract<TimelineEntry, { kind: 'workflow' }> => e.kind === 'workflow')
       .flatMap((e) => e.data.events.filter((ev) => ev.type === 'tool_call'));
     expect(tools).toHaveLength(0);
+  });
+});
+
+describe('sealPendingCompression (timeout fallback)', () => {
+  // The optimistic "Generating context summary..." block is only cleared by a
+  // terminal frame from the agent. When the request never reaches the agent,
+  // this seal is the last thing standing between the user and a forever-spinner.
+  const optimistic = (): TimelineEntry[] => [
+    {
+      kind: 'workflow',
+      data: {
+        events: [
+          {
+            type: 'summary_stream',
+            content: { id: 'compress_pending', text: 'Generating context summary...', done: false, pending: true },
+            timestamp: 1_700_000_000_000,
+          },
+        ],
+        status: 'working',
+        completed: false,
+      },
+      _uid: genTimelineUID(),
+    },
+  ];
+
+  it('flips a pending compression block to a settled terminal state', () => {
+    const prev = optimistic();
+    const sealed = sealPendingCompression(prev);
+    expect(sealed[0].kind).toBe('workflow');
+    if (sealed[0].kind !== 'workflow') return;
+    expect(sealed[0].data.completed).toBe(true);
+    expect(sealed[0].data.status).toBeNull();
+    const ev = sealed[0].data.events[0];
+    expect(ev.type).toBe('summary_stream');
+    // `is_final` (snake_case) is the field every other consumer reads —
+    // `isWorkflowSettled` gates on it, so writing `isFinal` would leave the
+    // block looking unsettled on the next render.
+    expect((ev.content as { done?: boolean }).done).toBe(true);
+    expect((ev.content as { is_final?: boolean }).is_final).toBe(true);
+    expect(sealed[0].data.events.some((e) => e.type === 'compression_progress')).toBe(false);
+  });
+
+  it('trims the progress event too when both frames are pending', () => {
+    const prev = optimistic();
+    if (prev[0].kind !== 'workflow') throw new Error('shape');
+    prev[0].data.events.push({
+      type: 'compression_progress',
+      content: { text: 'Summarizing…', is_final: false },
+      timestamp: 1_700_000_000_001,
+    });
+    const sealed = sealPendingCompression(prev);
+    if (sealed[0].kind !== 'workflow') throw new Error('shape');
+    const progress = sealed[0].data.events.find((e) => e.type === 'compression_progress');
+    expect((progress?.content as { is_final?: boolean }).is_final).toBe(true);
+  });
+
+  it('returns the SAME array reference when nothing compression-ish is pending', () => {
+    const prev: TimelineEntry[] = [
+      {
+        kind: 'workflow',
+        data: {
+          events: [{ type: 'thought', content: 'unrelated', timestamp: 1_700_000_000_000 }],
+          status: 'working',
+          completed: false,
+        },
+        _uid: genTimelineUID(),
+      },
+    ];
+    expect(sealPendingCompression(prev)).toBe(prev);
+  });
+
+  it('is a no-op once the block is already completed', () => {
+    const prev = optimistic();
+    if (prev[0].kind !== 'workflow') throw new Error('shape');
+    prev[0].data.completed = true;
+    expect(sealPendingCompression(prev)).toBe(prev);
   });
 });
 

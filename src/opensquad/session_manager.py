@@ -1434,6 +1434,8 @@ class SessionManager:
         previous_summary: str = "",
         external_summary: str = "",
         keep_from_timestamp_ms: float | None = None,
+        *,
+        sid: str | None = None,
     ) -> dict[str, Any]:
         """Compress session context based on token count or a timestamp cut.
 
@@ -1441,6 +1443,11 @@ class SessionManager:
         `keep_from_timestamp_ms` is set — then every unit whose newest item is
         strictly before that timestamp is archived (aligns disk archive with
         chat_api auto-compression's recent_start boundary).
+
+        `sid` targets a non-focused parallel session: the mutation lands on that
+        session's live copy and is persisted to ``history/{sid}.json`` only —
+        ``current_session.json`` is never rewritten for a non-focused sid.
+        ``sid=None`` keeps the legacy focused-session behaviour.
 
         Removed items are stored in archived_messages / archived_events.
         """
@@ -1452,8 +1459,9 @@ class SessionManager:
             except Exception:
                 keep_ratio = 0.1
 
-        messages = list(self.session_data.get("messages", []))
-        events = list(self.session_data.get("events", []))
+        target = self._resolve_session_data(sid)
+        messages = list(target.get("messages", []))
+        events = list(target.get("events", []))
 
         # Build a unified chronological list. Previously messages were appended
         # first and events second, so walking from the "end" kept all events
@@ -1569,26 +1577,31 @@ class SessionManager:
         # items are appended to the archived_* arrays (capped) so the UI
         # can still display them after refresh.
         def _mutate():
-            self.session_data["messages"] = kept_messages
-            self.session_data["events"] = kept_events
+            target["messages"] = kept_messages
+            target["events"] = kept_events
             # Append, not replace, so repeated compressions preserve the
             # full conversation history. The cap trims the oldest entries
             # if the session is compressed many times.
-            existing_msgs = self.session_data.get("archived_messages") or []
+            existing_msgs = target.get("archived_messages") or []
             merged_msgs = existing_msgs + compressed_messages
-            self.session_data["archived_messages"] = merged_msgs[-self._ARCHIVED_MESSAGES_CAP :]
-            existing_evts = self.session_data.get("archived_events") or []
+            target["archived_messages"] = merged_msgs[-self._ARCHIVED_MESSAGES_CAP :]
+            existing_evts = target.get("archived_events") or []
             merged_evts = existing_evts + compressed_events
-            self.session_data["archived_events"] = merged_evts[-self._ARCHIVED_EVENTS_CAP :]
-            self.session_data["latest_summary"] = summary_content
-            self.session_data["last_updated"] = utc_now_iso()
+            target["archived_events"] = merged_evts[-self._ARCHIVED_EVENTS_CAP :]
+            target["latest_summary"] = summary_content
+            target["last_updated"] = utc_now_iso()
 
         # Compression is a rare operation; sync flush to guarantee immediate persistence
         _mutate()
-        self._save_session()
+        if target is self.session_data:
+            self._save_session()
+        else:
+            # Non-focused parallel session: mirror to history/{sid}.json only.
+            self._save_session_data(target, as_focused=False)
 
         return {
             "compressed": True,
+            "sid": target.get("id") or sid or "",
             "total_tokens": total_tokens,
             "kept_tokens": total_tokens - budget if not used_timestamp_cut else budget,
             "keep_ratio": keep_ratio,
@@ -1597,8 +1610,8 @@ class SessionManager:
             "compressed_events": len(compressed_events),
             "kept_messages": len(kept_messages),
             "kept_events": len(kept_events),
-            "archived_messages_count": len(self.session_data.get("archived_messages") or []),
-            "archived_events_count": len(self.session_data.get("archived_events") or []),
+            "archived_messages_count": len(target.get("archived_messages") or []),
+            "archived_events_count": len(target.get("archived_events") or []),
             "summary_content": summary_content,
         }
 

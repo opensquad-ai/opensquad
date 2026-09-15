@@ -619,7 +619,7 @@ def _reject_outside_session_project(resolved: str) -> str | None:
         return None
 
 
-def _track_mutation(path: str, *, deleting: bool = False, prev_content: Any = ...) -> None:
+def _track_mutation(path: str, *, deleting: bool = False) -> None:
     """Record session changeset baseline before mutating a project file."""
     try:
         from opensquad.utils.session_changeset import ensure_baseline_before_write, note_deleted
@@ -632,13 +632,10 @@ def _track_mutation(path: str, *, deleting: bool = False, prev_content: Any = ..
                 path,
             )
             return
-        kwargs: dict[str, Any] = {}
-        if prev_content is not ...:
-            kwargs["prev_content"] = prev_content
         if deleting:
-            note_deleted(root, path, **kwargs)
+            note_deleted(root, path)
         else:
-            ensure_baseline_before_write(root, path, **kwargs)
+            ensure_baseline_before_write(root, path)
     except Exception:
         logger.debug("[filesystem] session changeset track failed", exc_info=True)
 
@@ -669,7 +666,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
         return {"status": "error", "message": outside}
 
     try:
-        # Capture previous body for UI red/green (+ session edit_base) before overwrite
+        # Capture previous body for the chat FileDiffBlock red/green payload
         prev_content: str | None = None
         if os.path.isfile(resolved):
             try:
@@ -678,7 +675,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
             except Exception:
                 prev_content = None
 
-        _track_mutation(resolved, prev_content=prev_content)
+        _track_mutation(resolved)
         parent = os.path.dirname(resolved)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -813,7 +810,7 @@ def replace_in_file(path: str, old_str: str, new_str: str, replace_all: bool = F
             new_content = content.replace(old_str, new_str, 1)
             replaced = 1
 
-        _track_mutation(resolved, prev_content=content)
+        _track_mutation(resolved)
         # See write_file() for why we use plain utf-8 here: we must not add a
         # BOM on write, otherwise subsequent json.load() calls (which read with
         # utf-8-sig but still treat the BOM as content) will see corrupted data.
@@ -855,13 +852,8 @@ def delete_file(path: str) -> dict[str, Any]:
 
     try:
         if os.path.isfile(resolved):
-            prev_content: str | None = None
-            try:
-                with open(resolved, encoding="utf-8-sig", errors="replace") as f:
-                    prev_content = f.read()
-            except Exception:
-                prev_content = None
-            _track_mutation(resolved, deleting=True, prev_content=prev_content)
+            # Baseline is snapshotted from disk inside note_deleted, before the remove.
+            _track_mutation(resolved, deleting=True)
             os.remove(resolved)
             _track_mutation_done(resolved)
             return {"status": "success", "message": f"Deleted file '{resolved}'."}

@@ -264,9 +264,17 @@ class AIWebSocketService {
     this._sendCommand('withdraw_turn', data || {});
   }
 
-  /** Manually compress current conversation context */
-  compressContext() {
-    this._sendCommand('compress_context');
+  /**
+   * Manually compress conversation context.
+   *
+   * `sessionId` selects the parallel pane to compress. It is NOT optional in
+   * practice: the agent runs several panes at once, and without it the backend
+   * can only guess the focused session — which may be a different pane than the
+   * one whose button was clicked.
+   */
+  compressContext(sessionId?: string) {
+    const sid = (sessionId || '').trim();
+    this._sendCommand('compress_context', sid ? { session_id: sid } : undefined);
   }
 
   /** Ask the agent to rebroadcast latest context token stats (optionally for a session). */

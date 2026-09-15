@@ -1135,6 +1135,57 @@ export function sealIncompleteWorkflows(
 }
 
 /**
+ * Seal a locally-optimistic context-compression block when the backend never
+ * answered.
+ *
+ * The normal path is backend-driven: `summary_stream {done:true}` or
+ * `compression_progress {is_final:true}` flips the block to completed. This is
+ * the last-resort path for "the request never reached the agent" / "the agent
+ * died mid-request" — without it the optimistic "Generating context summary..."
+ * entry stays pending forever and the button looks stuck.
+ *
+ * Returns the SAME array reference when there is nothing pending to seal, so a
+ * caller can hand it straight to `setTimeline` without forcing a re-render.
+ */
+export function sealPendingCompression(
+  prev: TimelineEntry[],
+  message = 'Compression did not respond — please retry',
+): TimelineEntry[] {
+  let targetIdx = -1;
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const entry = prev[i];
+    if (entry.kind === 'workflow' && !entry.data.completed) {
+      targetIdx = i;
+      break;
+    }
+  }
+  if (targetIdx < 0) return prev;
+
+  const target = prev[targetIdx];
+  if (target.kind !== 'workflow') return prev;
+  const wf = target.data;
+  const isCompressionEvent = (e: WorkflowEvent) =>
+    e.type === 'summary_stream' || e.type === 'compression_progress';
+  if (!wf.events.some(isCompressionEvent)) return prev;
+
+  const events: WorkflowEvent[] = wf.events.map((evt) => {
+    if (!isCompressionEvent(evt)) return evt;
+    const c = typeof evt.content === 'object' && evt.content ? evt.content : {};
+    return {
+      ...evt,
+      content: { ...c, done: true, is_final: true, pending: false, text: message },
+    };
+  });
+
+  const updated = [...prev];
+  updated[targetIdx] = {
+    ...target,
+    data: { ...wf, events, status: null, completed: true },
+  };
+  return updated;
+}
+
+/**
  * Whether a trailing / orphan workflow should render as finished even if
  * `completed` was never flipped by a following chat message.
  * Avoids thought-only live blocks (still streaming) being marked done.
